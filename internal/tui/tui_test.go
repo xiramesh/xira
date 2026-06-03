@@ -263,6 +263,76 @@ func TestRunTraceShowsToolCallsAuditAndEvents(t *testing.T) {
 	}
 }
 
+func TestMarkdownRenderingHighlightsStructure(t *testing.T) {
+	rendered := renderMarkdown(strings.Join([]string{
+		"## Result",
+		"",
+		"- **first** item",
+		"1. `second` item",
+		"> important note",
+		"",
+		"```txt",
+		"code line",
+		"```",
+	}, "\n"), 80, assistantTextStyle)
+
+	for _, want := range []string{"Result", "- first item", "1. second item", "> important note", "txt", "code line"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("renderMarkdown() = %q, want substring %q", rendered, want)
+		}
+	}
+}
+
+func TestUpdateStreamsTraceEventsWhileLoading(t *testing.T) {
+	events := make(chan frt.RuntimeEvent, 1)
+	events <- frt.RuntimeEvent{
+		Kind:    "tool.started",
+		Source:  "read_file",
+		Message: "tool call started",
+		Payload: map[string]any{"path": "kb/开门时间.txt"},
+	}
+	m := model{loading: true, traceSub: events}
+
+	msg := m.watchTrace()()
+	updated, cmd := m.Update(msg)
+	got := updated.(model)
+
+	if len(got.traceEvents) != 1 {
+		t.Fatalf("traceEvents len = %d, want 1", len(got.traceEvents))
+	}
+	if cmd == nil {
+		t.Fatal("trace update command is nil, want next trace watch command")
+	}
+	trace := renderLiveTrace(got.traceEvents, 120)
+	for _, want := range []string{"Trace", "live", "tool.started", "read_file", "path=\"kb/开门时间.txt\""} {
+		if !strings.Contains(trace, want) {
+			t.Fatalf("live trace = %q, want substring %q", trace, want)
+		}
+	}
+}
+
+func TestViewShowsVisibleRunningStatusNearInput(t *testing.T) {
+	input := textinput.New()
+	input.Placeholder = "Talk to FlowDeck, or use /agent <id> <message>"
+	m := model{
+		input:       input,
+		width:       110,
+		height:      30,
+		loading:     true,
+		loadingMode: "default",
+		transcript: []transcriptEntry{
+			{Role: "You", Content: "明天几点开门"},
+		},
+	}
+
+	view := m.View()
+	for _, want := range []string{"RUNNING", "thinking - live trace is updating", "Trace", "waiting for run.started", "Message"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("View() = %q, want substring %q", view, want)
+		}
+	}
+}
+
 func TestModelStatusLabel(t *testing.T) {
 	if got := modelStatusLabel(map[string]any{"mock_model": true}); got != "mock" {
 		t.Fatalf("modelStatusLabel(mock) = %q", got)

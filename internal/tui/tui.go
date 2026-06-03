@@ -28,6 +28,9 @@ type model struct {
 	err         error
 	loading     bool
 	loadingMode string
+	traceEvents []frt.RuntimeEvent
+	traceSub    <-chan frt.RuntimeEvent
+	traceCancel context.CancelFunc
 }
 
 type transcriptEntry struct {
@@ -46,19 +49,29 @@ type runMsg struct {
 	err  error
 }
 
+type traceEventMsg struct {
+	event frt.RuntimeEvent
+}
+
+type traceClosedMsg struct{}
+
 var (
-	titleStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("81"))
-	labelStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	mutedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
-	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	successStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
-	userStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
-	assistantStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("150"))
-	panelBorderStyle = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("238")).Padding(1, 2)
-	activePanelStyle = panelBorderStyle.BorderForeground(lipgloss.Color("81"))
-	headerStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Background(lipgloss.Color("235")).Padding(0, 1)
-	footerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(lipgloss.Color("235")).Padding(0, 1)
-	pillStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("238")).Padding(0, 1)
+	titleStyle         = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("81"))
+	labelStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("249"))
+	mutedStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
+	errorStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	successStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
+	userStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("159"))
+	assistantStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("194"))
+	userTextStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
+	assistantTextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	codeStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("229")).Background(lipgloss.Color("236")).Padding(0, 1)
+	quoteStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Italic(true)
+	panelBorderStyle   = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("238")).Padding(1, 2)
+	activePanelStyle   = panelBorderStyle.BorderForeground(lipgloss.Color("81"))
+	headerStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Background(lipgloss.Color("235")).Padding(0, 1)
+	footerStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(lipgloss.Color("235")).Padding(0, 1)
+	pillStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("63")).Padding(0, 1)
 )
 
 func Run(ctx context.Context, runtime *frt.Service, initialAgentID string) error {
@@ -101,14 +114,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.output = ""
 				m.err = nil
 				m.addTranscript("You", text)
-				return m, m.runAgent("", text)
+				traceCmd := m.beginTrace()
+				return m, tea.Batch(traceCmd, m.runAgent("", text))
 			}
 			m.loading = true
 			m.loadingMode = "agent"
 			m.output = ""
 			m.err = nil
 			m.addTranscript("You -> "+m.activeAgent, text)
-			return m, m.runAgent(m.activeAgent, text)
+			traceCmd := m.beginTrace()
+			return m, tea.Batch(traceCmd, m.runAgent(m.activeAgent, text))
 		}
 	case initMsg:
 		m.status = msg.status
@@ -121,6 +136,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runMsg:
 		m.loading = false
 		m.loadingMode = ""
+		m.stopTrace()
 		m.err = msg.err
 		m.input.SetValue("")
 		if msg.err != nil {
@@ -131,6 +147,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.output = msg.resp.FinalResponse
 			m.addTranscript(msg.resp.AgentID, msg.resp.FinalResponse)
 		}
+	case traceEventMsg:
+		m.traceEvents = appendTraceEvent(m.traceEvents, msg.event, 80)
+		if m.loading {
+			return m, m.watchTrace()
+		}
+	case traceClosedMsg:
+		m.traceSub = nil
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
@@ -237,14 +260,19 @@ func renderConversation(m model, width, height int) string {
 	} else {
 		sections = append(sections, renderTranscriptBlocks(m.transcript, 10, bodyWidth))
 	}
-	if trace := renderRunTrace(lastRun(m), bodyWidth); trace != "" {
+	if m.loading {
+		sections = append(sections, "", renderLiveTrace(m.traceEvents, bodyWidth))
+	} else if trace := renderRunTrace(lastRun(m), bodyWidth); trace != "" {
 		sections = append(sections, "", trace)
-	} else if m.loading {
-		sections = append(sections, "", titleStyle.Render("Trace"), mutedStyle.Render("Waiting for tool callbacks..."))
+	} else if len(m.traceEvents) > 0 {
+		sections = append(sections, "", renderLiveTrace(m.traceEvents, bodyWidth))
 	}
 
 	if m.err != nil {
 		sections = append(sections, errorStyle.Render(m.err.Error()))
+	}
+	if m.loading {
+		sections = append(sections, "", renderActiveStatus(m, bodyWidth))
 	}
 	sections = append(sections, "", labelStyle.Render("Message"), m.input.View())
 	return activePanelStyle.Width(width - 5).Height(height - 4).Render(strings.Join(sections, "\n"))
@@ -252,6 +280,9 @@ func renderConversation(m model, width, height int) string {
 
 func renderFooter(m model, width int) string {
 	status := "Enter send  /agents list  /use <id> switch  /exit-agent default  Trace shows tools/audit  Esc quit"
+	if m.loading {
+		status = "RUNNING: " + loadingLabel(m.loadingMode) + "  Trace is streaming below the conversation"
+	}
 	if m.err != nil {
 		status = "Error: " + m.err.Error()
 	}
@@ -344,7 +375,8 @@ func (m *model) applyAgentCommand(args string) tea.Cmd {
 	m.err = nil
 	m.output = ""
 	m.addTranscript("You -> "+id, message)
-	return m.runAgent(id, message)
+	traceCmd := m.beginTrace()
+	return tea.Batch(traceCmd, m.runAgent(id, message))
 }
 
 func (m *model) applyUseCommand(id string) tea.Cmd {
@@ -373,6 +405,40 @@ func (m *model) addTranscript(role, content string) {
 		return
 	}
 	m.transcript = append(m.transcript, transcriptEntry{Role: strings.TrimSpace(role), Content: content})
+}
+
+func (m *model) beginTrace() tea.Cmd {
+	m.stopTrace()
+	m.traceEvents = nil
+	if m.runtime == nil || m.runtime.EventBus() == nil {
+		m.traceSub = nil
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.traceCancel = cancel
+	m.traceSub = m.runtime.EventBus().Subscribe(ctx)
+	return m.watchTrace()
+}
+
+func (m *model) stopTrace() {
+	if m.traceCancel != nil {
+		m.traceCancel()
+		m.traceCancel = nil
+	}
+}
+
+func (m model) watchTrace() tea.Cmd {
+	ch := m.traceSub
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		event, ok := <-ch
+		if !ok {
+			return traceClosedMsg{}
+		}
+		return traceEventMsg{event: event}
+	}
 }
 
 func renderTranscript(entries []transcriptEntry, max int) string {
@@ -420,9 +486,122 @@ func renderTranscriptBlocks(entries []transcriptEntry, max, width int) string {
 		case strings.Contains(lower, "flowdeck") || strings.Contains(lower, "assistant"):
 			header = assistantStyle.Render(role)
 		}
-		blocks = append(blocks, header+"\n"+mutedStyle.Render(indent(wrapText(content, width), "  ")))
+		bodyStyle := userTextStyle
+		if strings.Contains(lower, "flowdeck") || strings.Contains(lower, "assistant") {
+			bodyStyle = assistantTextStyle
+		}
+		blocks = append(blocks, header+"\n"+renderMarkdown(content, width, bodyStyle))
 	}
 	return strings.Join(blocks, "\n\n")
+}
+
+func renderMarkdown(content string, width int, bodyStyle lipgloss.Style) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	width = maxInt(12, width)
+	var out []string
+	inCode := false
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimRight(raw, " \t")
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inCode = !inCode
+			if inCode {
+				label := strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
+				if label == "" {
+					label = "code"
+				}
+				out = append(out, codeStyle.Render(" "+label+" "))
+			}
+			continue
+		}
+		if inCode {
+			out = append(out, codeStyle.Render(truncate(line, width-2)))
+			continue
+		}
+		if trimmed == "" {
+			out = append(out, "")
+			continue
+		}
+		if heading, ok := markdownHeading(trimmed); ok {
+			out = append(out, titleStyle.Render(wrapText(stripInlineMarkdown(heading), width)))
+			continue
+		}
+		if strings.HasPrefix(trimmed, ">") {
+			quote := strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
+			out = append(out, renderWrappedMarkdownLine("> ", quote, width, quoteStyle))
+			continue
+		}
+		if prefix, text, ok := markdownBullet(trimmed); ok {
+			out = append(out, renderWrappedMarkdownLine(prefix, text, width, bodyStyle))
+			continue
+		}
+		out = append(out, renderWrappedMarkdownLine("  ", trimmed, width, bodyStyle))
+	}
+	return strings.TrimRight(strings.Join(out, "\n"), "\n")
+}
+
+func renderWrappedMarkdownLine(prefix, text string, width int, style lipgloss.Style) string {
+	text = stripInlineMarkdown(strings.TrimSpace(text))
+	if text == "" {
+		return style.Render(strings.TrimRight(prefix, " "))
+	}
+	bodyWidth := maxInt(12, width-lipgloss.Width(prefix))
+	wrapped := wrapText(text, bodyWidth)
+	lines := strings.Split(wrapped, "\n")
+	continuation := strings.Repeat(" ", lipgloss.Width(prefix))
+	for i := range lines {
+		if i == 0 {
+			lines[i] = prefix + lines[i]
+			continue
+		}
+		lines[i] = continuation + lines[i]
+	}
+	return style.Render(strings.Join(lines, "\n"))
+}
+
+func markdownHeading(line string) (string, bool) {
+	count := 0
+	for count < len(line) && count < 6 && line[count] == '#' {
+		count++
+	}
+	if count == 0 || count >= len(line) {
+		return "", false
+	}
+	if line[count] != ' ' && line[count] != '\t' {
+		return "", false
+	}
+	return strings.TrimSpace(line[count:]), true
+}
+
+func markdownBullet(line string) (string, string, bool) {
+	for _, marker := range []string{"- ", "* ", "+ "} {
+		if strings.HasPrefix(line, marker) {
+			return "- ", strings.TrimSpace(strings.TrimPrefix(line, marker)), true
+		}
+	}
+	dot := strings.Index(line, ". ")
+	if dot <= 0 || dot > 4 {
+		return "", "", false
+	}
+	for _, r := range line[:dot] {
+		if r < '0' || r > '9' {
+			return "", "", false
+		}
+	}
+	return line[:dot+2], strings.TrimSpace(line[dot+2:]), true
+}
+
+func stripInlineMarkdown(text string) string {
+	replacer := strings.NewReplacer("**", "", "__", "", "`", "")
+	return replacer.Replace(text)
+}
+
+func renderActiveStatus(m model, width int) string {
+	message := truncate(loadingLabel(m.loadingMode)+" - live trace is updating below this turn", maxInt(12, width-10))
+	return pillStyle.Render("RUNNING") + " " + assistantTextStyle.Render(message)
 }
 
 func renderRunTrace(run *frt.TurnResponse, width int) string {
@@ -478,10 +657,41 @@ func renderRunTrace(run *frt.TurnResponse, width int) string {
 	return strings.Join(lines, "\n")
 }
 
+func renderLiveTrace(events []frt.RuntimeEvent, width int) string {
+	lines := []string{titleStyle.Render("Trace ") + pillStyle.Render("live")}
+	if len(events) == 0 {
+		lines = append(lines, mutedStyle.Render("  waiting for run.started / model / tool events..."))
+		return strings.Join(lines, "\n")
+	}
+	for _, event := range compactEvents(events, 8) {
+		line := fmt.Sprintf("  %s", emptyDash(event.Kind))
+		if event.Source != "" {
+			line += " " + event.Source
+		}
+		if event.Message != "" {
+			line += " - " + event.Message
+		}
+		if payload := summarizeMap(event.Payload, []string{"tool", "agent_id", "channel", "matched_by", "command", "path", "status"}); payload != "" {
+			line += " {" + payload + "}"
+		}
+		style := mutedStyle
+		if strings.Contains(event.Kind, "tool.") {
+			style = labelStyle
+		}
+		if strings.Contains(event.Kind, "failed") {
+			style = errorStyle
+		}
+		lines = append(lines, style.Render(truncate(line, width)))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func renderToolCallLine(call frt.ToolCallRecord, width int) string {
-	status := successStyle.Render("ok")
+	status := "ok"
+	style := successStyle
 	if call.Error != "" {
-		status = errorStyle.Render("err")
+		status = "err"
+		style = errorStyle
 	}
 	input := summarizeMap(call.Input, []string{"path", "command", "cwd", "action", "old_text", "new_text"})
 	output := summarizeMap(call.Output, []string{"path", "bytes", "entries", "exit_code", "stdout", "stderr", "content"})
@@ -495,7 +705,15 @@ func renderToolCallLine(call frt.ToolCallRecord, width int) string {
 	if output != "" {
 		line += " out{" + output + "}"
 	}
-	return truncate(line, width)
+	return style.Render(truncate(line, width))
+}
+
+func appendTraceEvent(events []frt.RuntimeEvent, event frt.RuntimeEvent, max int) []frt.RuntimeEvent {
+	events = append(events, event)
+	if max > 0 && len(events) > max {
+		return events[len(events)-max:]
+	}
+	return events
 }
 
 func summarizeMap(values map[string]any, preferred []string) string {
