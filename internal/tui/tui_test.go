@@ -227,6 +227,42 @@ func TestViewStartsAsDefaultAgent(t *testing.T) {
 	}
 }
 
+func TestRunTraceShowsToolCallsAuditAndEvents(t *testing.T) {
+	trace := renderRunTrace(&frt.TurnResponse{
+		RunID:          "run-1",
+		AgentID:        "flowdeck-assistant",
+		RouteMatchedBy: "default",
+		ToolCalls: []frt.ToolCallRecord{
+			{
+				Name:  "read_file",
+				Input: map[string]any{"path": "kb/开门时间.txt"},
+				Output: map[string]any{
+					"path":    "/workspace/kb/开门时间.txt",
+					"content": "工作日早上9点开门",
+					"bytes":   25,
+				},
+			},
+		},
+		AuditEvents: []frt.AuditEvent{
+			{Action: "tool.call", Target: "read_file", Allowed: true, Reason: "tool allowed by profile"},
+		},
+		Events: []frt.RuntimeEvent{
+			{Kind: "run.started", Source: "runtime", Message: "agent run started"},
+			{Kind: "tool.started", Source: "read_file", Message: "tool call started"},
+			{Kind: "tool.finished", Source: "read_file", Message: "tool call finished"},
+		},
+	}, 120)
+
+	for _, want := range []string{"Trace", "tools", "read_file", "path=\"kb/开门时间.txt\"", "content=<", "audit", "allow tool.call -> read_file", "events", "tool.finished read_file"} {
+		if !strings.Contains(trace, want) {
+			t.Fatalf("trace = %q, want substring %q", trace, want)
+		}
+	}
+	if strings.Contains(trace, "工作日早上9点开门") {
+		t.Fatalf("trace leaked full file content: %q", trace)
+	}
+}
+
 func TestModelStatusLabel(t *testing.T) {
 	if got := modelStatusLabel(map[string]any{"mock_model": true}); got != "mock" {
 		t.Fatalf("modelStatusLabel(mock) = %q", got)

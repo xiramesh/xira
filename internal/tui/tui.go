@@ -3,7 +3,9 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -235,6 +237,11 @@ func renderConversation(m model, width, height int) string {
 	} else {
 		sections = append(sections, renderTranscriptBlocks(m.transcript, 10, bodyWidth))
 	}
+	if trace := renderRunTrace(lastRun(m), bodyWidth); trace != "" {
+		sections = append(sections, "", trace)
+	} else if m.loading {
+		sections = append(sections, "", titleStyle.Render("Trace"), mutedStyle.Render("Waiting for tool callbacks..."))
+	}
 
 	if m.err != nil {
 		sections = append(sections, errorStyle.Render(m.err.Error()))
@@ -244,7 +251,7 @@ func renderConversation(m model, width, height int) string {
 }
 
 func renderFooter(m model, width int) string {
-	status := "Enter send  /agents list  /use <id> switch  /exit-agent default  Esc quit"
+	status := "Enter send  /agents list  /use <id> switch  /exit-agent default  Trace shows tools/audit  Esc quit"
 	if m.err != nil {
 		status = "Error: " + m.err.Error()
 	}
@@ -418,6 +425,149 @@ func renderTranscriptBlocks(entries []transcriptEntry, max, width int) string {
 	return strings.Join(blocks, "\n\n")
 }
 
+func renderRunTrace(run *frt.TurnResponse, width int) string {
+	if run == nil {
+		return ""
+	}
+	lines := []string{
+		titleStyle.Render("Trace"),
+		mutedStyle.Render(truncate(fmt.Sprintf("run %s  route %s", run.RunID, emptyDash(run.RouteMatchedBy)), width)),
+	}
+	if len(run.ToolCalls) == 0 {
+		lines = append(lines, mutedStyle.Render("tools: none"))
+	} else {
+		lines = append(lines, labelStyle.Render("tools"))
+		for i, call := range run.ToolCalls {
+			if i >= 4 {
+				lines = append(lines, mutedStyle.Render(fmt.Sprintf("  ... %d more", len(run.ToolCalls)-i)))
+				break
+			}
+			lines = append(lines, renderToolCallLine(call, width))
+		}
+	}
+	if len(run.AuditEvents) > 0 {
+		lines = append(lines, labelStyle.Render("audit"))
+		for i, event := range run.AuditEvents {
+			if i >= 3 {
+				lines = append(lines, mutedStyle.Render(fmt.Sprintf("  ... %d more", len(run.AuditEvents)-i)))
+				break
+			}
+			allowed := "deny"
+			style := errorStyle
+			if event.Allowed {
+				allowed = "allow"
+				style = successStyle
+			}
+			text := fmt.Sprintf("  %s %s -> %s", allowed, emptyDash(event.Action), emptyDash(event.Target))
+			if event.Reason != "" {
+				text += " (" + event.Reason + ")"
+			}
+			lines = append(lines, style.Render(truncate(text, width)))
+		}
+	}
+	if len(run.Events) > 0 {
+		lines = append(lines, labelStyle.Render("events"))
+		for _, event := range compactEvents(run.Events, 4) {
+			text := fmt.Sprintf("  %s %s", emptyDash(event.Kind), emptyDash(event.Source))
+			if event.Message != "" {
+				text += " - " + event.Message
+			}
+			lines = append(lines, mutedStyle.Render(truncate(text, width)))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderToolCallLine(call frt.ToolCallRecord, width int) string {
+	status := successStyle.Render("ok")
+	if call.Error != "" {
+		status = errorStyle.Render("err")
+	}
+	input := summarizeMap(call.Input, []string{"path", "command", "cwd", "action", "old_text", "new_text"})
+	output := summarizeMap(call.Output, []string{"path", "bytes", "entries", "exit_code", "stdout", "stderr", "content"})
+	if output == "" && call.Error != "" {
+		output = call.Error
+	}
+	line := fmt.Sprintf("  %s %s", status, call.Name)
+	if input != "" {
+		line += " in{" + input + "}"
+	}
+	if output != "" {
+		line += " out{" + output + "}"
+	}
+	return truncate(line, width)
+}
+
+func summarizeMap(values map[string]any, preferred []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	seen := map[string]bool{}
+	parts := make([]string, 0, minLen(len(values), 4))
+	for _, key := range preferred {
+		if value, ok := values[key]; ok {
+			parts = append(parts, key+"="+summarizeValue(key, value))
+			seen[key] = true
+		}
+		if len(parts) >= 4 {
+			return strings.Join(parts, ", ")
+		}
+	}
+	var keys []string
+	for key := range values {
+		if !seen[key] {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		parts = append(parts, key+"="+summarizeValue(key, values[key]))
+		if len(parts) >= 4 {
+			break
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func summarizeValue(key string, value any) string {
+	switch v := value.(type) {
+	case string:
+		if key == "content" {
+			return fmt.Sprintf("<%d chars>", utf8.RuneCountInString(v))
+		}
+		return quoteSummary(v, 48)
+	case []map[string]any:
+		return fmt.Sprintf("%d items", len(v))
+	case []any:
+		return fmt.Sprintf("%d items", len(v))
+	case nil:
+		return "nil"
+	default:
+		return quoteSummary(fmt.Sprint(v), 48)
+	}
+}
+
+func quoteSummary(text string, max int) string {
+	text = strings.ReplaceAll(strings.TrimSpace(text), "\n", "\\n")
+	return `"` + truncate(text, max) + `"`
+}
+
+func compactEvents(events []frt.RuntimeEvent, max int) []frt.RuntimeEvent {
+	if len(events) <= max {
+		return events
+	}
+	if max <= 0 {
+		return nil
+	}
+	if max == 1 {
+		return events[len(events)-1:]
+	}
+	out := make([]frt.RuntimeEvent, 0, max)
+	out = append(out, events[0])
+	out = append(out, events[len(events)-(max-1):]...)
+	return out
+}
+
 func (m model) runAgent(agentID, message string) tea.Cmd {
 	return func() tea.Msg {
 		if m.runtime == nil {
@@ -585,11 +735,26 @@ func selectedAgentID(m model) string {
 	return defaultAgentID(m.status)
 }
 
+func lastRun(m model) *frt.TurnResponse {
+	if len(m.runs) == 0 {
+		return nil
+	}
+	return &m.runs[0]
+}
+
 func loadingLabel(mode string) string {
 	if mode == "default" {
 		return "thinking"
 	}
 	return "running"
+}
+
+func emptyDash(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "-"
+	}
+	return text
 }
 
 func defaultAgentID(status map[string]any) string {
@@ -679,6 +844,13 @@ func clamp(value, min, max int) int {
 
 func maxInt(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minLen(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
