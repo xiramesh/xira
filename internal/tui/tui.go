@@ -15,6 +15,8 @@ import (
 type model struct {
 	runtime     *frt.Service
 	input       textinput.Model
+	width       int
+	height      int
 	status      map[string]any
 	agents      []map[string]any
 	activeAgent string
@@ -43,9 +45,18 @@ type runMsg struct {
 }
 
 var (
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	labelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	titleStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("81"))
+	labelStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	mutedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
+	errorStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	successStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
+	userStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
+	assistantStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("150"))
+	panelBorderStyle = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("238")).Padding(1, 2)
+	activePanelStyle = panelBorderStyle.BorderForeground(lipgloss.Color("81"))
+	headerStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Background(lipgloss.Color("235")).Padding(0, 1)
+	footerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(lipgloss.Color("235")).Padding(0, 1)
+	pillStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("238")).Padding(0, 1)
 )
 
 func Run(ctx context.Context, runtime *frt.Service, initialAgentID string) error {
@@ -54,7 +65,7 @@ func Run(ctx context.Context, runtime *frt.Service, initialAgentID string) error
 	input.Focus()
 	input.CharLimit = 2000
 	input.Width = 96
-	m := model{runtime: runtime, input: input, activeAgent: strings.TrimSpace(initialAgentID)}
+	m := model{runtime: runtime, input: input, width: 110, height: 32, activeAgent: strings.TrimSpace(initialAgentID)}
 	_, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
 	return err
 }
@@ -65,6 +76,10 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.input.Width = inputWidth(msg.Width)
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":
@@ -121,53 +136,119 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("FlowDeck TUI"))
-	b.WriteString("\n")
-	if m.status != nil {
-		b.WriteString(labelStyle.Render("Model: "))
-		b.WriteString(modelStatusLabel(m.status))
-		b.WriteString("\n")
+	width := m.width
+	if width < 72 {
+		width = 72
 	}
-	b.WriteString(labelStyle.Render("Mode: "))
-	if strings.TrimSpace(m.activeAgent) == "" {
-		b.WriteString("default agent")
-		if id := defaultAgentID(m.status); id != "" {
-			b.WriteString(" ")
-			b.WriteString(id)
-		}
+	height := m.height
+	if height < 20 {
+		height = 20
+	}
+
+	sidebarWidth := clamp(width/4, 24, 34)
+	mainWidth := width - sidebarWidth - 1
+	bodyHeight := height - 3
+	if bodyHeight < 16 {
+		bodyHeight = 16
+	}
+	m.input.Width = maxInt(24, mainWidth-8)
+
+	header := renderHeader(m, width)
+	sidebar := renderSidebar(m, sidebarWidth, bodyHeight)
+	main := renderConversation(m, mainWidth, bodyHeight)
+	footer := renderFooter(m, width)
+	return strings.TrimRight(strings.Join([]string{
+		header,
+		lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main),
+		footer,
+	}, "\n"), "\n")
+}
+
+func renderHeader(m model, width int) string {
+	mode := modeLabel(m)
+	left := titleStyle.Render("FlowDeck TUI")
+	right := strings.Join([]string{
+		"Model: " + modelStatusLabel(m.status),
+		"Mode: " + mode,
+	}, "  ")
+	gap := maxInt(1, width-lipgloss.Width(left)-lipgloss.Width(right)-2)
+	return headerStyle.Width(width).Render(left + strings.Repeat(" ", gap) + mutedStyle.Render(right))
+}
+
+func renderSidebar(m model, width, height int) string {
+	selected := selectedAgentID(m)
+	lines := []string{titleStyle.Render("Agents")}
+	if len(m.agents) == 0 {
+		lines = append(lines, mutedStyle.Render("No agents loaded"))
 	} else {
-		b.WriteString("agent ")
-		b.WriteString(agentSelectionLabel(m.agents, m.activeAgent))
-	}
-	b.WriteString("\n\n")
-	if len(m.transcript) > 0 {
-		b.WriteString(renderTranscript(m.transcript, 12))
-		b.WriteString("\n\n")
-	}
-	b.WriteString(m.input.View())
-	b.WriteString("\n")
-	if m.loading {
-		if m.loadingMode == "default" {
-			b.WriteString("Thinking...\n")
-		} else {
-			b.WriteString("Running agent...\n")
+		for _, agent := range m.agents {
+			id := agentID(agent)
+			if id == "" {
+				continue
+			}
+			marker := " "
+			rowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+			if id == selected {
+				marker = ">"
+				rowStyle = successStyle.Bold(true)
+			}
+			lines = append(lines, rowStyle.Render(fmt.Sprintf("%s %s", marker, truncate(id, width-8))))
+			if name := agentString(agent, "name"); name != "" && name != id {
+				lines = append(lines, mutedStyle.Render("  "+truncate(name, width-8)))
+			}
+			if tools := agentStringList(agent, "tools"); len(tools) > 0 {
+				lines = append(lines, mutedStyle.Render(fmt.Sprintf("  tools %d", len(tools))))
+			}
 		}
 	}
-	if len(m.runs) > 0 {
-		b.WriteString("\n")
-		b.WriteString(labelStyle.Render("Last runs"))
-		b.WriteString("\n")
+
+	lines = append(lines, "", titleStyle.Render("Runs"))
+	if len(m.runs) == 0 {
+		lines = append(lines, mutedStyle.Render("No runs yet"))
+	} else {
 		for i, run := range m.runs {
-			if i >= 5 {
+			if i >= 4 {
 				break
 			}
-			b.WriteString(fmt.Sprintf("- %s %s %s\n", run.RunID, run.Status, run.VerificationResult.Status))
+			status := run.Status
+			if run.VerificationResult.Status != "" {
+				status += "/" + run.VerificationResult.Status
+			}
+			lines = append(lines, truncate(run.AgentID, width-8))
+			lines = append(lines, mutedStyle.Render("  "+truncate(status, width-8)))
 		}
 	}
-	b.WriteString("\n")
-	b.WriteString(labelStyle.Render("Enter: send  /agents  /agent <id> <message>  /use <id>  /exit-agent  Esc/Ctrl-C: quit"))
-	return b.String()
+	return panelBorderStyle.Width(width - 5).Height(height - 4).Render(strings.Join(lines, "\n"))
+}
+
+func renderConversation(m model, width, height int) string {
+	var sections []string
+	title := titleStyle.Render("Conversation")
+	if m.loading {
+		title += " " + pillStyle.Render(loadingLabel(m.loadingMode))
+	}
+	sections = append(sections, title)
+
+	bodyWidth := maxInt(28, width-8)
+	if len(m.transcript) == 0 {
+		sections = append(sections, mutedStyle.Render("Start with a message, or use /agents and /use <id>."))
+	} else {
+		sections = append(sections, renderTranscriptBlocks(m.transcript, 10, bodyWidth))
+	}
+
+	if m.err != nil {
+		sections = append(sections, errorStyle.Render(m.err.Error()))
+	}
+	sections = append(sections, "", labelStyle.Render("Message"), m.input.View())
+	return activePanelStyle.Width(width - 5).Height(height - 4).Render(strings.Join(sections, "\n"))
+}
+
+func renderFooter(m model, width int) string {
+	status := "Enter send  /agents list  /use <id> switch  /exit-agent default  Esc quit"
+	if m.err != nil {
+		status = "Error: " + m.err.Error()
+	}
+	return footerStyle.Width(width).Render(truncate(status, width-2))
 }
 
 func (m model) load() tea.Msg {
@@ -308,6 +389,33 @@ func renderTranscript(entries []transcriptEntry, max int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func renderTranscriptBlocks(entries []transcriptEntry, max, width int) string {
+	if max > 0 && len(entries) > max {
+		entries = entries[len(entries)-max:]
+	}
+	blocks := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		role := strings.TrimSpace(entry.Role)
+		if role == "" {
+			role = "Unknown"
+		}
+		content := strings.TrimSpace(entry.Content)
+		if content == "" {
+			continue
+		}
+		header := userStyle.Render(role)
+		lower := strings.ToLower(role)
+		switch {
+		case strings.Contains(lower, "error"):
+			header = errorStyle.Bold(true).Render(role)
+		case strings.Contains(lower, "flowdeck") || strings.Contains(lower, "assistant"):
+			header = assistantStyle.Render(role)
+		}
+		blocks = append(blocks, header+"\n"+mutedStyle.Render(indent(wrapText(content, width), "  ")))
+	}
+	return strings.Join(blocks, "\n\n")
 }
 
 func (m model) runAgent(agentID, message string) tea.Cmd {
@@ -460,6 +568,30 @@ func modelStatusLabel(status map[string]any) string {
 	return "DeepSeek"
 }
 
+func modeLabel(m model) string {
+	if strings.TrimSpace(m.activeAgent) == "" {
+		if id := defaultAgentID(m.status); id != "" {
+			return "default agent " + id
+		}
+		return "default agent"
+	}
+	return "agent " + agentSelectionLabel(m.agents, m.activeAgent)
+}
+
+func selectedAgentID(m model) string {
+	if id := strings.TrimSpace(m.activeAgent); id != "" {
+		return id
+	}
+	return defaultAgentID(m.status)
+}
+
+func loadingLabel(mode string) string {
+	if mode == "default" {
+		return "thinking"
+	}
+	return "running"
+}
+
 func defaultAgentID(status map[string]any) string {
 	value, ok := status["default_agent"]
 	if !ok {
@@ -470,6 +602,86 @@ func defaultAgentID(status map[string]any) string {
 		return ""
 	}
 	return strings.TrimSpace(text)
+}
+
+func inputWidth(width int) int {
+	return maxInt(24, width-42)
+}
+
+func wrapText(text string, width int) string {
+	width = maxInt(12, width)
+	var out []string
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		for lipgloss.Width(line) > width {
+			head, tail := splitDisplayWidth(line, width)
+			if head == "" {
+				break
+			}
+			out = append(out, strings.TrimSpace(head))
+			line = strings.TrimSpace(tail)
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+func indent(text, prefix string) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func truncate(text string, width int) string {
+	text = strings.TrimSpace(text)
+	if width <= 0 || lipgloss.Width(text) <= width {
+		return text
+	}
+	if width <= 3 {
+		head, _ := splitDisplayWidth(text, width)
+		return head
+	}
+	head, _ := splitDisplayWidth(text, width-3)
+	return strings.TrimSpace(head) + "..."
+}
+
+func splitDisplayWidth(text string, width int) (string, string) {
+	if width <= 0 || text == "" {
+		return "", text
+	}
+	var b strings.Builder
+	used := 0
+	for index, r := range text {
+		w := lipgloss.Width(string(r))
+		if used+w > width {
+			return b.String(), text[index:]
+		}
+		b.WriteRune(r)
+		used += w
+	}
+	return b.String(), ""
+}
+
+func clamp(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func statusBool(status map[string]any, key string) bool {
