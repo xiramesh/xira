@@ -248,6 +248,7 @@ func (s *Service) generateNativeDeepSeek(
 		Messages:    messages,
 		Tools:       tools,
 		Temperature: &temp,
+		Thinking:    &deepseek.Thinking{Type: "disabled"},
 	})
 	if err != nil {
 		recordAudit("model.chat", modelID, false, err.Error(), nil)
@@ -281,6 +282,7 @@ func (s *Service) generateNativeDeepSeek(
 		Model:       modelID,
 		Messages:    messages,
 		Temperature: &temp,
+		Thinking:    &deepseek.Thinking{Type: "disabled"},
 	})
 	if err != nil {
 		return "", toolRecords, err
@@ -406,15 +408,15 @@ func toolNameFromWire(registry *rtools.Registry, wireName string) string {
 }
 
 func messageContent(msg deepseek.Message) string {
-	switch v := msg.Content.(type) {
-	case string:
-		return v
-	case nil:
-		return ""
-	default:
-		data, _ := json.Marshal(v)
-		return string(data)
+	text := deepseek.ContentText(msg.Content)
+	if text != "" {
+		return text
 	}
+	if msg.Content == nil {
+		return ""
+	}
+	data, _ := json.Marshal(msg.Content)
+	return string(data)
 }
 
 func errString(err error) string {

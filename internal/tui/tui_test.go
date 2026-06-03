@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,33 @@ func TestDefaultAgentResponseUpdatesTranscript(t *testing.T) {
 	}
 	if got.transcript[0].Role != "flowdeck-assistant" || got.transcript[0].Content != "你好" {
 		t.Fatalf("transcript = %+v", got.transcript)
+	}
+}
+
+func TestFailedAgentResponseStillAddsRunForTraceReview(t *testing.T) {
+	m := model{loading: true, loadingMode: "default"}
+	updated, _ := m.Update(runMsg{
+		resp: frt.TurnResponse{
+			RunID:   "run-failed",
+			AgentID: "flowdeck-assistant",
+			Status:  "failed",
+			Events: []frt.RuntimeEvent{
+				{Kind: "run.started", Source: "runtime"},
+				{Kind: "adk.empty_final", Source: "adk.runner", Message: "final ADK event contained no response text"},
+			},
+		},
+		err: errors.New("ADK runner produced empty final response"),
+	})
+	got := updated.(model)
+
+	if len(got.runs) != 1 || got.runs[0].RunID != "run-failed" {
+		t.Fatalf("runs = %+v, want failed run retained", got.runs)
+	}
+	if !strings.Contains(renderRunTrace(lastRun(got), 120), "adk.empty_final") {
+		t.Fatalf("trace = %q, want adk.empty_final", renderRunTrace(lastRun(got), 120))
+	}
+	if len(got.transcript) != 1 || got.transcript[0].Role != "Error" {
+		t.Fatalf("transcript = %+v, want error transcript", got.transcript)
 	}
 }
 

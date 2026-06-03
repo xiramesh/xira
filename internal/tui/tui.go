@@ -139,11 +139,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.stopTrace()
 		m.err = msg.err
 		m.input.SetValue("")
+		if msg.resp.RunID != "" {
+			m.runs = append([]frt.TurnResponse{msg.resp}, m.runs...)
+		}
 		if msg.err != nil {
 			m.output = msg.err.Error()
 			m.addTranscript("Error", msg.err.Error())
 		} else {
-			m.runs = append([]frt.TurnResponse{msg.resp}, m.runs...)
 			m.output = msg.resp.FinalResponse
 			m.addTranscript(msg.resp.AgentID, msg.resp.FinalResponse)
 		}

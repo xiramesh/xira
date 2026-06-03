@@ -2,12 +2,16 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ai-daming/flowdeck/internal/agents"
+	"github.com/ai-daming/flowdeck/internal/model/deepseek"
 )
 
 func TestRunAgentWritesHarnessStore(t *testing.T) {
@@ -114,6 +118,49 @@ func TestRunAgentCanUseExecTool(t *testing.T) {
 	}
 	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "exec" {
 		t.Fatalf("expected exec tool call: %+v", resp.ToolCalls)
+	}
+}
+
+func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "test-key")
+	var gotReq deepseek.ChatRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"adk runtime ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	rt, err := NewService(Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest(server.URL), deepseek.WithAPIKey("test-key")),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hi", Channel: "test"})
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	if resp.FinalResponse != "adk runtime ok" {
+		t.Fatalf("final response = %q", resp.FinalResponse)
+	}
+	if gotReq.Thinking == nil || gotReq.Thinking.Type != "disabled" {
+		t.Fatalf("thinking = %+v, want disabled", gotReq.Thinking)
+	}
+	var found bool
+	for _, event := range resp.Events {
+		if event.Kind != "adk.event" {
+			continue
+		}
+		found = true
+		if event.Payload["content_chars"] == nil || event.Payload["parts"] == nil || event.Payload["finish_reason"] != "stop" {
+			t.Fatalf("adk event payload = %+v, want content diagnostics", event.Payload)
+		}
+	}
+	if !found {
+		t.Fatalf("events = %+v, want adk.event", resp.Events)
 	}
 }
 

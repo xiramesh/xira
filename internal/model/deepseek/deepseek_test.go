@@ -105,7 +105,11 @@ func TestClientStreamWithFakeServer(t *testing.T) {
 }
 
 func TestADKModelGenerateContent(t *testing.T) {
+	var gotReq ChatRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatal(err)
+		}
 		_, _ = w.Write([]byte(`{"model":"deepseek-v4-flash","choices":[{"message":{"role":"assistant","content":"adk ok"}}]}`))
 	}))
 	defer server.Close()
@@ -125,6 +129,34 @@ func TestADKModelGenerateContent(t *testing.T) {
 		}
 	}
 	if got != "adk ok" {
+		t.Fatalf("got %q", got)
+	}
+	if gotReq.Thinking == nil || gotReq.Thinking.Type != "disabled" {
+		t.Fatalf("thinking = %+v, want disabled", gotReq.Thinking)
+	}
+}
+
+func TestADKModelExtractsStructuredContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"model":"deepseek-v4-flash","choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"structured ok"}]}}]}`))
+	}))
+	defer server.Close()
+	client := New(WithBaseURLForTest(server.URL), WithAPIKey("test-key"))
+	model, err := NewADKModel(ModelFlash, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &adkmodel.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)}}
+	var got string
+	for resp, err := range model.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		if resp.Content != nil && len(resp.Content.Parts) > 0 {
+			got = resp.Content.Parts[0].Text
+		}
+	}
+	if got != "structured ok" {
 		t.Fatalf("got %q", got)
 	}
 }

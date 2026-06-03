@@ -76,11 +76,12 @@ func SupportedModel(model string) bool {
 }
 
 type Message struct {
-	Role       string     `json:"role"`
-	Content    any        `json:"content,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"`
+	Role             string     `json:"role"`
+	Content          any        `json:"content,omitempty"`
+	ReasoningContent any        `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
+	Name             string     `json:"name,omitempty"`
 }
 
 type Tool struct {
@@ -111,6 +112,11 @@ type ChatRequest struct {
 	Stream      bool      `json:"stream,omitempty"`
 	Tools       []Tool    `json:"tools,omitempty"`
 	Temperature *float32  `json:"temperature,omitempty"`
+	Thinking    *Thinking `json:"thinking,omitempty"`
+}
+
+type Thinking struct {
+	Type string `json:"type"`
 }
 
 type ChatResponse struct {
@@ -259,6 +265,7 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 			Model:    m.modelName,
 			Messages: contentsToMessages(req.Contents, originalToWire),
 			Tools:    tools,
+			Thinking: &Thinking{Type: "disabled"},
 		}
 		if req.Model != "" && SupportedModel(req.Model) {
 			chatReq.Model = req.Model
@@ -385,9 +392,10 @@ func responseToADK(resp ChatResponse, wireToOriginal map[string]string) *adkmode
 	if len(resp.Choices) == 0 {
 		return textResponse("", false)
 	}
-	msg := resp.Choices[0].Message
+	choice := resp.Choices[0]
+	msg := choice.Message
 	var parts []*genai.Part
-	if text, ok := msg.Content.(string); ok && text != "" {
+	if text := ContentText(msg.Content); text != "" {
 		parts = append(parts, genai.NewPartFromText(text))
 	}
 	for _, call := range msg.ToolCalls {
@@ -405,6 +413,7 @@ func responseToADK(resp ChatResponse, wireToOriginal map[string]string) *adkmode
 		Content:      genai.NewContentFromParts(parts, genai.RoleModel),
 		TurnComplete: true,
 		ModelVersion: resp.Model,
+		FinishReason: genai.FinishReason(choice.FinishReason),
 	}
 }
 
@@ -420,11 +429,33 @@ func chunkText(chunk ChatResponse) string {
 	if len(chunk.Choices) == 0 {
 		return ""
 	}
-	if s, ok := chunk.Choices[0].Delta.Content.(string); ok {
-		return s
+	if text := ContentText(chunk.Choices[0].Delta.Content); text != "" {
+		return text
 	}
-	if s, ok := chunk.Choices[0].Message.Content.(string); ok {
-		return s
+	if text := ContentText(chunk.Choices[0].Message.Content); text != "" {
+		return text
+	}
+	return ""
+}
+
+func ContentText(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case []any:
+		var parts []string
+		for _, item := range v {
+			if text := ContentText(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "")
+	case map[string]any:
+		for _, key := range []string{"text", "content", "value"} {
+			if text := ContentText(v[key]); text != "" {
+				return text
+			}
+		}
 	}
 	return ""
 }

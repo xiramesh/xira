@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -81,6 +82,7 @@ func (s *Service) generateADK(
 		return "", nil, err
 	}
 	var final string
+	var latestText string
 	for evt, err := range run.Run(ctx, req.UserID, req.SessionID, genai.NewContentFromText(req.Message, genai.RoleUser), adkagent.RunConfig{}) {
 		if err != nil {
 			return final, nil, err
@@ -88,17 +90,43 @@ func (s *Service) generateADK(
 		if evt == nil {
 			continue
 		}
-		recordEvent("adk.event", "adk.runner", evt.Author, map[string]any{
+		text := contentText(evt.Content)
+		if strings.TrimSpace(text) != "" {
+			latestText = text
+		}
+		payload := map[string]any{
 			"event_id":      evt.ID,
 			"invocation_id": evt.InvocationID,
 			"partial":       evt.Partial,
 			"final":         evt.IsFinalResponse(),
-		})
+			"parts":         contentPartCount(evt.Content),
+			"content_chars": utf8.RuneCountInString(text),
+			"turn_complete": evt.TurnComplete,
+		}
+		if evt.ModelVersion != "" {
+			payload["model"] = evt.ModelVersion
+		}
+		if evt.FinishReason != "" {
+			payload["finish_reason"] = string(evt.FinishReason)
+		}
+		if evt.ErrorCode != "" {
+			payload["error_code"] = evt.ErrorCode
+		}
+		if evt.ErrorMessage != "" {
+			payload["error_message"] = evt.ErrorMessage
+		}
+		recordEvent("adk.event", "adk.runner", evt.Author, payload)
 		if evt.IsFinalResponse() {
-			final = contentText(evt.Content)
+			final = text
+			if strings.TrimSpace(final) == "" {
+				final = latestText
+			}
 		}
 	}
 	if strings.TrimSpace(final) == "" {
+		recordEvent("adk.empty_final", "adk.runner", "final ADK event contained no response text", map[string]any{
+			"agent_id": profile.ID,
+		})
 		return final, nil, fmt.Errorf("ADK runner produced empty final response")
 	}
 	recordAudit("adk.runner", profile.ID, true, "ADK runner completed", nil)
@@ -231,4 +259,11 @@ func contentText(content *genai.Content) string {
 		}
 	}
 	return strings.Join(parts, "")
+}
+
+func contentPartCount(content *genai.Content) int {
+	if content == nil {
+		return 0
+	}
+	return len(content.Parts)
 }
