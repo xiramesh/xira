@@ -1,0 +1,93 @@
+version: "3"
+
+vars:
+  GO_CACHE: '{{.GO_CACHE | default "/tmp/flowdeck-go-build"}}'
+  CONFIG: '{{.CONFIG | default "flowdeck.yaml"}}'
+  RUN_ROOT: '{{.RUN_ROOT | default ".flowdeck/runs"}}'
+  AGENT: '{{.AGENT | default ""}}'
+  MSG: '{{.MSG | default "hello flowdeck"}}'
+
+env:
+  GOCACHE: "{{.GO_CACHE}}"
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  tidy:
+    desc: Tidy Go module dependencies
+    cmds:
+      - go mod tidy
+
+  fmt:
+    desc: Format Go source
+    cmds:
+      - gofmt -w cmd internal
+
+  test:
+    desc: Run all Go tests
+    cmds:
+      - go test ./...
+
+  check:
+    desc: Format and run tests
+    cmds:
+      - task: fmt
+      - task: test
+
+  version:
+    desc: Print FlowDeck version
+    cmds:
+      - go run ./cmd/flowdeck version
+
+  serve:
+    desc: Run the FlowDeck runtime API server
+    cmds:
+      - go run ./cmd/flowdeck --config {{.CONFIG}} --run-root {{.RUN_ROOT}} serve
+
+  tui:
+    desc: Run embedded FlowDeck TUI with DeepSeek when DEEPSEEK_API_KEY is set
+    cmds:
+      - go run ./cmd/flowdeck --config {{.CONFIG}} --run-root {{.RUN_ROOT}} tui {{if .AGENT}}--agent {{.AGENT}}{{end}}
+
+  tui:mock:
+    desc: Run embedded FlowDeck TUI with the mock model
+    cmds:
+      - go run ./cmd/flowdeck --config {{.CONFIG}} --mock-model --run-root {{.RUN_ROOT}} tui {{if .AGENT}}--agent {{.AGENT}}{{end}}
+
+  agent:list:
+    desc: List agent profiles
+    cmds:
+      - go run ./cmd/flowdeck --config {{.CONFIG}} --run-root {{.RUN_ROOT}} agent list
+
+  agent:run:
+    desc: Run an agent once; override with MSG='...' and AGENT='...'
+    cmds:
+      - go run ./cmd/flowdeck --config {{.CONFIG}} --run-root {{.RUN_ROOT}} agent run {{if .AGENT}}--agent {{.AGENT}} {{end}}--message {{quote .MSG}}
+
+  agent:run:mock:
+    desc: Run an agent once with the mock model; override with MSG='...' and AGENT='...'
+    cmds:
+      - go run ./cmd/flowdeck --config {{.CONFIG}} --mock-model --run-root {{.RUN_ROOT}} agent run {{if .AGENT}}--agent {{.AGENT}} {{end}}--message {{quote .MSG}}
+
+  runs:list:
+    desc: List recorded runs
+    cmds:
+      - go run ./cmd/flowdeck --config {{.CONFIG}} --run-root {{.RUN_ROOT}} runs list
+
+  smoke:
+    desc: Run a non-interactive mock smoke test
+    vars:
+      SMOKE_ROOT: /tmp/flowdeck-smoke-runs
+    cmds:
+      - rm -rf {{.SMOKE_ROOT}}
+      - go run ./cmd/flowdeck version
+      - go run ./cmd/flowdeck --config {{.CONFIG}} --mock-model --run-root {{.SMOKE_ROOT}} agent run --message "please call exec"
+      - test -f {{.SMOKE_ROOT}}/*/run.yaml
+
+  clean:
+    desc: Remove local FlowDeck run/cache output
+    cmds:
+      - rm -rf .flowdeck .cache /tmp/flowdeck-go-build /tmp/flowdeck-smoke-runs /tmp/flowdeck-task-smoke-runs

@@ -1,0 +1,208 @@
+package session
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/ai-daming/flowdeck/internal/channel"
+	"github.com/ai-daming/flowdeck/internal/routing"
+)
+
+const ScopeVersionV1 = 1
+
+type SessionScope struct {
+	Version    int               `json:"version" yaml:"version"`
+	AgentID    string            `json:"agent_id" yaml:"agent_id"`
+	Channel    string            `json:"channel" yaml:"channel"`
+	Account    string            `json:"account,omitempty" yaml:"account,omitempty"`
+	Dimensions []string          `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
+	Values     map[string]string `json:"values,omitempty" yaml:"values,omitempty"`
+}
+
+type AllocationInput struct {
+	AgentID           string
+	Context           channel.InboundContext
+	SessionPolicy     routing.SessionPolicy
+	SessionIDOverride string
+}
+
+type Allocation struct {
+	Scope     SessionScope
+	SessionID string
+}
+
+type Message struct {
+	Role    string `json:"role" yaml:"role"`
+	Content string `json:"content" yaml:"content"`
+}
+
+type Manager struct {
+	mu        sync.RWMutex
+	histories map[string][]Message
+}
+
+func NewManager() *Manager {
+	return &Manager{histories: map[string][]Message{}}
+}
+
+func (m *Manager) Allocate(input AllocationInput) Allocation {
+	scope := BuildScope(input.AgentID, input.Context, input.SessionPolicy)
+	sessionID := strings.TrimSpace(input.SessionIDOverride)
+	if sessionID == "" {
+		sessionID = BuildSessionID(scope)
+	}
+	return Allocation{Scope: scope, SessionID: sessionID}
+}
+
+func BuildScope(agentID string, ctx channel.InboundContext, policy routing.SessionPolicy) SessionScope {
+	ctx = channel.NormalizeInboundContext(ctx)
+	scope := SessionScope{
+		Version: ScopeVersionV1,
+		AgentID: strings.TrimSpace(agentID),
+		Channel: ctx.Channel,
+		Account: strings.TrimSpace(ctx.Account),
+	}
+	values := map[string]string{}
+	for _, dimension := range policy.Dimensions {
+		switch strings.ToLower(strings.TrimSpace(dimension)) {
+		case "space":
+			if ctx.SpaceID == "" {
+				continue
+			}
+			spaceType := strings.TrimSpace(ctx.SpaceType)
+			if spaceType == "" {
+				spaceType = "space"
+			}
+			values["space"] = strings.ToLower(spaceType) + ":" + strings.ToLower(ctx.SpaceID)
+		case "chat":
+			if ctx.ChatID == "" {
+				continue
+			}
+			chatType := strings.TrimSpace(ctx.ChatType)
+			if chatType == "" {
+				chatType = "direct"
+			}
+			values["chat"] = strings.ToLower(chatType) + ":" + strings.ToLower(ctx.ChatID)
+		case "topic":
+			if ctx.TopicID == "" {
+				continue
+			}
+			values["topic"] = "topic:" + strings.ToLower(ctx.TopicID)
+		case "sender":
+			if ctx.SenderID == "" {
+				continue
+			}
+			values["sender"] = canonicalSenderID(ctx.Channel, ctx.SenderID, policy.IdentityLinks)
+		case "channel":
+			if ctx.Channel == "" {
+				continue
+			}
+			values["channel"] = "channel:" + strings.ToLower(ctx.Channel)
+		}
+	}
+	if len(values) > 0 {
+		scope.Dimensions = sortedKeys(values)
+		scope.Values = values
+	}
+	return scope
+}
+
+func BuildSessionID(scope SessionScope) string {
+	signature := scopeSignature(scope)
+	sum := sha256.Sum256([]byte(signature))
+	return fmt.Sprintf("session:%s:%s", safeID(scope.AgentID), hex.EncodeToString(sum[:])[:16])
+}
+
+func (m *Manager) AppendMessage(sessionID string, msg Message) {
+	sessionID = strings.TrimSpace(sessionID)
+	msg.Role = strings.TrimSpace(msg.Role)
+	msg.Content = strings.TrimSpace(msg.Content)
+	if m == nil || sessionID == "" || msg.Role == "" || msg.Content == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.histories[sessionID] = append(m.histories[sessionID], msg)
+}
+
+func (m *Manager) AppendTurn(sessionID, userMessage, assistantMessage string) {
+	m.AppendMessage(sessionID, Message{Role: "user", Content: userMessage})
+	m.AppendMessage(sessionID, Message{Role: "assistant", Content: assistantMessage})
+}
+
+func (m *Manager) History(sessionID string) []Message {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	history := m.histories[strings.TrimSpace(sessionID)]
+	return append([]Message(nil), history...)
+}
+
+func (m *Manager) LastMessages(sessionID string, max int) []Message {
+	history := m.History(sessionID)
+	if max > 0 && len(history) > max {
+		history = history[len(history)-max:]
+	}
+	return history
+}
+
+func sortedKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func scopeSignature(scope SessionScope) string {
+	var b strings.Builder
+	b.WriteString("v=")
+	b.WriteString(fmt.Sprint(scope.Version))
+	b.WriteString("|agent=")
+	b.WriteString(strings.ToLower(strings.TrimSpace(scope.AgentID)))
+	b.WriteString("|channel=")
+	b.WriteString(strings.ToLower(strings.TrimSpace(scope.Channel)))
+	b.WriteString("|account=")
+	b.WriteString(strings.ToLower(strings.TrimSpace(scope.Account)))
+	for _, dimension := range scope.Dimensions {
+		key := strings.ToLower(strings.TrimSpace(dimension))
+		b.WriteString("|")
+		b.WriteString(key)
+		b.WriteString("=")
+		b.WriteString(strings.ToLower(strings.TrimSpace(scope.Values[key])))
+	}
+	return b.String()
+}
+
+func safeID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.NewReplacer("/", "-", " ", "-", ":", "-").Replace(value)
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func canonicalSenderID(channelName, senderID string, identityLinks map[string][]string) string {
+	senderID = strings.ToLower(strings.TrimSpace(senderID))
+	channelName = strings.ToLower(strings.TrimSpace(channelName))
+	if senderID == "" {
+		return ""
+	}
+	candidate := channelName + ":" + senderID
+	for canonical, aliases := range identityLinks {
+		for _, alias := range aliases {
+			if strings.EqualFold(strings.TrimSpace(alias), candidate) || strings.EqualFold(strings.TrimSpace(alias), senderID) {
+				return strings.ToLower(strings.TrimSpace(canonical))
+			}
+		}
+	}
+	return candidate
+}
