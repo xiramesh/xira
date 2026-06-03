@@ -255,6 +255,89 @@ func TestViewStartsAsDefaultAgent(t *testing.T) {
 	}
 }
 
+func TestConversationDoesNotShowTraceByDefaultAfterRun(t *testing.T) {
+	input := textinput.New()
+	m := model{
+		input:  input,
+		width:  120,
+		height: 32,
+		transcript: []transcriptEntry{
+			{Role: "You", Content: "你好"},
+			{Role: "flowdeck-assistant", Content: "你好，有什么可以帮你？"},
+		},
+		runs: []frt.TurnResponse{{
+			RunID:   "run-1",
+			AgentID: "flowdeck-assistant",
+			Status:  "completed",
+			Events: []frt.RuntimeEvent{
+				{Kind: "run.started", Source: "runtime"},
+				{Kind: "tool.started", Source: "read_file"},
+				{Kind: "run.finished", Source: "runtime"},
+			},
+		}},
+	}
+
+	view := m.View()
+	for _, want := range []string{"Conversation", "You", "flowdeck-assistant", "Activity", "tools 0  events 3"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("View() = %q, want substring %q", view, want)
+		}
+	}
+	for _, forbidden := range []string{"Trace", "tools: none", "run run-1"} {
+		if strings.Contains(view, forbidden) {
+			t.Fatalf("View() = %q, should not contain default trace substring %q", view, forbidden)
+		}
+	}
+}
+
+func TestTraceCommandTogglesInspector(t *testing.T) {
+	m := model{}
+	handled, cmd := m.applyCommand("/trace")
+	if !handled {
+		t.Fatal("applyCommand did not handle /trace")
+	}
+	if cmd != nil {
+		t.Fatal("applyCommand returned command, want nil")
+	}
+	if !m.showTrace {
+		t.Fatal("showTrace = false, want true")
+	}
+	if m.output != "Trace inspector: on" {
+		t.Fatalf("output = %q", m.output)
+	}
+}
+
+func TestTraceInspectorShowsRunOnlyWhenEnabled(t *testing.T) {
+	input := textinput.New()
+	m := model{
+		input:     input,
+		width:     120,
+		height:    32,
+		showTrace: true,
+		transcript: []transcriptEntry{
+			{Role: "You", Content: "你好"},
+			{Role: "flowdeck-assistant", Content: "你好"},
+		},
+		runs: []frt.TurnResponse{{
+			RunID:          "run-1",
+			AgentID:        "flowdeck-assistant",
+			Status:         "completed",
+			RouteMatchedBy: "default",
+			Events: []frt.RuntimeEvent{
+				{Kind: "run.started", Source: "runtime"},
+				{Kind: "run.finished", Source: "runtime"},
+			},
+		}},
+	}
+
+	view := m.View()
+	for _, want := range []string{"Trace", "run run-1", "events", "run.finished runtime"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("View() = %q, want trace substring %q", view, want)
+		}
+	}
+}
+
 func TestRunTraceShowsToolCallsAuditAndEvents(t *testing.T) {
 	trace := renderRunTrace(&frt.TurnResponse{
 		RunID:          "run-1",
@@ -354,9 +437,14 @@ func TestViewShowsVisibleRunningStatusNearInput(t *testing.T) {
 	}
 
 	view := m.View()
-	for _, want := range []string{"RUNNING", "thinking - live trace is updating", "Trace", "waiting for run.started", "Message"} {
+	for _, want := range []string{"RUNNING", "thinking - activity is updating", "Activity", "waiting for events", "Message"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("View() = %q, want substring %q", view, want)
+		}
+	}
+	for _, forbidden := range []string{"Trace", "waiting for run.started"} {
+		if strings.Contains(view, forbidden) {
+			t.Fatalf("View() = %q, should not contain %q", view, forbidden)
 		}
 	}
 }

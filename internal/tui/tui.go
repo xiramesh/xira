@@ -28,6 +28,7 @@ type model struct {
 	err         error
 	loading     bool
 	loadingMode string
+	showTrace   bool
 	traceEvents []frt.RuntimeEvent
 	traceSub    <-chan frt.RuntimeEvent
 	traceCancel context.CancelFunc
@@ -245,6 +246,8 @@ func renderSidebar(m model, width, height int) string {
 			lines = append(lines, mutedStyle.Render("  "+truncate(status, width-8)))
 		}
 	}
+	lines = append(lines, "", titleStyle.Render("Activity"))
+	lines = append(lines, renderActivity(m, width-8)...)
 	return panelBorderStyle.Width(width - 5).Height(height - 4).Render(strings.Join(lines, "\n"))
 }
 
@@ -262,12 +265,14 @@ func renderConversation(m model, width, height int) string {
 	} else {
 		sections = append(sections, renderTranscriptBlocks(m.transcript, 10, bodyWidth))
 	}
-	if m.loading {
-		sections = append(sections, "", renderLiveTrace(m.traceEvents, bodyWidth))
-	} else if trace := renderRunTrace(lastRun(m), bodyWidth); trace != "" {
-		sections = append(sections, "", trace)
-	} else if len(m.traceEvents) > 0 {
-		sections = append(sections, "", renderLiveTrace(m.traceEvents, bodyWidth))
+	if m.showTrace {
+		if m.loading {
+			sections = append(sections, "", renderLiveTrace(m.traceEvents, bodyWidth))
+		} else if trace := renderRunTrace(lastRun(m), bodyWidth); trace != "" {
+			sections = append(sections, "", trace)
+		} else if len(m.traceEvents) > 0 {
+			sections = append(sections, "", renderLiveTrace(m.traceEvents, bodyWidth))
+		}
 	}
 
 	if m.err != nil {
@@ -281,9 +286,9 @@ func renderConversation(m model, width, height int) string {
 }
 
 func renderFooter(m model, width int) string {
-	status := "Enter send  /agents list  /use <id> switch  /exit-agent default  Trace shows tools/audit  Esc quit"
+	status := "Enter send  /agents list  /use <id> switch  /trace inspect  /exit-agent default  Esc quit"
 	if m.loading {
-		status = "RUNNING: " + loadingLabel(m.loadingMode) + "  Trace is streaming below the conversation"
+		status = "RUNNING: " + loadingLabel(m.loadingMode) + "  Activity panel updates live  /trace opens inspector"
 	}
 	if m.err != nil {
 		status = "Error: " + m.err.Error()
@@ -320,6 +325,21 @@ func (m *model) applyCommand(text string) (bool, tea.Cmd) {
 		m.err = nil
 		m.output = helpText()
 		m.addTranscript("FlowDeck", m.output)
+		return true, nil
+	case text == "/trace":
+		m.showTrace = !m.showTrace
+		m.err = nil
+		m.output = traceModeText(m.showTrace)
+		return true, nil
+	case text == "/trace on":
+		m.showTrace = true
+		m.err = nil
+		m.output = traceModeText(m.showTrace)
+		return true, nil
+	case text == "/trace off":
+		m.showTrace = false
+		m.err = nil
+		m.output = traceModeText(m.showTrace)
 		return true, nil
 	case strings.HasPrefix(text, "/agent "):
 		return true, m.applyAgentCommand(strings.TrimSpace(strings.TrimPrefix(text, "/agent ")))
@@ -497,6 +517,57 @@ func renderTranscriptBlocks(entries []transcriptEntry, max, width int) string {
 	return strings.Join(blocks, "\n\n")
 }
 
+func renderActivity(m model, width int) []string {
+	width = maxInt(12, width)
+	if m.loading {
+		lines := []string{pillStyle.Render(loadingLabel(m.loadingMode))}
+		events := compactEvents(m.traceEvents, 4)
+		if len(events) == 0 {
+			return append(lines, mutedStyle.Render("waiting for events"))
+		}
+		for _, event := range events {
+			lines = append(lines, compactEventLine(event, width))
+		}
+		return lines
+	}
+	if run := lastRun(m); run != nil {
+		status := emptyDash(run.Status)
+		if run.VerificationResult.Status != "" {
+			status += "/" + run.VerificationResult.Status
+		}
+		lines := []string{
+			labelStyle.Render(truncate(status, width)),
+			mutedStyle.Render(truncate(fmt.Sprintf("tools %d  events %d", len(run.ToolCalls), len(run.Events)), width)),
+		}
+		if len(run.Events) > 0 {
+			lines = append(lines, compactEventLine(run.Events[len(run.Events)-1], width))
+		}
+		return lines
+	}
+	if len(m.traceEvents) > 0 {
+		return []string{compactEventLine(m.traceEvents[len(m.traceEvents)-1], width)}
+	}
+	return []string{mutedStyle.Render("idle")}
+}
+
+func compactEventLine(event frt.RuntimeEvent, width int) string {
+	text := emptyDash(event.Kind)
+	if event.Source != "" {
+		text += " " + event.Source
+	}
+	if payload := summarizeMap(event.Payload, []string{"tool", "path", "command", "status", "content_chars"}); payload != "" {
+		text += " {" + payload + "}"
+	}
+	style := mutedStyle
+	if strings.Contains(event.Kind, "tool.") {
+		style = labelStyle
+	}
+	if strings.Contains(event.Kind, "failed") || strings.Contains(event.Kind, "empty") {
+		style = errorStyle
+	}
+	return style.Render(truncate(text, width))
+}
+
 func renderMarkdown(content string, width int, bodyStyle lipgloss.Style) string {
 	content = strings.TrimSpace(content)
 	if content == "" {
@@ -602,7 +673,7 @@ func stripInlineMarkdown(text string) string {
 }
 
 func renderActiveStatus(m model, width int) string {
-	message := truncate(loadingLabel(m.loadingMode)+" - live trace is updating below this turn", maxInt(12, width-10))
+	message := truncate(loadingLabel(m.loadingMode)+" - activity is updating in the sidebar", maxInt(12, width-10))
 	return pillStyle.Render("RUNNING") + " " + assistantTextStyle.Render(message)
 }
 
@@ -877,9 +948,18 @@ func helpText() string {
 		"/agent <id> <message> - call an agent once",
 		"/agent <id> - enter agent mode",
 		"/use <id> - enter agent mode",
+		"/trace - toggle trace inspector",
+		"/trace on|off - show or hide trace inspector",
 		"/exit-agent - return to the default agent",
 		"/flows - list flow entrypoints when enabled",
 	}, "\n")
+}
+
+func traceModeText(enabled bool) string {
+	if enabled {
+		return "Trace inspector: on"
+	}
+	return "Trace inspector: off"
 }
 
 func agentID(agent map[string]any) string {
