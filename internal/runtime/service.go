@@ -272,6 +272,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	}
 	agentReq.Metadata["conversation_session_id"] = req.SessionID
 	agentReq.SessionID = agentSessionID
+	ctx = s.withLLMRequestTrace(ctx, runID, recordEvent)
 	final, toolCalls, runErr := s.generate(ctx, profile, agentReq, recordEvent, recordAudit)
 	resp.FinalResponse = final
 	resp.ToolCalls = toolCalls

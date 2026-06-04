@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -278,6 +279,49 @@ func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("events = %+v, want adk.event", resp.Events)
+	}
+}
+
+func TestRunAgentTracesLLMRequestWhenEnabled(t *testing.T) {
+	t.Setenv(llmTraceEnv, "1")
+	runRoot := filepath.Join(t.TempDir(), "runs")
+	rt := newTestService(t, Config{RunRoot: runRoot})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "trace me", Channel: "test"})
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	tracePath := filepath.Join(rt.RunStore().RunDir(resp.RunID), "llm_requests", "001.json")
+	data, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("expected llm request trace: %v", err)
+	}
+	var req deepseek.ChatRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		t.Fatalf("decode trace: %v", err)
+	}
+	if req.Model != deepseek.ModelFlash {
+		t.Fatalf("trace model = %q", req.Model)
+	}
+	if len(req.Messages) < 2 {
+		t.Fatalf("trace messages = %+v", req.Messages)
+	}
+	if req.Messages[0].Role != "system" || !strings.Contains(fmt.Sprint(req.Messages[0].Content), "Current Xira agent: xira-assistant") {
+		t.Fatalf("trace system message = %+v", req.Messages[0])
+	}
+	if req.Messages[1].Role != "user" || req.Messages[1].Content != "trace me" {
+		t.Fatalf("trace user message = %+v", req.Messages[1])
+	}
+	if req.Thinking == nil || req.Thinking.Type != "disabled" {
+		t.Fatalf("trace thinking = %+v", req.Thinking)
+	}
+	var tracedEvent bool
+	for _, event := range resp.Events {
+		if event.Kind == "llm.request_traced" && event.Payload["path"] == "llm_requests/001.json" {
+			tracedEvent = true
+		}
+	}
+	if !tracedEvent {
+		t.Fatalf("events = %+v, want llm.request_traced", resp.Events)
 	}
 }
 

@@ -139,6 +139,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error
 		return ChatResponse{}, errors.New("DEEPSEEK_API_KEY is required")
 	}
 	req.Stream = false
+	traceRequest(ctx, req)
 	var out ChatResponse
 	if err := c.do(ctx, req, &out); err != nil {
 		return out, err
@@ -156,6 +157,7 @@ func (c *Client) Stream(ctx context.Context, req ChatRequest, yield func(ChatRes
 		return
 	}
 	req.Stream = true
+	traceRequest(ctx, req)
 	body, err := json.Marshal(req)
 	if err != nil {
 		yield(ChatResponse{}, err)
