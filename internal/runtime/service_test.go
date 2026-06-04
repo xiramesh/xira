@@ -281,86 +281,6 @@ func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
 	}
 }
 
-func TestRunAgentPreloadsGroundingRequiredKnowledge(t *testing.T) {
-	instance := writeRuntimeFixture(t, "research-assistant", []string{"chat", "sender"})
-	writeFile(t, filepath.Join(instance, "workspace", "agents", "research-assistant", "PROFILE.md"), `---
-id: research-assistant
-name: Research Assistant
-version: 0.1.1
-description: Evidence-first research assistant.
-model_policy:
-  provider: deepseek
-  model: deepseek-v4-flash
-  stream: true
-  temperature: 0.2
-tools:
-  - read_file
-  - search_file
-knowledge:
-  root: kb/research-assistant
-  default:
-    - index.md
-  rules:
-    - id: product_intro
-      keywords: ["养生壹号", "什么是"]
-      required:
-        - 产品/产品简介.md
-verification:
-  default_checks:
-    - final_response_non_empty
----
-# Working Contract
-
-Use local evidence before summaries.
-`)
-	writeFile(t, filepath.Join(instance, "workspace", "kb", "research-assistant", "index.md"), "知识库索引\n")
-	writeFile(t, filepath.Join(instance, "workspace", "kb", "research-assistant", "产品", "产品简介.md"), "养生壹号是草本养生酒。\n")
-
-	var gotReq deepseek.ChatRequest
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
-			return nil, err
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(deepSeekTextResponse("grounded answer"))),
-		}, nil
-	})}
-	rt, err := NewService(Config{
-		ConfigPath:     filepath.Join(instance, "xira.yaml"),
-		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "什么是养生壹号", Channel: "test"})
-	if err != nil {
-		t.Fatalf("run agent: %v", err)
-	}
-	if resp.GroundingResult.Status != "passed" {
-		t.Fatalf("grounding = %+v", resp.GroundingResult)
-	}
-	for _, path := range []string{"kb/research-assistant/index.md", "kb/research-assistant/产品/产品简介.md"} {
-		if !containsString(resp.GroundingResult.RequiredFiles, path) || !containsString(resp.GroundingResult.ReadFiles, path) {
-			t.Fatalf("grounding files = %+v", resp.GroundingResult)
-		}
-	}
-	if len(resp.ToolCalls) != 2 {
-		t.Fatalf("tool calls = %+v, want two required read_file calls", resp.ToolCalls)
-	}
-	for _, rec := range resp.ToolCalls {
-		if rec.Name != "read_file" || rec.Input["grounding_required"] != true {
-			t.Fatalf("tool call = %+v, want grounding read_file", rec)
-		}
-	}
-	systemInstruction, ok := gotReq.Messages[0].Content.(string)
-	if !ok || !strings.Contains(systemInstruction, "# Runtime Required Knowledge Context") || !strings.Contains(systemInstruction, "养生壹号是草本养生酒") {
-		t.Fatalf("system instruction missing grounding context: %q", systemInstruction)
-	}
-}
-
 func TestNewServiceLoadsWorkspaceAgentsFromConfig(t *testing.T) {
 	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
 	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
@@ -788,15 +708,6 @@ func cloneStringMap(values map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 func writeFile(t *testing.T, path, content string) {

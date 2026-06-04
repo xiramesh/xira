@@ -264,18 +264,6 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"matched_by":    entrypointDecision.MatchedBy,
 		"entrypoint_id": inbound.Context.EntrypointID,
 	})
-	grounding := s.prepareGrounding(ctx, profile, req.Message, recordEvent, recordAudit)
-	if grounding.result.Status != "" && grounding.result.Status != "not_required" {
-		recordEvent("grounding.prepared", "runtime", "required knowledge prepared", map[string]any{
-			"status":         grounding.result.Status,
-			"root":           grounding.result.Root,
-			"matched_rules":  grounding.result.MatchedRules,
-			"required_files": grounding.result.RequiredFiles,
-			"read_files":     grounding.result.ReadFiles,
-			"missing_files":  grounding.result.MissingFiles,
-			"context_chars":  grounding.result.ContextChars,
-		})
-	}
 
 	agentReq := req
 	agentReq.Metadata = copyTurnMetadata(req.Metadata)
@@ -284,16 +272,10 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	}
 	agentReq.Metadata["conversation_session_id"] = req.SessionID
 	agentReq.SessionID = agentSessionID
-	runProfile := profile
-	if strings.TrimSpace(grounding.context) != "" {
-		runProfile.Instructions = append(append([]string{}, profile.Instructions...), grounding.context)
-	}
-	final, modelToolCalls, runErr := s.generate(ctx, runProfile, agentReq, recordEvent, recordAudit)
+	final, toolCalls, runErr := s.generate(ctx, profile, agentReq, recordEvent, recordAudit)
 	resp.FinalResponse = final
-	resp.ToolCalls = append(grounding.toolCalls, modelToolCalls...)
-	resp.GroundingResult = s.finalizeGrounding(profile, req.Message, final, resp.ToolCalls, grounding.result)
+	resp.ToolCalls = toolCalls
 	resp.VerificationResult = s.verifier.Verify(final, profile.Verification.DefaultChecks)
-	resp.VerificationResult = mergeGroundingVerification(resp.VerificationResult, resp.GroundingResult)
 	resp.EndedAt = time.Now()
 	resp.Status = "completed"
 	if runErr != nil || resp.VerificationResult.Status != "passed" {
@@ -308,7 +290,6 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"session_id", resp.SessionID,
 		"status", resp.Status,
 		"verification_status", resp.VerificationResult.Status,
-		"grounding_status", resp.GroundingResult.Status,
 		"tool_calls", len(resp.ToolCalls),
 		"events", len(resp.Events),
 		"audit_events", len(resp.AuditEvents),
@@ -349,7 +330,6 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	recordEvent("run.finished", "runtime", "agent run finished", map[string]any{
 		"status":              resp.Status,
 		"verification_status": resp.VerificationResult.Status,
-		"grounding_status":    resp.GroundingResult.Status,
 	})
 	resp.Artifacts = []string{"artifacts/"}
 	if err := s.runs.SaveRun(resp); err != nil && runErr == nil {

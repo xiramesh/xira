@@ -26,15 +26,6 @@ tools:
   - write_file
   - list_dir
   - edit_file
-knowledge:
-  root: kb/research-assistant
-  default:
-    - index.md
-  rules:
-    - id: local_evidence
-      keywords: ["evidence"]
-      required:
-        - evidence.md
 skills:
   - local-search
 mcp_servers:
@@ -77,12 +68,6 @@ Direct, careful, and source-backed.`)
 	}
 	if got := strings.Join(profile.Permissions.Tools, ","); got != "exec,search_file,read_file,write_file,list_dir,edit_file" {
 		t.Fatalf("Permissions.Tools = %q", got)
-	}
-	if profile.Knowledge.Root != "kb/research-assistant" || strings.Join(profile.Knowledge.Default, ",") != "index.md" {
-		t.Fatalf("Knowledge = %+v", profile.Knowledge)
-	}
-	if len(profile.Knowledge.Rules) != 1 || profile.Knowledge.Rules[0].ID != "local_evidence" {
-		t.Fatalf("Knowledge.Rules = %+v", profile.Knowledge.Rules)
 	}
 	if got := strings.Join(profile.Session.Dimensions, ","); got != "chat,sender,channel" {
 		t.Fatalf("Session.Dimensions = %q", got)
