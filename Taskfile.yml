@@ -4,6 +4,8 @@ vars:
   GO_CACHE: '{{.GO_CACHE | default "/tmp/xira-go-build"}}'
   CONFIG: '{{.CONFIG | default "xira.yaml"}}'
   RUN_ROOT: '{{.RUN_ROOT | default ".xira/runs"}}'
+  BIN_DIR: '{{.BIN_DIR | default "bin"}}'
+  BIN: '{{.BIN | default "bin/xira"}}'
   AGENT: '{{.AGENT | default ""}}'
   MSG: '{{.MSG | default "hello xira"}}'
 
@@ -36,6 +38,12 @@ tasks:
     cmds:
       - task: fmt
       - task: test
+
+  build:
+    desc: Build Xira binary
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -o {{.BIN}} ./cmd/xira
 
   version:
     desc: Print Xira version

@@ -16,13 +16,14 @@ import (
 const defaultConfigPath = "xira.yaml"
 
 type runtimeConfigFile struct {
-	Workspace      string `yaml:"workspace"`
-	DefaultAgentID string `yaml:"default_agent"`
-	RunRoot        string `yaml:"run_root"`
-	SessionRoot    string `yaml:"session_root"`
-	StateRoot      string `yaml:"state_root"`
-	Routes         string `yaml:"routes"`
-	Entrypoints    string `yaml:"entrypoints"`
+	Workspace      string       `yaml:"workspace"`
+	DefaultAgentID string       `yaml:"default_agent"`
+	RunRoot        string       `yaml:"run_root"`
+	SessionRoot    string       `yaml:"session_root"`
+	StateRoot      string       `yaml:"state_root"`
+	Routes         string       `yaml:"routes"`
+	Entrypoints    string       `yaml:"entrypoints"`
+	Pricing        UsagePricing `yaml:"pricing"`
 }
 
 type routesConfigFile struct {
@@ -55,6 +56,8 @@ type resolvedRuntimeConfig struct {
 	DefaultAgentID    string
 	RunRoot           string
 	SessionRoot       string
+	StateRoot         string
+	Pricing           UsagePricing
 	Routes            []routing.Rule
 	Entrypoints       []entrypoints.Definition
 }
@@ -94,7 +97,10 @@ func resolveRuntimeConfig(cfg Config) (resolvedRuntimeConfig, error) {
 	}
 	workspace = resolveRelativePath(baseDir, workspace)
 
-	stateRoot := strings.TrimSpace(configFile.StateRoot)
+	stateRoot := strings.TrimSpace(cfg.StateRoot)
+	if stateRoot == "" {
+		stateRoot = strings.TrimSpace(configFile.StateRoot)
+	}
 
 	runRoot := strings.TrimSpace(cfg.RunRoot)
 	if runRoot == "" {
@@ -119,6 +125,11 @@ func resolveRuntimeConfig(cfg Config) (resolvedRuntimeConfig, error) {
 		sessionRoot = filepath.Join(filepath.Dir(runRoot), "sessions")
 	}
 	sessionRoot = resolveRelativePath(baseDir, sessionRoot)
+
+	if stateRoot == "" {
+		stateRoot = filepath.Join(filepath.Dir(runRoot), "state")
+	}
+	stateRoot = resolveRelativePath(baseDir, stateRoot)
 
 	routesPath := strings.TrimSpace(configFile.Routes)
 	routesRequired := false
@@ -164,6 +175,8 @@ func resolveRuntimeConfig(cfg Config) (resolvedRuntimeConfig, error) {
 		DefaultAgentID:    defaultAgentID,
 		RunRoot:           runRoot,
 		SessionRoot:       sessionRoot,
+		StateRoot:         stateRoot,
+		Pricing:           normalizeUsagePricing(configFile.Pricing),
 		Routes:            routes,
 		Entrypoints:       entrypointDefs,
 	}, nil

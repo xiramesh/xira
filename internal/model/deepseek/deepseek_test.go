@@ -82,6 +82,64 @@ func TestDeepSeekToolNameSanitizesDots(t *testing.T) {
 	}
 }
 
+func TestMergeToolCallDeltasAppendsFunctionNameFragments(t *testing.T) {
+	calls := mergeToolCallDeltas(nil, []ToolCall{{
+		Index: 0,
+		ID:    "call-1",
+		Type:  "function",
+		Function: ToolCallFunction{
+			Name:      "read_",
+			Arguments: `{"pa`,
+		},
+	}})
+	calls = mergeToolCallDeltas(calls, []ToolCall{{
+		Index: 0,
+		Function: ToolCallFunction{
+			Name:      "file",
+			Arguments: `th":"agents/PROFILE.md"}`,
+		},
+	}})
+	if len(calls) != 1 {
+		t.Fatalf("tool calls = %+v", calls)
+	}
+	if calls[0].Function.Name != "read_file" {
+		t.Fatalf("tool call name = %q", calls[0].Function.Name)
+	}
+	if calls[0].Function.Arguments != `{"path":"agents/PROFILE.md"}` {
+		t.Fatalf("tool call arguments = %q", calls[0].Function.Arguments)
+	}
+}
+
+func TestMergeFullToolCallsReplacesFunctionFields(t *testing.T) {
+	calls := mergeFullToolCalls(nil, []ToolCall{{
+		Index: 0,
+		ID:    "call-1",
+		Type:  "function",
+		Function: ToolCallFunction{
+			Name:      "read_file",
+			Arguments: `{"path":"agents/PROFILE.md"}`,
+		},
+	}})
+	calls = mergeFullToolCalls(calls, []ToolCall{{
+		Index: 0,
+		ID:    "call-1",
+		Type:  "function",
+		Function: ToolCallFunction{
+			Name:      "read_file",
+			Arguments: `{"path":"agents/PROFILE.md"}`,
+		},
+	}})
+	if len(calls) != 1 {
+		t.Fatalf("tool calls = %+v", calls)
+	}
+	if calls[0].Function.Name != "read_file" {
+		t.Fatalf("tool call name = %q", calls[0].Function.Name)
+	}
+	if calls[0].Function.Arguments != `{"path":"agents/PROFILE.md"}` {
+		t.Fatalf("tool call arguments = %q", calls[0].Function.Arguments)
+	}
+}
+
 func TestClientStreamWithFakeServer(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

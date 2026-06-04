@@ -64,6 +64,16 @@ func (s *RunStore) SaveRun(resp TurnResponse) error {
 	if err := writeJSONL(filepath.Join(s.RunDir(resp.RunID), "tool_calls.jsonl"), resp.ToolCalls); err != nil {
 		return err
 	}
+	if err := writeJSONL(filepath.Join(s.RunDir(resp.RunID), "llm_calls.jsonl"), resp.LLMCalls); err != nil {
+		return err
+	}
+	usage, err := json.MarshalIndent(resp.Usage, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(s.RunDir(resp.RunID), "usage.json"), usage, 0o644); err != nil {
+		return err
+	}
 	verification, err := json.MarshalIndent(resp.VerificationResult, "", "  ")
 	if err != nil {
 		return err

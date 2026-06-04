@@ -14,6 +14,7 @@ import (
 
 	openilink "github.com/openilink/openilink-sdk-go"
 
+	"github.com/ai-daming/xira/internal/channelrunner/dedupe"
 	"github.com/ai-daming/xira/internal/entrypoints"
 	frt "github.com/ai-daming/xira/internal/runtime"
 )
@@ -40,10 +41,10 @@ type Runner struct {
 	mu       sync.Mutex
 	runCtx   context.Context
 	cancel   context.CancelFunc
-	messages *messageDeduper
+	messages *dedupe.MessageDeduper
 }
 
-func NewRunner(definition entrypoints.Definition, rt *frt.Service) (*Runner, error) {
+func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot string) (*Runner, error) {
 	token := resolveValue(definition.Token, definition.TokenEnv)
 	if token == "" {
 		return nil, fmt.Errorf("ilink entrypoint %q missing token or token_env", definition.ID)
@@ -55,7 +56,10 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service) (*Runner, err
 	}
 	stateDir := strings.TrimSpace(definition.StateDir)
 	if stateDir == "" {
-		stateDir = filepath.Join(".xira", "ilink", safePathSegment(definition.ID))
+		if strings.TrimSpace(stateRoot) == "" {
+			stateRoot = filepath.Join(".xira", "state")
+		}
+		stateDir = filepath.Join(stateRoot, "channels", "ilink", safePathSegment(definition.ID))
 	}
 	runner := &Runner{
 		definition: definition,
@@ -64,7 +68,7 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service) (*Runner, err
 		token:      token,
 		baseURL:    baseURL,
 		stateDir:   stateDir,
-		messages:   newMessageDeduper(messageDedupeTTL),
+		messages:   dedupe.New(filepath.Join(stateDir, "dedupe.json"), messageDedupeTTL),
 	}
 	slog.Info("ilink runner configured",
 		"entrypoint_id", definition.ID,
@@ -466,61 +470,8 @@ func previewText(text string, limit int) string {
 	return string(runes[:limit]) + "..."
 }
 
-type messageDeduper struct {
-	mu      sync.Mutex
-	ttl     time.Duration
-	entries map[string]time.Time
-}
+type messageDeduper = dedupe.MessageDeduper
 
 func newMessageDeduper(ttl time.Duration) *messageDeduper {
-	if ttl <= 0 {
-		ttl = messageDedupeTTL
-	}
-	return &messageDeduper{
-		ttl:     ttl,
-		entries: map[string]time.Time{},
-	}
-}
-
-func (d *messageDeduper) Begin(key string, now time.Time) bool {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return true
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.pruneLocked(now)
-	if _, ok := d.entries[key]; ok {
-		return false
-	}
-	d.entries[key] = now.Add(d.ttl)
-	return true
-}
-
-func (d *messageDeduper) Complete(key string, now time.Time) {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.entries[key] = now.Add(d.ttl)
-}
-
-func (d *messageDeduper) Forget(key string) {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	delete(d.entries, key)
-}
-
-func (d *messageDeduper) pruneLocked(now time.Time) {
-	for key, expiresAt := range d.entries {
-		if !expiresAt.After(now) {
-			delete(d.entries, key)
-		}
-	}
+	return dedupe.New("", ttl)
 }

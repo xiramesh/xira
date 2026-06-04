@@ -29,10 +29,15 @@ type Profile struct {
 }
 
 type ModelPolicy struct {
-	Provider string  `json:"provider" yaml:"provider"`
-	Model    string  `json:"model" yaml:"model"`
-	Stream   bool    `json:"stream,omitempty" yaml:"stream,omitempty"`
-	Temp     float32 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
+	Provider string              `json:"provider" yaml:"provider"`
+	Model    string              `json:"model" yaml:"model"`
+	Stream   bool                `json:"stream,omitempty" yaml:"stream,omitempty"`
+	Temp     *float32            `json:"temperature,omitempty" yaml:"temperature,omitempty"`
+	Thinking ModelThinkingPolicy `json:"thinking,omitempty" yaml:"thinking,omitempty"`
+}
+
+type ModelThinkingPolicy struct {
+	Type string `json:"type,omitempty" yaml:"type,omitempty"`
 }
 
 type ContextPolicy struct {
@@ -79,7 +84,8 @@ func BuiltinXiraAssistant() Profile {
 			Provider: "deepseek",
 			Model:    "deepseek-v4-flash",
 			Stream:   true,
-			Temp:     0.2,
+			Temp:     float32Ptr(0.2),
+			Thinking: ModelThinkingPolicy{Type: "disabled"},
 		},
 		Instructions: []string{
 			"You are Xira's default runtime assistant.",
@@ -105,7 +111,8 @@ func BuiltinResearchAssistant() Profile {
 			Provider: "deepseek",
 			Model:    "deepseek-v4-flash",
 			Stream:   true,
-			Temp:     0.2,
+			Temp:     float32Ptr(0.2),
+			Thinking: ModelThinkingPolicy{Type: "disabled"},
 		},
 		Instructions: []string{
 			"You are Xira's built-in research assistant.",
@@ -121,6 +128,10 @@ func BuiltinResearchAssistant() Profile {
 
 func BuiltinToolNames() []string {
 	return []string{"exec", "read_file", "search_file", "write_file", "list_dir", "edit_file"}
+}
+
+func float32Ptr(value float32) *float32 {
+	return &value
 }
 
 func (p Profile) InstructionText() string {

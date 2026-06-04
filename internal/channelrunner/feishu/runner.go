@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
+	"github.com/ai-daming/xira/internal/channelrunner/dedupe"
 	"github.com/ai-daming/xira/internal/entrypoints"
 	frt "github.com/ai-daming/xira/internal/runtime"
 )
@@ -38,10 +40,10 @@ type Runner struct {
 	cancel   context.CancelFunc
 	wsClient *larkws.Client
 
-	messages *messageDeduper
+	messages *dedupe.MessageDeduper
 }
 
-func NewRunner(definition entrypoints.Definition, rt *frt.Service) (*Runner, error) {
+func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot string) (*Runner, error) {
 	appID := resolveValue(definition.AppID, definition.AppIDEnv)
 	appSecret := resolveValue(definition.AppSecret, definition.AppSecretEnv)
 	if appID == "" {
@@ -54,10 +56,12 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service) (*Runner, err
 	if definition.IsLark {
 		opts = append(opts, lark.WithOpenBaseUrl(lark.LarkBaseUrl))
 	}
+	stateDir := channelStateDir(definition, stateRoot, "feishu")
 	slog.Info("feishu runner configured",
 		"entrypoint_id", definition.ID,
 		"app_id", appID,
 		"app_id_env", definition.AppIDEnv,
+		"state_dir", stateDir,
 		"is_lark", definition.IsLark,
 		"verification_token_configured", resolveValue(definition.VerifyToken, definition.VerifyTokenEnv) != "",
 		"encrypt_key_configured", resolveValue(definition.EncryptKey, definition.EncryptKeyEnv) != "",
@@ -71,7 +75,7 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service) (*Runner, err
 		verify:     resolveValue(definition.VerifyToken, definition.VerifyTokenEnv),
 		encryptKey: resolveValue(definition.EncryptKey, definition.EncryptKeyEnv),
 		client:     lark.NewClient(appID, appSecret, opts...),
-		messages:   newMessageDeduper(messageDedupeTTL),
+		messages:   dedupe.New(filepath.Join(stateDir, "dedupe.json"), messageDedupeTTL),
 	}, nil
 }
 
@@ -393,63 +397,36 @@ func buildMarkdownCard(content string) (string, error) {
 	return string(data), nil
 }
 
-type messageDeduper struct {
-	mu      sync.Mutex
-	ttl     time.Duration
-	entries map[string]time.Time
-}
+type messageDeduper = dedupe.MessageDeduper
 
 func newMessageDeduper(ttl time.Duration) *messageDeduper {
-	if ttl <= 0 {
-		ttl = messageDedupeTTL
-	}
-	return &messageDeduper{
-		ttl:     ttl,
-		entries: map[string]time.Time{},
-	}
+	return dedupe.New("", ttl)
 }
 
-func (d *messageDeduper) Begin(key string, now time.Time) bool {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return true
+func channelStateDir(definition entrypoints.Definition, stateRoot, channel string) string {
+	if strings.TrimSpace(definition.StateDir) != "" {
+		return strings.TrimSpace(definition.StateDir)
 	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.pruneLocked(now)
-	if _, ok := d.entries[key]; ok {
-		return false
+	if strings.TrimSpace(stateRoot) == "" {
+		stateRoot = filepath.Join(".xira", "state")
 	}
-	d.entries[key] = now.Add(d.ttl)
-	return true
+	return filepath.Join(stateRoot, "channels", channel, safePathSegment(definition.ID))
 }
 
-func (d *messageDeduper) Complete(key string, now time.Time) {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return
+func safePathSegment(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "default"
 	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.entries[key] = now.Add(d.ttl)
-}
-
-func (d *messageDeduper) Forget(key string) {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	delete(d.entries, key)
-}
-
-func (d *messageDeduper) pruneLocked(now time.Time) {
-	for key, expiresAt := range d.entries {
-		if !expiresAt.After(now) {
-			delete(d.entries, key)
+	var b strings.Builder
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
 		}
 	}
+	return b.String()
 }
 
 func extractContent(messageType, rawContent string) string {

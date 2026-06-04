@@ -31,6 +31,7 @@ type Config struct {
 	DefaultAgentID string
 	RunRoot        string
 	SessionRoot    string
+	StateRoot      string
 	DeepSeekClient *deepseek.Client
 }
 
@@ -41,14 +42,17 @@ type Service struct {
 	router        *routing.Router
 	entrypoints   *entrypoints.Registry
 	sessions      *fsession.Manager
+	usage         *UsageStore
 	adkSessions   adksession.Service
 	verifier      *VerificationRunner
 	evolution     *EvolutionEngine
 	deepseek      *deepseek.Client
 	configPath    string
 	workspace     string
+	stateRoot     string
 	defaultAgent  string
 	profileSource string
+	pricing       UsagePricing
 	mu            sync.RWMutex
 }
 
@@ -82,14 +86,17 @@ func NewService(cfg Config) (*Service, error) {
 		router:        routing.NewRouterWithRules(resolved.DefaultAgentID, resolved.Routes),
 		entrypoints:   entrypoints.NewRegistry(resolved.DefaultAgentID, resolved.Entrypoints),
 		sessions:      sessionManager,
+		usage:         NewUsageStore(resolved.StateRoot),
 		adkSessions:   adksession.InMemoryService(),
 		verifier:      NewVerificationRunner(),
 		evolution:     NewEvolutionEngine(),
 		deepseek:      dsClient,
 		configPath:    resolved.ConfigPath,
 		workspace:     resolved.WorkspaceRoot,
+		stateRoot:     resolved.StateRoot,
 		defaultAgent:  resolved.DefaultAgentID,
 		profileSource: profileSource,
+		pricing:       resolved.Pricing,
 	}, nil
 }
 
@@ -105,6 +112,13 @@ func (s *Service) EventBus() *EventBus {
 
 func (s *Service) RunStore() *RunStore {
 	return s.runs
+}
+
+func (s *Service) StateRoot() string {
+	if s == nil {
+		return ""
+	}
+	return s.stateRoot
 }
 
 func (s *Service) SessionManager() *fsession.Manager {
@@ -125,6 +139,18 @@ func (s *Service) Agents() []agents.Profile {
 	return list
 }
 
+func (s *Service) AgentSummaries() []ModelPolicySnapshot {
+	if s == nil {
+		return nil
+	}
+	profiles := s.Agents()
+	out := make([]ModelPolicySnapshot, 0, len(profiles))
+	for _, profile := range profiles {
+		out = append(out, modelPolicySnapshot(profile, s.profileSource))
+	}
+	return out
+}
+
 func (s *Service) Entrypoints() []entrypoints.Definition {
 	if s == nil || s.entrypoints == nil {
 		return nil
@@ -139,6 +165,7 @@ func (s *Service) Status() map[string]any {
 		"workspace":      s.workspace,
 		"run_root":       s.runs.Root(),
 		"session_root":   s.sessions.Root(),
+		"state_root":     s.stateRoot,
 		"agents":         len(s.Agents()),
 		"entrypoints":    len(s.entrypoints.Definitions()),
 		"default_agent":  s.defaultAgent,
@@ -218,6 +245,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		SessionID:      req.SessionID,
 		SessionScope:   &scope,
 		RouteMatchedBy: entrypointDecision.MatchedBy,
+		ModelPolicy:    modelPolicySnapshot(profile, s.profileSource),
 		Message:        req.Message,
 		Status:         "running",
 		StartedAt:      now,
@@ -264,6 +292,16 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"matched_by":    entrypointDecision.MatchedBy,
 		"entrypoint_id": inbound.Context.EntrypointID,
 	})
+	recordEvent("model.policy_resolved", "runtime", "model policy resolved", map[string]any{
+		"provider":         resp.ModelPolicy.Provider,
+		"model":            resp.ModelPolicy.Model,
+		"stream":           resp.ModelPolicy.Stream,
+		"temperature":      resp.ModelPolicy.Temperature,
+		"thinking_type":    resp.ModelPolicy.ThinkingType,
+		"tools":            resp.ModelPolicy.Tools,
+		"profile_source":   resp.ModelPolicy.ProfileSource,
+		"instruction_hash": resp.ModelPolicy.InstructionHash,
+	})
 
 	agentReq := req
 	agentReq.Metadata = copyTurnMetadata(req.Metadata)
@@ -272,12 +310,24 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	}
 	agentReq.Metadata["conversation_session_id"] = req.SessionID
 	agentReq.SessionID = agentSessionID
-	ctx = s.withLLMRequestTrace(ctx, runID, recordEvent)
+	ctx = s.withLLMInstrumentation(ctx, llmInstrumentationInput{
+		RunID:          runID,
+		AgentID:        profile.ID,
+		EntrypointID:   inbound.Context.EntrypointID,
+		Channel:        inbound.Context.Channel,
+		SessionID:      req.SessionID,
+		AgentSessionID: agentSessionID,
+		UserID:         req.UserID,
+		Pricing:        s.pricing,
+	}, recordEvent, func(call LLMCallRecord) {
+		resp.LLMCalls = append(resp.LLMCalls, call)
+	})
 	final, toolCalls, runErr := s.generate(ctx, profile, agentReq, recordEvent, recordAudit)
 	resp.FinalResponse = final
 	resp.ToolCalls = toolCalls
 	resp.VerificationResult = s.verifier.Verify(final, profile.Verification.DefaultChecks)
 	resp.EndedAt = time.Now()
+	resp.Usage = summarizeUsage(resp)
 	resp.Status = "completed"
 	if runErr != nil || resp.VerificationResult.Status != "passed" {
 		resp.Status = "failed"
@@ -294,8 +344,15 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"tool_calls", len(resp.ToolCalls),
 		"events", len(resp.Events),
 		"audit_events", len(resp.AuditEvents),
+		"llm_calls", len(resp.LLMCalls),
+		"prompt_tokens", resp.Usage.PromptTokens,
+		"completion_tokens", resp.Usage.CompletionTokens,
+		"total_tokens", resp.Usage.TotalTokens,
 		"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
 		"duration", resp.EndedAt.Sub(resp.StartedAt),
+	}
+	if resp.Usage.Cost != nil {
+		logAttrs = append(logAttrs, "cost", *resp.Usage.Cost, "currency", resp.Usage.Currency)
 	}
 	if runErr != nil {
 		logAttrs = append(logAttrs, "error", runErr)
@@ -304,7 +361,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		slog.Info("agent run finished", logAttrs...)
 	}
 	if runErr == nil && resp.VerificationResult.Status == "passed" {
-		if err := s.sessions.AppendAgentTurn(fsession.AgentTurnInput{
+		sessionTurn := fsession.AgentTurnInput{
 			SessionID:      req.SessionID,
 			AgentID:        profile.ID,
 			AgentSessionID: agentSessionID,
@@ -313,7 +370,8 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 			Scope:          &scope,
 			UserMessage:    req.Message,
 			AssistantReply: final,
-		}); err != nil {
+		}
+		if err := s.sessions.AppendAgentTurn(sessionTurn); err != nil {
 			slog.Warn("session history persistence failed",
 				"run_id", runID,
 				"agent_id", profile.ID,
@@ -326,6 +384,47 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 				"agent_session_id": agentSessionID,
 				"error":            err.Error(),
 			})
+		} else {
+			messagesPath := s.sessions.AgentMessagesPath(sessionTurn)
+			slog.Info("session history persisted",
+				"run_id", runID,
+				"agent_id", profile.ID,
+				"session_id", req.SessionID,
+				"agent_session_id", agentSessionID,
+				"messages_path", messagesPath,
+			)
+			recordEvent("session.persisted", "runtime", "session history persisted", map[string]any{
+				"session_id":       req.SessionID,
+				"agent_session_id": agentSessionID,
+				"messages_path":    messagesPath,
+			})
+		}
+	}
+	if len(resp.LLMCalls) > 0 {
+		payload := map[string]any{
+			"call_count":        resp.Usage.CallCount,
+			"completed_calls":   resp.Usage.CompletedCalls,
+			"failed_calls":      resp.Usage.FailedCalls,
+			"prompt_tokens":     resp.Usage.PromptTokens,
+			"completion_tokens": resp.Usage.CompletionTokens,
+			"total_tokens":      resp.Usage.TotalTokens,
+			"usage_sources":     resp.Usage.UsageSources,
+		}
+		if resp.Usage.Cost != nil {
+			payload["cost"] = *resp.Usage.Cost
+			payload["currency"] = resp.Usage.Currency
+		}
+		recordEvent("llm.usage_summary", "runtime", "llm usage summarized", payload)
+		if s.usage != nil {
+			if err := s.usage.AppendCalls(resp.LLMCalls); err != nil {
+				slog.Warn("usage ledger append failed", "run_id", runID, "error", err)
+				recordEvent("usage.ledger_failed", "runtime", "usage ledger append failed", map[string]any{"error": err.Error()})
+			} else {
+				recordEvent("usage.ledger_appended", "runtime", "usage ledger appended", map[string]any{
+					"calls": len(resp.LLMCalls),
+					"path":  filepathJoinSlash(s.usage.Root(), "usage-ledger.jsonl"),
+				})
+			}
 		}
 	}
 	recordEvent("run.finished", "runtime", "agent run finished", map[string]any{
@@ -376,14 +475,13 @@ func (s *Service) generateNativeDeepSeek(
 		{Role: "user", Content: req.Message},
 	}
 	tools := s.toolDefinitions(profile)
-	temp := profile.ModelPolicy.Temp
 	recordEvent("model.request", "deepseek", "sending chat completion", map[string]any{"model": modelID})
 	first, err := s.deepseek.Chat(ctx, deepseek.ChatRequest{
 		Model:       modelID,
 		Messages:    messages,
 		Tools:       tools,
-		Temperature: &temp,
-		Thinking:    &deepseek.Thinking{Type: "disabled"},
+		Temperature: cloneFloat32(profile.ModelPolicy.Temp),
+		Thinking:    &deepseek.Thinking{Type: thinkingType(profile.ModelPolicy)},
 	})
 	if err != nil {
 		recordAudit("model.chat", modelID, false, err.Error(), nil)
@@ -416,8 +514,8 @@ func (s *Service) generateNativeDeepSeek(
 	second, err := s.deepseek.Chat(ctx, deepseek.ChatRequest{
 		Model:       modelID,
 		Messages:    messages,
-		Temperature: &temp,
-		Thinking:    &deepseek.Thinking{Type: "disabled"},
+		Temperature: cloneFloat32(profile.ModelPolicy.Temp),
+		Thinking:    &deepseek.Thinking{Type: thinkingType(profile.ModelPolicy)},
 	})
 	if err != nil {
 		return "", toolRecords, err

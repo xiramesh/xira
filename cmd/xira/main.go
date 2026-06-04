@@ -81,9 +81,23 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 				"config_path", status["config_path"],
 				"workspace", status["workspace"],
 				"run_root", status["run_root"],
+				"state_root", status["state_root"],
 				"default_agent", status["default_agent"],
 				"profile_source", status["profile_source"],
 			)
+			for _, summary := range rt.AgentSummaries() {
+				slog.Info("agent profile loaded",
+					"agent_id", summary.AgentID,
+					"provider", summary.Provider,
+					"model", summary.Model,
+					"stream", summary.Stream,
+					"temperature", optionalFloat32(summary.Temperature),
+					"thinking_type", summary.ThinkingType,
+					"tools", summary.Tools,
+					"profile_source", summary.ProfileSource,
+					"instruction_hash", summary.InstructionHash,
+				)
+			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			channelRunners, err := channelrunner.NewManager(rt)
@@ -238,6 +252,13 @@ func runtimeHasAgent(rt *runtime.Service, agentID string) bool {
 		}
 	}
 	return false
+}
+
+func optionalFloat32(value *float32) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func printJSON(cmd *cobra.Command, value any) error {
