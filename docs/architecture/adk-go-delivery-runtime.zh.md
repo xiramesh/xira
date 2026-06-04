@@ -1090,7 +1090,7 @@ Review gate 至少检查：
 15. RunLogWriter records run summary, artifacts, verification result
 16. EvolutionEngine creates candidate if failure / correction / reusable success appears
 17. BusinessRuntime writes audit events
-18. OutboundRouter sends response to original entrypoint / channel
+18. ChannelGateway sends response to original entrypoint / channel
 ```
 
 关键设计点：
@@ -1429,7 +1429,7 @@ apps/
     internal/
       runtime/
         daemon.go
-        router.go
+        entrypoints.go
         policy.go
         turn.go
         verification.go

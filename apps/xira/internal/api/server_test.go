@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/ai-daming/xira/internal/agents"
+	"github.com/ai-daming/xira/internal/channelcontrol"
 	"github.com/ai-daming/xira/internal/model/deepseek"
 	frt "github.com/ai-daming/xira/internal/runtime"
 )
@@ -220,6 +222,55 @@ func TestXiraGardenEventsWebSocketReceivesChannelEvents(t *testing.T) {
 	}
 }
 
+func TestEntrypointPairingAPIUsesChannelControls(t *testing.T) {
+	controls := &fakeChannelControls{
+		pairing: channelcontrol.PairingSnapshot{
+			PairingID:      "pair-1",
+			EntrypointID:   "ilink-wechat",
+			Status:         channelcontrol.PairingStatusWait,
+			QRCode:         "qr-key",
+			QRImageContent: "https://liteapp.weixin.qq.com/q/qr-key",
+		},
+		accounts: []channelcontrol.AccountSnapshot{{
+			AccountID:    "bot-1",
+			EntrypointID: "ilink-wechat",
+			UserID:       "owner-1",
+			Running:      true,
+		}},
+	}
+	server := NewServer(nil, "127.0.0.1:0", controls)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/entrypoints/ilink-wechat/pairings", nil)
+	createResp := httptest.NewRecorder()
+	server.server.Handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body=%s", createResp.Code, createResp.Body.String())
+	}
+	var pairing channelcontrol.PairingSnapshot
+	if err := json.NewDecoder(createResp.Body).Decode(&pairing); err != nil {
+		t.Fatal(err)
+	}
+	if pairing.PairingID != "pair-1" || controls.createEntrypoint != "ilink-wechat" {
+		t.Fatalf("pairing=%+v createEntrypoint=%q", pairing, controls.createEntrypoint)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/entrypoints/ilink-wechat/accounts", nil)
+	listResp := httptest.NewRecorder()
+	server.server.Handler.ServeHTTP(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("list status = %d body=%s", listResp.Code, listResp.Body.String())
+	}
+	var body struct {
+		Accounts []channelcontrol.AccountSnapshot `json:"accounts"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Accounts) != 1 || body.Accounts[0].AccountID != "bot-1" {
+		t.Fatalf("accounts = %+v", body.Accounts)
+	}
+}
+
 func newAPITestService(t *testing.T, cfg frt.Config) *frt.Service {
 	t.Helper()
 	if cfg.DeepSeekClient == nil {
@@ -258,6 +309,31 @@ type apiRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn apiRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
+}
+
+type fakeChannelControls struct {
+	pairing          channelcontrol.PairingSnapshot
+	accounts         []channelcontrol.AccountSnapshot
+	createEntrypoint string
+}
+
+func (f *fakeChannelControls) CreatePairing(_ context.Context, entrypointID string) (channelcontrol.PairingSnapshot, error) {
+	f.createEntrypoint = entrypointID
+	return f.pairing, nil
+}
+
+func (f *fakeChannelControls) GetPairing(entrypointID, pairingID string) (channelcontrol.PairingSnapshot, error) {
+	f.pairing.EntrypointID = entrypointID
+	f.pairing.PairingID = pairingID
+	return f.pairing, nil
+}
+
+func (f *fakeChannelControls) ListAccounts(string) ([]channelcontrol.AccountSnapshot, error) {
+	return f.accounts, nil
+}
+
+func (f *fakeChannelControls) DeleteAccount(context.Context, string, string) error {
+	return nil
 }
 
 func writeAPIWorkspace(t *testing.T) string {

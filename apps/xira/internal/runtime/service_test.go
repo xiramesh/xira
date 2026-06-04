@@ -451,7 +451,7 @@ func TestNewServiceLoadsWorkspaceAgentsFromConfig(t *testing.T) {
 	}
 }
 
-func TestConfigDefaultAgentRoutesDefaultRequest(t *testing.T) {
+func TestConfigDefaultAgentHandlesImplicitEntrypoint(t *testing.T) {
 	instance := writeRuntimeFixture(t, "research-assistant", []string{"chat", "sender"})
 	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hi", Channel: "test"})
@@ -729,10 +729,6 @@ func writeRuntimeFixture(t *testing.T, defaultAgentID string, xiraSessionDimensi
 	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
 default_agent: `+defaultAgentID+`
 run_root: .xira/runs
-routes: workspace/routes.yaml
-`)
-	writeFile(t, filepath.Join(instance, "workspace", "routes.yaml"), `default_agent: `+defaultAgentID+`
-routes: []
 `)
 	writeFile(t, filepath.Join(instance, "workspace", "agents", "xira-assistant", "PROFILE.md"), `---
 id: xira-assistant
@@ -809,7 +805,6 @@ func writeRuntimeFixtureWithEntrypoints(t *testing.T) string {
 	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
 default_agent: xira-assistant
 run_root: .xira/runs
-routes: workspace/routes.yaml
 entrypoints: workspace/entrypoints.yaml
 `)
 	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
