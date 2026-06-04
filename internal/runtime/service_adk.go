@@ -31,6 +31,12 @@ type adkReadFileArgs struct {
 	Path string `json:"path"`
 }
 
+type adkSearchFileArgs struct {
+	Query      string `json:"query"`
+	Root       string `json:"root,omitempty"`
+	MaxResults int    `json:"max_results,omitempty"`
+}
+
 type adkWriteFileArgs struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
@@ -241,6 +247,18 @@ func (s *Service) adkTools(
 			Description: description("read_file"),
 		}, func(_ adktool.Context, args adkReadFileArgs) (map[string]any, error) {
 			return run("read_file", args)
+		})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	if registry.Has("search_file") {
+		t, err := functiontool.New(functiontool.Config{
+			Name:        "search_file",
+			Description: description("search_file"),
+		}, func(_ adktool.Context, args adkSearchFileArgs) (map[string]any, error) {
+			return run("search_file", args)
 		})
 		if err != nil {
 			return nil, err

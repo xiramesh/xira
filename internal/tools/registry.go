@@ -41,11 +41,12 @@ func NewRegistry(tools []Tool) *Registry {
 
 func NewBuiltinRegistry(workspaceRoot string, allowed []string) *Registry {
 	all := map[string]Tool{
-		"exec":       NewExecTool(workspaceRoot),
-		"read_file":  NewReadFileTool(workspaceRoot),
-		"write_file": NewWriteFileTool(workspaceRoot),
-		"list_dir":   NewListDirTool(workspaceRoot),
-		"edit_file":  NewEditFileTool(workspaceRoot),
+		"exec":        NewExecTool(workspaceRoot),
+		"read_file":   NewReadFileTool(workspaceRoot),
+		"search_file": NewSearchFileTool(workspaceRoot),
+		"write_file":  NewWriteFileTool(workspaceRoot),
+		"list_dir":    NewListDirTool(workspaceRoot),
+		"edit_file":   NewEditFileTool(workspaceRoot),
 	}
 	tools := make([]Tool, 0, len(allowed))
 	for _, name := range allowed {

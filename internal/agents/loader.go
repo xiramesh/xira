@@ -22,6 +22,7 @@ type profileFrontmatter struct {
 	Description  string             `yaml:"description"`
 	ModelPolicy  ModelPolicy        `yaml:"model_policy"`
 	Context      ContextPolicy      `yaml:"context"`
+	Knowledge    KnowledgePolicy    `yaml:"knowledge"`
 	Skills       []string           `yaml:"skills"`
 	MCPServers   []string           `yaml:"mcp_servers"`
 	Tools        []string           `yaml:"tools"`
@@ -117,6 +118,7 @@ func LoadProfileDir(agentDir string) (Profile, error) {
 		ModelPolicy:  frontmatter.ModelPolicy,
 		Instructions: instructions,
 		Context:      frontmatter.Context,
+		Knowledge:    frontmatter.Knowledge,
 		Skills:       frontmatter.Skills,
 		MCPServers:   frontmatter.MCPServers,
 		Session:      frontmatter.Session,

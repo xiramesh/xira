@@ -19,6 +19,7 @@ type Profile struct {
 	ModelPolicy  ModelPolicy        `json:"model_policy" yaml:"model_policy"`
 	Instructions []string           `json:"instructions" yaml:"instructions"`
 	Context      ContextPolicy      `json:"context,omitempty" yaml:"context,omitempty"`
+	Knowledge    KnowledgePolicy    `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
 	Skills       []string           `json:"skills,omitempty" yaml:"skills,omitempty"`
 	MCPServers   []string           `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
 	Session      SessionPolicy      `json:"session,omitempty" yaml:"session,omitempty"`
@@ -39,6 +40,19 @@ type ContextPolicy struct {
 	Required  []string `json:"required,omitempty" yaml:"required,omitempty"`
 	Optional  []string `json:"optional,omitempty" yaml:"optional,omitempty"`
 	Forbidden []string `json:"forbidden,omitempty" yaml:"forbidden,omitempty"`
+}
+
+type KnowledgePolicy struct {
+	Root    string          `json:"root,omitempty" yaml:"root,omitempty"`
+	Default []string        `json:"default,omitempty" yaml:"default,omitempty"`
+	Rules   []KnowledgeRule `json:"rules,omitempty" yaml:"rules,omitempty"`
+}
+
+type KnowledgeRule struct {
+	ID       string   `json:"id,omitempty" yaml:"id,omitempty"`
+	When     string   `json:"when,omitempty" yaml:"when,omitempty"`
+	Keywords []string `json:"keywords,omitempty" yaml:"keywords,omitempty"`
+	Required []string `json:"required,omitempty" yaml:"required,omitempty"`
 }
 
 type SessionPolicy struct {
@@ -120,7 +134,7 @@ func BuiltinResearchAssistant() Profile {
 }
 
 func BuiltinToolNames() []string {
-	return []string{"exec", "read_file", "write_file", "list_dir", "edit_file"}
+	return []string{"exec", "read_file", "search_file", "write_file", "list_dir", "edit_file"}
 }
 
 func (p Profile) InstructionText() string {

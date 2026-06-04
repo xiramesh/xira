@@ -71,6 +71,45 @@ func TestFileToolsReadWriteListAndEdit(t *testing.T) {
 	}
 }
 
+func TestSearchFileFindsTextMatchesInsideWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	writePath := filepath.Join(workspace, "kb", "index.md")
+	if err := os.MkdirAll(filepath.Dir(writePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(writePath, []byte("第一行\n养生壹号是草本养生酒\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewBuiltinRegistry(workspace, []string{"search_file"})
+
+	out, err := registry.Execute(context.Background(), "search_file", map[string]any{
+		"query":       "养生壹号",
+		"root":        "kb",
+		"max_results": 5,
+	})
+	if err != nil {
+		t.Fatalf("search_file error = %v", err)
+	}
+	if out["root"] != "kb" || out["match_count"] != 1 || out["total_matches"] != 1 {
+		t.Fatalf("search output = %+v", out)
+	}
+	matches, ok := out["matches"].([]map[string]any)
+	if !ok || len(matches) != 1 {
+		t.Fatalf("matches = %#v", out["matches"])
+	}
+	if matches[0]["path"] != "kb/index.md" || matches[0]["line"] != 2 {
+		t.Fatalf("match = %+v", matches[0])
+	}
+
+	_, err = registry.Execute(context.Background(), "search_file", map[string]any{
+		"query": "养生壹号",
+		"root":  filepath.Dir(workspace),
+	})
+	if err == nil || !strings.Contains(err.Error(), "within workspace") {
+		t.Fatalf("outside workspace error = %v", err)
+	}
+}
+
 func TestEditFileRejectsAmbiguousReplacement(t *testing.T) {
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "dupe.txt")

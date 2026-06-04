@@ -36,6 +36,7 @@ type TurnResponse struct {
 	StartedAt          time.Time              `json:"started_at" yaml:"started_at"`
 	EndedAt            time.Time              `json:"ended_at" yaml:"ended_at"`
 	ToolCalls          []ToolCallRecord       `json:"tool_calls,omitempty" yaml:"tool_calls,omitempty"`
+	GroundingResult    GroundingResult        `json:"grounding,omitempty" yaml:"grounding,omitempty"`
 	VerificationResult VerificationResult     `json:"verification" yaml:"verification"`
 	EvolutionCandidate *EvolutionCandidate    `json:"evolution_candidate,omitempty" yaml:"evolution_candidate,omitempty"`
 	Artifacts          []string               `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
@@ -82,6 +83,17 @@ type VerificationResult struct {
 	Status string   `json:"status" yaml:"status"`
 	Checks []string `json:"checks,omitempty" yaml:"checks,omitempty"`
 	Errors []string `json:"errors,omitempty" yaml:"errors,omitempty"`
+}
+
+type GroundingResult struct {
+	Status        string   `json:"status,omitempty" yaml:"status,omitempty"`
+	Root          string   `json:"root,omitempty" yaml:"root,omitempty"`
+	MatchedRules  []string `json:"matched_rules,omitempty" yaml:"matched_rules,omitempty"`
+	RequiredFiles []string `json:"required_files,omitempty" yaml:"required_files,omitempty"`
+	ReadFiles     []string `json:"read_files,omitempty" yaml:"read_files,omitempty"`
+	MissingFiles  []string `json:"missing_files,omitempty" yaml:"missing_files,omitempty"`
+	Errors        []string `json:"errors,omitempty" yaml:"errors,omitempty"`
+	ContextChars  int      `json:"context_chars,omitempty" yaml:"context_chars,omitempty"`
 }
 
 type EvolutionCandidate struct {
