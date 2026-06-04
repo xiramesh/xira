@@ -9,23 +9,24 @@ import (
 )
 
 type Definition struct {
-	ID              string                `json:"id" yaml:"id"`
-	Enabled         bool                  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	Channel         string                `json:"channel" yaml:"channel"`
-	Account         string                `json:"account,omitempty" yaml:"account,omitempty"`
-	AppID           string                `json:"app_id,omitempty" yaml:"app_id,omitempty"`
-	AppIDEnv        string                `json:"app_id_env,omitempty" yaml:"app_id_env,omitempty"`
-	BotID           string                `json:"bot_id,omitempty" yaml:"bot_id,omitempty"`
-	DefaultAgentID  string                `json:"default_agent" yaml:"default_agent"`
-	AllowedAgentIDs []string              `json:"allowed_agents,omitempty" yaml:"allowed_agents,omitempty"`
-	SessionPolicy   routing.SessionPolicy `json:"session,omitempty" yaml:"session,omitempty"`
-	AppSecret       string                `json:"app_secret,omitempty" yaml:"app_secret,omitempty"`
-	AppSecretEnv    string                `json:"app_secret_env,omitempty" yaml:"app_secret_env,omitempty"`
-	EncryptKey      string                `json:"encrypt_key,omitempty" yaml:"encrypt_key,omitempty"`
-	EncryptKeyEnv   string                `json:"encrypt_key_env,omitempty" yaml:"encrypt_key_env,omitempty"`
-	VerifyToken     string                `json:"verification_token,omitempty" yaml:"verification_token,omitempty"`
-	VerifyTokenEnv  string                `json:"verification_token_env,omitempty" yaml:"verification_token_env,omitempty"`
-	IsLark          bool                  `json:"is_lark,omitempty" yaml:"is_lark,omitempty"`
+	ID                                string                `json:"id" yaml:"id"`
+	Enabled                           bool                  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Channel                           string                `json:"channel" yaml:"channel"`
+	Account                           string                `json:"account,omitempty" yaml:"account,omitempty"`
+	AppID                             string                `json:"app_id,omitempty" yaml:"app_id,omitempty"`
+	AppIDEnv                          string                `json:"app_id_env,omitempty" yaml:"app_id_env,omitempty"`
+	BotID                             string                `json:"bot_id,omitempty" yaml:"bot_id,omitempty"`
+	DefaultAgentID                    string                `json:"default_agent" yaml:"default_agent"`
+	AllowedAgentIDs                   []string              `json:"allowed_agents,omitempty" yaml:"allowed_agents,omitempty"`
+	SessionPolicy                     routing.SessionPolicy `json:"session,omitempty" yaml:"session,omitempty"`
+	AppSecret                         string                `json:"app_secret,omitempty" yaml:"app_secret,omitempty"`
+	AppSecretEnv                      string                `json:"app_secret_env,omitempty" yaml:"app_secret_env,omitempty"`
+	EncryptKey                        string                `json:"encrypt_key,omitempty" yaml:"encrypt_key,omitempty"`
+	EncryptKeyEnv                     string                `json:"encrypt_key_env,omitempty" yaml:"encrypt_key_env,omitempty"`
+	VerifyToken                       string                `json:"verification_token,omitempty" yaml:"verification_token,omitempty"`
+	VerifyTokenEnv                    string                `json:"verification_token_env,omitempty" yaml:"verification_token_env,omitempty"`
+	IsLark                            bool                  `json:"is_lark,omitempty" yaml:"is_lark,omitempty"`
+	RespondToUnmentionedGroupMessages bool                  `json:"respond_to_unmentioned_group_messages,omitempty" yaml:"respond_to_unmentioned_group_messages,omitempty"`
 }
 
 type ResolveInput struct {

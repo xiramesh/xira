@@ -123,7 +123,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		senderID = "unknown"
 	}
 	mentioned := len(message.Mentions) > 0
-	if chatType == "group" && !mentioned {
+	if !shouldHandleMessage(chatType, mentioned, r.definition) {
 		return nil
 	}
 
@@ -152,6 +152,16 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		return fmt.Errorf("feishu entrypoint %s send response: %w", r.definition.ID, err)
 	}
 	return nil
+}
+
+func shouldHandleMessage(chatType string, mentioned bool, definition entrypoints.Definition) bool {
+	if chatType != "group" {
+		return true
+	}
+	if mentioned {
+		return true
+	}
+	return definition.RespondToUnmentionedGroupMessages
 }
 
 func (r *Runner) buildMetadata(message *larkim.EventMessage, sender *larkim.EventSender, chatType, messageType string) map[string]string {

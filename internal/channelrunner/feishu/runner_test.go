@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/ai-daming/xira/internal/entrypoints"
+
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
@@ -33,5 +35,23 @@ func TestBuildMarkdownCard(t *testing.T) {
 	}
 	if parsed["schema"] != "2.0" {
 		t.Fatalf("schema = %v", parsed["schema"])
+	}
+}
+
+func TestShouldHandleMessageRespectsGroupMentionPolicy(t *testing.T) {
+	defaultDefinition := entrypoints.Definition{}
+	if !shouldHandleMessage("direct", false, defaultDefinition) {
+		t.Fatal("direct messages should be handled")
+	}
+	if !shouldHandleMessage("group", true, defaultDefinition) {
+		t.Fatal("mentioned group messages should be handled")
+	}
+	if shouldHandleMessage("group", false, defaultDefinition) {
+		t.Fatal("unmentioned group messages should be ignored by default")
+	}
+
+	respondAllGroups := entrypoints.Definition{RespondToUnmentionedGroupMessages: true}
+	if !shouldHandleMessage("group", false, respondAllGroups) {
+		t.Fatal("unmentioned group messages should be handled when configured")
 	}
 }

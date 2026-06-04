@@ -15,23 +15,24 @@ import (
 )
 
 type model struct {
-	runtime     *frt.Service
-	input       textinput.Model
-	width       int
-	height      int
-	status      map[string]any
-	agents      []map[string]any
-	activeAgent string
-	transcript  []transcriptEntry
-	runs        []frt.TurnResponse
-	output      string
-	err         error
-	loading     bool
-	loadingMode string
-	showTrace   bool
-	traceEvents []frt.RuntimeEvent
-	traceSub    <-chan frt.RuntimeEvent
-	traceCancel context.CancelFunc
+	runtime      *frt.Service
+	input        textinput.Model
+	width        int
+	height       int
+	status       map[string]any
+	agents       []map[string]any
+	activeAgent  string
+	transcript   []transcriptEntry
+	runs         []frt.TurnResponse
+	output       string
+	err          error
+	loading      bool
+	loadingMode  string
+	runningAgent string
+	showTrace    bool
+	traceEvents  []frt.RuntimeEvent
+	traceSub     <-chan frt.RuntimeEvent
+	traceCancel  context.CancelFunc
 }
 
 type transcriptEntry struct {
@@ -71,6 +72,7 @@ var (
 	panelBorderStyle   = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("238")).Padding(1, 2)
 	activePanelStyle   = panelBorderStyle.BorderForeground(lipgloss.Color("81"))
 	headerStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Background(lipgloss.Color("235")).Padding(0, 1)
+	runbarStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("232")).Padding(0, 1)
 	footerStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(lipgloss.Color("235")).Padding(0, 1)
 	pillStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("63")).Padding(0, 1)
 )
@@ -112,17 +114,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(m.activeAgent) == "" {
 				m.loading = true
 				m.loadingMode = "default"
+				m.runningAgent = defaultAgentID(m.status)
 				m.output = ""
 				m.err = nil
 				m.addTranscript("You", text)
+				m.input.SetValue("")
 				traceCmd := m.beginTrace()
 				return m, tea.Batch(traceCmd, m.runAgent("", text))
 			}
 			m.loading = true
 			m.loadingMode = "agent"
+			m.runningAgent = strings.TrimSpace(m.activeAgent)
 			m.output = ""
 			m.err = nil
 			m.addTranscript("You -> "+m.activeAgent, text)
+			m.input.SetValue("")
 			traceCmd := m.beginTrace()
 			return m, tea.Batch(traceCmd, m.runAgent(m.activeAgent, text))
 		}
@@ -137,6 +143,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runMsg:
 		m.loading = false
 		m.loadingMode = ""
+		m.runningAgent = ""
 		m.stopTrace()
 		m.err = msg.err
 		m.input.SetValue("")
@@ -168,26 +175,18 @@ func (m model) View() string {
 	if width < 72 {
 		width = 72
 	}
-	height := m.height
-	if height < 20 {
-		height = 20
-	}
-
-	sidebarWidth := clamp(width/4, 24, 34)
-	mainWidth := width - sidebarWidth - 1
-	bodyHeight := height - 3
-	if bodyHeight < 16 {
-		bodyHeight = 16
-	}
-	m.input.Width = maxInt(24, mainWidth-8)
+	m.input.Width = inputWidth(width)
 
 	header := renderHeader(m, width)
-	sidebar := renderSidebar(m, sidebarWidth, bodyHeight)
-	main := renderConversation(m, mainWidth, bodyHeight)
+	runbar := renderRunStatus(m, width)
+	main := renderConversation(m, width)
+	composer := renderComposer(m, width)
 	footer := renderFooter(m, width)
 	return strings.TrimRight(strings.Join([]string{
 		header,
-		lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main),
+		runbar,
+		main,
+		composer,
 		footer,
 	}, "\n"), "\n")
 }
@@ -201,6 +200,30 @@ func renderHeader(m model, width int) string {
 	}, "  ")
 	gap := maxInt(1, width-lipgloss.Width(left)-lipgloss.Width(right)-2)
 	return headerStyle.Width(width).Render(left + strings.Repeat(" ", gap) + mutedStyle.Render(right))
+}
+
+func renderRunStatus(m model, width int) string {
+	text := "Current run  "
+	style := runbarStyle
+	switch {
+	case m.loading:
+		agent := runningAgentID(m)
+		text += fmt.Sprintf("RUNNING %s · %s · steps %d · audit persisted to .xira/runs", loadingLabel(m.loadingMode), agent, len(liveActivitySteps(m.traceEvents, agent)))
+		style = style.Foreground(lipgloss.Color("230")).Background(lipgloss.Color("63"))
+	case lastRun(m) != nil:
+		run := lastRun(m)
+		status := emptyDash(run.Status)
+		if run.VerificationResult.Status != "" {
+			status += "/" + run.VerificationResult.Status
+		}
+		text += fmt.Sprintf("%s · %s · steps %d  artifacts %d · audit persisted to .xira/runs", status, emptyDash(run.AgentID), len(runActivitySteps(run)), len(run.Artifacts))
+		if run.Status == "failed" {
+			style = style.Foreground(lipgloss.Color("203"))
+		}
+	default:
+		text += fmt.Sprintf("idle · %s · audit will persist to .xira/runs", modeLabel(m))
+	}
+	return style.Width(width).Render(truncate(text, width-2))
 }
 
 func renderSidebar(m model, width, height int) string {
@@ -251,19 +274,20 @@ func renderSidebar(m model, width, height int) string {
 	return panelBorderStyle.Width(width - 5).Height(height - 4).Render(strings.Join(lines, "\n"))
 }
 
-func renderConversation(m model, width, height int) string {
+func renderConversation(m model, width int) string {
 	var sections []string
-	title := titleStyle.Render("Conversation")
-	if m.loading {
-		title += " " + pillStyle.Render(loadingLabel(m.loadingMode))
-	}
-	sections = append(sections, title)
+	sections = append(sections, titleStyle.Render("Conversation"))
 
-	bodyWidth := maxInt(28, width-8)
+	bodyWidth := maxInt(28, width-4)
 	if len(m.transcript) == 0 {
 		sections = append(sections, mutedStyle.Render("Start with a message, or use /agents and /use <id>."))
 	} else {
-		sections = append(sections, renderTranscriptBlocks(m.transcript, 10, bodyWidth))
+		sections = append(sections, renderTranscriptBlocks(m.transcript, 0, bodyWidth))
+	}
+	if m.loading {
+		sections = append(sections, "", renderInlineLiveActivity(m, bodyWidth))
+	} else if summary := renderInlineRunSummary(lastRun(m), bodyWidth); summary != "" {
+		sections = append(sections, "", summary)
 	}
 	if m.showTrace {
 		if m.loading {
@@ -281,14 +305,20 @@ func renderConversation(m model, width, height int) string {
 	if m.loading {
 		sections = append(sections, "", renderActiveStatus(m, bodyWidth))
 	}
-	sections = append(sections, "", labelStyle.Render("Message"), m.input.View())
-	return activePanelStyle.Width(width - 5).Height(height - 4).Render(strings.Join(sections, "\n"))
+	return strings.Join(sections, "\n")
+}
+
+func renderComposer(m model, width int) string {
+	return strings.Join([]string{
+		labelStyle.Render(composerLabel(m)),
+		m.input.View(),
+	}, "\n")
 }
 
 func renderFooter(m model, width int) string {
-	status := "Enter send  /agents list  /use <id> switch  /trace inspect  /exit-agent default  Esc quit"
+	status := "Enter send  /trace inspect raw events  /agents list  /use <id> switch  Esc quit"
 	if m.loading {
-		status = "RUNNING: " + loadingLabel(m.loadingMode) + "  Activity panel updates live  /trace opens inspector"
+		status = "RUNNING: " + loadingLabel(m.loadingMode) + "  activity shows steps  /trace opens raw inspector"
 	}
 	if m.err != nil {
 		status = "Error: " + m.err.Error()
@@ -394,6 +424,7 @@ func (m *model) applyAgentCommand(args string) tea.Cmd {
 	}
 	m.loading = true
 	m.loadingMode = "agent"
+	m.runningAgent = id
 	m.err = nil
 	m.output = ""
 	m.addTranscript("You -> "+id, message)
@@ -550,6 +581,285 @@ func renderActivity(m model, width int) []string {
 	return []string{mutedStyle.Render("idle")}
 }
 
+type activityStep struct {
+	Status string
+	Agent  string
+	Action string
+	Detail string
+}
+
+func renderInlineLiveActivity(m model, width int) string {
+	width = maxInt(24, width)
+	steps := liveActivitySteps(m.traceEvents, runningAgentID(m))
+	header := renderActivityHeader("Activity live", true, steps, 0, "")
+	lines := []string{header}
+	if len(steps) == 0 {
+		lines = append(lines, mutedStyle.Render("  waiting for activity..."))
+		return strings.Join(lines, "\n")
+	}
+	for _, step := range steps {
+		lines = append(lines, renderActivityStep(step, width))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderInlineRunSummary(run *frt.TurnResponse, width int) string {
+	if run == nil {
+		return ""
+	}
+	width = maxInt(24, width)
+	steps := runActivitySteps(run)
+	lines := []string{
+		renderActivityHeader("Activity summary", false, steps, len(run.Artifacts), runDurationLabel(run)),
+		mutedStyle.Render(truncate("  audit ref: .xira/runs", width)),
+	}
+	if len(steps) == 0 {
+		lines = append(lines, mutedStyle.Render("  no visible activity steps"))
+		return strings.Join(lines, "\n")
+	}
+	for _, step := range steps {
+		lines = append(lines, renderActivityStep(step, width))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderActivityHeader(label string, live bool, steps []activityStep, artifacts int, duration string) string {
+	agentCount := countActivityAgents(steps)
+	if agentCount == 0 && len(steps) > 0 {
+		agentCount = 1
+	}
+	parts := []string{pluralCount(agentCount, "agent"), pluralCount(len(steps), "step")}
+	if artifacts > 0 {
+		parts = append(parts, pluralCount(artifacts, "artifact"))
+	}
+	if duration != "" {
+		parts = append(parts, duration)
+	}
+	header := titleStyle.Render(label)
+	if live {
+		header += " " + pillStyle.Render("running")
+	}
+	return header + " " + mutedStyle.Render(strings.Join(parts, " · "))
+}
+
+func renderActivityStep(step activityStep, width int) string {
+	status := strings.TrimSpace(step.Status)
+	if status == "" {
+		status = "ok"
+	}
+	statusStyle := successStyle
+	switch status {
+	case "running":
+		statusStyle = labelStyle
+	case "err", "failed":
+		statusStyle = errorStyle
+	}
+	agent := emptyDash(step.Agent)
+	action := emptyDash(step.Action)
+	detail := strings.TrimSpace(step.Detail)
+	prefix := statusStyle.Render(padRight(status, 7)) + " " + assistantStyle.Render(truncate(agent, 22)) + " " + labelStyle.Render(truncate(action, 16))
+	if detail == "" {
+		return prefix
+	}
+	remaining := maxInt(16, width-lipgloss.Width(prefix)-2)
+	return prefix + " " + mutedStyle.Render(truncate(detail, remaining))
+}
+
+func liveActivitySteps(events []frt.RuntimeEvent, fallbackAgent string) []activityStep {
+	agent := emptyDash(fallbackAgent)
+	var steps []activityStep
+	modelStep := -1
+	for _, event := range events {
+		switch event.Kind {
+		case "tool.started":
+			steps = append(steps, activityStep{
+				Status: "running",
+				Agent:  agent,
+				Action: toolEventName(event),
+				Detail: toolEventDetail(event.Payload),
+			})
+		case "tool.finished":
+			updateLastMatchingStep(steps, toolEventName(event), "ok", toolEventDetail(event.Payload))
+		case "tool.failed":
+			if !updateLastMatchingStep(steps, toolEventName(event), "err", toolEventDetail(event.Payload)) {
+				steps = append(steps, activityStep{Status: "err", Agent: agent, Action: toolEventName(event), Detail: toolEventDetail(event.Payload)})
+			}
+		case "adk.event":
+			detail := modelEventDetail(event.Payload)
+			if detail == "" {
+				continue
+			}
+			if modelStep >= 0 {
+				steps[modelStep].Detail = detail
+				continue
+			}
+			steps = append(steps, activityStep{Status: "running", Agent: agent, Action: "model", Detail: detail})
+			modelStep = len(steps) - 1
+		case "run.failed":
+			steps = append(steps, activityStep{Status: "err", Agent: agent, Action: "runtime", Detail: event.Message})
+		}
+	}
+	return steps
+}
+
+func runActivitySteps(run *frt.TurnResponse) []activityStep {
+	agent := emptyDash(run.AgentID)
+	var steps []activityStep
+	for _, call := range run.ToolCalls {
+		status := "ok"
+		if call.Error != "" {
+			status = "err"
+		}
+		detail := toolCallDetail(call)
+		steps = append(steps, activityStep{Status: status, Agent: agent, Action: call.Name, Detail: detail})
+	}
+	for _, artifact := range run.Artifacts {
+		steps = append(steps, activityStep{Status: "ok", Agent: agent, Action: "artifact", Detail: artifact})
+	}
+	if strings.TrimSpace(run.FinalResponse) != "" {
+		steps = append(steps, activityStep{Status: "ok", Agent: agent, Action: "answer", Detail: "synthesized final response"})
+	}
+	if len(steps) == 0 {
+		steps = liveActivitySteps(run.Events, agent)
+		for i := range steps {
+			if steps[i].Status == "running" {
+				steps[i].Status = "ok"
+			}
+		}
+	}
+	return steps
+}
+
+func updateLastMatchingStep(steps []activityStep, action, status, detail string) bool {
+	for i := len(steps) - 1; i >= 0; i-- {
+		if steps[i].Action != action {
+			continue
+		}
+		steps[i].Status = status
+		if detail != "" {
+			steps[i].Detail = detail
+		}
+		return true
+	}
+	return false
+}
+
+func toolEventName(event frt.RuntimeEvent) string {
+	if event.Source != "" {
+		return event.Source
+	}
+	if tool := payloadString(event.Payload, "tool", "name"); tool != "" {
+		return tool
+	}
+	return "tool"
+}
+
+func toolEventDetail(payload map[string]any) string {
+	return firstNonEmpty(
+		payloadString(payload, "command"),
+		payloadString(payload, "path"),
+		payloadString(payload, "action"),
+		payloadString(payload, "status"),
+	)
+}
+
+func toolCallDetail(call frt.ToolCallRecord) string {
+	input := firstNonEmpty(
+		payloadString(call.Input, "command"),
+		payloadString(call.Input, "path"),
+		payloadString(call.Input, "action"),
+	)
+	output := firstNonEmpty(
+		payloadString(call.Output, "path"),
+		payloadString(call.Output, "bytes"),
+		payloadString(call.Output, "entries"),
+		payloadString(call.Output, "exit_code"),
+	)
+	if call.Error != "" {
+		if input == "" {
+			return call.Error
+		}
+		return input + " -> " + call.Error
+	}
+	if input != "" && output != "" && input != output {
+		return input + " -> " + output
+	}
+	return firstNonEmpty(input, output)
+}
+
+func modelEventDetail(payload map[string]any) string {
+	if payloadString(payload, "final") == "true" {
+		return "final response"
+	}
+	if reason := payloadString(payload, "finish_reason"); reason != "" {
+		return "finish reason: " + reason
+	}
+	if chars := payloadString(payload, "content_chars"); chars != "" && chars != "0" {
+		return "streaming response"
+	}
+	return ""
+}
+
+func payloadString(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := payload[key]
+		if !ok {
+			continue
+		}
+		text := strings.TrimSpace(fmt.Sprint(value))
+		if text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func countActivityAgents(steps []activityStep) int {
+	seen := map[string]bool{}
+	for _, step := range steps {
+		agent := strings.TrimSpace(step.Agent)
+		if agent != "" && agent != "-" {
+			seen[agent] = true
+		}
+	}
+	return len(seen)
+}
+
+func pluralCount(count int, singular string) string {
+	word := singular
+	if count != 1 {
+		word += "s"
+	}
+	return fmt.Sprintf("%d %s", count, word)
+}
+
+func runDurationLabel(run *frt.TurnResponse) string {
+	if run == nil || run.StartedAt.IsZero() || run.EndedAt.IsZero() {
+		return ""
+	}
+	duration := run.EndedAt.Sub(run.StartedAt)
+	if duration <= 0 {
+		return ""
+	}
+	return duration.Round(100 * 1000 * 1000).String()
+}
+
+func padRight(text string, width int) string {
+	for lipgloss.Width(text) < width {
+		text += " "
+	}
+	return text
+}
+
 func compactEventLine(event frt.RuntimeEvent, width int) string {
 	text := emptyDash(event.Kind)
 	if event.Source != "" {
@@ -673,7 +983,7 @@ func stripInlineMarkdown(text string) string {
 }
 
 func renderActiveStatus(m model, width int) string {
-	message := truncate(loadingLabel(m.loadingMode)+" - activity is updating in the sidebar", maxInt(12, width-10))
+	message := truncate(loadingLabel(m.loadingMode)+" - activity is streaming in this turn", maxInt(12, width-10))
 	return pillStyle.Render("RUNNING") + " " + assistantTextStyle.Render(message)
 }
 
@@ -1028,6 +1338,23 @@ func modeLabel(m model) string {
 	return "agent " + agentSelectionLabel(m.agents, m.activeAgent)
 }
 
+func composerLabel(m model) string {
+	if id := strings.TrimSpace(m.activeAgent); id != "" {
+		return "You -> " + id
+	}
+	return "You"
+}
+
+func runningAgentID(m model) string {
+	if agent := strings.TrimSpace(m.runningAgent); agent != "" {
+		return agent
+	}
+	if agent := selectedAgentID(m); agent != "" {
+		return agent
+	}
+	return "default agent"
+}
+
 func selectedAgentID(m model) string {
 	if id := strings.TrimSpace(m.activeAgent); id != "" {
 		return id
@@ -1070,7 +1397,7 @@ func defaultAgentID(status map[string]any) string {
 }
 
 func inputWidth(width int) int {
-	return maxInt(24, width-42)
+	return maxInt(24, width-4)
 }
 
 func wrapText(text string, width int) string {

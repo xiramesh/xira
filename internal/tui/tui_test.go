@@ -58,6 +58,9 @@ func TestPlainInputUsesDefaultAgentMode(t *testing.T) {
 	if got.output != "" {
 		t.Fatalf("output = %q, want empty while default agent runs", got.output)
 	}
+	if got.input.Value() != "" {
+		t.Fatalf("input value = %q, want cleared after submit", got.input.Value())
+	}
 }
 
 func TestDefaultAgentResponseUpdatesTranscript(t *testing.T) {
@@ -157,6 +160,9 @@ func TestApplyCommandRunsExplicitAgentWithMessage(t *testing.T) {
 	if m.activeAgent != "" {
 		t.Fatalf("activeAgent = %q, want one-shot agent call without mode switch", m.activeAgent)
 	}
+	if m.runningAgent != "research-assistant" {
+		t.Fatalf("runningAgent = %q, want research-assistant", m.runningAgent)
+	}
 }
 
 func TestApplyCommandRejectsUnknownAgent(t *testing.T) {
@@ -243,12 +249,12 @@ func TestViewStartsAsDefaultAgent(t *testing.T) {
 	}
 
 	view := m.View()
-	for _, want := range []string{"Xira TUI", "Model: DeepSeek", "Mode: default agent xira-assistant"} {
+	for _, want := range []string{"Xira TUI", "Model: DeepSeek", "Mode: default agent xira-assistant", "Current run", "idle"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("View() = %q, want substring %q", view, want)
 		}
 	}
-	for _, forbidden := range []string{"Mode: shell", "Ask research-assistant", "Entrypoint: agent run", "Selected agent:", "mock_model=", "known_tool=", "known_tool:"} {
+	for _, forbidden := range []string{"Mode: shell", "Ask research-assistant", "Entrypoint: agent run", "Selected agent:", "mock_model=", "known_tool=", "known_tool:", "No agents loaded", "No runs yet"} {
 		if strings.Contains(view, forbidden) {
 			t.Fatalf("View() = %q, should not contain %q", view, forbidden)
 		}
@@ -278,14 +284,55 @@ func TestConversationDoesNotShowTraceByDefaultAfterRun(t *testing.T) {
 	}
 
 	view := m.View()
-	for _, want := range []string{"Conversation", "You", "xira-assistant", "Activity", "tools 0  events 3"} {
+	for _, want := range []string{"Conversation", "You", "xira-assistant", "Activity summary", "1 agent", "1 step", "read_file", "audit ref"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("View() = %q, want substring %q", view, want)
 		}
 	}
-	for _, forbidden := range []string{"Trace", "tools: none", "run run-1"} {
+	for _, forbidden := range []string{"Trace", "tools: none", "tools 0  events 3", "run run-1", "No runs yet"} {
 		if strings.Contains(view, forbidden) {
 			t.Fatalf("View() = %q, should not contain default trace substring %q", view, forbidden)
+		}
+	}
+}
+
+func TestViewRendersConversationWithoutOuterFrame(t *testing.T) {
+	input := textinput.New()
+	m := model{
+		input:  input,
+		width:  100,
+		height: 24,
+		transcript: []transcriptEntry{
+			{Role: "You", Content: "你好"},
+			{Role: "xira-assistant", Content: "你好，有什么可以帮你？"},
+		},
+	}
+
+	view := m.View()
+	for _, forbidden := range []string{"│", "┌", "└"} {
+		if strings.Contains(view, forbidden) {
+			t.Fatalf("View() = %q, should not contain outer frame glyph %q", view, forbidden)
+		}
+	}
+}
+
+func TestViewRendersFullConversationHistory(t *testing.T) {
+	input := textinput.New()
+	m := model{
+		input:  input,
+		width:  90,
+		height: 20,
+		transcript: []transcriptEntry{
+			{Role: "You", Content: "turn-01"},
+			{Role: "xira-assistant", Content: "turn middle"},
+			{Role: "You", Content: "turn latest"},
+		},
+	}
+
+	view := m.View()
+	for _, want := range []string{"turn-01", "turn middle", "turn latest"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("View() = %q, want full history substring %q", view, want)
 		}
 	}
 }
@@ -437,15 +484,52 @@ func TestViewShowsVisibleRunningStatusNearInput(t *testing.T) {
 	}
 
 	view := m.View()
-	for _, want := range []string{"RUNNING", "thinking - activity is updating", "Activity", "waiting for events", "Message"} {
+	for _, want := range []string{"RUNNING", "thinking - activity is streaming", "Activity live", "waiting for activity", "You"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("View() = %q, want substring %q", view, want)
 		}
 	}
-	for _, forbidden := range []string{"Trace", "waiting for run.started"} {
+	for _, forbidden := range []string{"Trace", "waiting for run.started", "Message"} {
 		if strings.Contains(view, forbidden) {
 			t.Fatalf("View() = %q, should not contain %q", view, forbidden)
 		}
+	}
+}
+
+func TestInlineLiveActivitySummarizesSteps(t *testing.T) {
+	m := model{
+		loading:      true,
+		loadingMode:  "default",
+		runningAgent: "xira-assistant",
+		traceEvents: []frt.RuntimeEvent{
+			{Kind: "run.started", Source: "runtime", Payload: map[string]any{"agent_id": "xira-assistant"}},
+			{Kind: "tool.started", Source: "exec", Payload: map[string]any{"command": "pwd && ls -la"}},
+			{Kind: "tool.finished", Source: "exec", Payload: map[string]any{"tool": "exec"}},
+			{Kind: "adk.event", Source: "adk.runner", Payload: map[string]any{"content_chars": "0", "event_id": "event-1"}},
+			{Kind: "adk.event", Source: "adk.runner", Payload: map[string]any{"content_chars": "20", "event_id": "event-2", "finish_reason": "tool_calls"}},
+			{Kind: "adk.event", Source: "adk.runner", Payload: map[string]any{"content_chars": "0", "invocation_id": "invoke-1"}},
+		},
+	}
+
+	activity := renderInlineLiveActivity(m, 120)
+	for _, want := range []string{"Activity live", "2 steps", "xira-assistant", "exec", "pwd && ls -la", "model", "finish reason: tool_calls"} {
+		if !strings.Contains(activity, want) {
+			t.Fatalf("activity = %q, want substring %q", activity, want)
+		}
+	}
+	for _, forbidden := range []string{"run.started", "tool.started", "tool.finished", "adk.event", "event_id", "invocation_id"} {
+		if strings.Contains(activity, forbidden) {
+			t.Fatalf("activity = %q, should not contain raw event substring %q", activity, forbidden)
+		}
+	}
+}
+
+func TestComposerLabelUsesUserPerspective(t *testing.T) {
+	if got := composerLabel(model{}); got != "You" {
+		t.Fatalf("composerLabel(default) = %q, want You", got)
+	}
+	if got := composerLabel(model{activeAgent: "research-assistant"}); got != "You -> research-assistant" {
+		t.Fatalf("composerLabel(agent) = %q, want You -> research-assistant", got)
 	}
 }
 
