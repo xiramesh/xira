@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	adksession "google.golang.org/adk/session"
@@ -190,6 +192,20 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	agentSessionID := fsession.BuildAgentSessionID(req.SessionID, profile.ID)
 	runID := NewRunID(profile.ID, now)
 	scope := allocation.Scope
+	slog.Info("agent run accepted",
+		"run_id", runID,
+		"agent_id", profile.ID,
+		"entrypoint_id", inbound.Context.EntrypointID,
+		"channel", inbound.Context.Channel,
+		"channel_app_id", inbound.Context.ChannelAppID,
+		"bot_id", inbound.Context.BotID,
+		"user_id", req.UserID,
+		"session_id", req.SessionID,
+		"agent_session_id", agentSessionID,
+		"matched_by", entrypointDecision.MatchedBy,
+		"message_chars", utf8.RuneCountInString(req.Message),
+		"message_preview", previewText(req.Message, 120),
+	)
 	resp := TurnResponse{
 		RunID:          runID,
 		AgentID:        profile.ID,
@@ -255,6 +271,26 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	if runErr != nil || resp.VerificationResult.Status != "passed" {
 		resp.Status = "failed"
 		resp.EvolutionCandidate = s.evolution.CandidateForFailure(runID, "run_failure", resp.VerificationResult, runErr, resp.EndedAt)
+	}
+	logAttrs := []any{
+		"run_id", resp.RunID,
+		"agent_id", resp.AgentID,
+		"entrypoint_id", resp.EntrypointID,
+		"channel", req.Channel,
+		"session_id", resp.SessionID,
+		"status", resp.Status,
+		"verification_status", resp.VerificationResult.Status,
+		"tool_calls", len(resp.ToolCalls),
+		"events", len(resp.Events),
+		"audit_events", len(resp.AuditEvents),
+		"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
+		"duration", resp.EndedAt.Sub(resp.StartedAt),
+	}
+	if runErr != nil {
+		logAttrs = append(logAttrs, "error", runErr)
+		slog.Error("agent run finished with error", logAttrs...)
+	} else {
+		slog.Info("agent run finished", logAttrs...)
 	}
 	if runErr == nil && resp.VerificationResult.Status == "passed" {
 		s.sessions.AppendTurn(req.SessionID, req.Message, final)
@@ -472,6 +508,18 @@ func messageContent(msg deepseek.Message) string {
 	}
 	data, _ := json.Marshal(msg.Content)
 	return string(data)
+}
+
+func previewText(text string, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if limit <= 0 || text == "" {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "..."
 }
 
 func channelConflict(requestChannel, entrypointChannel string) bool {

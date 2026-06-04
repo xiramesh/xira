@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -73,6 +74,16 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 				return err
 			}
 			defer rt.Close()
+			status := rt.Status()
+			slog.Info("xira serve starting",
+				"addr", addr,
+				"config_path", status["config_path"],
+				"workspace", status["workspace"],
+				"run_root", status["run_root"],
+				"default_agent", status["default_agent"],
+				"profile_source", status["profile_source"],
+				"mock_model", status["mock_model"],
+			)
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			channelRunners, err := channelrunner.NewManager(rt)
@@ -82,14 +93,22 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 			if err := channelRunners.Start(ctx); err != nil {
 				return err
 			}
+			slog.Info("channel runners started", "count", channelRunners.Count())
 			defer func() {
 				stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel()
 				_ = channelRunners.Stop(stopCtx)
+				slog.Info("channel runners stopped", "count", channelRunners.Count())
 			}()
 			srv := api.NewServer(rt, addr)
 			fmt.Fprintf(cmd.OutOrStdout(), "xira runtime listening on %s (channel runners: %d)\n", srv.URL(), channelRunners.Count())
-			return srv.Start(ctx)
+			slog.Info("xira http server listening", "url", srv.URL(), "channel_runners", channelRunners.Count())
+			if err := srv.Start(ctx); err != nil {
+				slog.Error("xira http server stopped with error", "error", err)
+				return err
+			}
+			slog.Info("xira serve stopped")
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:8089", "HTTP listen address")

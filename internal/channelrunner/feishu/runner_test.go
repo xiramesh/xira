@@ -3,6 +3,7 @@ package feishu
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/ai-daming/xira/internal/entrypoints"
 
@@ -53,5 +54,56 @@ func TestShouldHandleMessageRespectsGroupMentionPolicy(t *testing.T) {
 	respondAllGroups := entrypoints.Definition{RespondToUnmentionedGroupMessages: true}
 	if !shouldHandleMessage("group", false, respondAllGroups) {
 		t.Fatal("unmentioned group messages should be handled when configured")
+	}
+}
+
+func TestMessageDeduperRejectsInFlightDuplicate(t *testing.T) {
+	deduper := newMessageDeduper(time.Minute)
+	now := time.Unix(1, 0)
+
+	if !deduper.Begin("feishu-default:om-1", now) {
+		t.Fatal("first message should be accepted")
+	}
+	if deduper.Begin("feishu-default:om-1", now.Add(time.Second)) {
+		t.Fatal("duplicate in-flight message should be rejected")
+	}
+}
+
+func TestMessageDeduperKeepsCompletedMessageUntilTTL(t *testing.T) {
+	deduper := newMessageDeduper(time.Minute)
+	now := time.Unix(1, 0)
+
+	if !deduper.Begin("feishu-default:om-1", now) {
+		t.Fatal("first message should be accepted")
+	}
+	deduper.Complete("feishu-default:om-1", now.Add(10*time.Second))
+	if deduper.Begin("feishu-default:om-1", now.Add(30*time.Second)) {
+		t.Fatal("completed message should be rejected before ttl")
+	}
+	if !deduper.Begin("feishu-default:om-1", now.Add(2*time.Minute)) {
+		t.Fatal("completed message should be accepted after ttl")
+	}
+}
+
+func TestMessageDeduperForgetAllowsRetry(t *testing.T) {
+	deduper := newMessageDeduper(time.Minute)
+	now := time.Unix(1, 0)
+
+	if !deduper.Begin("feishu-default:om-1", now) {
+		t.Fatal("first message should be accepted")
+	}
+	deduper.Forget("feishu-default:om-1")
+	if !deduper.Begin("feishu-default:om-1", now.Add(time.Second)) {
+		t.Fatal("forgotten message should be accepted for retry")
+	}
+}
+
+func TestRunnerMessageDedupeKeyIncludesEntrypoint(t *testing.T) {
+	runner := &Runner{definition: entrypoints.Definition{ID: "feishu-default"}}
+	if got := runner.messageDedupeKey("om-1"); got != "feishu-default:om-1" {
+		t.Fatalf("dedupe key = %q", got)
+	}
+	if got := runner.messageDedupeKey(""); got != "" {
+		t.Fatalf("empty message id dedupe key = %q", got)
 	}
 }

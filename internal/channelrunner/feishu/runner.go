@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
+	"unicode/utf8"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
@@ -20,6 +22,8 @@ import (
 )
 
 var mentionPlaceholderRegex = regexp.MustCompile(`@_user_\d+`)
+
+const messageDedupeTTL = time.Hour
 
 type Runner struct {
 	definition entrypoints.Definition
@@ -33,6 +37,8 @@ type Runner struct {
 	mu       sync.Mutex
 	cancel   context.CancelFunc
 	wsClient *larkws.Client
+
+	messages *messageDeduper
 }
 
 func NewRunner(definition entrypoints.Definition, rt *frt.Service) (*Runner, error) {
@@ -48,6 +54,15 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service) (*Runner, err
 	if definition.IsLark {
 		opts = append(opts, lark.WithOpenBaseUrl(lark.LarkBaseUrl))
 	}
+	slog.Info("feishu runner configured",
+		"entrypoint_id", definition.ID,
+		"app_id", appID,
+		"app_id_env", definition.AppIDEnv,
+		"is_lark", definition.IsLark,
+		"verification_token_configured", resolveValue(definition.VerifyToken, definition.VerifyTokenEnv) != "",
+		"encrypt_key_configured", resolveValue(definition.EncryptKey, definition.EncryptKeyEnv) != "",
+		"respond_to_unmentioned_group_messages", definition.RespondToUnmentionedGroupMessages,
+	)
 	return &Runner{
 		definition: definition,
 		runtime:    rt,
@@ -56,6 +71,7 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service) (*Runner, err
 		verify:     resolveValue(definition.VerifyToken, definition.VerifyTokenEnv),
 		encryptKey: resolveValue(definition.EncryptKey, definition.EncryptKeyEnv),
 		client:     lark.NewClient(appID, appSecret, opts...),
+		messages:   newMessageDeduper(messageDedupeTTL),
 	}, nil
 }
 
@@ -76,6 +92,12 @@ func (r *Runner) Start(ctx context.Context) error {
 	if r.definition.IsLark {
 		domain = lark.LarkBaseUrl
 	}
+	slog.Info("feishu runner starting",
+		"entrypoint_id", r.definition.ID,
+		"app_id", r.appID,
+		"domain", domain,
+		"is_lark", r.definition.IsLark,
+	)
 	client := larkws.NewClient(
 		r.appID,
 		r.appSecret,
@@ -90,13 +112,16 @@ func (r *Runner) Start(ctx context.Context) error {
 
 	go func() {
 		if err := client.Start(runCtx); err != nil && runCtx.Err() == nil {
-			log.Printf("xira feishu runner %s stopped: %v", r.definition.ID, err)
+			slog.Error("feishu runner stopped with error", "entrypoint_id", r.definition.ID, "error", err)
+			return
 		}
+		slog.Info("feishu runner stopped", "entrypoint_id", r.definition.ID, "reason", runCtx.Err())
 	}()
 	return nil
 }
 
 func (r *Runner) Stop(context.Context) error {
+	slog.Info("feishu runner stopping", "entrypoint_id", r.definition.ID)
 	r.mu.Lock()
 	cancel := r.cancel
 	r.cancel = nil
@@ -115,6 +140,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 	message := event.Event.Message
 	chatID := stringValue(message.ChatId)
 	if chatID == "" {
+		slog.Warn("feishu message ignored", "entrypoint_id", r.definition.ID, "reason", "missing_chat_id")
 		return nil
 	}
 	chatType := normalizeChatType(stringValue(message.ChatType))
@@ -123,18 +149,67 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		senderID = "unknown"
 	}
 	mentioned := len(message.Mentions) > 0
-	if !shouldHandleMessage(chatType, mentioned, r.definition) {
-		return nil
-	}
-
 	messageType := stringValue(message.MessageType)
 	content := extractContent(messageType, stringValue(message.Content))
 	content = stripMentionPlaceholders(content, message.Mentions)
 	if strings.TrimSpace(content) == "" {
 		content = "[empty message]"
 	}
+	messageID := stringValue(message.MessageId)
+	slog.Info("feishu message received",
+		"entrypoint_id", r.definition.ID,
+		"app_id", r.appID,
+		"chat_id", chatID,
+		"chat_type", chatType,
+		"message_id", messageID,
+		"message_type", messageType,
+		"sender_id", senderID,
+		"mentioned", mentioned,
+		"mentions", len(message.Mentions),
+		"content_chars", utf8.RuneCountInString(content),
+		"content_preview", previewText(content, 120),
+	)
+	if !shouldHandleMessage(chatType, mentioned, r.definition) {
+		slog.Info("feishu message ignored",
+			"entrypoint_id", r.definition.ID,
+			"chat_id", chatID,
+			"chat_type", chatType,
+			"message_id", messageID,
+			"sender_id", senderID,
+			"reason", "unmentioned_group_message",
+			"respond_to_unmentioned_group_messages", r.definition.RespondToUnmentionedGroupMessages,
+		)
+		return nil
+	}
+	dedupeKey := r.messageDedupeKey(messageID)
+	if !r.messages.Begin(dedupeKey, time.Now()) {
+		slog.Info("feishu duplicate message ignored",
+			"entrypoint_id", r.definition.ID,
+			"chat_id", chatID,
+			"chat_type", chatType,
+			"message_id", messageID,
+			"sender_id", senderID,
+			"dedupe_ttl", messageDedupeTTL,
+		)
+		return nil
+	}
+	messageProcessed := false
+	defer func() {
+		if messageProcessed {
+			r.messages.Complete(dedupeKey, time.Now())
+			return
+		}
+		r.messages.Forget(dedupeKey)
+	}()
 
 	metadata := r.buildMetadata(message, event.Event.Sender, chatType, messageType)
+	slog.Info("feishu dispatching message to runtime",
+		"entrypoint_id", r.definition.ID,
+		"chat_id", chatID,
+		"chat_type", chatType,
+		"message_id", messageID,
+		"sender_id", senderID,
+	)
 	resp, err := r.runtime.RunAgent(ctx, frt.TurnRequest{
 		EntrypointID: r.definition.ID,
 		Channel:      "feishu",
@@ -143,15 +218,65 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		Metadata:     metadata,
 	})
 	if err != nil {
+		slog.Error("feishu runtime run failed",
+			"entrypoint_id", r.definition.ID,
+			"chat_id", chatID,
+			"message_id", messageID,
+			"sender_id", senderID,
+			"error", err,
+		)
 		return fmt.Errorf("feishu entrypoint %s run agent: %w", r.definition.ID, err)
 	}
+	slog.Info("feishu runtime run completed",
+		"entrypoint_id", r.definition.ID,
+		"run_id", resp.RunID,
+		"agent_id", resp.AgentID,
+		"status", resp.Status,
+		"session_id", resp.SessionID,
+		"chat_id", chatID,
+		"message_id", messageID,
+		"tool_calls", len(resp.ToolCalls),
+		"events", len(resp.Events),
+		"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
+	)
 	if strings.TrimSpace(resp.FinalResponse) == "" {
+		slog.Warn("feishu response skipped",
+			"entrypoint_id", r.definition.ID,
+			"run_id", resp.RunID,
+			"chat_id", chatID,
+			"message_id", messageID,
+			"reason", "empty_final_response",
+		)
+		messageProcessed = true
 		return nil
 	}
 	if err := r.send(ctx, chatID, resp.FinalResponse); err != nil {
+		slog.Error("feishu response send failed",
+			"entrypoint_id", r.definition.ID,
+			"run_id", resp.RunID,
+			"chat_id", chatID,
+			"message_id", messageID,
+			"error", err,
+		)
 		return fmt.Errorf("feishu entrypoint %s send response: %w", r.definition.ID, err)
 	}
+	messageProcessed = true
+	slog.Info("feishu response sent",
+		"entrypoint_id", r.definition.ID,
+		"run_id", resp.RunID,
+		"chat_id", chatID,
+		"message_id", messageID,
+		"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
+	)
 	return nil
+}
+
+func (r *Runner) messageDedupeKey(messageID string) string {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return ""
+	}
+	return strings.TrimSpace(r.definition.ID) + ":" + messageID
 }
 
 func shouldHandleMessage(chatType string, mentioned bool, definition entrypoints.Definition) bool {
@@ -198,10 +323,19 @@ func (r *Runner) send(ctx context.Context, chatID, content string) error {
 	cardContent, err := buildMarkdownCard(content)
 	if err == nil {
 		if err := r.sendCard(ctx, chatID, cardContent); err == nil {
+			slog.Info("feishu card response sent", "entrypoint_id", r.definition.ID, "chat_id", chatID, "content_chars", utf8.RuneCountInString(content))
 			return nil
+		} else {
+			slog.Warn("feishu card response failed; falling back to text", "entrypoint_id", r.definition.ID, "chat_id", chatID, "error", err)
 		}
+	} else {
+		slog.Warn("feishu card response build failed; falling back to text", "entrypoint_id", r.definition.ID, "chat_id", chatID, "error", err)
 	}
-	return r.sendText(ctx, chatID, content)
+	if err := r.sendText(ctx, chatID, content); err != nil {
+		return err
+	}
+	slog.Info("feishu text response sent", "entrypoint_id", r.definition.ID, "chat_id", chatID, "content_chars", utf8.RuneCountInString(content))
+	return nil
 }
 
 func (r *Runner) sendCard(ctx context.Context, chatID, cardContent string) error {
@@ -257,6 +391,65 @@ func buildMarkdownCard(content string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+type messageDeduper struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	entries map[string]time.Time
+}
+
+func newMessageDeduper(ttl time.Duration) *messageDeduper {
+	if ttl <= 0 {
+		ttl = messageDedupeTTL
+	}
+	return &messageDeduper{
+		ttl:     ttl,
+		entries: map[string]time.Time{},
+	}
+}
+
+func (d *messageDeduper) Begin(key string, now time.Time) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return true
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pruneLocked(now)
+	if _, ok := d.entries[key]; ok {
+		return false
+	}
+	d.entries[key] = now.Add(d.ttl)
+	return true
+}
+
+func (d *messageDeduper) Complete(key string, now time.Time) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.entries[key] = now.Add(d.ttl)
+}
+
+func (d *messageDeduper) Forget(key string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.entries, key)
+}
+
+func (d *messageDeduper) pruneLocked(now time.Time) {
+	for key, expiresAt := range d.entries {
+		if !expiresAt.After(now) {
+			delete(d.entries, key)
+		}
+	}
 }
 
 func extractContent(messageType, rawContent string) string {
@@ -356,6 +549,18 @@ func setMetadata(metadata map[string]string, key, value string) {
 	if strings.TrimSpace(value) != "" {
 		metadata[key] = strings.TrimSpace(value)
 	}
+}
+
+func previewText(text string, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if limit <= 0 || text == "" {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "..."
 }
 
 func resolveValue(value, envName string) string {

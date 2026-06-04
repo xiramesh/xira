@@ -3,6 +3,7 @@ package channelrunner
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/ai-daming/xira/internal/channelrunner/feishu"
@@ -36,6 +37,7 @@ func NewManager(rt *runtime.Service) (*Manager, error) {
 				return nil, err
 			}
 			manager.runners = append(manager.runners, runner)
+			slog.Info("channel runner registered", "id", runner.ID(), "channel", runner.Channel())
 		default:
 			return nil, fmt.Errorf("entrypoint %q enables unsupported channel runner %q", definition.ID, definition.Channel)
 		}
@@ -49,10 +51,13 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	var started []Runner
 	for _, runner := range m.runners {
+		slog.Info("channel runner starting", "id", runner.ID(), "channel", runner.Channel())
 		if err := runner.Start(ctx); err != nil {
 			_ = stopRunners(ctx, started)
+			slog.Error("channel runner failed to start", "id", runner.ID(), "channel", runner.Channel(), "error", err)
 			return err
 		}
+		slog.Info("channel runner started", "id", runner.ID(), "channel", runner.Channel())
 		started = append(started, runner)
 	}
 	return nil
@@ -75,9 +80,15 @@ func (m *Manager) Count() int {
 func stopRunners(ctx context.Context, runners []Runner) error {
 	var firstErr error
 	for i := len(runners) - 1; i >= 0; i-- {
-		if err := runners[i].Stop(ctx); err != nil && firstErr == nil {
-			firstErr = err
+		slog.Info("channel runner stopping", "id", runners[i].ID(), "channel", runners[i].Channel())
+		if err := runners[i].Stop(ctx); err != nil {
+			slog.Error("channel runner failed to stop", "id", runners[i].ID(), "channel", runners[i].Channel(), "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
+		slog.Info("channel runner stopped", "id", runners[i].ID(), "channel", runners[i].Channel())
 	}
 	return firstErr
 }
