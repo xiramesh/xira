@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ai-daming/flowdeck/internal/channel"
-	"github.com/ai-daming/flowdeck/internal/routing"
+	"github.com/ai-daming/xira/internal/channel"
+	"github.com/ai-daming/xira/internal/routing"
 )
 
 const ScopeVersionV1 = 1

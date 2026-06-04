@@ -5,14 +5,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ai-daming/flowdeck/internal/runtime"
+	"github.com/ai-daming/xira/internal/runtime"
 )
 
 func TestManagerIgnoresDisabledEntrypoints(t *testing.T) {
 	instance := t.TempDir()
-	writeFile(t, filepath.Join(instance, "flowdeck.yaml"), `workspace: workspace
-default_agent: flowdeck-assistant
-run_root: .flowdeck/runs
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+run_root: .xira/runs
 entrypoints: workspace/entrypoints.yaml
 `)
 	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
@@ -21,11 +21,11 @@ entrypoints: workspace/entrypoints.yaml
     enabled: false
     app_id: cli_xxx
     app_secret_env: MISSING_FEISHU_SECRET
-    default_agent: flowdeck-assistant
+    default_agent: xira-assistant
 `)
-	writeMinimalAgent(t, filepath.Join(instance, "workspace", "agents", "flowdeck-assistant"))
+	writeMinimalAgent(t, filepath.Join(instance, "workspace", "agents", "xira-assistant"))
 
-	rt, err := runtime.NewService(runtime.Config{ConfigPath: filepath.Join(instance, "flowdeck.yaml"), UseMockModel: true})
+	rt, err := runtime.NewService(runtime.Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,20 +40,20 @@ entrypoints: workspace/entrypoints.yaml
 
 func TestManagerRequiresFeishuCredentialsForEnabledEntrypoint(t *testing.T) {
 	instance := t.TempDir()
-	writeFile(t, filepath.Join(instance, "flowdeck.yaml"), `workspace: workspace
-default_agent: flowdeck-assistant
-run_root: .flowdeck/runs
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+run_root: .xira/runs
 entrypoints: workspace/entrypoints.yaml
 `)
 	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
   - id: feishu-default
     channel: feishu
     enabled: true
-    default_agent: flowdeck-assistant
+    default_agent: xira-assistant
 `)
-	writeMinimalAgent(t, filepath.Join(instance, "workspace", "agents", "flowdeck-assistant"))
+	writeMinimalAgent(t, filepath.Join(instance, "workspace", "agents", "xira-assistant"))
 
-	rt, err := runtime.NewService(runtime.Config{ConfigPath: filepath.Join(instance, "flowdeck.yaml"), UseMockModel: true})
+	rt, err := runtime.NewService(runtime.Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,9 +75,9 @@ func writeFile(t *testing.T, path, content string) {
 func writeMinimalAgent(t *testing.T, dir string) {
 	t.Helper()
 	writeFile(t, filepath.Join(dir, "PROFILE.md"), `---
-id: flowdeck-assistant
-name: FlowDeck Assistant
-version: 0.1.0
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.1
 description: Test assistant.
 model_policy:
   provider: deepseek

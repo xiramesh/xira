@@ -1,5 +1,5 @@
 workspace: workspace
-default_agent: flowdeck-assistant
-run_root: .flowdeck/runs
+default_agent: xira-assistant
+run_root: .xira/runs
 routes: workspace/routes.yaml
 entrypoints: workspace/entrypoints.yaml

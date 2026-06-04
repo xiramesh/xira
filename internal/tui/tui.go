@@ -11,7 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	frt "github.com/ai-daming/flowdeck/internal/runtime"
+	frt "github.com/ai-daming/xira/internal/runtime"
 )
 
 type model struct {
@@ -77,7 +77,7 @@ var (
 
 func Run(ctx context.Context, runtime *frt.Service, initialAgentID string) error {
 	input := textinput.New()
-	input.Placeholder = "Talk to FlowDeck, or use /agent <id> <message>"
+	input.Placeholder = "Talk to Xira, or use /agent <id> <message>"
 	input.Focus()
 	input.CharLimit = 2000
 	input.Width = 96
@@ -194,7 +194,7 @@ func (m model) View() string {
 
 func renderHeader(m model, width int) string {
 	mode := modeLabel(m)
-	left := titleStyle.Render("FlowDeck TUI")
+	left := titleStyle.Render("Xira TUI")
 	right := strings.Join([]string{
 		"Model: " + modelStatusLabel(m.status),
 		"Mode: " + mode,
@@ -319,12 +319,12 @@ func (m *model) applyCommand(text string) (bool, tea.Cmd) {
 	case text == "/agents":
 		m.err = nil
 		m.output = agentListText(m.agents)
-		m.addTranscript("FlowDeck", m.output)
+		m.addTranscript("Xira", m.output)
 		return true, nil
 	case text == "/help":
 		m.err = nil
 		m.output = helpText()
-		m.addTranscript("FlowDeck", m.output)
+		m.addTranscript("Xira", m.output)
 		return true, nil
 	case text == "/trace":
 		m.showTrace = !m.showTrace
@@ -346,25 +346,25 @@ func (m *model) applyCommand(text string) (bool, tea.Cmd) {
 	case text == "/agent":
 		m.err = nil
 		m.output = "Usage: /agent <id> <message>\n\n" + agentListText(m.agents)
-		m.addTranscript("FlowDeck", m.output)
+		m.addTranscript("Xira", m.output)
 		return true, nil
 	case strings.HasPrefix(text, "/use "):
 		return true, m.applyUseCommand(strings.TrimSpace(strings.TrimPrefix(text, "/use ")))
 	case text == "/use":
 		m.err = nil
 		m.output = "Usage: /use <agent-id>\n\n" + agentListText(m.agents)
-		m.addTranscript("FlowDeck", m.output)
+		m.addTranscript("Xira", m.output)
 		return true, nil
 	case text == "/exit-agent":
 		m.activeAgent = ""
 		m.err = nil
 		m.output = "Mode: default agent"
-		m.addTranscript("FlowDeck", m.output)
+		m.addTranscript("Xira", m.output)
 		return true, nil
 	case text == "/flows" || text == "/flow":
 		m.err = nil
 		m.output = "Flow entrypoints are not enabled in Phase 1. Use /agents or /agent <id> <message>."
-		m.addTranscript("FlowDeck", m.output)
+		m.addTranscript("Xira", m.output)
 		return true, nil
 	default:
 		return false, nil
@@ -376,7 +376,7 @@ func (m *model) applyAgentCommand(args string) tea.Cmd {
 	if id == "" {
 		m.err = nil
 		m.output = "Usage: /agent <id> <message>\n\n" + agentListText(m.agents)
-		m.addTranscript("FlowDeck", m.output)
+		m.addTranscript("Xira", m.output)
 		return nil
 	}
 	if !hasAgent(m.agents, id) {
@@ -389,7 +389,7 @@ func (m *model) applyAgentCommand(args string) tea.Cmd {
 		m.activeAgent = id
 		m.err = nil
 		m.output = "Mode: agent " + agentSelectionLabel(m.agents, id)
-		m.addTranscript("FlowDeck", m.output)
+		m.addTranscript("Xira", m.output)
 		return nil
 	}
 	m.loading = true
@@ -405,7 +405,7 @@ func (m *model) applyUseCommand(id string) tea.Cmd {
 	if id == "" {
 		m.err = nil
 		m.output = "Usage: /use <agent-id>\n\n" + agentListText(m.agents)
-		m.addTranscript("FlowDeck", m.output)
+		m.addTranscript("Xira", m.output)
 		return nil
 	}
 	if !hasAgent(m.agents, id) {
@@ -417,7 +417,7 @@ func (m *model) applyUseCommand(id string) tea.Cmd {
 	m.activeAgent = id
 	m.err = nil
 	m.output = "Mode: agent " + agentSelectionLabel(m.agents, id)
-	m.addTranscript("FlowDeck", m.output)
+	m.addTranscript("Xira", m.output)
 	return nil
 }
 
@@ -505,11 +505,11 @@ func renderTranscriptBlocks(entries []transcriptEntry, max, width int) string {
 		switch {
 		case strings.Contains(lower, "error"):
 			header = errorStyle.Bold(true).Render(role)
-		case strings.Contains(lower, "flowdeck") || strings.Contains(lower, "assistant"):
+		case strings.Contains(lower, "xira") || strings.Contains(lower, "assistant"):
 			header = assistantStyle.Render(role)
 		}
 		bodyStyle := userTextStyle
-		if strings.Contains(lower, "flowdeck") || strings.Contains(lower, "assistant") {
+		if strings.Contains(lower, "xira") || strings.Contains(lower, "assistant") {
 			bodyStyle = assistantTextStyle
 		}
 		blocks = append(blocks, header+"\n"+renderMarkdown(content, width, bodyStyle))

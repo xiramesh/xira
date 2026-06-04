@@ -3,7 +3,7 @@ package routing
 import (
 	"testing"
 
-	"github.com/ai-daming/flowdeck/internal/channel"
+	"github.com/ai-daming/xira/internal/channel"
 )
 
 func TestRouterReturnsDefaultAgentAndSessionPolicy(t *testing.T) {
@@ -34,7 +34,7 @@ func TestRouterPreservesExplicitAgentRequest(t *testing.T) {
 }
 
 func TestRouterMatchesChannelRule(t *testing.T) {
-	router := NewRouterWithRules("flowdeck-assistant", []Rule{
+	router := NewRouterWithRules("xira-assistant", []Rule{
 		{
 			Channel: "research",
 			AgentID: "research-assistant",

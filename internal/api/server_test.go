@@ -12,8 +12,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/ai-daming/flowdeck/internal/agents"
-	frt "github.com/ai-daming/flowdeck/internal/runtime"
+	"github.com/ai-daming/xira/internal/agents"
+	frt "github.com/ai-daming/xira/internal/runtime"
 )
 
 func TestAgentRunAPI(t *testing.T) {
@@ -71,7 +71,7 @@ func TestAgentsAPIUsesWorkspaceDiscoveredAgents(t *testing.T) {
 	workspace := writeAPIWorkspace(t)
 	rt, err := frt.NewService(frt.Config{
 		WorkspaceRoot:  workspace,
-		DefaultAgentID: "flowdeck-assistant",
+		DefaultAgentID: "xira-assistant",
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		UseMockModel:   true,
 	})
@@ -100,7 +100,7 @@ func TestAgentsAPIUsesWorkspaceDiscoveredAgents(t *testing.T) {
 	if len(profiles) != 2 {
 		t.Fatalf("profiles len = %d", len(profiles))
 	}
-	if profiles[0].ID != "flowdeck-assistant" || profiles[1].ID != "research-assistant" {
+	if profiles[0].ID != "xira-assistant" || profiles[1].ID != "research-assistant" {
 		t.Fatalf("profiles = %+v", profiles)
 	}
 }
@@ -143,21 +143,21 @@ func TestEventsWebSocketReceivesRunEvents(t *testing.T) {
 func writeAPIWorkspace(t *testing.T) string {
 	t.Helper()
 	workspace := t.TempDir()
-	writeAPIFile(t, filepath.Join(workspace, "agents", "flowdeck-assistant", "PROFILE.md"), `---
-id: flowdeck-assistant
-name: FlowDeck Assistant
-version: 0.1.0
+	writeAPIFile(t, filepath.Join(workspace, "agents", "xira-assistant", "PROFILE.md"), `---
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.1
 model_policy:
   provider: deepseek
   model: deepseek-v4-flash
 ---
 Default contract.
 `)
-	writeAPIFile(t, filepath.Join(workspace, "agents", "flowdeck-assistant", "SOUL.md"), `Default soul.`)
+	writeAPIFile(t, filepath.Join(workspace, "agents", "xira-assistant", "SOUL.md"), `Default soul.`)
 	writeAPIFile(t, filepath.Join(workspace, "agents", "research-assistant", "PROFILE.md"), `---
 id: research-assistant
 name: Research Assistant
-version: 0.1.0
+version: 0.1.1
 model_policy:
   provider: deepseek
   model: deepseek-v4-flash

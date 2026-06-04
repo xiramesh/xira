@@ -14,8 +14,8 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 
-	"github.com/ai-daming/flowdeck/internal/agents"
-	"github.com/ai-daming/flowdeck/internal/model/deepseek"
+	"github.com/ai-daming/xira/internal/agents"
+	"github.com/ai-daming/xira/internal/model/deepseek"
 )
 
 type adkExecArgs struct {
@@ -73,7 +73,7 @@ func (s *Service) generateADK(
 		return "", nil, err
 	}
 	run, err := runner.New(runner.Config{
-		AppName:           "flowdeck",
+		AppName:           "xira",
 		Agent:             agent,
 		SessionService:    s.adkSessions,
 		AutoCreateSession: true,

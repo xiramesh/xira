@@ -1,4 +1,6 @@
 .cache/
 .flowdeck/
 .flowdeck-smoke/
+.xira/
+.xira-smoke/
 references/

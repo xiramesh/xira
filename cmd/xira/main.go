@@ -12,11 +12,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ai-daming/flowdeck/internal/api"
-	"github.com/ai-daming/flowdeck/internal/channelrunner"
-	"github.com/ai-daming/flowdeck/internal/runtime"
-	"github.com/ai-daming/flowdeck/internal/tui"
-	"github.com/ai-daming/flowdeck/internal/version"
+	"github.com/ai-daming/xira/internal/api"
+	"github.com/ai-daming/xira/internal/channelrunner"
+	"github.com/ai-daming/xira/internal/runtime"
+	"github.com/ai-daming/xira/internal/tui"
+	"github.com/ai-daming/xira/internal/version"
 )
 
 func main() {
@@ -31,10 +31,10 @@ func newRootCommand() *cobra.Command {
 	var runRoot string
 	var mockModel bool
 	cmd := &cobra.Command{
-		Use:   "flowdeck",
-		Short: "FlowDeck customer delivery runtime",
+		Use:   "xira",
+		Short: "Xira customer delivery runtime",
 	}
-	cmd.PersistentFlags().StringVar(&configPath, "config", "flowdeck.yaml", "Runtime instance config path")
+	cmd.PersistentFlags().StringVar(&configPath, "config", "xira.yaml", "Runtime instance config path")
 	cmd.PersistentFlags().StringVar(&runRoot, "run-root", "", "Override run log root directory")
 	cmd.PersistentFlags().BoolVar(&mockModel, "mock-model", false, "Use mock model instead of DeepSeek")
 	newRuntime := func() (*runtime.Service, error) {
@@ -55,7 +55,7 @@ func newRootCommand() *cobra.Command {
 func versionCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
-		Short: "Print FlowDeck version",
+		Short: "Print Xira version",
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", version.Name, version.Version)
 		},
@@ -66,7 +66,7 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 	var addr string
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run FlowDeck runtime API server",
+		Short: "Run Xira runtime API server",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rt, err := newRuntime()
 			if err != nil {
@@ -88,7 +88,7 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 				_ = channelRunners.Stop(stopCtx)
 			}()
 			srv := api.NewServer(rt, addr)
-			fmt.Fprintf(cmd.OutOrStdout(), "flowdeck runtime listening on %s (channel runners: %d)\n", srv.URL(), channelRunners.Count())
+			fmt.Fprintf(cmd.OutOrStdout(), "xira runtime listening on %s (channel runners: %d)\n", srv.URL(), channelRunners.Count())
 			return srv.Start(ctx)
 		},
 	}
@@ -194,7 +194,7 @@ func tuiCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 	var agentID string
 	cmd := &cobra.Command{
 		Use:   "tui",
-		Short: "Run embedded FlowDeck TUI",
+		Short: "Run embedded Xira TUI",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rt, err := newRuntime()
 			if err != nil {

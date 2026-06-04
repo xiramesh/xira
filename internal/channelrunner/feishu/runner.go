@@ -15,8 +15,8 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
-	"github.com/ai-daming/flowdeck/internal/entrypoints"
-	frt "github.com/ai-daming/flowdeck/internal/runtime"
+	"github.com/ai-daming/xira/internal/entrypoints"
+	frt "github.com/ai-daming/xira/internal/runtime"
 )
 
 var mentionPlaceholderRegex = regexp.MustCompile(`@_user_\d+`)
@@ -90,7 +90,7 @@ func (r *Runner) Start(ctx context.Context) error {
 
 	go func() {
 		if err := client.Start(runCtx); err != nil && runCtx.Err() == nil {
-			log.Printf("flowdeck feishu runner %s stopped: %v", r.definition.ID, err)
+			log.Printf("xira feishu runner %s stopped: %v", r.definition.ID, err)
 		}
 	}()
 	return nil

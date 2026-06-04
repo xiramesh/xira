@@ -36,7 +36,7 @@ func NewEditFileTool(workspaceRoot string) *EditFileTool {
 
 func (t *ReadFileTool) Name() string { return "read_file" }
 func (t *ReadFileTool) Description() string {
-	return "Read a UTF-8 text file from the FlowDeck workspace."
+	return "Read a UTF-8 text file from the Xira workspace."
 }
 func (t *ReadFileTool) Parameters() map[string]any {
 	return map[string]any{
@@ -65,7 +65,7 @@ func (t *ReadFileTool) Execute(_ context.Context, args map[string]any) (map[stri
 
 func (t *WriteFileTool) Name() string { return "write_file" }
 func (t *WriteFileTool) Description() string {
-	return "Create or overwrite a UTF-8 text file in the FlowDeck workspace."
+	return "Create or overwrite a UTF-8 text file in the Xira workspace."
 }
 func (t *WriteFileTool) Parameters() map[string]any {
 	return map[string]any{
@@ -97,7 +97,7 @@ func (t *WriteFileTool) Execute(_ context.Context, args map[string]any) (map[str
 
 func (t *ListDirTool) Name() string { return "list_dir" }
 func (t *ListDirTool) Description() string {
-	return "List files and directories in the FlowDeck workspace."
+	return "List files and directories in the Xira workspace."
 }
 func (t *ListDirTool) Parameters() map[string]any {
 	return map[string]any{

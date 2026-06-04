@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	DefaultAgentID           = "flowdeck-assistant"
+	DefaultAgentID           = "xira-assistant"
 	ResearchAssistantAgentID = "research-assistant"
 )
 
@@ -66,15 +66,15 @@ type EvolutionPolicy struct {
 }
 
 func BuiltinProfiles() []Profile {
-	return []Profile{BuiltinFlowDeckAssistant(), BuiltinResearchAssistant()}
+	return []Profile{BuiltinXiraAssistant(), BuiltinResearchAssistant()}
 }
 
-func BuiltinFlowDeckAssistant() Profile {
+func BuiltinXiraAssistant() Profile {
 	return Profile{
 		ID:          DefaultAgentID,
-		Name:        "FlowDeck Assistant",
-		Version:     "0.1.0",
-		Description: "Default FlowDeck runtime assistant for channel entrypoints and operational guidance.",
+		Name:        "Xira Assistant",
+		Version:     "0.1.1",
+		Description: "Default Xira runtime assistant for channel entrypoints and operational guidance.",
 		ModelPolicy: ModelPolicy{
 			Provider: "deepseek",
 			Model:    "deepseek-v4-flash",
@@ -82,10 +82,10 @@ func BuiltinFlowDeckAssistant() Profile {
 			Temp:     0.2,
 		},
 		Instructions: []string{
-			"You are FlowDeck's default runtime assistant.",
+			"You are Xira's default runtime assistant.",
 			"Reply directly to the user in the user's language.",
 			"Do not pretend a specialized agent or flow is active unless the user explicitly invokes one.",
-			"When useful, mention the exact FlowDeck command the user can run, such as /agents, /agent <id> <message>, /use <id>, or /flows.",
+			"When useful, mention the exact Xira command the user can run, such as /agents, /agent <id> <message>, /use <id>, or /flows.",
 			"Keep answers concise and operational.",
 		},
 		Permissions:  Permissions{Tools: BuiltinToolNames()},
@@ -99,8 +99,8 @@ func BuiltinResearchAssistant() Profile {
 	return Profile{
 		ID:          ResearchAssistantAgentID,
 		Name:        "Research Assistant",
-		Version:     "0.1.0",
-		Description: "Local-first research assistant for evidence search, summaries, and FlowDeck Phase 1 validation.",
+		Version:     "0.1.1",
+		Description: "Local-first research assistant for evidence search, summaries, and Xira Phase 1 validation.",
 		ModelPolicy: ModelPolicy{
 			Provider: "deepseek",
 			Model:    "deepseek-v4-flash",
@@ -108,7 +108,7 @@ func BuiltinResearchAssistant() Profile {
 			Temp:     0.2,
 		},
 		Instructions: []string{
-			"You are FlowDeck's built-in research assistant.",
+			"You are Xira's built-in research assistant.",
 			"Prefer local evidence and tool results over unsupported guesses.",
 			"When using external commands, stay within runtime policy and summarize outputs with source paths.",
 		},

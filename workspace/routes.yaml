@@ -1,2 +1,2 @@
-default_agent: flowdeck-assistant
+default_agent: xira-assistant
 routes: []

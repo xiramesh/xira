@@ -12,7 +12,7 @@ func TestLoadFromWorkspaceReadsProfileFrontmatterBodyAndSoul(t *testing.T) {
 	writeAgentProfile(t, workspace, "research-assistant", `---
 id: research-assistant
 name: Research Assistant
-version: 0.1.0
+version: 0.1.1
 description: Evidence-first research agent.
 model_policy:
   provider: deepseek
@@ -81,7 +81,7 @@ func TestLoadProfileDirRequiresIDToMatchDirectory(t *testing.T) {
 	writeAgentProfile(t, workspace, "copied-agent", `---
 id: original-agent
 name: Copied Agent
-version: 0.1.0
+version: 0.1.1
 model_policy:
   provider: deepseek
   model: deepseek-v4-flash
@@ -103,7 +103,7 @@ func TestLoadProfileDirReportsMissingRequiredFields(t *testing.T) {
 	writeAgentProfile(t, workspace, "broken-agent", `---
 id: broken-agent
 name: Broken Agent
-version: 0.1.0
+version: 0.1.1
 ---
 Body.
 `, "Soul.")
@@ -122,7 +122,7 @@ func TestLoadProfileDirRequiresSoulFile(t *testing.T) {
 	writeAgentProfile(t, workspace, "soulless-agent", `---
 id: soulless-agent
 name: Soulless Agent
-version: 0.1.0
+version: 0.1.1
 model_policy:
   provider: deepseek
   model: deepseek-v4-flash

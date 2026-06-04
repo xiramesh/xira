@@ -1,4 +1,4 @@
-module github.com/ai-daming/flowdeck
+module github.com/ai-daming/xira
 
 go 1.25.0
 

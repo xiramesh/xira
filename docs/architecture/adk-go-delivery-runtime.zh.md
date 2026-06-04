@@ -1,12 +1,12 @@
-# 基于 ADK Go 的 FlowDeck 客户交付运行时设计草案
+# 基于 ADK Go 的 Xira 客户交付运行时设计草案
 
 > 日期：2026-06-03  
 > 定位：新产品 / 新运行时的架构草案，不是 PicoClaw 的重构计划。  
-> 结论：采用 ADK Go 作为 Agent Loop 内核是可行的，但产品边界应该由 FlowDeck Business Runtime 定义。
+> 结论：采用 ADK Go 作为 Agent Loop 内核是可行的，但产品边界应该由 Xira Business Runtime 定义。
 
 ## 摘要
 
-如果从零做一个面向客户交付的桌面 / 私有化 FlowDeck 运行时，可以采用 **ADK Go first, but not ADK only** 的设计。
+如果从零做一个面向客户交付的桌面 / 私有化 Xira 运行时，可以采用 **ADK Go first, but not ADK only** 的设计。
 
 ADK Go 负责：
 
@@ -24,11 +24,11 @@ ADK Go 负责：
 - 桌面 / TUI / Web 控制台
 - 飞书、企业微信、WebSocket、自定义 API 等 channel gateway
 
-核心判断是：**ADK Go 可以定义 agent 怎么跑，但不应该定义 FlowDeck 交付什么。**
+核心判断是：**ADK Go 可以定义 agent 怎么跑，但不应该定义 Xira 交付什么。**
 
-## FlowDeck 与 Flow 定义
+## Xira 与 Flow 定义
 
-FlowDeck 的 `flow` 不是传统意义上的 workflow、DAG、审批流或任务编排引擎。
+Xira 的 `flow` 不是传统意义上的 workflow、DAG、审批流或任务编排引擎。
 
 这里的 flow 是对 B 交付的业务流程视角：
 
@@ -37,7 +37,7 @@ FlowDeck 的 `flow` 不是传统意义上的 workflow、DAG、审批流或任务
 - 一个 flow 围绕客户真实业务目标组织多个 agent、skills、connectors、secrets、policy、人工审批、审计和交付物。
 - 客户购买和验收的不是 prompt，也不是单个 agent，而是一个能嵌入业务流程并持续运行的 flow。
 
-因此 FlowDeck 的产品边界应该是：
+因此 Xira 的产品边界应该是：
 
 ```text
 Business Flow
@@ -54,7 +54,7 @@ Business Flow
 
 Flow 可以包含多 agent 协作，但 flow 本身首先是业务对象，不是底层 agent 编排图。
 
-运行入口不等于交付边界。FlowDeck 应该同时支持两类 entrypoint：
+运行入口不等于交付边界。Xira 应该同时支持两类 entrypoint：
 
 ```text
 Agent Run
@@ -70,9 +70,9 @@ Flow Run
 
 ## 背景
 
-目标产品是一个面向客户交付的 FlowDeck：
+目标产品是一个面向客户交付的 Xira：
 
-- 有统一的 `flowdeck` 桌面 / TUI / CLI / GUI 入口。
+- 有统一的 `xira` 桌面 / TUI / CLI / GUI 入口。
 - 能把同一套 runtime 部署到不同客户环境。
 - 支持直接运行 agent，也支持运行业务 flow。
 - 每个客户获得定制化 flow packs、skills、connectors、closed-source CLI tools。
@@ -126,7 +126,7 @@ PicoClaw 提供的参考思想是：
 - 不在第一版支持复杂 multi-agent 编排。
 - 不要求第一版所有任务都必须建模为 flow。
 - 不把客户业务 connector 编译进核心 runtime。
-- 不直接把 ADK Skills 当作 FlowDeck 的交付格式。
+- 不直接把 ADK Skills 当作 Xira 的交付格式。
 
 ## 高层架构
 
@@ -242,7 +242,7 @@ Agent profile 负责定义：
 
 面向客户长期交付时，最终交付对象不应该只是一段 prompt，也不应该只是单个 agent 或 skill。
 
-FlowDeck 的交付单位应该是 flow pack。一个 flow pack 应该包含：
+Xira 的交付单位应该是 flow pack。一个 flow pack 应该包含：
 
 - flow definition
 - instructions
@@ -307,13 +307,13 @@ native module 只用于平台基础能力，不作为默认客户定制方式。
 
 注意：audit log 不一定保存完整敏感内容，但要保留足够的可追溯 metadata。
 
-### 6. Harness 是 FlowDeck 的工程闭环
+### 6. Harness 是 Xira 的工程闭环
 
-FlowDeck 不只是让 agent 能调用工具，而是要让每次真实运行都能成为下一版交付能力的证据。
+Xira 不只是让 agent 能调用工具，而是要让每次真实运行都能成为下一版交付能力的证据。
 
-可以把 FlowDeck 的 Harness 动作定义为：
+可以把 Xira 的 Harness 动作定义为：
 
-| 动作 | FlowDeck 中的含义 | 主要落点 |
+| 动作 | Xira 中的含义 | 主要落点 |
 | --- | --- | --- |
 | Specify | 把客户需求变成可执行规格和验收标准 | `agent_profile.yaml`、`task_spec.yaml`、flow objective、acceptance cases |
 | Ground | 给 agent 正确上下文，排除过期材料 | context pack、source of truth、forbidden context |
@@ -324,7 +324,7 @@ FlowDeck 不只是让 agent 能调用工具，而是要让每次真实运行都�
 | Observe | 保存 trace、run log、audit、artifact | event store、audit store、artifact store |
 | Improve | 把失败和用户纠正转化为改进候选 | evolution events、candidate patches、promotion gate |
 
-这意味着 FlowDeck 同时有两个闭环：
+这意味着 Xira 同时有两个闭环：
 
 ```text
 执行闭环：
@@ -358,10 +358,10 @@ Run Log -> Failure Attribution -> Evolution Candidate -> Verification -> Promote
 建议命令：
 
 ```text
-flowdeck serve
+xira serve
 ```
 
-### FlowDeck CLI
+### Xira CLI
 
 面向开发者、交付工程师和运维人员。
 
@@ -381,14 +381,14 @@ flowdeck serve
 建议命令：
 
 ```text
-flowdeck
-flowdeck init
-flowdeck serve
-flowdeck agent run
-flowdeck flow install
-flowdeck flow run
-flowdeck command run
-flowdeck audit export
+xira
+xira init
+xira serve
+xira agent run
+xira flow install
+xira flow run
+xira command run
+xira audit export
 ```
 
 ### Console
@@ -526,7 +526,7 @@ model:
 3. 未配置 `DEEPSEEK_API_KEY` 时启动失败。
 4. tool calls 必须经过 Business Runtime 的 policy / audit wrapper。
 
-这样做的目的不是封死未来模型选择，而是让第一版先证明 FlowDeck 的 runtime 边界、TUI、agent profile、connector、audit 链路。模型扩展应该在 `AgentEngine` 和 model adapter 稳定之后再做。
+这样做的目的不是封死未来模型选择，而是让第一版先证明 Xira 的 runtime 边界、TUI、agent profile、connector、audit 链路。模型扩展应该在 `AgentEngine` 和 model adapter 稳定之后再做。
 
 ### Agent Profile Manager
 
@@ -547,7 +547,7 @@ agents/
 ```yaml
 id: research-assistant
 name: Research Assistant
-version: 0.1.0
+version: 0.1.1
 model_policy: default
 model:
   provider: deepseek
@@ -669,7 +669,7 @@ customer-support/
 ```yaml
 id: customer-support
 name: Customer Support
-version: 0.1.0
+version: 0.1.1
 description: Customer-specific support flow.
 
 flow:
@@ -767,12 +767,12 @@ Skill Pack Manager 不决定客户交付边界；Flow Pack Manager 才决定一�
 
 ### Built-in Tools
 
-FlowDeck 第一版需要一组类似 Codex/PicoClaw 的最小内置工具：`exec`、`read_file`、`write_file`、`list_dir`、`edit_file`。其中 `exec` 用来执行运行前未知的 shell 命令，四个文件工具负责稳定的本地文件读写和编辑。
+Xira 第一版需要一组类似 Codex/PicoClaw 的最小内置工具：`exec`、`read_file`、`write_file`、`list_dir`、`edit_file`。其中 `exec` 用来执行运行前未知的 shell 命令，四个文件工具负责稳定的本地文件读写和编辑。
 
 原因：
 
 - 客户现场常常已经有可执行 CLI、内部脚本、运维工具。
-- FlowDeck 在启动前无法知道这些命令的名字、路径、版本和参数。
+- Xira 在启动前无法知道这些命令的名字、路径、版本和参数。
 - 交付工程师需要先通过 TUI / agent 试跑命令、观察输出，再决定是否把它写入业务流程或后续工具声明。
 - 本地知识库、临时脚本、HTML 图表和交付产物都需要稳定的文件读写能力。
 
@@ -821,13 +821,13 @@ External Tool Runtime 是客户系统和 flow / agent 之间的能力桥。Phase
 
 #### Process CLI 模式
 
-CLI 是 FlowDeck 对 B 交付里的重要形态。很多客户交付物本身就是一个可执行命令，FlowDeck 在运行前不应该假设自己知道客户环境里有哪些命令、版本和能力。
+CLI 是 Xira 对 B 交付里的重要形态。很多客户交付物本身就是一个可执行命令，Xira 在运行前不应该假设自己知道客户环境里有哪些命令、版本和能力。
 
 Process CLI 后续可以支持两种模式：
 
 | 模式 | 用途 | 说明 |
 | --- | --- | --- |
-| Protocol CLI | 专门为 FlowDeck 编写的闭源工具 | 走 JSON stdin/stdout 协议 |
+| Protocol CLI | 专门为 Xira 编写的闭源工具 | 走 JSON stdin/stdout 协议 |
 | Wrapped CLI | 已存在的客户 / 交付 CLI | 由 connector manifest 映射命令、参数、schema 和权限 |
 
 Protocol CLI 建议协议：
@@ -846,7 +846,7 @@ connector -> runtime: JSON response over stdout
 - stderr 进入 debug log
 - stdout 只承载协议输出
 
-Wrapped CLI 不要求原命令理解 FlowDeck。运行时通过 flow pack / connector manifest 知道如何调用它。但这不是 Phase 1 的默认能力，不能在 core runtime 里硬编码任何具体 CLI。
+Wrapped CLI 不要求原命令理解 Xira。运行时通过 flow pack / connector manifest 知道如何调用它。但这不是 Phase 1 的默认能力，不能在 core runtime 里硬编码任何具体 CLI。
 
 运行时在安装或启动 flow pack 时做 capability discovery：
 
@@ -862,7 +862,7 @@ Wrapped CLI 不要求原命令理解 FlowDeck。运行时通过 flow pack / conn
 - Wrapped CLI connector 不扫描任意系统命令，只把 manifest 声明的 tool 暴露为可复用能力。
 - 未在 flow pack / connector manifest 中声明的 CLI 不能作为稳定 tool 自动调用；如果需要临时运行，必须走 Built-in Command Runner 的审批、sandbox 和 audit。
 - TUI 展示的是 runtime-discovered agent 和其允许的 built-in tools，不是自己发现的本机命令。
-- 对客户交付 CLI，建议同时提供 `--version` 和机器可读输出；但第一版不强制 CLI 原生支持 FlowDeck 协议。
+- 对客户交付 CLI，建议同时提供 `--version` 和机器可读输出；但第一版不强制 CLI 原生支持 Xira 协议。
 
 ### Secrets Manager
 
@@ -905,7 +905,7 @@ Run log 和 artifact 是客户交付验收、失败复盘和 Harness 进化的�
 建议每次 agent run / flow run 生成目录：
 
 ```text
-.flowdeck/
+.xira/
   runs/
     20260603-143000-customer-support/
       run.yaml
@@ -960,7 +960,7 @@ Run log 不是 chat transcript 的替代品。它要回答：
 
 ### Harness Evolution Loop
 
-FlowDeck 的 evolution loop 负责把真实运行中的失败、成功模式和用户纠正转成可审查的改进候选。
+Xira 的 evolution loop 负责把真实运行中的失败、成功模式和用户纠正转成可审查的改进候选。
 
 第一版只做 candidate generation，不做自动 promote。
 
@@ -1035,7 +1035,7 @@ rg -n "customer_id" .
 如果这组命令在客户环境中稳定，可以生成 command recipe artifact：
 
 ```text
-.flowdeck/
+.xira/
   command-recipes/
     20260603-rg-search.yaml
     tests/
@@ -1051,7 +1051,7 @@ Review gate 至少检查：
 5. timeout 和错误输出行为明确。
 6. audit metadata 足够复盘。
 
-这个设计允许 FlowDeck 像 Codex / Claude Code 一样先探索本机未知工具，同时又能把成熟命令沉淀成对 B 可交付、可验收、可回滚的 connector。
+这个设计允许 Xira 像 Codex / Claude Code 一样先探索本机未知工具，同时又能把成熟命令沉淀成对 B 可交付、可验收、可回滚的 connector。
 
 ## 概念映射
 
@@ -1160,7 +1160,7 @@ conversation_id + agent_id -> ADK session_id
 
 ## Flow Pack 与 ADK 的关系
 
-不建议直接把 ADK Skills 作为 FlowDeck 的交付格式。
+不建议直接把 ADK Skills 作为 Xira 的交付格式。
 
 原因：
 
@@ -1275,7 +1275,7 @@ decision_options:
 
 ```text
 Desktop App
-  -> local flowdeck serve
+  -> local xira serve
   -> local config / encrypted secrets
   -> local ADK runner
 ```
@@ -1291,7 +1291,7 @@ Desktop App
 
 ```text
 Customer Server
-  -> flowdeck serve
+  -> xira serve
   -> customer DB / secret backend
   -> internal ERP connectors
   -> Feishu / WeCom channel
@@ -1331,9 +1331,9 @@ Customer Runtime
 
 范围：
 
-- `flowdeck serve` runtime daemon
-- `flowdeck serve` 统一启动 enabled channel / entrypoint runner；不提供 `flowdeck <channel> serve` 这类 per-channel daemon 命令
-- `flowdeck` 基础 CLI
+- `xira serve` runtime daemon
+- `xira serve` 统一启动 enabled channel / entrypoint runner；不提供 `xira <channel> serve` 这类 per-channel daemon 命令
+- `xira` 基础 CLI
 - WebSocket channel
 - ADK Go runner
 - DeepSeek model adapter，只支持 `deepseek-v4-flash` / `deepseek-v4-pro`
@@ -1376,7 +1376,7 @@ Customer Runtime
 - integration permission policy
 - secrets binding
 - Feishu channel
-- Feishu channel 由 `flowdeck serve` 根据 entrypoint 配置自动启动，采用 Feishu SDK WebSocket 模式
+- Feishu channel 由 `xira serve` 根据 entrypoint 配置自动启动，采用 Feishu SDK WebSocket 模式
 - audit event 查询
 - tool call replay / debug 页面
 - package version metadata
@@ -1422,7 +1422,7 @@ Customer Runtime
 
 ```text
 cmd/
-  flowdeck/
+  xira/
 
 internal/
   runtime/
@@ -1486,8 +1486,8 @@ pkg/
 
 其中：
 
-- `cmd/flowdeck` 提供单一命令入口，通过子命令承担 daemon 和运维动作。
-- channel 生命周期由 `flowdeck serve` 管理；禁止增加 `flowdeck feishu serve`、`flowdeck ilink serve` 这类 per-channel command。
+- `cmd/xira` 提供单一命令入口，通过子命令承担 daemon 和运维动作。
+- channel 生命周期由 `xira serve` 管理；禁止增加 `xira feishu serve`、`xira ilink serve` 这类 per-channel command。
 - `internal/agent/engine.go` 定义 agent engine 抽象。
 - `internal/agent/adk` 只负责 ADK adapter。
 - `internal/agents` 定义可独立运行的 agent profile。
@@ -1606,7 +1606,7 @@ flow、客户、渠道、权限、secrets、审计、flow pack 由 Business Runt
 
 理由：
 
-- FlowDeck 的客户交付对象是业务 flow，不是 prompt、agent 或 workflow DAG。
+- Xira 的客户交付对象是业务 flow，不是 prompt、agent 或 workflow DAG。
 - 客户交付需要版本、权限、secrets、tests、integrations。
 - ADK Skills 不应成为唯一交付格式。
 - 自有格式可以稳定表达业务交付需求。
@@ -1650,11 +1650,11 @@ flow、客户、渠道、权限、secrets、审计、flow pack 由 Business Runt
 
 决策：
 
-把 run log、artifact、verification result、evolution candidate 作为 FlowDeck 的 Harness Stores，而不是普通 debug log。
+把 run log、artifact、verification result、evolution candidate 作为 Xira 的 Harness Stores，而不是普通 debug log。
 
 理由：
 
-- FlowDeck 的交付对象是可复盘、可验收、可改进的业务 flow。
+- Xira 的交付对象是可复盘、可验收、可改进的业务 flow。
 - 客户现场失败通常不是单点 bug，而是 spec、context、tool、permission、workflow、verification 的组合问题。
 - 没有结构化运行证据，就无法判断一次改动是否真的提升了交付质量。
 - run log 和 artifact 是 handoff、复盘、客户验收和后续演进的共同基础。
@@ -1675,7 +1675,7 @@ flow、客户、渠道、权限、secrets、审计、flow pack 由 Business Runt
 
 决策：
 
-FlowDeck 内置 `exec` 工具，允许运行运行前未知的本地命令。Phase 1 不把每个 CLI 命令包装成专用 tool 或 connector；稳定命令先沉淀为 command recipe 和 flow / agent command step。
+Xira 内置 `exec` 工具，允许运行运行前未知的本地命令。Phase 1 不把每个 CLI 命令包装成专用 tool 或 connector；稳定命令先沉淀为 command recipe 和 flow / agent command step。
 
 理由：
 
@@ -1698,12 +1698,12 @@ FlowDeck 内置 `exec` 工具，允许运行运行前未知的本地命令。Pha
 
 决策：
 
-第一版可以优先做 TUI，但 TUI 只通过 Runtime API 操作 FlowDeck，不直接执行客户 CLI、不直接读取 secrets、不绕过 policy。
+第一版可以优先做 TUI，但 TUI 只通过 Runtime API 操作 Xira，不直接执行客户 CLI、不直接读取 secrets、不绕过 policy。
 
 理由：
 
 - CLI / TUI 是交付给客户的重要入口，但安全、权限、审计和复盘必须集中在 Runtime。
-- FlowDeck 运行前不知道客户有哪些 flow、agent 或外部 CLI，TUI 必须动态读取 runtime 状态。
+- Xira 运行前不知道客户有哪些 flow、agent 或外部 CLI，TUI 必须动态读取 runtime 状态。
 - 如果 TUI 直接执行命令，会让同一动作在 TUI、agent、API 中产生不同安全语义。
 
 代价：
@@ -1713,7 +1713,7 @@ FlowDeck 内置 `exec` 工具，允许运行运行前未知的本地命令。Pha
 
 缓解：
 
-- 本地开发可以支持 `flowdeck tui --embedded-runtime`，但内部仍走同一套 Runtime API。
+- 本地开发可以支持 `xira tui --embedded-runtime`，但内部仍走同一套 Runtime API。
 - TUI 的所有动作生成 runtime event；高风险动作生成 approval request；完成后写 run log。
 
 ## 风险与缓解
@@ -1722,7 +1722,7 @@ FlowDeck 内置 `exec` 工具，允许运行运行前未知的本地命令。Pha
 | --- | --- | --- |
 | ADK Go API 变化 | adapter 需要更新 | 通过 `AgentEngine` 隔离，锁版本 |
 | DeepSeek API 语义变化 | chat / stream / tool call adapter 需要更新 | model id 白名单、contract tests、mock adapter |
-| 模型范围过早泛化 | 第一版变成 LLM gateway，拖慢 FlowDeck 验证 | 只支持 `deepseek-v4-flash` / `deepseek-v4-pro` |
+| 模型范围过早泛化 | 第一版变成 LLM gateway，拖慢 Xira 验证 | 只支持 `deepseek-v4-flash` / `deepseek-v4-pro` |
 | 过早强制所有任务 flow 化 | 第一版实现变重，真实干活入口不顺 | Phase 1 采用 agent-first，flow wrapper 后置 |
 | ADK Skills 成熟度不足 | flow 交付受阻 | 自定义 flow pack，ADK 只作为编译目标 |
 | Integration 失败难排查 | 客户交付风险 | 强制 audit、debug log、test harness |
@@ -1837,10 +1837,10 @@ PicoClaw 可以参考：
 - Web launcher / dashboard 思路
 - tool result 区分 ForLLM / ForUser 的产品语义
 
-FlowDeck 还应该从 PicoClaw 的经验里保留三个教训：
+Xira 还应该从 PicoClaw 的经验里保留三个教训：
 
 - Runtime event 要服务 UI 和 debug，但 audit / run log 需要更稳定，不能混在一起。
-- Hook / process hook 说明进程外扩展是有效路线，但 FlowDeck 需要把它产品化为 connector manifest、schema 和 tests。
+- Hook / process hook 说明进程外扩展是有效路线，但 Xira 需要把它产品化为 connector manifest、schema 和 tests。
 - Session scope 要从业务边界建模，再映射到底层 agent engine，而不是反过来。
 
 但不建议复用：
@@ -1850,7 +1850,7 @@ FlowDeck 还应该从 PicoClaw 的经验里保留三个教训：
 - steering / subturn 的完整实现
 - 所有 channel 的历史兼容逻辑
 
-新产品应该从 ADK Go 的 agent loop 出发，再逐步补齐真实交付场景需要的 runtime 能力。FlowDeck 比 PicoClaw 更明确地把 Harness Stores、verification 和 evolution candidate 放进第一版边界，因为这是对 B 交付和后续复用的基础。
+新产品应该从 ADK Go 的 agent loop 出发，再逐步补齐真实交付场景需要的 runtime 能力。Xira 比 PicoClaw 更明确地把 Harness Stores、verification 和 evolution candidate 放进第一版边界，因为这是对 B 交付和后续复用的基础。
 
 ## 开放问题
 
@@ -1867,7 +1867,7 @@ FlowDeck 还应该从 PicoClaw 的经验里保留三个教训：
 11. 每个 flow pack 至少需要多少 golden tasks 才允许交付？
 12. exec tool 的 sandbox 后续用本地进程限制、Docker，还是客户环境提供的隔离机制？
 13. artifact policy 是否需要区分内部证据、客户可见交付物和模型可见上下文？
-14. TUI 是否默认嵌入 runtime，还是要求用户先启动 `flowdeck serve`？
+14. TUI 是否默认嵌入 runtime，还是要求用户先启动 `xira serve`？
 15. 已探索成功的客户 CLI 命令什么时候可以进入 flow pack：按复用次数、客户验收、还是 artifact / audit 边界成熟度？
 16. 后续是否需要独立 connector SDK，还是长期保持 exec + MCP 优先？
 
@@ -1878,16 +1878,16 @@ FlowDeck 还应该从 PicoClaw 的经验里保留三个教训：
 3. 实现 DeepSeek adapter v0，只支持 `deepseek-v4-flash` / `deepseek-v4-pro`，同时准备 mock adapter。
 4. 定义核心接口：`AgentEngine`、`TurnRequest`、`RuntimeEvent`、`ToolCall`、`VerificationResult`、`RunRecord`。
 5. 定义 agent profile v0 schema，包含 model policy、instructions、permissions、artifact policy、verification defaults。
-6. 实现 agent profile manager，并支持 `flowdeck agent run`。
+6. 实现 agent profile manager，并支持 `xira agent run`。
 7. 实现 built-in tools v0：`exec`、`read_file`、`write_file`、`list_dir`、`edit_file`。
 8. 实现模型工具调用路径：模型通过 `exec` 探索 `which`、`--help`、`--version` 和具体命令，不为每个 CLI 写专用 tool。
-9. 实现 run log / artifact store v0：本地 `.flowdeck/runs/<run_id>/`，支持导出。
+9. 实现 run log / artifact store v0：本地 `.xira/runs/<run_id>/`，支持导出。
 10. 实现 verification runner v0：schema check、command check、agent smoke case、golden task。
 11. 实现 evolution candidate v0：失败归因、候选记录、人工 review 状态，不自动 promote。
 12. 做 TUI + Runtime API + agent profile + built-in tools + ADK tool call 的端到端 demo。
 13. 用一个真实 agent 任务验证：例如本地证据检索、客户资料汇总、售后处理或内部知识问答。
 14. 定义 flow pack v0 schema，把稳定 agent profile 包装成 demo flow。
-15. 把 successful ad-hoc command 保存为 command recipe，跑一次 review gate，验证 FlowDeck 的交付闭环。
+15. 把 successful ad-hoc command 保存为 command recipe，跑一次 review gate，验证 Xira 的交付闭环。
 
 ## 参考资料
 

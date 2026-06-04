@@ -7,13 +7,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ai-daming/flowdeck/internal/agents"
-	"github.com/ai-daming/flowdeck/internal/runtime"
+	"github.com/ai-daming/xira/internal/agents"
+	"github.com/ai-daming/xira/internal/runtime"
 )
 
 func TestAgentListUsesWorkspaceAgents(t *testing.T) {
-	instance := writeCLIFixture(t, "flowdeck-assistant")
-	out := executeCommand(t, "--config", filepath.Join(instance, "flowdeck.yaml"), "--mock-model", "agent", "list")
+	instance := writeCLIFixture(t, "xira-assistant")
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "--mock-model", "agent", "list")
 
 	var profiles []agents.Profile
 	if err := json.Unmarshal([]byte(out), &profiles); err != nil {
@@ -22,14 +22,14 @@ func TestAgentListUsesWorkspaceAgents(t *testing.T) {
 	if len(profiles) != 2 {
 		t.Fatalf("profiles len = %d", len(profiles))
 	}
-	if profiles[0].ID != "flowdeck-assistant" || profiles[1].ID != "research-assistant" {
+	if profiles[0].ID != "xira-assistant" || profiles[1].ID != "research-assistant" {
 		t.Fatalf("profiles = %+v", profiles)
 	}
 }
 
 func TestAgentRunUsesRuntimeDefaultAgent(t *testing.T) {
 	instance := writeCLIFixture(t, "research-assistant")
-	out := executeCommand(t, "--config", filepath.Join(instance, "flowdeck.yaml"), "--mock-model", "agent", "run", "--message", "hi")
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "--mock-model", "agent", "run", "--message", "hi")
 
 	var resp runtime.TurnResponse
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
@@ -41,8 +41,8 @@ func TestAgentRunUsesRuntimeDefaultAgent(t *testing.T) {
 }
 
 func TestAgentRunUsesExplicitWorkspaceAgent(t *testing.T) {
-	instance := writeCLIFixture(t, "flowdeck-assistant")
-	out := executeCommand(t, "--config", filepath.Join(instance, "flowdeck.yaml"), "--mock-model", "agent", "run", "--agent", "research-assistant", "--message", "please call exec")
+	instance := writeCLIFixture(t, "xira-assistant")
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "--mock-model", "agent", "run", "--agent", "research-assistant", "--message", "please call exec")
 
 	var resp runtime.TurnResponse
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
@@ -60,7 +60,7 @@ func TestNoPerChannelFeishuCommand(t *testing.T) {
 	cmd := newRootCommand()
 	for _, sub := range cmd.Commands() {
 		if sub.Name() == "feishu" {
-			t.Fatal("flowdeck feishu command should not exist; channel runners are owned by flowdeck serve")
+			t.Fatal("xira feishu command should not exist; channel runners are owned by xira serve")
 		}
 	}
 }
@@ -81,19 +81,19 @@ func executeCommand(t *testing.T, args ...string) string {
 func writeCLIFixture(t *testing.T, defaultAgentID string) string {
 	t.Helper()
 	instance := t.TempDir()
-	writeCLIFile(t, filepath.Join(instance, "flowdeck.yaml"), `workspace: workspace
+	writeCLIFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
 default_agent: `+defaultAgentID+`
-run_root: .flowdeck/runs
+run_root: .xira/runs
 routes: workspace/routes.yaml
 `)
 	writeCLIFile(t, filepath.Join(instance, "workspace", "routes.yaml"), `default_agent: `+defaultAgentID+`
 routes: []
 `)
-	writeCLIFile(t, filepath.Join(instance, "workspace", "agents", "flowdeck-assistant", "PROFILE.md"), `---
-id: flowdeck-assistant
-name: FlowDeck Assistant
-version: 0.1.0
-description: Default FlowDeck runtime assistant.
+	writeCLIFile(t, filepath.Join(instance, "workspace", "agents", "xira-assistant", "PROFILE.md"), `---
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.1
+description: Default Xira runtime assistant.
 model_policy:
   provider: deepseek
   model: deepseek-v4-flash
@@ -111,13 +111,13 @@ verification:
 
 Keep responses operational.
 `)
-	writeCLIFile(t, filepath.Join(instance, "workspace", "agents", "flowdeck-assistant", "SOUL.md"), `# Soul
+	writeCLIFile(t, filepath.Join(instance, "workspace", "agents", "xira-assistant", "SOUL.md"), `# Soul
 
 Plain and practical.`)
 	writeCLIFile(t, filepath.Join(instance, "workspace", "agents", "research-assistant", "PROFILE.md"), `---
 id: research-assistant
 name: Research Assistant
-version: 0.1.0
+version: 0.1.1
 description: Evidence-first research assistant.
 model_policy:
   provider: deepseek

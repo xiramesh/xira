@@ -3,7 +3,7 @@ package routing
 import (
 	"strings"
 
-	"github.com/ai-daming/flowdeck/internal/channel"
+	"github.com/ai-daming/xira/internal/channel"
 )
 
 var DefaultSessionDimensions = []string{"chat", "sender"}

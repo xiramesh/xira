@@ -21,7 +21,7 @@ type RunStore struct {
 
 func NewRunStore(root string) *RunStore {
 	if strings.TrimSpace(root) == "" {
-		root = ".flowdeck/runs"
+		root = ".xira/runs"
 	}
 	return &RunStore{root: root}
 }

@@ -3,7 +3,7 @@ package agents
 import "testing"
 
 func TestBuiltinDefaultAssistantValidates(t *testing.T) {
-	profile := BuiltinFlowDeckAssistant()
+	profile := BuiltinXiraAssistant()
 	if err := profile.Validate(); err != nil {
 		t.Fatalf("builtin profile should validate: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestBuiltinResearchAssistantValidates(t *testing.T) {
 }
 
 func TestProfileValidateRequiresBoundaries(t *testing.T) {
-	profile := Profile{ID: "x", Name: "X", Version: "0.1.0"}
+	profile := Profile{ID: "x", Name: "X", Version: "0.1.1"}
 	if err := profile.Validate(); err == nil {
 		t.Fatal("expected validation error")
 	}

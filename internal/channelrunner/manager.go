@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ai-daming/flowdeck/internal/channelrunner/feishu"
-	"github.com/ai-daming/flowdeck/internal/runtime"
+	"github.com/ai-daming/xira/internal/channelrunner/feishu"
+	"github.com/ai-daming/xira/internal/runtime"
 )
 
 type Runner interface {

@@ -3,12 +3,12 @@ package entrypoints
 import (
 	"testing"
 
-	"github.com/ai-daming/flowdeck/internal/channel"
-	"github.com/ai-daming/flowdeck/internal/routing"
+	"github.com/ai-daming/xira/internal/channel"
+	"github.com/ai-daming/xira/internal/routing"
 )
 
 func TestRegistryUsesRequestedAgentWhenAllowed(t *testing.T) {
-	registry := NewRegistry("flowdeck-assistant", []Definition{
+	registry := NewRegistry("xira-assistant", []Definition{
 		{
 			ID:              "feishu-expense-bot",
 			Channel:         "feishu",
@@ -38,7 +38,7 @@ func TestRegistryUsesRequestedAgentWhenAllowed(t *testing.T) {
 }
 
 func TestRegistryRejectsDisallowedRequestedAgent(t *testing.T) {
-	registry := NewRegistry("flowdeck-assistant", []Definition{
+	registry := NewRegistry("xira-assistant", []Definition{
 		{
 			ID:              "feishu-expense-bot",
 			Channel:         "feishu",
@@ -58,11 +58,11 @@ func TestRegistryRejectsDisallowedRequestedAgent(t *testing.T) {
 }
 
 func TestRegistryMatchesMultipleEntrypointsForSameChannelByAppAndBot(t *testing.T) {
-	registry := NewRegistry("flowdeck-assistant", []Definition{
+	registry := NewRegistry("xira-assistant", []Definition{
 		{
 			ID:             "feishu-default",
 			Channel:        "feishu",
-			DefaultAgentID: "flowdeck-assistant",
+			DefaultAgentID: "xira-assistant",
 		},
 		{
 			ID:             "feishu-expense-bot",
@@ -98,7 +98,7 @@ func TestRegistryMatchesMultipleEntrypointsForSameChannelByAppAndBot(t *testing.
 }
 
 func TestRegistryUsesImplicitEntrypointWhenUnconfigured(t *testing.T) {
-	registry := NewRegistry("flowdeck-assistant", nil)
+	registry := NewRegistry("xira-assistant", nil)
 
 	decision, err := registry.Resolve(ResolveInput{
 		Context: channel.NewInboundContext("ilink", "wx-1", map[string]string{"chat_id": "room-1"}),
@@ -112,7 +112,7 @@ func TestRegistryUsesImplicitEntrypointWhenUnconfigured(t *testing.T) {
 	if decision.Definition.Channel != "ilink" {
 		t.Fatalf("channel = %q", decision.Definition.Channel)
 	}
-	if decision.AgentID != "flowdeck-assistant" {
+	if decision.AgentID != "xira-assistant" {
 		t.Fatalf("agent = %q", decision.AgentID)
 	}
 }

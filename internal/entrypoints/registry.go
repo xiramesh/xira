@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ai-daming/flowdeck/internal/channel"
-	"github.com/ai-daming/flowdeck/internal/routing"
+	"github.com/ai-daming/xira/internal/channel"
+	"github.com/ai-daming/xira/internal/routing"
 )
 
 type Definition struct {
@@ -50,7 +50,7 @@ type Registry struct {
 func NewRegistry(defaultAgentID string, definitions []Definition) *Registry {
 	defaultAgentID = strings.TrimSpace(defaultAgentID)
 	if defaultAgentID == "" {
-		defaultAgentID = "flowdeck-assistant"
+		defaultAgentID = "xira-assistant"
 	}
 	registry := &Registry{
 		defaultAgentID: defaultAgentID,

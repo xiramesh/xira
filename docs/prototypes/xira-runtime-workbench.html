@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FlowDeck Conversation Workbench Prototype</title>
+  <title>Xira Conversation Workbench Prototype</title>
   <style>
     :root {
       color-scheme: dark;
@@ -589,11 +589,11 @@
 <body>
   <div class="app">
     <header class="topbar">
-      <div class="brand"><div class="mark">FD</div><span>FlowDeck Conversation Workbench</span></div>
+      <div class="brand"><div class="mark">XR</div><span>Xira Conversation Workbench</span></div>
       <div class="status-line">
-        <span class="chip"><span class="dot green"></span>workspace <strong>/work/flowdeck</strong></span>
+        <span class="chip"><span class="dot green"></span>workspace <strong>/work/xira</strong></span>
         <span class="chip">channel <strong>tui.local</strong></span>
-        <span class="chip">agent <strong id="activeAgentChip">flowdeck-assistant</strong></span>
+        <span class="chip">agent <strong id="activeAgentChip">xira-assistant</strong></span>
         <span class="chip">model <strong>deepseek-v4-flash</strong></span>
       </div>
       <div class="top-actions">
@@ -605,7 +605,7 @@
     <section class="runbar">
       <div class="run-meta">
         <span class="run-label"><span class="dot green" id="runDot"></span>Current run <strong id="selectedRun">run-20260604-001</strong></span>
-        <span class="run-note" id="runNote">completed · 7/7 steps · audit persisted to .flowdeck/runs</span>
+        <span class="run-note" id="runNote">completed · 7/7 steps · audit persisted to .xira/runs</span>
       </div>
       <div class="progress-shell">
         <span id="progressText">100%</span>
@@ -624,7 +624,7 @@
           </article>
 
           <article class="turn assistant-turn" data-run-id="run-20260604-001">
-            <div class="speaker"><span class="agent">flowdeck-assistant</span></div>
+            <div class="speaker"><span class="agent">xira-assistant</span></div>
             <div class="message">
               <p>已生成 HTML 柱状图：<span class="step-tool">artifacts/revenue-chart.html</span>。执行过程保留在这个 turn 的 activity summary 里；完整 raw trace 已持久化到 run store。</p>
               <div class="activity collapsed" data-activity="run-20260604-001">
@@ -639,7 +639,7 @@
                     <button class="tiny-button" data-toggle-drawer>Audit ref</button>
                   </div>
                 </div>
-                <div class="summary-line">Completed: read source data, computed monthly totals, wrote chart.html, verified artifact path. Full trace: .flowdeck/runs/run-20260604-001.</div>
+                <div class="summary-line">Completed: read source data, computed monthly totals, wrote chart.html, verified artifact path. Full trace: .xira/runs/run-20260604-001.</div>
                 <div class="steps">
                   <div class="step">
                     <div class="step-status done">ok</div>
@@ -662,7 +662,7 @@
                   </div>
                   <div class="step">
                     <div class="step-status done">ok</div>
-                    <div class="agent-name">flowdeck-assistant</div>
+                    <div class="agent-name">xira-assistant</div>
                     <div class="step-text">synthesized final answer from child agent summaries</div>
                     <div class="step-time">1.1s</div>
                   </div>
@@ -698,10 +698,10 @@ artifacts: artifacts/revenue-chart.html</div>
       running: false,
       expandedAll: false,
       demoSteps: [
-        { agent: "flowdeck-assistant", text: "route request to default agent", tool: "route", seconds: "0.1s" },
+        { agent: "xira-assistant", text: "route request to default agent", tool: "route", seconds: "0.1s" },
         { agent: "research-assistant", text: "read workspace/kb/opening-hours.txt", tool: "read_file", seconds: "0.3s", output: "weekday 09:00, weekend 10:00, holiday 10:00" },
         { agent: "ops-assistant", text: "resolve date context and channel scope", tool: "session", seconds: "0.2s" },
-        { agent: "flowdeck-assistant", text: "synthesize final answer", tool: "final", seconds: "0.6s" }
+        { agent: "xira-assistant", text: "synthesize final answer", tool: "final", seconds: "0.6s" }
       ]
     };
 
@@ -747,7 +747,7 @@ artifacts: artifacts/revenue-chart.html</div>
       article.className = "turn assistant-turn";
       article.dataset.runId = runId;
       article.innerHTML = `
-        <div class="speaker"><span class="agent">flowdeck-assistant</span></div>
+        <div class="speaker"><span class="agent">xira-assistant</span></div>
         <div class="message">
           <p class="muted">Working. Activity streams inside this turn; raw trace is persisted separately for audit.</p>
           <div class="activity" data-activity="${runId}">
@@ -766,7 +766,7 @@ artifacts: artifacts/revenue-chart.html</div>
             <div class="steps" data-steps></div>
           </div>
           <div class="drawer">run_id: ${escapeHTML(runId)}
-audit: events are being persisted to .flowdeck/runs
+audit: events are being persisted to .xira/runs
 status: running</div>
         </div>
       `;
@@ -806,7 +806,7 @@ status: running</div>
       headerDot.className = "dot green";
       turn.querySelector(".activity-title strong").textContent = "Activity summary";
       turn.querySelector("[data-activity-meta]").textContent = "4 agents · 4 steps · 0 artifacts · completed";
-      turn.querySelector(".summary-line").textContent = `Completed: read knowledge base, resolved date context, produced final answer. Full trace: .flowdeck/runs/${runId}.`;
+      turn.querySelector(".summary-line").textContent = `Completed: read knowledge base, resolved date context, produced final answer. Full trace: .xira/runs/${runId}.`;
       const message = turn.querySelector(".message");
       const final = document.createElement("p");
       final.textContent = answer;
@@ -818,7 +818,7 @@ audit: allow read_file, allow session context, allow final response
 events: 4 persisted
 artifacts: none`;
       state.running = false;
-      setRunStatus(runId, "completed · 4/4 steps · audit persisted to .flowdeck/runs", 100, false);
+      setRunStatus(runId, "completed · 4/4 steps · audit persisted to .xira/runs", 100, false);
       transcript.scrollTop = transcript.scrollHeight;
     }
 
@@ -826,7 +826,7 @@ artifacts: none`;
       if (state.running) return;
       const runId = `run-${new Date().toISOString().slice(11, 19).replaceAll(":", "")}`;
       state.running = true;
-      const turn = createActivityTurn(runId, question || "Run a FlowDeck task");
+      const turn = createActivityTurn(runId, question || "Run a Xira task");
       setRunStatus(runId, "running · 0/4 steps · activity streaming in current turn", 5, true);
 
       state.demoSteps.forEach((step, index) => {

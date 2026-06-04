@@ -33,7 +33,7 @@ func TestFileToolsReadWriteListAndEdit(t *testing.T) {
 
 	if _, err := registry.Execute(context.Background(), "write_file", map[string]any{
 		"path":    "notes/one.md",
-		"content": "hello FlowDeck\n",
+		"content": "hello Xira\n",
 	}); err != nil {
 		t.Fatalf("write_file error = %v", err)
 	}
@@ -42,7 +42,7 @@ func TestFileToolsReadWriteListAndEdit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read_file error = %v", err)
 	}
-	if read["content"] != "hello FlowDeck\n" {
+	if read["content"] != "hello Xira\n" {
 		t.Fatalf("read content = %q", read["content"])
 	}
 
@@ -57,7 +57,7 @@ func TestFileToolsReadWriteListAndEdit(t *testing.T) {
 
 	if _, err := registry.Execute(context.Background(), "edit_file", map[string]any{
 		"path":     "notes/one.md",
-		"old_text": "FlowDeck",
+		"old_text": "Xira",
 		"new_text": "kernel",
 	}); err != nil {
 		t.Fatalf("edit_file error = %v", err)

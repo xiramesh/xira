@@ -3,8 +3,8 @@ package session
 import (
 	"testing"
 
-	"github.com/ai-daming/flowdeck/internal/channel"
-	"github.com/ai-daming/flowdeck/internal/routing"
+	"github.com/ai-daming/xira/internal/channel"
+	"github.com/ai-daming/xira/internal/routing"
 )
 
 func TestManagerAllocatesStableScopedSession(t *testing.T) {
@@ -73,9 +73,9 @@ func TestAgentSessionIDIsDerivedFromConversationAndAgent(t *testing.T) {
 		SessionPolicy: routing.SessionPolicy{Dimensions: []string{"chat", "sender"}},
 	})
 
-	first := BuildAgentSessionID(allocation.SessionID, "flowdeck-assistant")
+	first := BuildAgentSessionID(allocation.SessionID, "xira-assistant")
 	second := BuildAgentSessionID(allocation.SessionID, "research-assistant")
-	again := BuildAgentSessionID(allocation.SessionID, "flowdeck-assistant")
+	again := BuildAgentSessionID(allocation.SessionID, "xira-assistant")
 
 	if first == "" || second == "" {
 		t.Fatal("agent session id is empty")

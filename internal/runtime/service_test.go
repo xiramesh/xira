@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ai-daming/flowdeck/internal/agents"
-	"github.com/ai-daming/flowdeck/internal/model/deepseek"
+	"github.com/ai-daming/xira/internal/agents"
+	"github.com/ai-daming/xira/internal/model/deepseek"
 )
 
 func TestRunAgentWritesHarnessStore(t *testing.T) {
@@ -165,8 +165,8 @@ func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
 }
 
 func TestNewServiceLoadsWorkspaceAgentsFromConfig(t *testing.T) {
-	instance := writeRuntimeFixture(t, "flowdeck-assistant", []string{"chat", "sender"})
-	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "flowdeck.yaml"), UseMockModel: true})
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
+	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,13 +174,13 @@ func TestNewServiceLoadsWorkspaceAgentsFromConfig(t *testing.T) {
 	if status["profile_source"] != "workspace" {
 		t.Fatalf("profile_source = %v", status["profile_source"])
 	}
-	if status["default_agent"] != "flowdeck-assistant" {
+	if status["default_agent"] != "xira-assistant" {
 		t.Fatalf("default_agent = %v", status["default_agent"])
 	}
 	if status["agents"] != 2 {
 		t.Fatalf("agents = %v", status["agents"])
 	}
-	if status["config_path"] != filepath.Join(instance, "flowdeck.yaml") {
+	if status["config_path"] != filepath.Join(instance, "xira.yaml") {
 		t.Fatalf("config_path = %v", status["config_path"])
 	}
 	if status["workspace"] != filepath.Join(instance, "workspace") {
@@ -190,7 +190,7 @@ func TestNewServiceLoadsWorkspaceAgentsFromConfig(t *testing.T) {
 
 func TestConfigDefaultAgentRoutesDefaultRequest(t *testing.T) {
 	instance := writeRuntimeFixture(t, "research-assistant", []string{"chat", "sender"})
-	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "flowdeck.yaml"), UseMockModel: true})
+	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,8 +207,8 @@ func TestConfigDefaultAgentRoutesDefaultRequest(t *testing.T) {
 }
 
 func TestExplicitAgentCanRunWorkspaceResearchAssistant(t *testing.T) {
-	instance := writeRuntimeFixture(t, "flowdeck-assistant", []string{"chat", "sender"})
-	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "flowdeck.yaml"), UseMockModel: true})
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
+	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestExplicitAgentSharesConversationSessionWithDefaultAgent(t *testing.T) {
 
 func TestFeishuEntrypointsSplitConversationByBotInstance(t *testing.T) {
 	instance := writeRuntimeFixtureWithEntrypoints(t)
-	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "flowdeck.yaml"), UseMockModel: true})
+	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,8 +328,8 @@ func TestFeishuEntrypointsSplitConversationByBotInstance(t *testing.T) {
 }
 
 func TestAgentProfileSessionDimensionsOverrideDefaultScope(t *testing.T) {
-	instance := writeRuntimeFixture(t, "flowdeck-assistant", []string{"channel"})
-	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "flowdeck.yaml"), UseMockModel: true})
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"channel"})
+	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,22 +370,22 @@ func TestVerificationFailureCreatesEvolutionCandidate(t *testing.T) {
 	}
 }
 
-func writeRuntimeFixture(t *testing.T, defaultAgentID string, flowdeckSessionDimensions []string) string {
+func writeRuntimeFixture(t *testing.T, defaultAgentID string, xiraSessionDimensions []string) string {
 	t.Helper()
 	instance := t.TempDir()
-	writeFile(t, filepath.Join(instance, "flowdeck.yaml"), `workspace: workspace
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
 default_agent: `+defaultAgentID+`
-run_root: .flowdeck/runs
+run_root: .xira/runs
 routes: workspace/routes.yaml
 `)
 	writeFile(t, filepath.Join(instance, "workspace", "routes.yaml"), `default_agent: `+defaultAgentID+`
 routes: []
 `)
-	writeFile(t, filepath.Join(instance, "workspace", "agents", "flowdeck-assistant", "PROFILE.md"), `---
-id: flowdeck-assistant
-name: FlowDeck Assistant
-version: 0.1.0
-description: Default FlowDeck runtime assistant.
+	writeFile(t, filepath.Join(instance, "workspace", "agents", "xira-assistant", "PROFILE.md"), `---
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.1
+description: Default Xira runtime assistant.
 model_policy:
   provider: deepseek
   model: deepseek-v4-flash
@@ -393,7 +393,7 @@ model_policy:
   temperature: 0.2
 session:
   dimensions:
-`+yamlStringList(flowdeckSessionDimensions, "    ")+`verification:
+`+yamlStringList(xiraSessionDimensions, "    ")+`verification:
   default_checks:
     - final_response_non_empty
 artifacts:
@@ -405,15 +405,15 @@ evolution:
 ---
 # Working Contract
 
-Use FlowDeck runtime context and keep responses operational.
+Use Xira runtime context and keep responses operational.
 `)
-	writeFile(t, filepath.Join(instance, "workspace", "agents", "flowdeck-assistant", "SOUL.md"), `# Soul
+	writeFile(t, filepath.Join(instance, "workspace", "agents", "xira-assistant", "SOUL.md"), `# Soul
 
 Plain, direct, and practical.`)
 	writeFile(t, filepath.Join(instance, "workspace", "agents", "research-assistant", "PROFILE.md"), `---
 id: research-assistant
 name: Research Assistant
-version: 0.1.0
+version: 0.1.1
 description: Evidence-first research assistant.
 model_policy:
   provider: deepseek
@@ -452,10 +452,10 @@ Careful and source-backed.`)
 
 func writeRuntimeFixtureWithEntrypoints(t *testing.T) string {
 	t.Helper()
-	instance := writeRuntimeFixture(t, "flowdeck-assistant", []string{"chat", "sender"})
-	writeFile(t, filepath.Join(instance, "flowdeck.yaml"), `workspace: workspace
-default_agent: flowdeck-assistant
-run_root: .flowdeck/runs
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+run_root: .xira/runs
 routes: workspace/routes.yaml
 entrypoints: workspace/entrypoints.yaml
 `)
@@ -464,9 +464,9 @@ entrypoints: workspace/entrypoints.yaml
     channel: feishu
     app_id: cli-expense
     bot_id: bot-expense
-    default_agent: flowdeck-assistant
+    default_agent: xira-assistant
     allowed_agents:
-      - flowdeck-assistant
+      - xira-assistant
       - research-assistant
     session:
       dimensions:
@@ -476,9 +476,9 @@ entrypoints: workspace/entrypoints.yaml
     channel: feishu
     app_id: cli-leave
     bot_id: bot-leave
-    default_agent: flowdeck-assistant
+    default_agent: xira-assistant
     allowed_agents:
-      - flowdeck-assistant
+      - xira-assistant
       - research-assistant
     session:
       dimensions:
@@ -486,9 +486,9 @@ entrypoints: workspace/entrypoints.yaml
         - sender
   - id: ilink-wechat
     channel: ilink
-    default_agent: flowdeck-assistant
+    default_agent: xira-assistant
     allowed_agents:
-      - flowdeck-assistant
+      - xira-assistant
       - research-assistant
     session:
       dimensions:

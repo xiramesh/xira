@@ -26,13 +26,13 @@ func NewExecTool(workspaceRoot string) *ExecTool {
 
 func (t *ExecTool) Name() string { return "exec" }
 func (t *ExecTool) Description() string {
-	return "Execute a shell command in the FlowDeck workspace. First version supports action=run only."
+	return "Execute a shell command in the Xira workspace. First version supports action=run only."
 }
 func (t *ExecTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"action":          map[string]any{"type": "string", "enum": []string{"run"}, "description": "Only run is supported in FlowDeck v1."},
+			"action":          map[string]any{"type": "string", "enum": []string{"run"}, "description": "Only run is supported in Xira v1."},
 			"command":         map[string]any{"type": "string", "description": "Shell command to execute."},
 			"cwd":             map[string]any{"type": "string", "description": "Working directory. Relative paths resolve under the workspace."},
 			"timeout_seconds": map[string]any{"type": "integer", "description": "Timeout in seconds. Defaults to 60."},

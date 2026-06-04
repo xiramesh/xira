@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -13,13 +14,13 @@ import (
 	"github.com/google/uuid"
 	adksession "google.golang.org/adk/session"
 
-	"github.com/ai-daming/flowdeck/internal/agents"
-	"github.com/ai-daming/flowdeck/internal/channel"
-	"github.com/ai-daming/flowdeck/internal/entrypoints"
-	"github.com/ai-daming/flowdeck/internal/model/deepseek"
-	"github.com/ai-daming/flowdeck/internal/routing"
-	fsession "github.com/ai-daming/flowdeck/internal/session"
-	rtools "github.com/ai-daming/flowdeck/internal/tools"
+	"github.com/ai-daming/xira/internal/agents"
+	"github.com/ai-daming/xira/internal/channel"
+	"github.com/ai-daming/xira/internal/entrypoints"
+	"github.com/ai-daming/xira/internal/model/deepseek"
+	"github.com/ai-daming/xira/internal/routing"
+	fsession "github.com/ai-daming/xira/internal/session"
+	rtools "github.com/ai-daming/xira/internal/tools"
 )
 
 type Config struct {
@@ -104,7 +105,17 @@ func (s *Service) SessionManager() *fsession.Manager {
 }
 
 func (s *Service) Agents() []agents.Profile {
-	return s.agents.List()
+	list := s.agents.List()
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].ID == s.defaultAgent {
+			return true
+		}
+		if list[j].ID == s.defaultAgent {
+			return false
+		}
+		return list[i].ID < list[j].ID
+	})
+	return list
 }
 
 func (s *Service) Entrypoints() []entrypoints.Definition {
@@ -116,7 +127,7 @@ func (s *Service) Entrypoints() []entrypoints.Definition {
 
 func (s *Service) Status() map[string]any {
 	return map[string]any{
-		"name":           "flowdeck",
+		"name":           "xira",
 		"config_path":    s.configPath,
 		"workspace":      s.workspace,
 		"run_root":       s.runs.Root(),
@@ -351,7 +362,7 @@ func (s *Service) mockGenerate(
 			Type: "function",
 			Function: deepseek.ToolCallFunction{
 				Name:      "exec",
-				Arguments: `{"action":"run","command":"printf 'hello from FlowDeck exec'"}`,
+				Arguments: `{"action":"run","command":"printf 'hello from Xira exec'"}`,
 			},
 		}
 		rec := s.executeToolCall(ctx, profile, call, recordEvent, recordAudit)

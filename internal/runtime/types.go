@@ -3,7 +3,7 @@ package runtime
 import (
 	"time"
 
-	fsession "github.com/ai-daming/flowdeck/internal/session"
+	fsession "github.com/ai-daming/xira/internal/session"
 )
 
 type EntrypointType string

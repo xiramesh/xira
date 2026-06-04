@@ -12,7 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	frt "github.com/ai-daming/flowdeck/internal/runtime"
+	frt "github.com/ai-daming/xira/internal/runtime"
 )
 
 type Server struct {

@@ -10,7 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	frt "github.com/ai-daming/flowdeck/internal/runtime"
+	frt "github.com/ai-daming/xira/internal/runtime"
 )
 
 func TestInitDoesNotSelectAgentByDefault(t *testing.T) {
@@ -18,7 +18,7 @@ func TestInitDoesNotSelectAgentByDefault(t *testing.T) {
 	updated, _ := m.Update(initMsg{
 		status: map[string]any{},
 		agents: []map[string]any{
-			{"id": "flowdeck-assistant", "name": "FlowDeck Assistant"},
+			{"id": "xira-assistant", "name": "Xira Assistant"},
 			{"id": "lead-research", "name": "Lead Research"},
 			{"id": "research-assistant", "name": "Research Assistant"},
 		},
@@ -33,7 +33,7 @@ func TestInitDoesNotSelectAgentByDefault(t *testing.T) {
 func TestPlainInputUsesDefaultAgentMode(t *testing.T) {
 	m := model{
 		agents: []map[string]any{
-			{"id": "flowdeck-assistant", "name": "FlowDeck Assistant"},
+			{"id": "xira-assistant", "name": "Xira Assistant"},
 			{"id": "research-assistant", "name": "Research Assistant"},
 		},
 	}
@@ -63,7 +63,7 @@ func TestPlainInputUsesDefaultAgentMode(t *testing.T) {
 func TestDefaultAgentResponseUpdatesTranscript(t *testing.T) {
 	m := model{}
 	updated, _ := m.Update(runMsg{resp: frt.TurnResponse{
-		AgentID:       "flowdeck-assistant",
+		AgentID:       "xira-assistant",
 		FinalResponse: "你好",
 		Status:        "completed",
 	}})
@@ -75,7 +75,7 @@ func TestDefaultAgentResponseUpdatesTranscript(t *testing.T) {
 	if len(got.transcript) != 1 {
 		t.Fatalf("transcript len = %d, want 1", len(got.transcript))
 	}
-	if got.transcript[0].Role != "flowdeck-assistant" || got.transcript[0].Content != "你好" {
+	if got.transcript[0].Role != "xira-assistant" || got.transcript[0].Content != "你好" {
 		t.Fatalf("transcript = %+v", got.transcript)
 	}
 }
@@ -85,7 +85,7 @@ func TestFailedAgentResponseStillAddsRunForTraceReview(t *testing.T) {
 	updated, _ := m.Update(runMsg{
 		resp: frt.TurnResponse{
 			RunID:   "run-failed",
-			AgentID: "flowdeck-assistant",
+			AgentID: "xira-assistant",
 			Status:  "failed",
 			Events: []frt.RuntimeEvent{
 				{Kind: "run.started", Source: "runtime"},
@@ -229,21 +229,21 @@ func TestLoadUsesRuntimeDiscoveredAgents(t *testing.T) {
 
 func TestViewStartsAsDefaultAgent(t *testing.T) {
 	input := textinput.New()
-	input.Placeholder = "Talk to FlowDeck, or use /agent <id> <message>"
+	input.Placeholder = "Talk to Xira, or use /agent <id> <message>"
 	m := model{
 		input: input,
 		status: map[string]any{
 			"mock_model":    false,
-			"default_agent": "flowdeck-assistant",
+			"default_agent": "xira-assistant",
 		},
 		agents: []map[string]any{
-			{"id": "flowdeck-assistant", "name": "FlowDeck Assistant"},
+			{"id": "xira-assistant", "name": "Xira Assistant"},
 			{"id": "lead-research", "name": "Lead Research"},
 		},
 	}
 
 	view := m.View()
-	for _, want := range []string{"FlowDeck TUI", "Model: DeepSeek", "Mode: default agent flowdeck-assistant"} {
+	for _, want := range []string{"Xira TUI", "Model: DeepSeek", "Mode: default agent xira-assistant"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("View() = %q, want substring %q", view, want)
 		}
@@ -263,11 +263,11 @@ func TestConversationDoesNotShowTraceByDefaultAfterRun(t *testing.T) {
 		height: 32,
 		transcript: []transcriptEntry{
 			{Role: "You", Content: "你好"},
-			{Role: "flowdeck-assistant", Content: "你好，有什么可以帮你？"},
+			{Role: "xira-assistant", Content: "你好，有什么可以帮你？"},
 		},
 		runs: []frt.TurnResponse{{
 			RunID:   "run-1",
-			AgentID: "flowdeck-assistant",
+			AgentID: "xira-assistant",
 			Status:  "completed",
 			Events: []frt.RuntimeEvent{
 				{Kind: "run.started", Source: "runtime"},
@@ -278,7 +278,7 @@ func TestConversationDoesNotShowTraceByDefaultAfterRun(t *testing.T) {
 	}
 
 	view := m.View()
-	for _, want := range []string{"Conversation", "You", "flowdeck-assistant", "Activity", "tools 0  events 3"} {
+	for _, want := range []string{"Conversation", "You", "xira-assistant", "Activity", "tools 0  events 3"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("View() = %q, want substring %q", view, want)
 		}
@@ -316,11 +316,11 @@ func TestTraceInspectorShowsRunOnlyWhenEnabled(t *testing.T) {
 		showTrace: true,
 		transcript: []transcriptEntry{
 			{Role: "You", Content: "你好"},
-			{Role: "flowdeck-assistant", Content: "你好"},
+			{Role: "xira-assistant", Content: "你好"},
 		},
 		runs: []frt.TurnResponse{{
 			RunID:          "run-1",
-			AgentID:        "flowdeck-assistant",
+			AgentID:        "xira-assistant",
 			Status:         "completed",
 			RouteMatchedBy: "default",
 			Events: []frt.RuntimeEvent{
@@ -341,7 +341,7 @@ func TestTraceInspectorShowsRunOnlyWhenEnabled(t *testing.T) {
 func TestRunTraceShowsToolCallsAuditAndEvents(t *testing.T) {
 	trace := renderRunTrace(&frt.TurnResponse{
 		RunID:          "run-1",
-		AgentID:        "flowdeck-assistant",
+		AgentID:        "xira-assistant",
 		RouteMatchedBy: "default",
 		ToolCalls: []frt.ToolCallRecord{
 			{
@@ -424,7 +424,7 @@ func TestUpdateStreamsTraceEventsWhileLoading(t *testing.T) {
 
 func TestViewShowsVisibleRunningStatusNearInput(t *testing.T) {
 	input := textinput.New()
-	input.Placeholder = "Talk to FlowDeck, or use /agent <id> <message>"
+	input.Placeholder = "Talk to Xira, or use /agent <id> <message>"
 	m := model{
 		input:       input,
 		width:       110,
@@ -468,7 +468,7 @@ func writeTUIWorkspace(t *testing.T) string {
 	if err := os.WriteFile(path, []byte(`---
 id: custom-agent
 name: Custom Agent
-version: 0.1.0
+version: 0.1.1
 description: Runtime-discovered test agent.
 model_policy:
   provider: deepseek

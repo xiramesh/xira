@@ -8,12 +8,12 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/ai-daming/flowdeck/internal/agents"
-	"github.com/ai-daming/flowdeck/internal/entrypoints"
-	"github.com/ai-daming/flowdeck/internal/routing"
+	"github.com/ai-daming/xira/internal/agents"
+	"github.com/ai-daming/xira/internal/entrypoints"
+	"github.com/ai-daming/xira/internal/routing"
 )
 
-const defaultConfigPath = "flowdeck.yaml"
+const defaultConfigPath = "xira.yaml"
 
 type runtimeConfigFile struct {
 	Workspace      string `yaml:"workspace"`
@@ -100,7 +100,7 @@ func resolveRuntimeConfig(cfg Config) (resolvedRuntimeConfig, error) {
 		runRoot = filepath.Join(strings.TrimSpace(configFile.StateRoot), "runs")
 	}
 	if runRoot == "" {
-		runRoot = ".flowdeck/runs"
+		runRoot = ".xira/runs"
 	}
 	runRoot = resolveRelativePath(baseDir, runRoot)
 
