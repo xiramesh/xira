@@ -5,4 +5,7 @@ bin/
 .xira/
 .xira-smoke/
 references/
+workspace/agents/
+workspace/kb/
+workspace/entrypoints.yaml
 .DS_Store
