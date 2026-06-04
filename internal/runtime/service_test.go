@@ -253,6 +253,19 @@ func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
 	if gotReq.Thinking == nil || gotReq.Thinking.Type != "disabled" {
 		t.Fatalf("thinking = %+v, want disabled", gotReq.Thinking)
 	}
+	if len(gotReq.Messages) < 2 {
+		t.Fatalf("messages = %+v, want system and user messages", gotReq.Messages)
+	}
+	systemInstruction, ok := gotReq.Messages[0].Content.(string)
+	if !ok || gotReq.Messages[0].Role != "system" || !strings.Contains(systemInstruction, "You are Xira's default runtime assistant.") {
+		t.Fatalf("system instruction message = %+v", gotReq.Messages[0])
+	}
+	if !strings.Contains(systemInstruction, "Current Xira agent: xira-assistant (Xira Assistant).") {
+		t.Fatalf("system instruction missing runtime identity: %q", systemInstruction)
+	}
+	if gotReq.Messages[1].Role != "user" || gotReq.Messages[1].Content != "hi" {
+		t.Fatalf("user message = %+v", gotReq.Messages[1])
+	}
 	var found bool
 	for _, event := range resp.Events {
 		if event.Kind != "adk.event" {

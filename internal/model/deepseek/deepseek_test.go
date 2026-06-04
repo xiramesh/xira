@@ -136,6 +136,42 @@ func TestADKModelGenerateContent(t *testing.T) {
 	}
 }
 
+func TestADKModelIncludesSystemInstruction(t *testing.T) {
+	var gotReq ChatRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"model":"deepseek-v4-flash","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer server.Close()
+	client := New(WithBaseURLForTest(server.URL), WithAPIKey("test-key"))
+	model, err := NewADKModel(ModelFlash, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &adkmodel.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("你是谁", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{
+			SystemInstruction: genai.NewContentFromText("你是养生一号，不要自称 DeepSeek。", genai.RoleUser),
+		},
+	}
+	for _, err := range model.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+	}
+	if len(gotReq.Messages) != 2 {
+		t.Fatalf("messages = %+v, want system and user", gotReq.Messages)
+	}
+	if gotReq.Messages[0].Role != "system" || gotReq.Messages[0].Content != "你是养生一号，不要自称 DeepSeek。" {
+		t.Fatalf("system message = %+v", gotReq.Messages[0])
+	}
+	if gotReq.Messages[1].Role != "user" || gotReq.Messages[1].Content != "你是谁" {
+		t.Fatalf("user message = %+v", gotReq.Messages[1])
+	}
+}
+
 func TestADKModelExtractsStructuredContent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"model":"deepseek-v4-flash","choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"structured ok"}]}}]}`))

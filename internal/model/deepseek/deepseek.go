@@ -263,7 +263,7 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 		}
 		chatReq := ChatRequest{
 			Model:    m.modelName,
-			Messages: contentsToMessages(req.Contents, originalToWire),
+			Messages: contentsToMessages(req.Contents, systemInstruction(req), originalToWire),
 			Tools:    tools,
 			Thinking: &Thinking{Type: "disabled"},
 		}
@@ -297,8 +297,11 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 	}
 }
 
-func contentsToMessages(contents []*genai.Content, originalToWire map[string]string) []Message {
-	out := make([]Message, 0, len(contents))
+func contentsToMessages(contents []*genai.Content, systemInstruction string, originalToWire map[string]string) []Message {
+	out := make([]Message, 0, len(contents)+1)
+	if systemInstruction != "" {
+		out = append(out, Message{Role: "system", Content: systemInstruction})
+	}
 	for _, content := range contents {
 		if content == nil {
 			continue
@@ -353,6 +356,26 @@ func contentsToMessages(contents []*genai.Content, originalToWire map[string]str
 		}
 	}
 	return out
+}
+
+func systemInstruction(req *adkmodel.LLMRequest) string {
+	if req == nil || req.Config == nil {
+		return ""
+	}
+	return genaiContentText(req.Config.SystemInstruction)
+}
+
+func genaiContentText(content *genai.Content) string {
+	if content == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(content.Parts))
+	for _, part := range content.Parts {
+		if part != nil && strings.TrimSpace(part.Text) != "" {
+			parts = append(parts, strings.TrimSpace(part.Text))
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func genaiToolsToDeepSeek(tools []*genai.Tool) ([]Tool, map[string]string, map[string]string) {

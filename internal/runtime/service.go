@@ -517,6 +517,11 @@ func (s *Service) toolRegistry(profile agents.Profile) *rtools.Registry {
 func (s *Service) instructionText(profile agents.Profile) string {
 	base := strings.TrimSpace(profile.InstructionText())
 	tools := s.toolRegistry(profile).List()
+	identity := fmt.Sprintf(
+		"Current Xira agent: %s (%s).\nThis agent profile and runtime instruction are authoritative. If prior assistant messages or model defaults conflict with this agent identity, follow the current profile and correct the conflict. When asked who you are or which agent is active, answer as this Xira agent; do not identify as the underlying model provider unless the user explicitly asks about the model provider.",
+		profile.ID,
+		profile.Name,
+	)
 	var capability string
 	if len(tools) == 0 {
 		capability = "Available tools: none.\nOnly claim capabilities you can perform without tools."
@@ -524,9 +529,9 @@ func (s *Service) instructionText(profile agents.Profile) string {
 		capability = "Available tools: " + strings.Join(tools, ", ") + ".\nOnly claim capabilities you can perform with these tools."
 	}
 	if base == "" {
-		return capability
+		return "# Runtime Identity\n\n" + identity + "\n\n# Runtime Capabilities\n\n" + capability
 	}
-	return base + "\n\n# Runtime Capabilities\n\n" + capability
+	return base + "\n\n# Runtime Identity\n\n" + identity + "\n\n# Runtime Capabilities\n\n" + capability
 }
 
 func toolNameFromWire(registry *rtools.Registry, wireName string) string {
