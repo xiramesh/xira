@@ -207,6 +207,31 @@ func TestStatusDoesNotExposeToolDiscovery(t *testing.T) {
 	}
 }
 
+func TestToolLogSummariesAvoidLargeContent(t *testing.T) {
+	input := toolInputSummary(map[string]any{
+		"path":    "kb/yangsheng-yihao/index.md",
+		"content": "secret body",
+	})
+	if input["content"] != nil {
+		t.Fatalf("input summary leaked content: %+v", input)
+	}
+	if input["content_chars"] != 11 {
+		t.Fatalf("input content chars = %v", input["content_chars"])
+	}
+
+	output := toolOutputSummary(map[string]any{
+		"path":    "/workspace/kb/yangsheng-yihao/index.md",
+		"content": "knowledge body",
+		"entries": []map[string]any{{"name": "a"}, {"name": "b"}},
+	})
+	if output["content"] != nil {
+		t.Fatalf("output summary leaked content: %+v", output)
+	}
+	if output["content_chars"] != 14 || output["entries_count"] != 2 {
+		t.Fatalf("output summary = %+v", output)
+	}
+}
+
 func TestRunAgentCanUseExecTool(t *testing.T) {
 	rt, err := NewService(Config{RunRoot: filepath.Join(t.TempDir(), "runs"), UseMockModel: true})
 	if err != nil {

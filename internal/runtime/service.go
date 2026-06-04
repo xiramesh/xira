@@ -474,9 +474,22 @@ func (s *Service) executeToolCall(
 	if !registry.Has(rec.Name) {
 		rec.Error = "tool is not allowed by agent profile"
 		rec.EndedAt = time.Now()
+		slog.Warn("tool call rejected",
+			"agent_id", profile.ID,
+			"tool", rec.Name,
+			"call_id", rec.ID,
+			"input", toolInputSummary(rec.Input),
+			"error", rec.Error,
+		)
 		recordAudit("tool.call", rec.Name, false, rec.Error, rec.Input)
 		return rec
 	}
+	slog.Info("tool call started",
+		"agent_id", profile.ID,
+		"tool", rec.Name,
+		"call_id", rec.ID,
+		"input", toolInputSummary(rec.Input),
+	)
 	recordEvent("tool.started", rec.Name, "tool call started", rec.Input)
 	recordAudit("tool.call", rec.Name, true, "tool allowed by profile", rec.Input)
 	output, err := registry.Execute(ctx, rec.Name, rec.Input)
@@ -487,8 +500,25 @@ func (s *Service) executeToolCall(
 	}
 	rec.EndedAt = time.Now()
 	if rec.Error != "" {
+		slog.Warn("tool call failed",
+			"agent_id", profile.ID,
+			"tool", rec.Name,
+			"call_id", rec.ID,
+			"duration", rec.EndedAt.Sub(rec.StartedAt),
+			"input", toolInputSummary(rec.Input),
+			"output", toolOutputSummary(rec.Output),
+			"error", rec.Error,
+		)
 		recordEvent("tool.failed", rec.Name, rec.Error, map[string]any{"tool": rec.Name})
 	} else {
+		slog.Info("tool call finished",
+			"agent_id", profile.ID,
+			"tool", rec.Name,
+			"call_id", rec.ID,
+			"duration", rec.EndedAt.Sub(rec.StartedAt),
+			"input", toolInputSummary(rec.Input),
+			"output", toolOutputSummary(rec.Output),
+		)
 		recordEvent("tool.finished", rec.Name, "tool call finished", map[string]any{"tool": rec.Name})
 	}
 	return rec
@@ -526,12 +556,84 @@ func (s *Service) instructionText(profile agents.Profile) string {
 	if len(tools) == 0 {
 		capability = "Available tools: none.\nOnly claim capabilities you can perform without tools."
 	} else {
-		capability = "Available tools: " + strings.Join(tools, ", ") + ".\nOnly claim capabilities you can perform with these tools."
+		capability = "Available tools: " + strings.Join(tools, ", ") + ".\nOnly claim capabilities you can perform with these tools.\nIf a needed tool is available, use it before claiming you cannot access the data. Only say a tool is unavailable or restricted when no appropriate tool exists or an attempted tool call returns an error; when that happens, mention the actual tool error."
 	}
 	if base == "" {
 		return "# Runtime Identity\n\n" + identity + "\n\n# Runtime Capabilities\n\n" + capability
 	}
 	return base + "\n\n# Runtime Identity\n\n" + identity + "\n\n# Runtime Capabilities\n\n" + capability
+}
+
+func toolInputSummary(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for _, key := range []string{"action", "path", "command", "cwd", "timeout_seconds"} {
+		if value, ok := input[key]; ok {
+			out[key] = value
+		}
+	}
+	if content, ok := input["content"].(string); ok {
+		out["content_chars"] = utf8.RuneCountInString(content)
+	}
+	if oldText, ok := input["old_text"].(string); ok {
+		out["old_text_chars"] = utf8.RuneCountInString(oldText)
+	}
+	if newText, ok := input["new_text"].(string); ok {
+		out["new_text_chars"] = utf8.RuneCountInString(newText)
+	}
+	if len(out) == 0 {
+		return input
+	}
+	return out
+}
+
+func toolOutputSummary(output map[string]any) map[string]any {
+	if len(output) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for _, key := range []string{"path", "bytes", "replacements", "action", "command", "cwd", "exit_code", "duration_ms"} {
+		if value, ok := output[key]; ok {
+			out[key] = value
+		}
+	}
+	if entries, ok := output["entries"]; ok {
+		out["entries_count"] = collectionLen(entries)
+	}
+	for _, key := range []string{"content", "stdout", "stderr"} {
+		if value, ok := output[key].(string); ok {
+			out[key+"_chars"] = utf8.RuneCountInString(value)
+		}
+	}
+	if errText, ok := output["error"].(string); ok {
+		out["error"] = errText
+	}
+	if len(out) == 0 {
+		out["keys"] = sortedAnyKeys(output)
+	}
+	return out
+}
+
+func collectionLen(value any) int {
+	switch v := value.(type) {
+	case []map[string]any:
+		return len(v)
+	case []any:
+		return len(v)
+	default:
+		return 0
+	}
+}
+
+func sortedAnyKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func toolNameFromWire(registry *rtools.Registry, wireName string) string {
