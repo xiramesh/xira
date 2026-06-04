@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/ai-daming/xira/internal/channelrunner/feishu"
+	"github.com/ai-daming/xira/internal/channelrunner/ilink"
 	"github.com/ai-daming/xira/internal/runtime"
 )
 
@@ -33,6 +34,13 @@ func NewManager(rt *runtime.Service) (*Manager, error) {
 		switch strings.ToLower(strings.TrimSpace(definition.Channel)) {
 		case "feishu":
 			runner, err := feishu.NewRunner(definition, rt)
+			if err != nil {
+				return nil, err
+			}
+			manager.runners = append(manager.runners, runner)
+			slog.Info("channel runner registered", "id", runner.ID(), "channel", runner.Channel())
+		case "ilink":
+			runner, err := ilink.NewRunner(definition, rt)
 			if err != nil {
 				return nil, err
 			}

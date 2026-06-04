@@ -16,6 +16,11 @@ type Definition struct {
 	AppID                             string                `json:"app_id,omitempty" yaml:"app_id,omitempty"`
 	AppIDEnv                          string                `json:"app_id_env,omitempty" yaml:"app_id_env,omitempty"`
 	BotID                             string                `json:"bot_id,omitempty" yaml:"bot_id,omitempty"`
+	Token                             string                `json:"token,omitempty" yaml:"token,omitempty"`
+	TokenEnv                          string                `json:"token_env,omitempty" yaml:"token_env,omitempty"`
+	BaseURL                           string                `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	BaseURLEnv                        string                `json:"base_url_env,omitempty" yaml:"base_url_env,omitempty"`
+	StateDir                          string                `json:"state_dir,omitempty" yaml:"state_dir,omitempty"`
 	DefaultAgentID                    string                `json:"default_agent" yaml:"default_agent"`
 	AllowedAgentIDs                   []string              `json:"allowed_agents,omitempty" yaml:"allowed_agents,omitempty"`
 	SessionPolicy                     routing.SessionPolicy `json:"session,omitempty" yaml:"session,omitempty"`
@@ -190,6 +195,11 @@ func normalizeDefinition(definition Definition, defaultAgentID string) Definitio
 	definition.AppID = strings.TrimSpace(definition.AppID)
 	definition.AppIDEnv = strings.TrimSpace(definition.AppIDEnv)
 	definition.BotID = strings.TrimSpace(definition.BotID)
+	definition.Token = strings.TrimSpace(definition.Token)
+	definition.TokenEnv = strings.TrimSpace(definition.TokenEnv)
+	definition.BaseURL = strings.TrimSpace(definition.BaseURL)
+	definition.BaseURLEnv = strings.TrimSpace(definition.BaseURLEnv)
+	definition.StateDir = strings.TrimSpace(definition.StateDir)
 	definition.DefaultAgentID = strings.TrimSpace(definition.DefaultAgentID)
 	definition.AppSecret = strings.TrimSpace(definition.AppSecret)
 	definition.AppSecretEnv = strings.TrimSpace(definition.AppSecretEnv)

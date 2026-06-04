@@ -56,6 +56,55 @@ entrypoints: workspace/entrypoints.yaml
 	}
 }
 
+func TestManagerRequiresIlinkTokenForEnabledEntrypoint(t *testing.T) {
+	instance := t.TempDir()
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+run_root: .xira/runs
+entrypoints: workspace/entrypoints.yaml
+`)
+	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
+  - id: ilink-default
+    channel: ilink
+    enabled: true
+    default_agent: xira-assistant
+`)
+	writeMinimalAgent(t, filepath.Join(instance, "workspace", "agents", "xira-assistant"))
+
+	rt := newManagerTestRuntime(t, filepath.Join(instance, "xira.yaml"))
+	if _, err := NewManager(rt); err == nil {
+		t.Fatal("expected missing token error")
+	}
+}
+
+func TestManagerRegistersIlinkEntrypoint(t *testing.T) {
+	instance := t.TempDir()
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+run_root: .xira/runs
+entrypoints: workspace/entrypoints.yaml
+`)
+	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
+  - id: ilink-default
+    channel: ilink
+    enabled: true
+    token_env: TEST_ILINK_TOKEN
+    state_dir: .xira/ilink/test
+    default_agent: xira-assistant
+`)
+	writeMinimalAgent(t, filepath.Join(instance, "workspace", "agents", "xira-assistant"))
+	t.Setenv("TEST_ILINK_TOKEN", "bot-token")
+
+	rt := newManagerTestRuntime(t, filepath.Join(instance, "xira.yaml"))
+	manager, err := NewManager(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.Count() != 1 {
+		t.Fatalf("runner count = %d, want 1", manager.Count())
+	}
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

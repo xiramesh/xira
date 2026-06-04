@@ -9,6 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/larksuite/oapi-sdk-go/v3 v3.7.5
+	github.com/openilink/openilink-sdk-go v0.6.0
 	github.com/spf13/cobra v1.10.2
 	google.golang.org/adk v1.4.0
 	google.golang.org/genai v1.57.0
