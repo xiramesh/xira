@@ -59,7 +59,7 @@ func (s *Service) generateADK(
 	recordEvent func(kind, source, message string, payload map[string]any),
 	recordAudit func(action, target string, allowed bool, reason string, meta map[string]any),
 ) (string, []ToolCallRecord, error) {
-	adkModel, err := deepseek.NewADKModel(profile.ModelPolicy.Model, s.deepseek)
+	adkModel, err := deepseek.NewADKModelWithThinking(profile.ModelPolicy.Model, s.deepseek, deepseek.Thinking{Type: thinkingType(profile.ModelPolicy)})
 	if err != nil {
 		return "", nil, err
 	}
@@ -71,11 +71,12 @@ func (s *Service) generateADK(
 		return "", nil, err
 	}
 	agent, err := llmagent.New(llmagent.Config{
-		Name:        profile.ID,
-		Description: profile.Description,
-		Model:       adkModel,
-		Instruction: s.instructionText(profile),
-		Tools:       tools,
+		Name:                  profile.ID,
+		Description:           profile.Description,
+		Model:                 adkModel,
+		Instruction:           s.instructionText(profile),
+		Tools:                 tools,
+		GenerateContentConfig: generateContentConfig(profile),
 	})
 	if err != nil {
 		return "", nil, err
@@ -90,17 +91,26 @@ func (s *Service) generateADK(
 		return "", nil, err
 	}
 	conversationSessionID := strings.TrimSpace(req.Metadata["conversation_session_id"])
-	if err := s.hydrateADKSession(ctx, req.UserID, req.SessionID, profile.ID, conversationSessionID); err != nil {
+	historyMessages, historyChars, err := s.hydrateADKSession(ctx, req.UserID, req.SessionID, profile.ID, conversationSessionID)
+	if err != nil {
 		recordEvent("adk.session_hydrate_failed", "adk.session", "failed to restore session history", map[string]any{
 			"agent_id":                profile.ID,
 			"agent_session_id":        req.SessionID,
 			"conversation_session_id": conversationSessionID,
 			"error":                   err.Error(),
 		})
+	} else {
+		recordEvent("adk.session_hydrated", "adk.session", "restored session history", map[string]any{
+			"agent_id":                profile.ID,
+			"agent_session_id":        req.SessionID,
+			"conversation_session_id": conversationSessionID,
+			"messages":                historyMessages,
+			"content_chars":           historyChars,
+		})
 	}
 	var final string
 	var latestText string
-	for evt, err := range run.Run(ctx, req.UserID, req.SessionID, genai.NewContentFromText(req.Message, genai.RoleUser), adkagent.RunConfig{}) {
+	for evt, err := range run.Run(ctx, req.UserID, req.SessionID, genai.NewContentFromText(req.Message, genai.RoleUser), adkRunConfig(profile)) {
 		if err != nil {
 			return final, nil, err
 		}
@@ -150,20 +160,35 @@ func (s *Service) generateADK(
 	return final, toolRecords, nil
 }
 
-func (s *Service) hydrateADKSession(ctx context.Context, userID, agentSessionID, agentID, conversationSessionID string) error {
+func generateContentConfig(profile agents.Profile) *genai.GenerateContentConfig {
+	if profile.ModelPolicy.Temp == nil {
+		return nil
+	}
+	temp := *profile.ModelPolicy.Temp
+	return &genai.GenerateContentConfig{Temperature: &temp}
+}
+
+func adkRunConfig(profile agents.Profile) adkagent.RunConfig {
+	if profile.ModelPolicy.Stream {
+		return adkagent.RunConfig{StreamingMode: adkagent.StreamingModeSSE}
+	}
+	return adkagent.RunConfig{StreamingMode: adkagent.StreamingModeNone}
+}
+
+func (s *Service) hydrateADKSession(ctx context.Context, userID, agentSessionID, agentID, conversationSessionID string) (int, int, error) {
 	userID = strings.TrimSpace(userID)
 	agentSessionID = strings.TrimSpace(agentSessionID)
 	agentID = strings.TrimSpace(agentID)
 	conversationSessionID = strings.TrimSpace(conversationSessionID)
 	if s == nil || s.adkSessions == nil || s.sessions == nil || userID == "" || agentSessionID == "" {
-		return nil
+		return 0, 0, nil
 	}
 	if _, err := s.adkSessions.Get(ctx, &adksession.GetRequest{
 		AppName:   "xira",
 		UserID:    userID,
 		SessionID: agentSessionID,
 	}); err == nil {
-		return nil
+		return 0, 0, nil
 	}
 	created, err := s.adkSessions.Create(ctx, &adksession.CreateRequest{
 		AppName:   "xira",
@@ -171,11 +196,13 @@ func (s *Service) hydrateADKSession(ctx context.Context, userID, agentSessionID,
 		SessionID: agentSessionID,
 	})
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	if conversationSessionID == "" || agentID == "" {
-		return nil
+		return 0, 0, nil
 	}
+	var restored int
+	var contentChars int
 	for _, msg := range s.sessions.AgentHistory(conversationSessionID, agentID) {
 		event := adksession.NewEvent("xira-session-restore")
 		event.Author = "user"
@@ -187,14 +214,16 @@ func (s *Service) hydrateADKSession(ctx context.Context, userID, agentSessionID,
 		event.LLMResponse = adkmodel.LLMResponse{
 			Content: genai.NewContentFromText(msg.Content, role),
 		}
+		restored++
+		contentChars += utf8.RuneCountInString(msg.Content)
 		if !msg.CreatedAt.IsZero() {
 			event.Timestamp = msg.CreatedAt
 		}
 		if err := s.adkSessions.AppendEvent(ctx, created.Session, event); err != nil {
-			return err
+			return restored, contentChars, err
 		}
 	}
-	return nil
+	return restored, contentChars, nil
 }
 
 func (s *Service) adkTools(

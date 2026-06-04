@@ -33,14 +33,14 @@ func NewManager(rt *runtime.Service) (*Manager, error) {
 		}
 		switch strings.ToLower(strings.TrimSpace(definition.Channel)) {
 		case "feishu":
-			runner, err := feishu.NewRunner(definition, rt)
+			runner, err := feishu.NewRunner(definition, rt, rt.StateRoot())
 			if err != nil {
 				return nil, err
 			}
 			manager.runners = append(manager.runners, runner)
 			slog.Info("channel runner registered", "id", runner.ID(), "channel", runner.Channel())
 		case "ilink":
-			runner, err := ilink.NewRunner(definition, rt)
+			runner, err := ilink.NewRunner(definition, rt, rt.StateRoot())
 			if err != nil {
 				return nil, err
 			}

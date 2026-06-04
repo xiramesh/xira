@@ -1,6 +1,9 @@
 package deepseek
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type requestTraceRecorderKey struct{}
 
@@ -19,4 +22,31 @@ func traceRequest(ctx context.Context, req ChatRequest) {
 		return
 	}
 	recorder(ctx, req)
+}
+
+type callTraceRecorderKey struct{}
+
+type CallTrace struct {
+	Request   ChatRequest
+	Response  *ChatResponse
+	Err       error
+	StartedAt time.Time
+	EndedAt   time.Time
+}
+
+type CallTraceRecorder func(context.Context, CallTrace)
+
+func WithCallTraceRecorder(ctx context.Context, recorder CallTraceRecorder) context.Context {
+	if recorder == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, callTraceRecorderKey{}, recorder)
+}
+
+func traceCall(ctx context.Context, call CallTrace) {
+	recorder, ok := ctx.Value(callTraceRecorderKey{}).(CallTraceRecorder)
+	if !ok || recorder == nil {
+		return
+	}
+	recorder(ctx, call)
 }

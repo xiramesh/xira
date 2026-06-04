@@ -151,7 +151,7 @@ func TestHydrateADKSessionRestoresPersistedAgentHistory(t *testing.T) {
 
 	reloaded := newTestService(t, Config{RunRoot: filepath.Join(stateRoot, "runs")})
 	agentSessionID := fsession.BuildAgentSessionID(resp.SessionID, resp.AgentID)
-	if err := reloaded.hydrateADKSession(context.Background(), "user-1", agentSessionID, resp.AgentID, resp.SessionID); err != nil {
+	if _, _, err := reloaded.hydrateADKSession(context.Background(), "user-1", agentSessionID, resp.AgentID, resp.SessionID); err != nil {
 		t.Fatal(err)
 	}
 	got, err := reloaded.adkSessions.Get(context.Background(), &adksession.GetRequest{
@@ -272,6 +272,9 @@ func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
 		if event.Kind != "adk.event" {
 			continue
 		}
+		if event.Payload["final"] != true {
+			continue
+		}
 		found = true
 		if event.Payload["content_chars"] == nil || event.Payload["parts"] == nil || event.Payload["finish_reason"] != "stop" {
 			t.Fatalf("adk event payload = %+v, want content diagnostics", event.Payload)
@@ -322,6 +325,108 @@ func TestRunAgentTracesLLMRequestWhenEnabled(t *testing.T) {
 	}
 	if !tracedEvent {
 		t.Fatalf("events = %+v, want llm.request_traced", resp.Events)
+	}
+}
+
+func TestRunAgentRecordsUsageWithoutLLMTrace(t *testing.T) {
+	runRoot := filepath.Join(t.TempDir(), "runs")
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"model":"deepseek-v4-flash",
+				"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"usage ok"}}],
+				"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
+			}`)),
+		}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        runRoot,
+		StateRoot:      stateRoot,
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "usage please", Channel: "test"})
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	if len(resp.LLMCalls) != 1 {
+		t.Fatalf("llm calls = %+v", resp.LLMCalls)
+	}
+	call := resp.LLMCalls[0]
+	if call.UsageSource != "provider" || call.PromptTokens != 11 || call.CompletionTokens != 7 || call.TotalTokens != 18 {
+		t.Fatalf("llm call usage = %+v", call)
+	}
+	if resp.Usage.CallCount != 1 || resp.Usage.TotalTokens != 18 {
+		t.Fatalf("usage summary = %+v", resp.Usage)
+	}
+	if _, err := os.Stat(filepath.Join(rt.RunStore().RunDir(resp.RunID), "llm_requests", "001.json")); !os.IsNotExist(err) {
+		t.Fatalf("llm request trace should be absent when %s is disabled: %v", llmTraceEnv, err)
+	}
+	for _, path := range []string{
+		filepath.Join(rt.RunStore().RunDir(resp.RunID), "llm_calls.jsonl"),
+		filepath.Join(rt.RunStore().RunDir(resp.RunID), "usage.json"),
+		filepath.Join(stateRoot, "usage-ledger.jsonl"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected usage file %s: %v", path, err)
+		}
+	}
+}
+
+func TestWorkspaceModelPolicyControlsDeepSeekRequest(t *testing.T) {
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "workspace", "agents", "xira-assistant", "PROFILE.md"), `---
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.1
+description: Default Xira runtime assistant.
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-pro
+  stream: true
+  temperature: 0
+  thinking:
+    type: enabled
+verification:
+  default_checks:
+    - final_response_non_empty
+---
+# Working Contract
+
+Use Xira runtime context and keep responses operational.
+`)
+	var gotReq deepseek.ChatRequest
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"model":"deepseek-v4-pro","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"policy ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`)),
+		}, nil
+	})}
+	rt := newTestService(t, Config{
+		ConfigPath:     filepath.Join(instance, "xira.yaml"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "policy", Channel: "test"})
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	if gotReq.Model != deepseek.ModelPro || !gotReq.Stream {
+		t.Fatalf("request model/stream = %q/%v", gotReq.Model, gotReq.Stream)
+	}
+	if gotReq.Temperature == nil || *gotReq.Temperature != 0 {
+		t.Fatalf("temperature = %+v, want explicit zero", gotReq.Temperature)
+	}
+	if gotReq.Thinking == nil || gotReq.Thinking.Type != "enabled" {
+		t.Fatalf("thinking = %+v", gotReq.Thinking)
+	}
+	if resp.ModelPolicy.Model != deepseek.ModelPro || resp.ModelPolicy.Temperature == nil || *resp.ModelPolicy.Temperature != 0 || resp.ModelPolicy.ThinkingType != "enabled" {
+		t.Fatalf("model policy snapshot = %+v", resp.ModelPolicy)
 	}
 }
 

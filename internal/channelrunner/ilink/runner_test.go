@@ -11,7 +11,7 @@ import (
 )
 
 func TestNewRunnerRequiresToken(t *testing.T) {
-	_, err := NewRunner(entrypoints.Definition{ID: "ilink-default", Channel: "ilink"}, nil)
+	_, err := NewRunner(entrypoints.Definition{ID: "ilink-default", Channel: "ilink"}, nil, t.TempDir())
 	if err == nil {
 		t.Fatal("expected missing token error")
 	}
@@ -19,18 +19,19 @@ func TestNewRunnerRequiresToken(t *testing.T) {
 
 func TestNewRunnerUsesTokenEnv(t *testing.T) {
 	t.Setenv("TEST_ILINK_TOKEN", "bot-token")
+	stateRoot := t.TempDir()
 	runner, err := NewRunner(entrypoints.Definition{
 		ID:       "ilink-default",
 		Channel:  "ilink",
 		TokenEnv: "TEST_ILINK_TOKEN",
-	}, nil)
+	}, nil, stateRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if runner.token != "bot-token" {
 		t.Fatalf("token = %q", runner.token)
 	}
-	if runner.stateDir != filepath.Join(".xira", "ilink", "ilink-default") {
+	if runner.stateDir != filepath.Join(stateRoot, "channels", "ilink", "ilink-default") {
 		t.Fatalf("stateDir = %q", runner.stateDir)
 	}
 }

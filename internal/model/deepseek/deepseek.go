@@ -96,6 +96,7 @@ type ToolFunction struct {
 }
 
 type ToolCall struct {
+	Index    int              `json:"index,omitempty"`
 	ID       string           `json:"id,omitempty"`
 	Type     string           `json:"type,omitempty"`
 	Function ToolCallFunction `json:"function"`
@@ -132,40 +133,58 @@ type ChatResponse struct {
 }
 
 func (c *Client) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+	startedAt := time.Now()
 	if !SupportedModel(req.Model) {
-		return ChatResponse{}, fmt.Errorf("%w: %s", ErrUnsupportedModel, req.Model)
+		err := fmt.Errorf("%w: %s", ErrUnsupportedModel, req.Model)
+		traceCall(ctx, CallTrace{Request: req, Err: err, StartedAt: startedAt, EndedAt: time.Now()})
+		return ChatResponse{}, err
 	}
 	if strings.TrimSpace(c.apiKey) == "" {
-		return ChatResponse{}, errors.New("DEEPSEEK_API_KEY is required")
+		err := errors.New("DEEPSEEK_API_KEY is required")
+		traceCall(ctx, CallTrace{Request: req, Err: err, StartedAt: startedAt, EndedAt: time.Now()})
+		return ChatResponse{}, err
 	}
 	req.Stream = false
 	traceRequest(ctx, req)
 	var out ChatResponse
 	if err := c.do(ctx, req, &out); err != nil {
+		traceCall(ctx, CallTrace{Request: req, Response: &out, Err: err, StartedAt: startedAt, EndedAt: time.Now()})
 		return out, err
 	}
+	traceCall(ctx, CallTrace{Request: req, Response: &out, StartedAt: startedAt, EndedAt: time.Now()})
 	return out, nil
 }
 
 func (c *Client) Stream(ctx context.Context, req ChatRequest, yield func(ChatResponse, error) bool) {
+	startedAt := time.Now()
+	req.Stream = true
+	var lastResp *ChatResponse
+	finish := func(err error) {
+		traceCall(ctx, CallTrace{Request: req, Response: lastResp, Err: err, StartedAt: startedAt, EndedAt: time.Now()})
+	}
 	if !SupportedModel(req.Model) {
-		yield(ChatResponse{}, fmt.Errorf("%w: %s", ErrUnsupportedModel, req.Model))
+		err := fmt.Errorf("%w: %s", ErrUnsupportedModel, req.Model)
+		yield(ChatResponse{}, err)
+		finish(err)
 		return
 	}
 	if strings.TrimSpace(c.apiKey) == "" {
-		yield(ChatResponse{}, errors.New("DEEPSEEK_API_KEY is required"))
+		err := errors.New("DEEPSEEK_API_KEY is required")
+		yield(ChatResponse{}, err)
+		finish(err)
 		return
 	}
-	req.Stream = true
 	traceRequest(ctx, req)
 	body, err := json.Marshal(req)
 	if err != nil {
 		yield(ChatResponse{}, err)
+		finish(err)
 		return
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		yield(ChatResponse{}, err)
+		finish(err)
 		return
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
@@ -173,41 +192,68 @@ func (c *Client) Stream(ctx context.Context, req ChatRequest, yield func(ChatRes
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		yield(ChatResponse{}, err)
+		finish(err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(resp.Body)
-		yield(ChatResponse{}, fmt.Errorf("deepseek stream failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(data))))
+		err := fmt.Errorf("deepseek stream failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(data)))
+		yield(ChatResponse{}, err)
+		finish(err)
 		return
 	}
 	scanner := bufio.NewScanner(resp.Body)
+	var rawLines []string
+	var sawData bool
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, ":") {
 			continue
 		}
 		if !strings.HasPrefix(line, "data:") {
+			rawLines = append(rawLines, line)
 			continue
 		}
+		sawData = true
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
+			finish(nil)
 			return
 		}
 		var chunk ChatResponse
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			if !yield(ChatResponse{}, err) {
+				finish(err)
 				return
 			}
 			continue
 		}
+		lastResp = &chunk
 		if !yield(chunk, nil) {
+			finish(nil)
 			return
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		yield(ChatResponse{}, err)
+		finish(err)
+		return
 	}
+	if !sawData && len(rawLines) > 0 {
+		var full ChatResponse
+		if err := json.Unmarshal([]byte(strings.Join(rawLines, "\n")), &full); err != nil {
+			yield(ChatResponse{}, err)
+			finish(err)
+			return
+		}
+		lastResp = &full
+		if !yield(full, nil) {
+			finish(nil)
+			return
+		}
+	}
+	finish(nil)
 }
 
 func (c *Client) do(ctx context.Context, req ChatRequest, out any) error {
@@ -239,16 +285,31 @@ func (c *Client) do(ctx context.Context, req ChatRequest, out any) error {
 type ADKModel struct {
 	modelName string
 	client    *Client
+	thinking  *Thinking
 }
 
 func NewADKModel(modelName string, client *Client) (*ADKModel, error) {
+	return NewADKModelWithThinking(modelName, client, Thinking{Type: "disabled"})
+}
+
+func NewADKModelWithThinking(modelName string, client *Client, thinking Thinking) (*ADKModel, error) {
 	if !SupportedModel(modelName) {
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedModel, modelName)
 	}
 	if client == nil {
 		client = New()
 	}
-	return &ADKModel{modelName: modelName, client: client}, nil
+	if strings.TrimSpace(thinking.Type) == "" {
+		thinking.Type = "disabled"
+	}
+	return &ADKModel{modelName: modelName, client: client, thinking: &thinking}, nil
+}
+
+func cloneThinking(thinking *Thinking) *Thinking {
+	if thinking == nil {
+		return nil
+	}
+	return &Thinking{Type: thinking.Type}
 }
 
 func (m *ADKModel) Name() string {
@@ -267,7 +328,7 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 			Model:    m.modelName,
 			Messages: contentsToMessages(req.Contents, systemInstruction(req), originalToWire),
 			Tools:    tools,
-			Thinking: &Thinking{Type: "disabled"},
+			Thinking: cloneThinking(m.thinking),
 		}
 		if req.Model != "" && SupportedModel(req.Model) {
 			chatReq.Model = req.Model
@@ -277,17 +338,52 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 			chatReq.Temperature = &t
 		}
 		if stream {
+			var full strings.Builder
+			var streamedToolCalls []ToolCall
+			var lastModel string
+			var lastFinishReason string
 			m.client.Stream(ctx, chatReq, func(chunk ChatResponse, err error) bool {
 				if err != nil {
 					return yield(nil, err)
+				}
+				if strings.TrimSpace(chunk.Model) != "" {
+					lastModel = chunk.Model
+				}
+				if len(chunk.Choices) > 0 {
+					if strings.TrimSpace(chunk.Choices[0].FinishReason) != "" {
+						lastFinishReason = chunk.Choices[0].FinishReason
+					}
+					streamedToolCalls = mergeToolCallDeltas(streamedToolCalls, chunk.Choices[0].Delta.ToolCalls)
+					streamedToolCalls = mergeFullToolCalls(streamedToolCalls, chunk.Choices[0].Message.ToolCalls)
 				}
 				text := chunkText(chunk)
 				if text == "" {
 					return true
 				}
+				full.WriteString(text)
 				return yield(textResponse(text, true), nil)
 			})
-			yield(&adkmodel.LLMResponse{TurnComplete: true}, nil)
+			if len(streamedToolCalls) > 0 {
+				yield(responseToADK(ChatResponse{
+					Model: lastModel,
+					Choices: []struct {
+						Index        int     `json:"index"`
+						Message      Message `json:"message"`
+						FinishReason string  `json:"finish_reason"`
+						Delta        Message `json:"delta,omitempty"`
+					}{{
+						Message:      Message{Role: "assistant", ToolCalls: streamedToolCalls},
+						FinishReason: "tool_calls",
+					}},
+				}, wireToOriginal), nil)
+			} else if strings.TrimSpace(full.String()) != "" {
+				resp := textResponse(full.String(), false)
+				resp.ModelVersion = lastModel
+				resp.FinishReason = genai.FinishReason(lastFinishReason)
+				yield(resp, nil)
+			} else {
+				yield(&adkmodel.LLMResponse{TurnComplete: true}, nil)
+			}
 			return
 		}
 		resp, err := m.client.Chat(ctx, chatReq)
@@ -448,6 +544,46 @@ func textResponse(text string, partial bool) *adkmodel.LLMResponse {
 		Partial:      partial,
 		TurnComplete: !partial,
 	}
+}
+
+func mergeToolCallDeltas(existing, deltas []ToolCall) []ToolCall {
+	return mergeToolCalls(existing, deltas, true)
+}
+
+func mergeFullToolCalls(existing, calls []ToolCall) []ToolCall {
+	return mergeToolCalls(existing, calls, false)
+}
+
+func mergeToolCalls(existing, calls []ToolCall, appendFragments bool) []ToolCall {
+	for _, call := range calls {
+		index := call.Index
+		for len(existing) <= index {
+			existing = append(existing, ToolCall{Index: len(existing), Type: "function"})
+		}
+		current := existing[index]
+		if strings.TrimSpace(call.ID) != "" {
+			current.ID = call.ID
+		}
+		if strings.TrimSpace(call.Type) != "" {
+			current.Type = call.Type
+		}
+		if strings.TrimSpace(call.Function.Name) != "" {
+			if appendFragments {
+				current.Function.Name += call.Function.Name
+			} else {
+				current.Function.Name = call.Function.Name
+			}
+		}
+		if strings.TrimSpace(call.Function.Arguments) != "" {
+			if appendFragments {
+				current.Function.Arguments += call.Function.Arguments
+			} else {
+				current.Function.Arguments = call.Function.Arguments
+			}
+		}
+		existing[index] = current
+	}
+	return existing
 }
 
 func chunkText(chunk ChatResponse) string {

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -93,6 +94,13 @@ func (m *Manager) Root() string {
 		return ""
 	}
 	return m.store.Root()
+}
+
+func (m *Manager) AgentMessagesPath(input AgentTurnInput) string {
+	if m == nil || m.store == nil {
+		return ""
+	}
+	return filepath.Join(m.store.agentDirForInput(input), "messages.jsonl")
 }
 
 func (m *Manager) Allocate(input AllocationInput) Allocation {
