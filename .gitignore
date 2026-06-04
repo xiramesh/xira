@@ -4,6 +4,8 @@ bin/
 .flowdeck-smoke/
 .xira/
 .xira-smoke/
+node_modules/
+dist/
 references/
 workspace/agents/
 workspace/kb/

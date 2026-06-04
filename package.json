@@ -1,0 +1,12 @@
+{
+  "name": "xira-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "xiragarden:dev": "pnpm --filter xiragarden dev",
+    "xiragarden:build": "pnpm --filter xiragarden build"
+  }
+}
