@@ -3,17 +3,21 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ai-daming/xira/internal/agents"
+	"github.com/ai-daming/xira/internal/model/deepseek"
 	"github.com/ai-daming/xira/internal/runtime"
 )
 
 func TestAgentListUsesWorkspaceAgents(t *testing.T) {
 	instance := writeCLIFixture(t, "xira-assistant")
-	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "--mock-model", "agent", "list")
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "agent", "list")
 
 	var profiles []agents.Profile
 	if err := json.Unmarshal([]byte(out), &profiles); err != nil {
@@ -29,7 +33,7 @@ func TestAgentListUsesWorkspaceAgents(t *testing.T) {
 
 func TestAgentRunUsesRuntimeDefaultAgent(t *testing.T) {
 	instance := writeCLIFixture(t, "research-assistant")
-	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "--mock-model", "agent", "run", "--message", "hi")
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "agent", "run", "--message", "hi")
 
 	var resp runtime.TurnResponse
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
@@ -42,7 +46,7 @@ func TestAgentRunUsesRuntimeDefaultAgent(t *testing.T) {
 
 func TestAgentRunUsesExplicitWorkspaceAgent(t *testing.T) {
 	instance := writeCLIFixture(t, "xira-assistant")
-	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "--mock-model", "agent", "run", "--agent", "research-assistant", "--message", "please call exec")
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "agent", "run", "--agent", "research-assistant", "--message", "please call exec")
 
 	var resp runtime.TurnResponse
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
@@ -67,7 +71,10 @@ func TestNoPerChannelFeishuCommand(t *testing.T) {
 
 func executeCommand(t *testing.T, args ...string) string {
 	t.Helper()
-	cmd := newRootCommand()
+	cmd := newRootCommandWithFactory(func(cfg runtime.Config) (*runtime.Service, error) {
+		cfg.DeepSeekClient = fakeCLIDeepSeekClient(t)
+		return runtime.NewService(cfg)
+	})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stdout)
@@ -76,6 +83,92 @@ func executeCommand(t *testing.T, args ...string) string {
 		t.Fatalf("Execute(%v) error = %v\n%s", args, err, stdout.String())
 	}
 	return stdout.String()
+}
+
+func fakeCLIDeepSeekClient(t *testing.T) *deepseek.Client {
+	t.Helper()
+	client := &http.Client{Transport: cliRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		var body string
+		if hasCLIToolResponse(req.Messages) {
+			body = cliDeepSeekTextResponse("fake cli tool final")
+		} else {
+			userMessage := lastCLIUserMessage(req.Messages)
+			if strings.Contains(strings.ToLower(userMessage), "exec") {
+				body = cliDeepSeekToolCallResponse()
+			} else {
+				body = cliDeepSeekTextResponse("fake cli response")
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+	return deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client))
+}
+
+type cliRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn cliRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func hasCLIToolResponse(messages []deepseek.Message) bool {
+	for _, message := range messages {
+		if message.Role == "tool" {
+			return true
+		}
+	}
+	return false
+}
+
+func lastCLIUserMessage(messages []deepseek.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return deepseek.ContentText(messages[i].Content)
+		}
+	}
+	return ""
+}
+
+func cliDeepSeekTextResponse(text string) string {
+	data, _ := json.Marshal(map[string]any{
+		"model": "deepseek-v4-flash",
+		"choices": []map[string]any{{
+			"finish_reason": "stop",
+			"message": map[string]any{
+				"role":    "assistant",
+				"content": text,
+			},
+		}},
+	})
+	return string(data)
+}
+
+func cliDeepSeekToolCallResponse() string {
+	data, _ := json.Marshal(map[string]any{
+		"model": "deepseek-v4-flash",
+		"choices": []map[string]any{{
+			"finish_reason": "tool_calls",
+			"message": map[string]any{
+				"role": "assistant",
+				"tool_calls": []map[string]any{{
+					"id":   "call-1",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "exec",
+						"arguments": `{"action":"run","command":"printf 'hello from Xira exec'"}`,
+					},
+				}},
+			},
+		}},
+	})
+	return string(data)
 }
 
 func writeCLIFixture(t *testing.T, defaultAgentID string) string {

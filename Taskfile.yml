@@ -52,11 +52,6 @@ tasks:
     cmds:
       - go run ./cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} tui {{if .AGENT}}--agent {{.AGENT}}{{end}}
 
-  tui:mock:
-    desc: Run embedded Xira TUI with the mock model
-    cmds:
-      - go run ./cmd/xira --config {{.CONFIG}} --mock-model --run-root {{.RUN_ROOT}} tui {{if .AGENT}}--agent {{.AGENT}}{{end}}
-
   agent:list:
     desc: List agent profiles
     cmds:
@@ -67,24 +62,19 @@ tasks:
     cmds:
       - go run ./cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} agent run {{if .AGENT}}--agent {{.AGENT}} {{end}}--message {{quote .MSG}}
 
-  agent:run:mock:
-    desc: Run an agent once with the mock model; override with MSG='...' and AGENT='...'
-    cmds:
-      - go run ./cmd/xira --config {{.CONFIG}} --mock-model --run-root {{.RUN_ROOT}} agent run {{if .AGENT}}--agent {{.AGENT}} {{end}}--message {{quote .MSG}}
-
   runs:list:
     desc: List recorded runs
     cmds:
       - go run ./cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} runs list
 
   smoke:
-    desc: Run a non-interactive mock smoke test
+    desc: Run a non-interactive DeepSeek smoke test
     vars:
       SMOKE_ROOT: /tmp/xira-smoke-runs
     cmds:
       - rm -rf {{.SMOKE_ROOT}}
       - go run ./cmd/xira version
-      - go run ./cmd/xira --config {{.CONFIG}} --mock-model --run-root {{.SMOKE_ROOT}} agent run --message "please call exec"
+      - go run ./cmd/xira --config {{.CONFIG}} --run-root {{.SMOKE_ROOT}} agent run --message "please call exec"
       - test -f {{.SMOKE_ROOT}}/*/run.yaml
 
   clean:

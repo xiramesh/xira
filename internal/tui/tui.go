@@ -1321,10 +1321,7 @@ func agentStringList(agent map[string]any, key string) []string {
 	}
 }
 
-func modelStatusLabel(status map[string]any) string {
-	if statusBool(status, "mock_model") {
-		return "mock"
-	}
+func modelStatusLabel(_ map[string]any) string {
 	return "DeepSeek"
 }
 

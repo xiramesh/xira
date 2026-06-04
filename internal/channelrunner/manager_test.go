@@ -25,10 +25,7 @@ entrypoints: workspace/entrypoints.yaml
 `)
 	writeMinimalAgent(t, filepath.Join(instance, "workspace", "agents", "xira-assistant"))
 
-	rt, err := runtime.NewService(runtime.Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newManagerTestRuntime(t, filepath.Join(instance, "xira.yaml"))
 	manager, err := NewManager(rt)
 	if err != nil {
 		t.Fatal(err)
@@ -53,10 +50,7 @@ entrypoints: workspace/entrypoints.yaml
 `)
 	writeMinimalAgent(t, filepath.Join(instance, "workspace", "agents", "xira-assistant"))
 
-	rt, err := runtime.NewService(runtime.Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newManagerTestRuntime(t, filepath.Join(instance, "xira.yaml"))
 	if _, err := NewManager(rt); err == nil {
 		t.Fatal("expected missing credential error")
 	}
@@ -70,6 +64,16 @@ func writeFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s): %v", path, err)
 	}
+}
+
+func newManagerTestRuntime(t *testing.T, configPath string) *runtime.Service {
+	t.Helper()
+	t.Setenv("DEEPSEEK_API_KEY", "test-key")
+	rt, err := runtime.NewService(runtime.Config{ConfigPath: configPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rt
 }
 
 func writeMinimalAgent(t *testing.T, dir string) {

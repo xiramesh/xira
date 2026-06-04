@@ -486,7 +486,6 @@ type AgentEngine interface {
 - `native.Engine`
 - `codexcli.Engine`
 - `claudecode.Engine`
-- `mock.Engine`
 
 ### DeepSeek Model Adapter
 
@@ -1524,7 +1523,7 @@ pkg/
 
 - 通过 `AgentEngine` adapter 隔离。
 - Runtime 层不直接依赖 ADK 的业务概念。
-- 保留 mock / native engine 作为测试和回退。
+- 保留 fake HTTP server / contract tests 作为测试手段；运行时不提供假模型回退。
 
 ### ADR-001A：第一版只支持 DeepSeek V4 Flash / Pro
 
@@ -1548,7 +1547,7 @@ pkg/
 
 - 通过 `AgentEngine` / model adapter 隔离 provider 细节。
 - model id 做白名单校验。
-- 保留 mock model adapter 做测试。
+- 用 fake DeepSeek HTTP server 做 adapter contract tests，不在运行时保留替身模型 adapter。
 - 后续需要时再新增 provider adapter，而不是把第一版改成通用 gateway。
 
 ### ADR-002：Business Runtime 位于 ADK 之上
@@ -1721,7 +1720,7 @@ Xira 内置 `exec` 工具，允许运行运行前未知的本地命令。Phase 1
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
 | ADK Go API 变化 | adapter 需要更新 | 通过 `AgentEngine` 隔离，锁版本 |
-| DeepSeek API 语义变化 | chat / stream / tool call adapter 需要更新 | model id 白名单、contract tests、mock adapter |
+| DeepSeek API 语义变化 | chat / stream / tool call adapter 需要更新 | model id 白名单、contract tests、fake HTTP server |
 | 模型范围过早泛化 | 第一版变成 LLM gateway，拖慢 Xira 验证 | 只支持 `deepseek-v4-flash` / `deepseek-v4-pro` |
 | 过早强制所有任务 flow 化 | 第一版实现变重，真实干活入口不顺 | Phase 1 采用 agent-first，flow wrapper 后置 |
 | ADK Skills 成熟度不足 | flow 交付受阻 | 自定义 flow pack，ADK 只作为编译目标 |
@@ -1875,7 +1874,7 @@ Xira 还应该从 PicoClaw 的经验里保留三个教训：
 
 1. 写一份更短的 product spec，锁定第一版客户场景、交付形态和 demo agent。
 2. 锁定 ADK Go 版本，做最小 runner spike，验证 chat、stream、tool call event 映射。
-3. 实现 DeepSeek adapter v0，只支持 `deepseek-v4-flash` / `deepseek-v4-pro`，同时准备 mock adapter。
+3. 实现 DeepSeek adapter v0，只支持 `deepseek-v4-flash` / `deepseek-v4-pro`，同时准备 fake HTTP server contract tests。
 4. 定义核心接口：`AgentEngine`、`TurnRequest`、`RuntimeEvent`、`ToolCall`、`VerificationResult`、`RunRecord`。
 5. 定义 agent profile v0 schema，包含 model policy、instructions、permissions、artifact policy、verification defaults。
 6. 实现 agent profile manager，并支持 `xira agent run`。

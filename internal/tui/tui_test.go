@@ -210,11 +210,11 @@ func TestAgentListTextIncludesRuntimeProfileDetails(t *testing.T) {
 
 func TestLoadUsesRuntimeDiscoveredAgents(t *testing.T) {
 	workspace := writeTUIWorkspace(t)
+	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 	rt, err := frt.NewService(frt.Config{
 		WorkspaceRoot:  workspace,
 		DefaultAgentID: "custom-agent",
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		UseMockModel:   true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -239,7 +239,6 @@ func TestViewStartsAsDefaultAgent(t *testing.T) {
 	m := model{
 		input: input,
 		status: map[string]any{
-			"mock_model":    false,
 			"default_agent": "xira-assistant",
 		},
 		agents: []map[string]any{
@@ -254,7 +253,7 @@ func TestViewStartsAsDefaultAgent(t *testing.T) {
 			t.Fatalf("View() = %q, want substring %q", view, want)
 		}
 	}
-	for _, forbidden := range []string{"Mode: shell", "Ask research-assistant", "Entrypoint: agent run", "Selected agent:", "mock_model=", "known_tool=", "known_tool:", "No agents loaded", "No runs yet"} {
+	for _, forbidden := range []string{"Mode: shell", "Ask research-assistant", "Entrypoint: agent run", "Selected agent:", "known_tool=", "known_tool:", "No agents loaded", "No runs yet"} {
 		if strings.Contains(view, forbidden) {
 			t.Fatalf("View() = %q, should not contain %q", view, forbidden)
 		}
@@ -534,10 +533,7 @@ func TestComposerLabelUsesUserPerspective(t *testing.T) {
 }
 
 func TestModelStatusLabel(t *testing.T) {
-	if got := modelStatusLabel(map[string]any{"mock_model": true}); got != "mock" {
-		t.Fatalf("modelStatusLabel(mock) = %q", got)
-	}
-	if got := modelStatusLabel(map[string]any{"mock_model": false}); got != "DeepSeek" {
+	if got := modelStatusLabel(map[string]any{}); got != "DeepSeek" {
 		t.Fatalf("modelStatusLabel(deepseek) = %q", got)
 	}
 }

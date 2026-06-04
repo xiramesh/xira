@@ -4,23 +4,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"github.com/ai-daming/xira/internal/agents"
+	"github.com/ai-daming/xira/internal/model/deepseek"
 	frt "github.com/ai-daming/xira/internal/runtime"
 )
 
 func TestAgentRunAPI(t *testing.T) {
-	rt, err := frt.NewService(frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -46,10 +46,7 @@ func TestAgentRunAPI(t *testing.T) {
 }
 
 func TestShellTurnAPIIsNotAChannelEntrypoint(t *testing.T) {
-	rt, err := frt.NewService(frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -73,7 +70,7 @@ func TestAgentsAPIUsesWorkspaceDiscoveredAgents(t *testing.T) {
 		WorkspaceRoot:  workspace,
 		DefaultAgentID: "xira-assistant",
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		UseMockModel:   true,
+		DeepSeekClient: fakeAPIDeepSeekClient(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -106,10 +103,7 @@ func TestAgentsAPIUsesWorkspaceDiscoveredAgents(t *testing.T) {
 }
 
 func TestEventsWebSocketReceivesRunEvents(t *testing.T) {
-	rt, err := frt.NewService(frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -138,6 +132,46 @@ func TestEventsWebSocketReceivesRunEvents(t *testing.T) {
 	if evt.Kind != "run.started" {
 		t.Fatalf("event kind = %q", evt.Kind)
 	}
+}
+
+func newAPITestService(t *testing.T, cfg frt.Config) *frt.Service {
+	t.Helper()
+	if cfg.DeepSeekClient == nil {
+		cfg.DeepSeekClient = fakeAPIDeepSeekClient(t)
+	}
+	rt, err := frt.NewService(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rt
+}
+
+func fakeAPIDeepSeekClient(t *testing.T) *deepseek.Client {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{
+		"model": "deepseek-v4-flash",
+		"choices": []map[string]any{{
+			"finish_reason": "stop",
+			"message": map[string]any{
+				"role":    "assistant",
+				"content": "fake api response",
+			},
+		}},
+	})
+	client := &http.Client{Transport: apiRoundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(string(body))),
+		}, nil
+	})}
+	return deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client))
+}
+
+type apiRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn apiRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }
 
 func writeAPIWorkspace(t *testing.T) string {

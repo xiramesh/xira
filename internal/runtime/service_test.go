@@ -3,8 +3,8 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,10 +18,7 @@ import (
 )
 
 func TestRunAgentWritesHarnessStore(t *testing.T) {
-	rt, err := NewService(Config{RunRoot: filepath.Join(t.TempDir(), "runs"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "hello",
 		Channel: "test",
@@ -57,11 +54,8 @@ func TestRunAgentWritesHarnessStore(t *testing.T) {
 	}
 }
 
-func TestDefaultAgentRespondsInMockMode(t *testing.T) {
-	rt, err := NewService(Config{RunRoot: filepath.Join(t.TempDir(), "runs"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestDefaultAgentRespondsWithDeepSeekAdapter(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hi", Channel: "test"})
 	if err != nil {
 		t.Fatalf("run default agent: %v", err)
@@ -78,7 +72,7 @@ func TestDefaultAgentRespondsInMockMode(t *testing.T) {
 	if resp.SessionScope == nil {
 		t.Fatal("session scope is nil")
 	}
-	if resp.FinalResponse != "Mock model response: hi" {
+	if resp.FinalResponse != "fake model response: hi" {
 		t.Fatalf("final response = %q", resp.FinalResponse)
 	}
 	history := rt.SessionManager().History(resp.SessionID)
@@ -93,10 +87,7 @@ func TestDefaultAgentRespondsInMockMode(t *testing.T) {
 func TestRunAgentPersistsSessionFilesAndReloadsHistory(t *testing.T) {
 	stateRoot := t.TempDir()
 	sessionRoot := filepath.Join(stateRoot, "sessions")
-	rt, err := NewService(Config{RunRoot: filepath.Join(stateRoot, "runs"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newTestService(t, Config{RunRoot: filepath.Join(stateRoot, "runs")})
 	if got := rt.SessionManager().Root(); got != sessionRoot {
 		t.Fatalf("session root = %q, want %q", got, sessionRoot)
 	}
@@ -135,25 +126,19 @@ func TestRunAgentPersistsSessionFilesAndReloadsHistory(t *testing.T) {
 		t.Fatalf("expected persisted messages: %v", err)
 	}
 
-	reloaded, err := NewService(Config{RunRoot: filepath.Join(stateRoot, "runs"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	reloaded := newTestService(t, Config{RunRoot: filepath.Join(stateRoot, "runs")})
 	history := reloaded.SessionManager().History(resp.SessionID)
 	if len(history) != 2 {
 		t.Fatalf("reloaded history len = %d, want 2: %+v", len(history), history)
 	}
-	if history[0].Content != "persist me" || history[1].Content != "Mock model response: persist me" {
+	if history[0].Content != "persist me" || history[1].Content != "fake model response: persist me" {
 		t.Fatalf("reloaded history = %+v", history)
 	}
 }
 
 func TestHydrateADKSessionRestoresPersistedAgentHistory(t *testing.T) {
 	stateRoot := t.TempDir()
-	rt, err := NewService(Config{RunRoot: filepath.Join(stateRoot, "runs"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newTestService(t, Config{RunRoot: filepath.Join(stateRoot, "runs")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "remember this",
 		Channel: "test",
@@ -163,10 +148,7 @@ func TestHydrateADKSessionRestoresPersistedAgentHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reloaded, err := NewService(Config{RunRoot: filepath.Join(stateRoot, "runs"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	reloaded := newTestService(t, Config{RunRoot: filepath.Join(stateRoot, "runs")})
 	agentSessionID := fsession.BuildAgentSessionID(resp.SessionID, resp.AgentID)
 	if err := reloaded.hydrateADKSession(context.Background(), "user-1", agentSessionID, resp.AgentID, resp.SessionID); err != nil {
 		t.Fatal(err)
@@ -186,24 +168,18 @@ func TestHydrateADKSessionRestoresPersistedAgentHistory(t *testing.T) {
 	if first := events.At(0); first.Author != "user" || contentText(first.Content) != "remember this" {
 		t.Fatalf("first restored event = %+v", first)
 	}
-	if second := events.At(1); second.Author != resp.AgentID || contentText(second.Content) != "Mock model response: remember this" {
+	if second := events.At(1); second.Author != resp.AgentID || contentText(second.Content) != "fake model response: remember this" {
 		t.Fatalf("second restored event = %+v", second)
 	}
 }
 
-func TestStatusDoesNotExposeToolDiscovery(t *testing.T) {
-	rt, err := NewService(Config{RunRoot: filepath.Join(t.TempDir(), "runs"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestStatusDoesNotExposeToolDiscoveryInternals(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	status := rt.Status()
 	for _, key := range []string{"known_tool_present", "known_tool_path"} {
 		if _, ok := status[key]; ok {
-			t.Fatalf("status exposes tool discovery key %q: %+v", key, status)
+			t.Fatalf("status exposes internal key %q: %+v", key, status)
 		}
-	}
-	if _, ok := status["mock_model"]; !ok {
-		t.Fatalf("status missing model mode: %+v", status)
 	}
 }
 
@@ -233,10 +209,7 @@ func TestToolLogSummariesAvoidLargeContent(t *testing.T) {
 }
 
 func TestRunAgentCanUseExecTool(t *testing.T) {
-	rt, err := NewService(Config{RunRoot: filepath.Join(t.TempDir(), "runs"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: agents.ResearchAssistantAgentID,
 		Message: "please call exec",
@@ -251,19 +224,21 @@ func TestRunAgentCanUseExecTool(t *testing.T) {
 }
 
 func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
-	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 	var gotReq deepseek.ChatRequest
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
-			t.Fatal(err)
+			return nil, err
 		}
-		_, _ = w.Write([]byte(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"adk runtime ok"}]}}]}`))
-	}))
-	defer server.Close()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"adk runtime ok"}]}}]}`)),
+		}, nil
+	})}
 
 	rt, err := NewService(Config{
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest(server.URL), deepseek.WithAPIKey("test-key")),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -308,10 +283,7 @@ func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
 
 func TestNewServiceLoadsWorkspaceAgentsFromConfig(t *testing.T) {
 	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
-	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
 	status := rt.Status()
 	if status["profile_source"] != "workspace" {
 		t.Fatalf("profile_source = %v", status["profile_source"])
@@ -332,10 +304,7 @@ func TestNewServiceLoadsWorkspaceAgentsFromConfig(t *testing.T) {
 
 func TestConfigDefaultAgentRoutesDefaultRequest(t *testing.T) {
 	instance := writeRuntimeFixture(t, "research-assistant", []string{"chat", "sender"})
-	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hi", Channel: "test"})
 	if err != nil {
 		t.Fatal(err)
@@ -350,10 +319,7 @@ func TestConfigDefaultAgentRoutesDefaultRequest(t *testing.T) {
 
 func TestExplicitAgentCanRunWorkspaceResearchAssistant(t *testing.T) {
 	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
-	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: "research-assistant",
 		Message: "please call exec",
@@ -371,10 +337,7 @@ func TestExplicitAgentCanRunWorkspaceResearchAssistant(t *testing.T) {
 }
 
 func TestExplicitAgentSharesConversationSessionWithDefaultAgent(t *testing.T) {
-	rt, err := NewService(Config{RunRoot: filepath.Join(t.TempDir(), "runs"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	metadata := map[string]string{
 		"account":   "tenant-a",
 		"chat_id":   "chat-1",
@@ -420,10 +383,7 @@ func TestExplicitAgentSharesConversationSessionWithDefaultAgent(t *testing.T) {
 
 func TestFeishuEntrypointsSplitConversationByBotInstance(t *testing.T) {
 	instance := writeRuntimeFixtureWithEntrypoints(t)
-	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
 	base := map[string]string{
 		"account":   "tenant-a",
 		"chat_id":   "chat-1",
@@ -471,10 +431,7 @@ func TestFeishuEntrypointsSplitConversationByBotInstance(t *testing.T) {
 
 func TestAgentProfileSessionDimensionsOverrideDefaultScope(t *testing.T) {
 	instance := writeRuntimeFixture(t, "xira-assistant", []string{"channel"})
-	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "xira.yaml"), UseMockModel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "hello",
 		Channel: "tui",
@@ -510,6 +467,111 @@ func TestVerificationFailureCreatesEvolutionCandidate(t *testing.T) {
 	if candidate.FailureLayer != "Verification" {
 		t.Fatalf("failure layer = %q", candidate.FailureLayer)
 	}
+}
+
+func TestNewServiceRequiresDeepSeekAPIKey(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	if _, err := NewService(Config{RunRoot: filepath.Join(t.TempDir(), "runs")}); err == nil || !strings.Contains(err.Error(), "DEEPSEEK_API_KEY is required") {
+		t.Fatalf("NewService() error = %v, want DEEPSEEK_API_KEY requirement", err)
+	}
+}
+
+func newTestService(t *testing.T, cfg Config) *Service {
+	t.Helper()
+	if cfg.DeepSeekClient == nil {
+		cfg.DeepSeekClient = fakeDeepSeekClient(t)
+	}
+	rt, err := NewService(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rt
+}
+
+func fakeDeepSeekClient(t *testing.T) *deepseek.Client {
+	t.Helper()
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		var body string
+		if hasToolResponse(req.Messages) {
+			body = deepSeekTextResponse("fake tool final")
+		} else {
+			userMessage := lastUserMessage(req.Messages)
+			if strings.Contains(strings.ToLower(userMessage), "exec") {
+				body = deepSeekToolCallResponse()
+			} else {
+				body = deepSeekTextResponse("fake model response: " + userMessage)
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+	return deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client))
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func hasToolResponse(messages []deepseek.Message) bool {
+	for _, message := range messages {
+		if message.Role == "tool" {
+			return true
+		}
+	}
+	return false
+}
+
+func lastUserMessage(messages []deepseek.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return deepseek.ContentText(messages[i].Content)
+		}
+	}
+	return ""
+}
+
+func deepSeekTextResponse(text string) string {
+	data, _ := json.Marshal(map[string]any{
+		"model": "deepseek-v4-flash",
+		"choices": []map[string]any{{
+			"finish_reason": "stop",
+			"message": map[string]any{
+				"role":    "assistant",
+				"content": text,
+			},
+		}},
+	})
+	return string(data)
+}
+
+func deepSeekToolCallResponse() string {
+	data, _ := json.Marshal(map[string]any{
+		"model": "deepseek-v4-flash",
+		"choices": []map[string]any{{
+			"finish_reason": "tool_calls",
+			"message": map[string]any{
+				"role": "assistant",
+				"tool_calls": []map[string]any{{
+					"id":   "call-1",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "exec",
+						"arguments": `{"action":"run","command":"printf 'hello from Xira exec'"}`,
+					},
+				}},
+			},
+		}},
+	})
+	return string(data)
 }
 
 func writeRuntimeFixture(t *testing.T, defaultAgentID string, xiraSessionDimensions []string) string {

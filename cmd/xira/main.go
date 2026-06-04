@@ -28,21 +28,22 @@ func main() {
 }
 
 func newRootCommand() *cobra.Command {
+	return newRootCommandWithFactory(runtime.NewService)
+}
+
+func newRootCommandWithFactory(serviceFactory func(runtime.Config) (*runtime.Service, error)) *cobra.Command {
 	var configPath string
 	var runRoot string
-	var mockModel bool
 	cmd := &cobra.Command{
 		Use:   "xira",
 		Short: "Xira customer delivery runtime",
 	}
 	cmd.PersistentFlags().StringVar(&configPath, "config", "xira.yaml", "Runtime instance config path")
 	cmd.PersistentFlags().StringVar(&runRoot, "run-root", "", "Override run log root directory")
-	cmd.PersistentFlags().BoolVar(&mockModel, "mock-model", false, "Use mock model instead of DeepSeek")
 	newRuntime := func() (*runtime.Service, error) {
-		return runtime.NewService(runtime.Config{
-			ConfigPath:   configPath,
-			RunRoot:      runRoot,
-			UseMockModel: mockModel,
+		return serviceFactory(runtime.Config{
+			ConfigPath: configPath,
+			RunRoot:    runRoot,
 		})
 	}
 	cmd.AddCommand(versionCommand())
@@ -82,7 +83,6 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 				"run_root", status["run_root"],
 				"default_agent", status["default_agent"],
 				"profile_source", status["profile_source"],
-				"mock_model", status["mock_model"],
 			)
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()

@@ -31,7 +31,6 @@ type Config struct {
 	DefaultAgentID string
 	RunRoot        string
 	SessionRoot    string
-	UseMockModel   bool
 	DeepSeekClient *deepseek.Client
 }
 
@@ -50,7 +49,6 @@ type Service struct {
 	workspace     string
 	defaultAgent  string
 	profileSource string
-	useMockModel  bool
 	mu            sync.RWMutex
 }
 
@@ -72,6 +70,9 @@ func NewService(cfg Config) (*Service, error) {
 	}
 	dsClient := cfg.DeepSeekClient
 	if dsClient == nil {
+		if strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")) == "" {
+			return nil, errors.New("DEEPSEEK_API_KEY is required")
+		}
 		dsClient = deepseek.New()
 	}
 	return &Service{
@@ -89,7 +90,6 @@ func NewService(cfg Config) (*Service, error) {
 		workspace:     resolved.WorkspaceRoot,
 		defaultAgent:  resolved.DefaultAgentID,
 		profileSource: profileSource,
-		useMockModel:  cfg.UseMockModel || os.Getenv("DEEPSEEK_API_KEY") == "",
 	}, nil
 }
 
@@ -143,7 +143,6 @@ func (s *Service) Status() map[string]any {
 		"entrypoints":    len(s.entrypoints.Definitions()),
 		"default_agent":  s.defaultAgent,
 		"profile_source": s.profileSource,
-		"mock_model":     s.useMockModel,
 	}
 }
 
@@ -343,9 +342,6 @@ func (s *Service) generate(
 	recordEvent func(kind, source, message string, payload map[string]any),
 	recordAudit func(action, target string, allowed bool, reason string, meta map[string]any),
 ) (string, []ToolCallRecord, error) {
-	if s.useMockModel {
-		return s.mockGenerate(ctx, profile, req, recordEvent, recordAudit)
-	}
 	return s.generateADK(ctx, profile, req, recordEvent, recordAudit)
 }
 
@@ -426,29 +422,6 @@ func (s *Service) generateNativeDeepSeek(
 		return "", toolRecords, errors.New("deepseek returned no final choices")
 	}
 	return messageContent(second.Choices[0].Message), toolRecords, nil
-}
-
-func (s *Service) mockGenerate(
-	ctx context.Context,
-	profile agents.Profile,
-	req TurnRequest,
-	recordEvent func(kind, source, message string, payload map[string]any),
-	recordAudit func(action, target string, allowed bool, reason string, meta map[string]any),
-) (string, []ToolCallRecord, error) {
-	lower := strings.ToLower(req.Message)
-	if strings.Contains(lower, "exec") && s.toolRegistry(profile).Has("exec") {
-		call := deepseek.ToolCall{
-			ID:   uuid.NewString(),
-			Type: "function",
-			Function: deepseek.ToolCallFunction{
-				Name:      "exec",
-				Arguments: `{"action":"run","command":"printf 'hello from Xira exec'"}`,
-			},
-		}
-		rec := s.executeToolCall(ctx, profile, call, recordEvent, recordAudit)
-		return fmt.Sprintf("Mock model used exec: %v", rec.Output["stdout"]), []ToolCallRecord{rec}, nil
-	}
-	return "Mock model response: " + req.Message, nil, nil
 }
 
 func (s *Service) executeToolCall(
