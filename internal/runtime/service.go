@@ -15,6 +15,7 @@ import (
 
 	"github.com/ai-daming/flowdeck/internal/agents"
 	"github.com/ai-daming/flowdeck/internal/channel"
+	"github.com/ai-daming/flowdeck/internal/entrypoints"
 	"github.com/ai-daming/flowdeck/internal/model/deepseek"
 	"github.com/ai-daming/flowdeck/internal/routing"
 	fsession "github.com/ai-daming/flowdeck/internal/session"
@@ -35,6 +36,7 @@ type Service struct {
 	events        *EventBus
 	runs          *RunStore
 	router        *routing.Router
+	entrypoints   *entrypoints.Registry
 	sessions      *fsession.Manager
 	adkSessions   adksession.Service
 	verifier      *VerificationRunner
@@ -69,6 +71,7 @@ func NewService(cfg Config) (*Service, error) {
 		events:        NewEventBus(),
 		runs:          NewRunStore(resolved.RunRoot),
 		router:        routing.NewRouterWithRules(resolved.DefaultAgentID, resolved.Routes),
+		entrypoints:   entrypoints.NewRegistry(resolved.DefaultAgentID, resolved.Entrypoints),
 		sessions:      fsession.NewManager(),
 		adkSessions:   adksession.InMemoryService(),
 		verifier:      NewVerificationRunner(),
@@ -104,6 +107,13 @@ func (s *Service) Agents() []agents.Profile {
 	return s.agents.List()
 }
 
+func (s *Service) Entrypoints() []entrypoints.Definition {
+	if s == nil || s.entrypoints == nil {
+		return nil
+	}
+	return s.entrypoints.Definitions()
+}
+
 func (s *Service) Status() map[string]any {
 	return map[string]any{
 		"name":           "flowdeck",
@@ -111,6 +121,7 @@ func (s *Service) Status() map[string]any {
 		"workspace":      s.workspace,
 		"run_root":       s.runs.Root(),
 		"agents":         len(s.Agents()),
+		"entrypoints":    len(s.entrypoints.Definitions()),
 		"default_agent":  s.defaultAgent,
 		"profile_source": s.profileSource,
 		"mock_model":     s.useMockModel,
@@ -120,37 +131,61 @@ func (s *Service) Status() map[string]any {
 func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, error) {
 	now := time.Now()
 	inbound := channel.InboundEnvelope{
-		Context:            channel.NewInboundContext(req.Channel, req.UserID, req.Metadata),
+		Context:            channel.NewInboundContextWithEntrypoint(req.Channel, req.EntrypointID, req.UserID, req.Metadata),
 		Content:            req.Message,
 		RequestedAgentID:   req.AgentID,
 		SessionIDOverride:  req.SessionID,
 		Metadata:           req.Metadata,
 		OriginalEntrypoint: "agent",
 	}
-	route := s.router.Resolve(inbound.Context, inbound.RequestedAgentID)
-	profile, ok := s.agents.Get(route.AgentID)
-	if !ok {
-		return TurnResponse{}, fmt.Errorf("agent profile %q not found", route.AgentID)
+	entrypointDecision, err := s.entrypoints.Resolve(entrypoints.ResolveInput{
+		Context:          inbound.Context,
+		EntrypointID:     req.EntrypointID,
+		RequestedAgentID: inbound.RequestedAgentID,
+	})
+	if err != nil {
+		return TurnResponse{}, err
 	}
-	route.SessionPolicy = sessionPolicyForProfile(profile, route.SessionPolicy)
+	if channelConflict(req.Channel, entrypointDecision.Definition.Channel) {
+		return TurnResponse{}, fmt.Errorf("entrypoint %q uses channel %q, got request channel %q", entrypointDecision.Definition.ID, entrypointDecision.Definition.Channel, req.Channel)
+	}
+	inbound.Context.Channel = entrypointDecision.Definition.Channel
+	inbound.Context.EntrypointID = entrypointDecision.Definition.ID
+	if inbound.Context.Account == "" {
+		inbound.Context.Account = entrypointDecision.Definition.Account
+	}
+	if inbound.Context.ChannelAppID == "" {
+		inbound.Context.ChannelAppID = entrypointDecision.Definition.AppID
+	}
+	if inbound.Context.BotID == "" {
+		inbound.Context.BotID = entrypointDecision.Definition.BotID
+	}
+	inbound.Context = channel.NormalizeInboundContext(inbound.Context)
+	profile, ok := s.agents.Get(entrypointDecision.AgentID)
+	if !ok {
+		return TurnResponse{}, fmt.Errorf("agent profile %q not found", entrypointDecision.AgentID)
+	}
+	sessionPolicy := sessionPolicyForProfile(profile, entrypointDecision.SessionPolicy)
 	allocation := s.sessions.Allocate(fsession.AllocationInput{
-		AgentID:           profile.ID,
 		Context:           inbound.Context,
-		SessionPolicy:     route.SessionPolicy,
+		SessionPolicy:     sessionPolicy,
 		SessionIDOverride: inbound.SessionIDOverride,
 	})
 	req.AgentID = profile.ID
+	req.EntrypointID = inbound.Context.EntrypointID
 	req.Channel = inbound.Context.Channel
 	req.UserID = inbound.Context.SenderID
 	req.SessionID = allocation.SessionID
+	agentSessionID := fsession.BuildAgentSessionID(req.SessionID, profile.ID)
 	runID := NewRunID(profile.ID, now)
 	scope := allocation.Scope
 	resp := TurnResponse{
 		RunID:          runID,
 		AgentID:        profile.ID,
+		EntrypointID:   inbound.Context.EntrypointID,
 		SessionID:      req.SessionID,
 		SessionScope:   &scope,
-		RouteMatchedBy: route.MatchedBy,
+		RouteMatchedBy: entrypointDecision.MatchedBy,
 		Message:        req.Message,
 		Status:         "running",
 		StartedAt:      now,
@@ -184,14 +219,23 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		})
 	}
 	recordEvent("run.started", "runtime", "agent run started", map[string]any{
-		"agent_id":   profile.ID,
-		"channel":    inbound.Context.Channel,
-		"session_id": req.SessionID,
-		"matched_by": route.MatchedBy,
+		"agent_id":         profile.ID,
+		"entrypoint_id":    inbound.Context.EntrypointID,
+		"channel":          inbound.Context.Channel,
+		"channel_app_id":   inbound.Context.ChannelAppID,
+		"bot_id":           inbound.Context.BotID,
+		"session_id":       req.SessionID,
+		"agent_session_id": agentSessionID,
+		"matched_by":       entrypointDecision.MatchedBy,
 	})
-	recordAudit("agent.run", profile.ID, true, "runtime accepted agent run", map[string]any{"matched_by": route.MatchedBy})
+	recordAudit("agent.run", profile.ID, true, "runtime accepted agent run", map[string]any{
+		"matched_by":    entrypointDecision.MatchedBy,
+		"entrypoint_id": inbound.Context.EntrypointID,
+	})
 
-	final, toolCalls, runErr := s.generate(ctx, profile, req, recordEvent, recordAudit)
+	agentReq := req
+	agentReq.SessionID = agentSessionID
+	final, toolCalls, runErr := s.generate(ctx, profile, agentReq, recordEvent, recordAudit)
 	resp.FinalResponse = final
 	resp.ToolCalls = toolCalls
 	resp.VerificationResult = s.verifier.Verify(final, profile.Verification.DefaultChecks)
@@ -417,6 +461,15 @@ func messageContent(msg deepseek.Message) string {
 	}
 	data, _ := json.Marshal(msg.Content)
 	return string(data)
+}
+
+func channelConflict(requestChannel, entrypointChannel string) bool {
+	requestChannel = strings.ToLower(strings.TrimSpace(requestChannel))
+	entrypointChannel = strings.ToLower(strings.TrimSpace(entrypointChannel))
+	if requestChannel == "" || requestChannel == "local" || entrypointChannel == "" {
+		return false
+	}
+	return requestChannel != entrypointChannel
 }
 
 func errString(err error) string {

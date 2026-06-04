@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/ai-daming/flowdeck/internal/api"
+	"github.com/ai-daming/flowdeck/internal/channelrunner"
 	"github.com/ai-daming/flowdeck/internal/runtime"
 	"github.com/ai-daming/flowdeck/internal/tui"
 	"github.com/ai-daming/flowdeck/internal/version"
@@ -72,8 +75,20 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 			defer rt.Close()
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
+			channelRunners, err := channelrunner.NewManager(rt)
+			if err != nil {
+				return err
+			}
+			if err := channelRunners.Start(ctx); err != nil {
+				return err
+			}
+			defer func() {
+				stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				_ = channelRunners.Stop(stopCtx)
+			}()
 			srv := api.NewServer(rt, addr)
-			fmt.Fprintf(cmd.OutOrStdout(), "flowdeck runtime listening on %s\n", srv.URL())
+			fmt.Fprintf(cmd.OutOrStdout(), "flowdeck runtime listening on %s (channel runners: %d)\n", srv.URL(), channelRunners.Count())
 			return srv.Start(ctx)
 		},
 	}

@@ -1,5 +1,2 @@
 default_agent: flowdeck-assistant
-routes:
-  - match:
-      channel: research
-    agent: research-assistant
+routes: []

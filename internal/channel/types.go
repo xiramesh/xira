@@ -4,7 +4,10 @@ import "strings"
 
 type InboundContext struct {
 	Channel          string            `json:"channel" yaml:"channel"`
+	EntrypointID     string            `json:"entrypoint_id,omitempty" yaml:"entrypoint_id,omitempty"`
 	Account          string            `json:"account,omitempty" yaml:"account,omitempty"`
+	ChannelAppID     string            `json:"channel_app_id,omitempty" yaml:"channel_app_id,omitempty"`
+	BotID            string            `json:"bot_id,omitempty" yaml:"bot_id,omitempty"`
 	ChatID           string            `json:"chat_id" yaml:"chat_id"`
 	ChatType         string            `json:"chat_type,omitempty" yaml:"chat_type,omitempty"`
 	TopicID          string            `json:"topic_id,omitempty" yaml:"topic_id,omitempty"`
@@ -37,15 +40,25 @@ type OutboundMessage struct {
 }
 
 func NewInboundContext(channelName, userID string, metadata map[string]string) InboundContext {
+	return NewInboundContextWithEntrypoint(channelName, "", userID, metadata)
+}
+
+func NewInboundContextWithEntrypoint(channelName, entrypointID, userID string, metadata map[string]string) InboundContext {
 	ctx := InboundContext{
-		Channel:  normalizedOrDefault(channelName, "local"),
-		SenderID: strings.TrimSpace(userID),
-		Raw:      copyMetadata(metadata),
+		Channel:      normalizedOrDefault(channelName, "local"),
+		EntrypointID: strings.TrimSpace(entrypointID),
+		SenderID:     strings.TrimSpace(userID),
+		Raw:          copyMetadata(metadata),
 	}
 	if ctx.SenderID == "" {
 		ctx.SenderID = "local-user"
 	}
+	if ctx.EntrypointID == "" {
+		ctx.EntrypointID = firstMetadata(metadata, "entrypoint_id", "entrypoint")
+	}
 	ctx.Account = firstMetadata(metadata, "account", "channel_account", "account_id")
+	ctx.ChannelAppID = firstMetadata(metadata, "channel_app_id", "app_id", "application_id")
+	ctx.BotID = firstMetadata(metadata, "bot_id", "robot_id")
 	ctx.ChatID = firstMetadata(metadata, "chat_id", "room_id", "conversation_id")
 	if ctx.ChatID == "" {
 		ctx.ChatID = ctx.SenderID
@@ -66,7 +79,10 @@ func NewInboundContext(channelName, userID string, metadata map[string]string) I
 
 func NormalizeInboundContext(ctx InboundContext) InboundContext {
 	ctx.Channel = normalizedOrDefault(ctx.Channel, "local")
+	ctx.EntrypointID = strings.TrimSpace(ctx.EntrypointID)
 	ctx.Account = strings.TrimSpace(ctx.Account)
+	ctx.ChannelAppID = strings.TrimSpace(ctx.ChannelAppID)
+	ctx.BotID = strings.TrimSpace(ctx.BotID)
 	ctx.ChatID = strings.TrimSpace(ctx.ChatID)
 	ctx.ChatType = normalizedOrDefault(ctx.ChatType, "direct")
 	ctx.TopicID = strings.TrimSpace(ctx.TopicID)

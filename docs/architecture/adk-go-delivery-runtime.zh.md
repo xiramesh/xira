@@ -1059,9 +1059,9 @@ Review gate 至少检查：
 | --- | --- | --- |
 | Workspace | app / custom metadata | 自有 runtime 保存，ADK 只接收必要 context |
 | Customer | custom metadata | 不交给 ADK 做主键 |
-| Entrypoint | 无直接等价 | runtime 决定本次是 agent run 还是 flow run |
+| Entrypoint | 无直接等价 | runtime 识别具体入口实例，例如某个 Feishu bot、iLink 微信入口或本地 TUI |
 | Flow | 无直接等价 | runtime 作为业务交付对象管理 |
-| Channel | 无直接等价 | runtime 归一化 |
+| Channel | 无直接等价 | runtime 归一化真实平台 / 协议，例如 feishu、ilink、tui、cli |
 | ConversationScope | session | runtime 生成业务 scope，再映射到 ADK session |
 | AgentProfile | agent | runtime 装配后创建 ADK agent |
 | FlowPack | agent + instructions + tools | runtime 编译成一个或多个 ADK agent 可用结构 |
@@ -1077,20 +1077,21 @@ Review gate 至少检查：
 1. Channel receives message
 2. ChannelGateway creates InboundEnvelope
 3. BusinessRuntime authenticates channel/account
-4. Router selects AgentProfile directly, or Flow + entry AgentProfile
-5. SessionManager allocates ConversationScope
-6. PolicyEngine resolves allowed skills/tools/connectors
-7. AgentProfileManager / FlowPackManager builds instructions and tool set
-8. ADK Engine creates / loads ADK session
-9. ADK Runner executes turn
-10. ConnectorRuntime handles tool calls
-11. PolicyEngine checks tool permission and secret access
-12. ADK emits events and final response
-13. VerificationRunner executes deterministic checks / acceptance cases
-14. RunLogWriter records run summary, artifacts, verification result
-15. EvolutionEngine creates candidate if failure / correction / reusable success appears
-16. BusinessRuntime writes audit events
-17. OutboundRouter sends response to original channel
+4. EntrypointResolver resolves channel_type + app/bot/install into entrypoint_id
+5. Agent selector uses requested `agent_id` when allowed, otherwise entrypoint.default_agent
+6. SessionManager allocates ConversationScope
+7. PolicyEngine resolves allowed skills/tools/connectors
+8. AgentProfileManager / FlowPackManager builds instructions and tool set
+9. ADK Engine creates / loads agent session
+10. ADK Runner executes turn
+11. ConnectorRuntime handles tool calls
+12. PolicyEngine checks tool permission and secret access
+13. ADK emits events and final response
+14. VerificationRunner executes deterministic checks / acceptance cases
+15. RunLogWriter records run summary, artifacts, verification result
+16. EvolutionEngine creates candidate if failure / correction / reusable success appears
+17. BusinessRuntime writes audit events
+18. OutboundRouter sends response to original entrypoint / channel
 ```
 
 关键设计点：
@@ -1106,20 +1107,31 @@ Review gate 至少检查：
 
 业务 session 和 ADK session 分开。
 
-业务 session：
+业务 conversation：
 
 ```text
 workspace_id
 customer_id
 flow_id          # optional for agent-only run
-agent_id
-channel
+entrypoint_id    # concrete entry instance, e.g. feishu-expense-bot
+channel          # platform/protocol, e.g. feishu / ilink
 channel_account
+channel_app_id   # optional platform app/install id
+bot_id           # optional platform bot identity
 space_id
 chat_id
 topic_id
 sender_id
 business_object_id
+```
+
+Agent run：
+
+```text
+conversation_id
+turn_id
+agent_id
+parent_run_id    # optional for delegation / reviewer / worker runs
 ```
 
 ADK session：
@@ -1133,13 +1145,17 @@ session_id
 映射规则：
 
 ```text
-business SessionScope -> stable hash -> ADK session_id
+ConversationScope -> stable hash -> conversation_id
+conversation_id + agent_id -> ADK session_id
 ```
 
 这样做的好处：
 
 - 业务层可以支持复杂隔离规则。
-- ADK 层保持简单。
+- 同一个 channel 下多个机器人不会混用 conversation，例如 Feishu 报销 bot 和请假 bot。
+- Feishu 和 iLink 是不同 channel；iLink 是微信侧入口，不是 Feishu 子类。
+- 同一通 conversation 可以调用不同 agent。
+- ADK 层仍按 agent 隔离底层 session。
 - 未来更换 agent engine 时不会丢失业务 session 语义。
 
 ## Flow Pack 与 ADK 的关系
@@ -1316,6 +1332,7 @@ Customer Runtime
 范围：
 
 - `flowdeck serve` runtime daemon
+- `flowdeck serve` 统一启动 enabled channel / entrypoint runner；不提供 `flowdeck <channel> serve` 这类 per-channel daemon 命令
 - `flowdeck` 基础 CLI
 - WebSocket channel
 - ADK Go runner
@@ -1359,6 +1376,7 @@ Customer Runtime
 - integration permission policy
 - secrets binding
 - Feishu channel
+- Feishu channel 由 `flowdeck serve` 根据 entrypoint 配置自动启动，采用 Feishu SDK WebSocket 模式
 - audit event 查询
 - tool call replay / debug 页面
 - package version metadata
@@ -1433,8 +1451,9 @@ internal/
     compiler.go
     validator.go
   channels/
-    websocket/
+    runner.go
     feishu/
+    websocket/
     httpapi/
   skills/
     pack.go
@@ -1468,6 +1487,7 @@ pkg/
 其中：
 
 - `cmd/flowdeck` 提供单一命令入口，通过子命令承担 daemon 和运维动作。
+- channel 生命周期由 `flowdeck serve` 管理；禁止增加 `flowdeck feishu serve`、`flowdeck ilink serve` 这类 per-channel command。
 - `internal/agent/engine.go` 定义 agent engine 抽象。
 - `internal/agent/adk` 只负责 ADK adapter。
 - `internal/agents` 定义可独立运行的 agent profile。

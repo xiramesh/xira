@@ -15,16 +15,15 @@ import (
 const ScopeVersionV1 = 1
 
 type SessionScope struct {
-	Version    int               `json:"version" yaml:"version"`
-	AgentID    string            `json:"agent_id" yaml:"agent_id"`
-	Channel    string            `json:"channel" yaml:"channel"`
-	Account    string            `json:"account,omitempty" yaml:"account,omitempty"`
-	Dimensions []string          `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
-	Values     map[string]string `json:"values,omitempty" yaml:"values,omitempty"`
+	Version      int               `json:"version" yaml:"version"`
+	EntrypointID string            `json:"entrypoint_id" yaml:"entrypoint_id"`
+	Channel      string            `json:"channel" yaml:"channel"`
+	Account      string            `json:"account,omitempty" yaml:"account,omitempty"`
+	Dimensions   []string          `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
+	Values       map[string]string `json:"values,omitempty" yaml:"values,omitempty"`
 }
 
 type AllocationInput struct {
-	AgentID           string
 	Context           channel.InboundContext
 	SessionPolicy     routing.SessionPolicy
 	SessionIDOverride string
@@ -50,7 +49,7 @@ func NewManager() *Manager {
 }
 
 func (m *Manager) Allocate(input AllocationInput) Allocation {
-	scope := BuildScope(input.AgentID, input.Context, input.SessionPolicy)
+	scope := BuildScope(input.Context, input.SessionPolicy)
 	sessionID := strings.TrimSpace(input.SessionIDOverride)
 	if sessionID == "" {
 		sessionID = BuildSessionID(scope)
@@ -58,13 +57,13 @@ func (m *Manager) Allocate(input AllocationInput) Allocation {
 	return Allocation{Scope: scope, SessionID: sessionID}
 }
 
-func BuildScope(agentID string, ctx channel.InboundContext, policy routing.SessionPolicy) SessionScope {
+func BuildScope(ctx channel.InboundContext, policy routing.SessionPolicy) SessionScope {
 	ctx = channel.NormalizeInboundContext(ctx)
 	scope := SessionScope{
-		Version: ScopeVersionV1,
-		AgentID: strings.TrimSpace(agentID),
-		Channel: ctx.Channel,
-		Account: strings.TrimSpace(ctx.Account),
+		Version:      ScopeVersionV1,
+		EntrypointID: strings.TrimSpace(ctx.EntrypointID),
+		Channel:      ctx.Channel,
+		Account:      strings.TrimSpace(ctx.Account),
 	}
 	values := map[string]string{}
 	for _, dimension := range policy.Dimensions {
@@ -114,7 +113,17 @@ func BuildScope(agentID string, ctx channel.InboundContext, policy routing.Sessi
 func BuildSessionID(scope SessionScope) string {
 	signature := scopeSignature(scope)
 	sum := sha256.Sum256([]byte(signature))
-	return fmt.Sprintf("session:%s:%s", safeID(scope.AgentID), hex.EncodeToString(sum[:])[:16])
+	return fmt.Sprintf("conversation:%s", hex.EncodeToString(sum[:])[:16])
+}
+
+func BuildAgentSessionID(conversationID, agentID string) string {
+	conversationID = strings.ToLower(strings.TrimSpace(conversationID))
+	if conversationID == "" {
+		conversationID = "conversation:unknown"
+	}
+	signature := "conversation=" + conversationID + "|agent=" + strings.ToLower(strings.TrimSpace(agentID))
+	sum := sha256.Sum256([]byte(signature))
+	return fmt.Sprintf("session:%s:%s", safeID(agentID), hex.EncodeToString(sum[:])[:16])
 }
 
 func (m *Manager) AppendMessage(sessionID string, msg Message) {
@@ -165,8 +174,8 @@ func scopeSignature(scope SessionScope) string {
 	var b strings.Builder
 	b.WriteString("v=")
 	b.WriteString(fmt.Sprint(scope.Version))
-	b.WriteString("|agent=")
-	b.WriteString(strings.ToLower(strings.TrimSpace(scope.AgentID)))
+	b.WriteString("|entrypoint=")
+	b.WriteString(strings.ToLower(strings.TrimSpace(scope.EntrypointID)))
 	b.WriteString("|channel=")
 	b.WriteString(strings.ToLower(strings.TrimSpace(scope.Channel)))
 	b.WriteString("|account=")

@@ -15,7 +15,6 @@ func TestManagerAllocatesStableScopedSession(t *testing.T) {
 		"chat_type": "group",
 	})
 	input := AllocationInput{
-		AgentID:       "research-assistant",
 		Context:       ctx,
 		SessionPolicy: routing.SessionPolicy{Dimensions: []string{"chat", "sender"}},
 	}
@@ -37,6 +36,55 @@ func TestManagerAllocatesStableScopedSession(t *testing.T) {
 	}
 	if first.Scope.Values["sender"] != "feishu:sender-1" {
 		t.Fatalf("sender scope = %q, want feishu:sender-1", first.Scope.Values["sender"])
+	}
+}
+
+func TestManagerConversationSessionIncludesEntrypoint(t *testing.T) {
+	manager := NewManager()
+	base := map[string]string{
+		"account":   "tenant-a",
+		"chat_id":   "chat-1",
+		"chat_type": "group",
+	}
+	expense := channel.NewInboundContextWithEntrypoint("feishu", "feishu-expense-bot", "sender-1", base)
+	leave := channel.NewInboundContextWithEntrypoint("feishu", "feishu-leave-bot", "sender-1", base)
+	policy := routing.SessionPolicy{Dimensions: []string{"chat", "sender"}}
+
+	first := manager.Allocate(AllocationInput{Context: expense, SessionPolicy: policy})
+	second := manager.Allocate(AllocationInput{Context: leave, SessionPolicy: policy})
+
+	if first.SessionID == second.SessionID {
+		t.Fatalf("conversation session should differ across entrypoints: %q", first.SessionID)
+	}
+	if first.Scope.EntrypointID != "feishu-expense-bot" {
+		t.Fatalf("entrypoint = %q", first.Scope.EntrypointID)
+	}
+}
+
+func TestAgentSessionIDIsDerivedFromConversationAndAgent(t *testing.T) {
+	manager := NewManager()
+	ctx := channel.NewInboundContext("feishu", "sender-1", map[string]string{
+		"account":   "tenant-a",
+		"chat_id":   "chat-1",
+		"chat_type": "group",
+	})
+	allocation := manager.Allocate(AllocationInput{
+		Context:       ctx,
+		SessionPolicy: routing.SessionPolicy{Dimensions: []string{"chat", "sender"}},
+	})
+
+	first := BuildAgentSessionID(allocation.SessionID, "flowdeck-assistant")
+	second := BuildAgentSessionID(allocation.SessionID, "research-assistant")
+	again := BuildAgentSessionID(allocation.SessionID, "flowdeck-assistant")
+
+	if first == "" || second == "" {
+		t.Fatal("agent session id is empty")
+	}
+	if first == second {
+		t.Fatalf("agent sessions should differ for different agents: %q", first)
+	}
+	if first != again {
+		t.Fatalf("agent session id changed: %q != %q", first, again)
 	}
 }
 

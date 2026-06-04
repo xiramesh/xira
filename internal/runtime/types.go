@@ -14,17 +14,19 @@ const (
 )
 
 type TurnRequest struct {
-	AgentID   string            `json:"agent_id" yaml:"agent_id"`
-	Message   string            `json:"message" yaml:"message"`
-	UserID    string            `json:"user_id,omitempty" yaml:"user_id,omitempty"`
-	SessionID string            `json:"session_id,omitempty" yaml:"session_id,omitempty"`
-	Channel   string            `json:"channel,omitempty" yaml:"channel,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	AgentID      string            `json:"agent_id" yaml:"agent_id"`
+	EntrypointID string            `json:"entrypoint_id,omitempty" yaml:"entrypoint_id,omitempty"`
+	Message      string            `json:"message" yaml:"message"`
+	UserID       string            `json:"user_id,omitempty" yaml:"user_id,omitempty"`
+	SessionID    string            `json:"session_id,omitempty" yaml:"session_id,omitempty"`
+	Channel      string            `json:"channel,omitempty" yaml:"channel,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 type TurnResponse struct {
 	RunID              string                 `json:"run_id" yaml:"run_id"`
 	AgentID            string                 `json:"agent_id" yaml:"agent_id"`
+	EntrypointID       string                 `json:"entrypoint_id,omitempty" yaml:"entrypoint_id,omitempty"`
 	SessionID          string                 `json:"session_id" yaml:"session_id"`
 	SessionScope       *fsession.SessionScope `json:"session_scope,omitempty" yaml:"session_scope,omitempty"`
 	RouteMatchedBy     string                 `json:"route_matched_by,omitempty" yaml:"route_matched_by,omitempty"`

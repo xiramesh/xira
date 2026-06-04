@@ -9,6 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ai-daming/flowdeck/internal/agents"
+	"github.com/ai-daming/flowdeck/internal/entrypoints"
 	"github.com/ai-daming/flowdeck/internal/routing"
 )
 
@@ -20,12 +21,17 @@ type runtimeConfigFile struct {
 	RunRoot        string `yaml:"run_root"`
 	StateRoot      string `yaml:"state_root"`
 	Routes         string `yaml:"routes"`
+	Entrypoints    string `yaml:"entrypoints"`
 }
 
 type routesConfigFile struct {
 	DefaultAgentID string       `yaml:"default_agent"`
 	Routes         []routeEntry `yaml:"routes"`
 	Rules          []routeEntry `yaml:"rules"`
+}
+
+type entrypointsConfigFile struct {
+	Entrypoints []entrypoints.Definition `yaml:"entrypoints"`
 }
 
 type routeEntry struct {
@@ -48,6 +54,7 @@ type resolvedRuntimeConfig struct {
 	DefaultAgentID    string
 	RunRoot           string
 	Routes            []routing.Rule
+	Entrypoints       []entrypoints.Definition
 }
 
 func resolveRuntimeConfig(cfg Config) (resolvedRuntimeConfig, error) {
@@ -109,6 +116,18 @@ func resolveRuntimeConfig(cfg Config) (resolvedRuntimeConfig, error) {
 	if err != nil {
 		return resolvedRuntimeConfig{}, err
 	}
+	entrypointsPath := strings.TrimSpace(configFile.Entrypoints)
+	entrypointsRequired := false
+	if entrypointsPath != "" {
+		entrypointsPath = resolveRelativePath(baseDir, entrypointsPath)
+		entrypointsRequired = true
+	} else if configLoaded {
+		entrypointsPath = filepath.Join(workspace, "entrypoints.yaml")
+	}
+	entrypointDefs, err := readEntrypointsFile(entrypointsPath, entrypointsRequired)
+	if err != nil {
+		return resolvedRuntimeConfig{}, err
+	}
 
 	defaultAgentID := strings.TrimSpace(cfg.DefaultAgentID)
 	if defaultAgentID == "" {
@@ -129,6 +148,7 @@ func resolveRuntimeConfig(cfg Config) (resolvedRuntimeConfig, error) {
 		DefaultAgentID:    defaultAgentID,
 		RunRoot:           runRoot,
 		Routes:            routes,
+		Entrypoints:       entrypointDefs,
 	}, nil
 }
 
@@ -185,6 +205,24 @@ func readRoutesFile(path string, required bool) ([]routing.Rule, string, error) 
 		})
 	}
 	return rules, strings.TrimSpace(cfg.DefaultAgentID), nil
+}
+
+func readEntrypointsFile(path string, required bool) ([]entrypoints.Definition, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, nil
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if !required && os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read entrypoints %s: %w", path, err)
+	}
+	var cfg entrypointsConfigFile
+	if err := yaml.Unmarshal(content, &cfg); err != nil {
+		return nil, fmt.Errorf("parse entrypoints %s: %w", path, err)
+	}
+	return cfg.Entrypoints, nil
 }
 
 func loadAgentManager(resolved resolvedRuntimeConfig) (*agents.Manager, string, error) {

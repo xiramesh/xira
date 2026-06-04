@@ -56,6 +56,15 @@ func TestAgentRunUsesExplicitWorkspaceAgent(t *testing.T) {
 	}
 }
 
+func TestNoPerChannelFeishuCommand(t *testing.T) {
+	cmd := newRootCommand()
+	for _, sub := range cmd.Commands() {
+		if sub.Name() == "feishu" {
+			t.Fatal("flowdeck feishu command should not exist; channel runners are owned by flowdeck serve")
+		}
+	}
+}
+
 func executeCommand(t *testing.T, args ...string) string {
 	t.Helper()
 	cmd := newRootCommand()

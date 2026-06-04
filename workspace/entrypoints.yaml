@@ -1,0 +1,52 @@
+entrypoints:
+  - id: tui-local
+    enabled: false
+    channel: tui
+    default_agent: flowdeck-assistant
+    allowed_agents:
+      - flowdeck-assistant
+      - research-assistant
+    session:
+      dimensions:
+        - chat
+        - sender
+
+  - id: cli-local
+    enabled: false
+    channel: cli
+    default_agent: flowdeck-assistant
+    allowed_agents:
+      - flowdeck-assistant
+      - research-assistant
+    session:
+      dimensions:
+        - chat
+        - sender
+
+  - id: feishu-default
+    enabled: false
+    channel: feishu
+    app_id_env: FEISHU_APP_ID
+    app_secret_env: FEISHU_APP_SECRET
+    verification_token_env: FEISHU_VERIFICATION_TOKEN
+    encrypt_key_env: FEISHU_ENCRYPT_KEY
+    default_agent: flowdeck-assistant
+    allowed_agents:
+      - flowdeck-assistant
+      - research-assistant
+    session:
+      dimensions:
+        - chat
+        - sender
+
+  - id: ilink-wechat
+    enabled: false
+    channel: ilink
+    default_agent: flowdeck-assistant
+    allowed_agents:
+      - flowdeck-assistant
+      - research-assistant
+    session:
+      dimensions:
+        - chat
+        - sender

@@ -43,8 +43,8 @@ func TestRunAgentWritesHarnessStore(t *testing.T) {
 	if resp.SessionScope.Values["chat"] != "group:chat-1" {
 		t.Fatalf("chat scope = %q, want group:chat-1", resp.SessionScope.Values["chat"])
 	}
-	if resp.RouteMatchedBy != "default" {
-		t.Fatalf("route matched by = %q, want default", resp.RouteMatchedBy)
+	if resp.RouteMatchedBy != "entrypoint.implicit" {
+		t.Fatalf("route matched by = %q, want entrypoint.implicit", resp.RouteMatchedBy)
 	}
 	runDir := rt.RunStore().RunDir(resp.RunID)
 	for _, name := range []string{"run.yaml", "events.jsonl", "audit.jsonl", "tool_calls.jsonl", "verification.json"} {
@@ -201,7 +201,7 @@ func TestConfigDefaultAgentRoutesDefaultRequest(t *testing.T) {
 	if resp.AgentID != "research-assistant" {
 		t.Fatalf("AgentID = %q", resp.AgentID)
 	}
-	if resp.RouteMatchedBy != "default" {
+	if resp.RouteMatchedBy != "entrypoint.implicit" {
 		t.Fatalf("RouteMatchedBy = %q", resp.RouteMatchedBy)
 	}
 }
@@ -225,6 +225,105 @@ func TestExplicitAgentCanRunWorkspaceResearchAssistant(t *testing.T) {
 	}
 	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "exec" {
 		t.Fatalf("expected exec tool call: %+v", resp.ToolCalls)
+	}
+}
+
+func TestExplicitAgentSharesConversationSessionWithDefaultAgent(t *testing.T) {
+	rt, err := NewService(Config{RunRoot: filepath.Join(t.TempDir(), "runs"), UseMockModel: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := map[string]string{
+		"account":   "tenant-a",
+		"chat_id":   "chat-1",
+		"chat_type": "group",
+	}
+	first, err := rt.RunAgent(context.Background(), TurnRequest{
+		Message:  "hello",
+		Channel:  "feishu",
+		UserID:   "sender-1",
+		Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := rt.RunAgent(context.Background(), TurnRequest{
+		AgentID:  agents.ResearchAssistantAgentID,
+		Message:  "research this",
+		Channel:  "feishu",
+		UserID:   "sender-1",
+		Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if first.AgentID != agents.DefaultAgentID {
+		t.Fatalf("default AgentID = %q", first.AgentID)
+	}
+	if second.AgentID != agents.ResearchAssistantAgentID {
+		t.Fatalf("explicit AgentID = %q", second.AgentID)
+	}
+	if second.RouteMatchedBy != "request.agent_id" {
+		t.Fatalf("RouteMatchedBy = %q, want request.agent_id", second.RouteMatchedBy)
+	}
+	if first.SessionID != second.SessionID {
+		t.Fatalf("conversation session changed across agents: %q != %q", first.SessionID, second.SessionID)
+	}
+	history := rt.SessionManager().History(first.SessionID)
+	if len(history) != 4 {
+		t.Fatalf("conversation history len = %d, want 4", len(history))
+	}
+}
+
+func TestFeishuEntrypointsSplitConversationByBotInstance(t *testing.T) {
+	instance := writeRuntimeFixtureWithEntrypoints(t)
+	rt, err := NewService(Config{ConfigPath: filepath.Join(instance, "flowdeck.yaml"), UseMockModel: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := map[string]string{
+		"account":   "tenant-a",
+		"chat_id":   "chat-1",
+		"chat_type": "group",
+	}
+	expenseMetadata := cloneStringMap(base)
+	expenseMetadata["app_id"] = "cli-expense"
+	expenseMetadata["bot_id"] = "bot-expense"
+	leaveMetadata := cloneStringMap(base)
+	leaveMetadata["app_id"] = "cli-leave"
+	leaveMetadata["bot_id"] = "bot-leave"
+
+	expense, err := rt.RunAgent(context.Background(), TurnRequest{
+		Message:  "expense",
+		Channel:  "feishu",
+		UserID:   "sender-1",
+		Metadata: expenseMetadata,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leave, err := rt.RunAgent(context.Background(), TurnRequest{
+		Message:  "leave",
+		Channel:  "feishu",
+		UserID:   "sender-1",
+		Metadata: leaveMetadata,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if expense.EntrypointID != "feishu-expense-bot" {
+		t.Fatalf("expense entrypoint = %q", expense.EntrypointID)
+	}
+	if leave.EntrypointID != "feishu-leave-bot" {
+		t.Fatalf("leave entrypoint = %q", leave.EntrypointID)
+	}
+	if expense.SessionID == leave.SessionID {
+		t.Fatalf("conversation session should differ across Feishu bots: %q", expense.SessionID)
+	}
+	if expense.SessionScope == nil || expense.SessionScope.EntrypointID != "feishu-expense-bot" {
+		t.Fatalf("expense scope = %+v", expense.SessionScope)
 	}
 }
 
@@ -280,10 +379,7 @@ run_root: .flowdeck/runs
 routes: workspace/routes.yaml
 `)
 	writeFile(t, filepath.Join(instance, "workspace", "routes.yaml"), `default_agent: `+defaultAgentID+`
-routes:
-  - match:
-      channel: research
-    agent: research-assistant
+routes: []
 `)
 	writeFile(t, filepath.Join(instance, "workspace", "agents", "flowdeck-assistant", "PROFILE.md"), `---
 id: flowdeck-assistant
@@ -352,6 +448,62 @@ Use local evidence before summaries.
 
 Careful and source-backed.`)
 	return instance
+}
+
+func writeRuntimeFixtureWithEntrypoints(t *testing.T) string {
+	t.Helper()
+	instance := writeRuntimeFixture(t, "flowdeck-assistant", []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "flowdeck.yaml"), `workspace: workspace
+default_agent: flowdeck-assistant
+run_root: .flowdeck/runs
+routes: workspace/routes.yaml
+entrypoints: workspace/entrypoints.yaml
+`)
+	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
+  - id: feishu-expense-bot
+    channel: feishu
+    app_id: cli-expense
+    bot_id: bot-expense
+    default_agent: flowdeck-assistant
+    allowed_agents:
+      - flowdeck-assistant
+      - research-assistant
+    session:
+      dimensions:
+        - chat
+        - sender
+  - id: feishu-leave-bot
+    channel: feishu
+    app_id: cli-leave
+    bot_id: bot-leave
+    default_agent: flowdeck-assistant
+    allowed_agents:
+      - flowdeck-assistant
+      - research-assistant
+    session:
+      dimensions:
+        - chat
+        - sender
+  - id: ilink-wechat
+    channel: ilink
+    default_agent: flowdeck-assistant
+    allowed_agents:
+      - flowdeck-assistant
+      - research-assistant
+    session:
+      dimensions:
+        - chat
+        - sender
+`)
+	return instance
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func writeFile(t *testing.T, path, content string) {

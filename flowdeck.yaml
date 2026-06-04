@@ -2,3 +2,4 @@ workspace: workspace
 default_agent: flowdeck-assistant
 run_root: .flowdeck/runs
 routes: workspace/routes.yaml
+entrypoints: workspace/entrypoints.yaml
