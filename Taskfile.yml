@@ -2,6 +2,7 @@ version: "3"
 
 vars:
   GO_CACHE: '{{.GO_CACHE | default "/tmp/xira-go-build"}}'
+  GO_PATH: '{{.GO_PATH | default "/tmp/xira-go"}}'
   CONFIG: '{{.CONFIG | default "xira.yaml"}}'
   RUN_ROOT: '{{.RUN_ROOT | default ".xira/runs"}}'
   BIN_DIR: '{{.BIN_DIR | default "bin"}}'
@@ -11,6 +12,7 @@ vars:
 
 env:
   GOCACHE: "{{.GO_CACHE}}"
+  GOPATH: "{{.GO_PATH}}"
 
 tasks:
   default:
@@ -21,17 +23,17 @@ tasks:
   tidy:
     desc: Tidy Go module dependencies
     cmds:
-      - go mod tidy
+      - go -C apps/xira mod tidy
 
   fmt:
     desc: Format Go source
     cmds:
-      - gofmt -w cmd internal
+      - gofmt -w apps/xira/cmd apps/xira/internal
 
   test:
     desc: Run all Go tests
     cmds:
-      - go test ./...
+      - go test ./apps/xira/...
 
   check:
     desc: Format and run tests
@@ -40,40 +42,41 @@ tasks:
       - task: test
 
   build:
-    desc: Build Xira binary
+    desc: Build Xira binary with debug symbols
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - go build -o {{.BIN}} ./cmd/xira
+      - go build -o {{.BIN}} ./apps/xira/cmd/xira
+
+  build:prod:
+    desc: Build stripped Xira production binary
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - go build -trimpath -ldflags="-s -w" -o {{.BIN}} ./apps/xira/cmd/xira
 
   version:
     desc: Print Xira version
     cmds:
-      - go run ./cmd/xira version
+      - go run ./apps/xira/cmd/xira version
 
   serve:
     desc: Run the Xira runtime API server
     cmds:
-      - go run ./cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} serve
-
-  tui:
-    desc: Run embedded Xira TUI with DeepSeek when DEEPSEEK_API_KEY is set
-    cmds:
-      - go run ./cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} tui {{if .AGENT}}--agent {{.AGENT}}{{end}}
+      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} serve
 
   agent:list:
     desc: List agent profiles
     cmds:
-      - go run ./cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} agent list
+      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} agent list
 
   agent:run:
     desc: Run an agent once; override with MSG='...' and AGENT='...'
     cmds:
-      - go run ./cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} agent run {{if .AGENT}}--agent {{.AGENT}} {{end}}--message {{quote .MSG}}
+      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} agent run {{if .AGENT}}--agent {{.AGENT}} {{end}}--message {{quote .MSG}}
 
   runs:list:
     desc: List recorded runs
     cmds:
-      - go run ./cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} runs list
+      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} runs list
 
   smoke:
     desc: Run a non-interactive DeepSeek smoke test
@@ -81,8 +84,8 @@ tasks:
       SMOKE_ROOT: /tmp/xira-smoke-runs
     cmds:
       - rm -rf {{.SMOKE_ROOT}}
-      - go run ./cmd/xira version
-      - go run ./cmd/xira --config {{.CONFIG}} --run-root {{.SMOKE_ROOT}} agent run --message "please call exec"
+      - go run ./apps/xira/cmd/xira version
+      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} --run-root {{.SMOKE_ROOT}} agent run --message "please call exec"
       - test -f {{.SMOKE_ROOT}}/*/run.yaml
 
   clean:

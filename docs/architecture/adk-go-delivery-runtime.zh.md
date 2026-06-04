@@ -21,7 +21,7 @@ ADK Go 负责：
 - flow pack、技能包、闭源 CLI、ERP / SaaS connector 的交付与权限
 - secrets、审计、日志、策略、版本、升级、回滚
 - task spec、context pack、verification、run log、artifact、evolution candidate
-- 桌面 / TUI / Web 控制台
+- 桌面 / Web GUI 控制台
 - 飞书、企业微信、WebSocket、自定义 API 等 channel gateway
 
 核心判断是：**ADK Go 可以定义 agent 怎么跑，但不应该定义 Xira 交付什么。**
@@ -66,13 +66,13 @@ Flow Run
   -> 适合客户交付、长期复用、验收、审计和持续演进
 ```
 
-很多真实工作并不需要先建模成 flow。第一版只要把 agent profile、tool call、built-in tools、run log 和 TUI 跑通，就可以开始干活；flow pack 可以作为后续对 B 交付和复用时的上层包装。
+很多真实工作并不需要先建模成 flow。第一版只要把 agent profile、tool call、built-in tools、run log 和 XiraGarden GUI channel 跑通，就可以开始干活；flow pack 可以作为后续对 B 交付和复用时的上层包装。
 
 ## 背景
 
 目标产品是一个面向客户交付的 Xira：
 
-- 有统一的 `xira` 桌面 / TUI / CLI / GUI 入口。
+- 有统一的 `xira` CLI/runtime API 入口，以及 XiraGarden GUI 入口。
 - 能把同一套 runtime 部署到不同客户环境。
 - 支持直接运行 agent，也支持运行业务 flow。
 - 每个客户获得定制化 flow packs、skills、connectors、closed-source CLI tools。
@@ -131,7 +131,7 @@ PicoClaw 提供的参考思想是：
 ## 高层架构
 
 ```text
-Desktop / TUI / Web Console
+XiraGarden / Web Console / CLI
         |
         v
 Control Plane / Runtime API
@@ -393,18 +393,18 @@ xira audit export
 
 ### Console
 
-桌面、Web 或 TUI 控制台。
+桌面或 Web GUI 控制台。
 
-第一版可以优先做 TUI。TUI 是客户交付和实施调试的重要入口，但它不应该硬编码任何 flow、agent、tool 或 CLI。
+第一版优先做 XiraGarden。XiraGarden 是客户交付和实施调试的重要入口，但它不应该硬编码任何 flow、agent、tool 或 CLI。
 
-TUI 启动后应该通过 Runtime API 读取当前 workspace 中已经安装 / 启用的：
+XiraGarden 启动后应该通过 Runtime API 读取当前 workspace 中已经安装 / 启用的：
 
 - flow packs
 - agent profiles
 - sessions
 - audit events
 
-TUI 可以触发 agent run、flow run、tool call 查看、ad-hoc exec request 和 audit export，但所有动作都必须经过 Business Runtime。TUI 不在自己进程里直接执行客户 CLI；它应该调用 Runtime API，由 Runtime 的 built-in tools 执行、记录和回传结果。
+XiraGarden 可以触发 agent run、flow run、tool call 查看、ad-hoc exec request 和 audit export，但所有动作都必须经过 Business Runtime。XiraGarden 不在自己进程里直接执行客户 CLI；它应该调用 Runtime API，由 Runtime 的 built-in tools 执行、记录和回传结果。
 
 第一版应该支持：
 
@@ -525,7 +525,7 @@ model:
 3. 未配置 `DEEPSEEK_API_KEY` 时启动失败。
 4. tool calls 必须经过 Business Runtime 的 policy / audit wrapper。
 
-这样做的目的不是封死未来模型选择，而是让第一版先证明 Xira 的 runtime 边界、TUI、agent profile、connector、audit 链路。模型扩展应该在 `AgentEngine` 和 model adapter 稳定之后再做。
+这样做的目的不是封死未来模型选择，而是让第一版先证明 Xira 的 runtime 边界、XiraGarden GUI channel、agent profile、connector、audit 链路。模型扩展应该在 `AgentEngine` 和 model adapter 稳定之后再做。
 
 ### Agent Profile Manager
 
@@ -772,7 +772,7 @@ Xira 第一版需要一组类似 Codex/PicoClaw 的最小内置工具：`exec`�
 
 - 客户现场常常已经有可执行 CLI、内部脚本、运维工具。
 - Xira 在启动前无法知道这些命令的名字、路径、版本和参数。
-- 交付工程师需要先通过 TUI / agent 试跑命令、观察输出，再决定是否把它写入业务流程或后续工具声明。
+- 交付工程师需要先通过 XiraGarden / agent 试跑命令、观察输出，再决定是否把它写入业务流程或后续工具声明。
 - 本地知识库、临时脚本、HTML 图表和交付产物都需要稳定的文件读写能力。
 
 `exec` 是内置平台能力，不等同于客户业务 connector。Phase 1 不为每个客户 CLI 编写专用 connector；模型如果需要探索外部工具，应通过 `exec` 调用 `which`、`--help`、`--version` 或具体命令，并把结果写入 audit/run log。
@@ -789,7 +789,7 @@ Xira 第一版需要一组类似 Codex/PicoClaw 的最小内置工具：`exec`�
 建议执行流程：
 
 ```text
-TUI / Agent
+XiraGarden / Agent
   -> Runtime API: tool call request
   -> ToolRegistry resolves built-in tool
   -> exec / file tool executes
@@ -853,14 +853,14 @@ Wrapped CLI 不要求原命令理解 Xira。运行时通过 flow pack / connecto
 2. 在 workspace / package bin / PATH 中解析 executable。
 3. 如配置了 `version_args`，执行版本探测并记录结果。
 4. 校验每个 tool 的 input / output schema。
-5. 生成 capability snapshot，暴露给 TUI 和 Runtime API。
+5. 生成 capability snapshot，暴露给 XiraGarden 和 Runtime API。
 6. tool call 执行时重新经过 policy、secret binding、rate limit、audit。
 
 注意：
 
 - Wrapped CLI connector 不扫描任意系统命令，只把 manifest 声明的 tool 暴露为可复用能力。
 - 未在 flow pack / connector manifest 中声明的 CLI 不能作为稳定 tool 自动调用；如果需要临时运行，必须走 Built-in Command Runner 的审批、sandbox 和 audit。
-- TUI 展示的是 runtime-discovered agent 和其允许的 built-in tools，不是自己发现的本机命令。
+- XiraGarden 展示的是 runtime-discovered agent 和其允许的 built-in tools，不是自己发现的本机命令。
 - 对客户交付 CLI，建议同时提供 `--version` 和机器可读输出；但第一版不强制 CLI 原生支持 Xira 协议。
 
 ### Secrets Manager
@@ -896,7 +896,7 @@ Run log 和 artifact 是客户交付验收、失败复盘和 Harness 进化的�
 
 | 类型 | 面向对象 | 内容 | 是否稳定 |
 | --- | --- | --- | --- |
-| Runtime Event | TUI、debug、实时观察 | 流式事件、delta、状态变化 | 可演进 |
+| Runtime Event | GUI、debug、实时观察 | 流式事件、delta、状态变化 | 可演进 |
 | Audit Event | 合规、追责、客户验收 | 稳定 metadata、权限、审批、tool call | 应稳定 |
 | Run Log | 复盘、handoff、evolution | 本次任务做了什么、看到什么、验证什么 | 半结构化 |
 | Artifact | 交付、证据、回放 | 报告、CSV、截图、diff、evidence ledger | 应可定位 |
@@ -934,7 +934,7 @@ status: completed
 started_at: 2026-06-03T14:30:00+08:00
 ended_at: 2026-06-03T14:32:10+08:00
 inputs:
-  channel: tui
+  channel: xiragarden
   message_id: local-1
 tools_used:
   - exec
@@ -1058,9 +1058,9 @@ Review gate 至少检查：
 | --- | --- | --- |
 | Workspace | app / custom metadata | 自有 runtime 保存，ADK 只接收必要 context |
 | Customer | custom metadata | 不交给 ADK 做主键 |
-| Entrypoint | 无直接等价 | runtime 识别具体入口实例，例如某个 Feishu bot、iLink 微信入口或本地 TUI |
+| Entrypoint | 无直接等价 | runtime 识别具体入口实例，例如某个 Feishu bot、iLink 微信入口或本地 XiraGarden 入口 |
 | Flow | 无直接等价 | runtime 作为业务交付对象管理 |
-| Channel | 无直接等价 | runtime 归一化真实平台 / 协议，例如 feishu、ilink、tui、cli |
+| Channel | 无直接等价 | runtime 归一化真实平台 / 协议，例如 feishu、ilink、xiragarden、cli |
 | ConversationScope | session | runtime 生成业务 scope，再映射到 ADK session |
 | AgentProfile | agent | runtime 装配后创建 ADK agent |
 | FlowPack | agent + instructions + tools | runtime 编译成一个或多个 ADK agent 可用结构 |
@@ -1346,16 +1346,16 @@ Customer Runtime
 - verification runner
 - evolution candidate 记录
 - runtime event log
-- 简单 Web / TUI console
+- 简单 XiraGarden / Web console
 
 验收：
 
 - 能从 WebSocket 发消息到 agent。
 - Agent 能通过 DeepSeek adapter 完成 chat / stream。
-- TUI 能选择 agent profile 并触发 agent run。
+- XiraGarden 能选择 agent profile 并通过 `xiragarden` channel 触发 agent run。
 - Agent 能通过 `exec` 调用本地命令。
 - Agent 能通过 `read_file` / `write_file` / `list_dir` / `edit_file` 读取、生成和修改 workspace 文件。
-- TUI `/agents` 能显示 runtime-discovered agent 及其允许工具。
+- GUI 的 agent 视图能显示 runtime-discovered agent 及其允许工具。
 - Tool call 有 audit event。
 - 每次 agent run 会生成 run log、artifact 目录和 verification result。
 - 如果启用 flow wrapper，flow run 复用同一套 agent run、policy、verification 和 run log 链路。
@@ -1420,83 +1420,90 @@ Customer Runtime
 ## 建议代码结构
 
 ```text
-cmd/
+apps/
   xira/
+    go.mod
+    go.sum
+    cmd/
+      xira/
+    internal/
+      runtime/
+        daemon.go
+        router.go
+        policy.go
+        turn.go
+        verification.go
+      command/
+        runner.go
+        sandbox.go
+        approval.go
+      agent/
+        engine.go
+        adk/
+          engine.go
+          tools.go
+          sessions.go
+      agents/
+        profile.go
+        loader.go
+        validator.go
+      flows/
+        pack.go
+        loader.go
+        compiler.go
+        validator.go
+      channels/
+        runner.go
+        feishu/
+        websocket/
+        httpapi/
+      skills/
+        pack.go
+        loader.go
+        compiler.go
+        validator.go
+      integrations/
+        mcp/
+        process/
+        http/
+        recipes/
+      sessions/
+      secrets/
+      audit/
+      events/
+      artifacts/
+      evolution/
+        record.go
+        diagnoser.go
+        promoter.go
+      evals/
+      console/
+  xiragarden/
+    src/
+      api/
+      features/
+      components/
+      styles/
 
-internal/
-  runtime/
-    daemon.go
-    router.go
-    policy.go
-    turn.go
-    verification.go
-  command/
-    runner.go
-    sandbox.go
-    approval.go
-  agent/
-    engine.go
-    adk/
-      engine.go
-      tools.go
-      sessions.go
-  agents/
-    profile.go
-    loader.go
-    validator.go
-  flows/
-    pack.go
-    loader.go
-    compiler.go
-    validator.go
-  channels/
-    runner.go
-    feishu/
-    websocket/
-    httpapi/
-  skills/
-    pack.go
-    loader.go
-    compiler.go
-    validator.go
-  integrations/
-    mcp/
-    process/
-    http/
-    recipes/
-  sessions/
-  secrets/
-  audit/
-  events/
-  artifacts/
-  evolution/
-    record.go
-    diagnoser.go
-    promoter.go
-  evals/
-  console/
-
-pkg/
-  sdk/
-    flow/
-    connector/
-    skill/
+packages/
+  xira-client/
 ```
 
 其中：
 
-- `cmd/xira` 提供单一命令入口，通过子命令承担 daemon 和运维动作。
+- `apps/xira/cmd/xira` 提供单一命令入口，通过子命令承担 daemon 和运维动作。
 - channel 生命周期由 `xira serve` 管理；禁止增加 `xira feishu serve`、`xira ilink serve` 这类 per-channel command。
-- `internal/agent/engine.go` 定义 agent engine 抽象。
-- `internal/agent/adk` 只负责 ADK adapter。
-- `internal/agents` 定义可独立运行的 agent profile。
-- `internal/runtime` 定义产品级 turn lifecycle。
-- `internal/flows` 定义 flow pack 的加载、校验和编译。
-- `internal/tools` 负责内置工具执行和协议。
-- `internal/artifacts` 保存 run 产物、evidence ledger、handoff。
-- `internal/evolution` 管理 evolution candidate、promote、rollback。
-- `internal/evals` 管理 acceptance case、golden task 和 deterministic checks。
-- `pkg/sdk` 可以提供给客户或交付工程师写 connector。
+- `apps/xira/internal/agent/engine.go` 定义 agent engine 抽象。
+- `apps/xira/internal/agent/adk` 只负责 ADK adapter。
+- `apps/xira/internal/agents` 定义可独立运行的 agent profile。
+- `apps/xira/internal/runtime` 定义产品级 turn lifecycle。
+- `apps/xira/internal/flows` 定义 flow pack 的加载、校验和编译。
+- `apps/xira/internal/tools` 负责内置工具执行和协议。
+- `apps/xira/internal/artifacts` 保存 run 产物、evidence ledger、handoff。
+- `apps/xira/internal/evolution` 管理 evolution candidate、promote、rollback。
+- `apps/xira/internal/evals` 管理 acceptance case、golden task 和 deterministic checks。
+- `apps/xiragarden` 是 GUI 客户端，只通过 `xira serve` 的 HTTP/WebSocket API 访问 runtime，不直接 import `apps/xira/internal`。
+- `packages/xira-client` 可以沉淀给 GUI 或外部客户端复用的 TypeScript API client。
 
 ## 关键 ADR
 
@@ -1631,7 +1638,7 @@ flow、客户、渠道、权限、secrets、审计、flow pack 由 Business Runt
 
 - 很多真实工作是探索、查询、生成、排查和实施，不需要先建模成完整业务 flow。
 - ADK Go 的最小验证对象天然是 agent runner。
-- TUI 第一版更适合围绕 agent profile、tool call、built-in tools 和 run log 打通体验。
+- XiraGarden 第一版更适合围绕 agent profile、tool call、built-in tools 和 run log 打通体验。
 - 等 agent、connector、verification 和 artifact policy 稳定后，再沉淀成 flow pack 更符合交付演进路径。
 
 代价：
@@ -1686,34 +1693,34 @@ Xira 内置 `exec` 工具，允许运行运行前未知的本地命令。Phase 1
 
 - `exec` 的安全边界必须足够清楚。
 - ad-hoc command 和 flow command step 之间需要 review 流程。
-- TUI / agent / API 都可能触发执行路径，runtime policy 必须统一。
+- XiraGarden / agent / API 都可能触发执行路径，runtime policy 必须统一。
 
 缓解：
 
 - 第一版只先打通工具路径；cwd 限制、风险分类、审批和 sandbox 后续再收敛，不阻塞最小 kernel。
 - review gate 检查 executable、cwd、参数、timeout、error behavior、输出截断和 audit metadata。
 
-### ADR-007：TUI 是 Runtime Client，不是执行器
+### ADR-007：XiraGarden 是 Runtime Client，不是执行器
 
 决策：
 
-第一版可以优先做 TUI，但 TUI 只通过 Runtime API 操作 Xira，不直接执行客户 CLI、不直接读取 secrets、不绕过 policy。
+第一版优先做 XiraGarden，但 XiraGarden 只通过 Runtime API 操作 Xira，不直接执行客户 CLI、不直接读取 secrets、不绕过 policy。
 
 理由：
 
-- CLI / TUI 是交付给客户的重要入口，但安全、权限、审计和复盘必须集中在 Runtime。
-- Xira 运行前不知道客户有哪些 flow、agent 或外部 CLI，TUI 必须动态读取 runtime 状态。
-- 如果 TUI 直接执行命令，会让同一动作在 TUI、agent、API 中产生不同安全语义。
+- CLI / XiraGarden 是交付给客户的重要入口，但安全、权限、审计和复盘必须集中在 Runtime。
+- Xira 运行前不知道客户有哪些 flow、agent 或外部 CLI，XiraGarden 必须动态读取 runtime 状态。
+- 如果 XiraGarden 直接执行命令，会让同一动作在 XiraGarden、agent、API 中产生不同安全语义。
 
 代价：
 
-- 第一版即使是本地 TUI，也需要启动或嵌入 runtime daemon。
-- TUI 交互要处理流式事件、审批请求和长任务状态。
+- 第一版即使是本地 GUI，也需要启动或嵌入 runtime daemon。
+- XiraGarden 交互要处理流式事件、审批请求和长任务状态。
 
 缓解：
 
-- 本地开发可以支持 `xira tui --embedded-runtime`，但内部仍走同一套 Runtime API。
-- TUI 的所有动作生成 runtime event；高风险动作生成 approval request；完成后写 run log。
+- 本地开发可以先要求用户启动 `xira serve`，桌面打包阶段再由 XiraGarden 管理 runtime 子进程。
+- XiraGarden 的所有动作生成 runtime event；高风险动作生成 approval request；完成后写 run log。
 
 ## 风险与缓解
 
@@ -1725,7 +1732,7 @@ Xira 内置 `exec` 工具，允许运行运行前未知的本地命令。Phase 1
 | 过早强制所有任务 flow 化 | 第一版实现变重，真实干活入口不顺 | Phase 1 采用 agent-first，flow wrapper 后置 |
 | ADK Skills 成熟度不足 | flow 交付受阻 | 自定义 flow pack，ADK 只作为编译目标 |
 | Integration 失败难排查 | 客户交付风险 | 强制 audit、debug log、test harness |
-| TUI 直接执行客户 CLI | 绕过 policy、secrets、audit | TUI 只调用 Runtime API，CLI 由 Command Runner 执行 |
+| XiraGarden 直接执行客户 CLI | 绕过 policy、secrets、audit | XiraGarden 只调用 Runtime API，CLI 由 Command Runner 执行 |
 | 无约束 shell 命令被暴露给 agent | 安全风险 | Command Runner 默认 cwd 限制、timeout、审批、audit；可复用命令必须进入 flow command step |
 | 权限绕过 | 安全风险 | tool call 前统一经过 runtime policy |
 | Secret 泄露 | 高风险 | secret binding、最小权限、访问审计 |
@@ -1866,7 +1873,7 @@ Xira 还应该从 PicoClaw 的经验里保留三个教训：
 11. 每个 flow pack 至少需要多少 golden tasks 才允许交付？
 12. exec tool 的 sandbox 后续用本地进程限制、Docker，还是客户环境提供的隔离机制？
 13. artifact policy 是否需要区分内部证据、客户可见交付物和模型可见上下文？
-14. TUI 是否默认嵌入 runtime，还是要求用户先启动 `xira serve`？
+14. XiraGarden 是否默认嵌入 runtime，还是要求用户先启动 `xira serve`？
 15. 已探索成功的客户 CLI 命令什么时候可以进入 flow pack：按复用次数、客户验收、还是 artifact / audit 边界成熟度？
 16. 后续是否需要独立 connector SDK，还是长期保持 exec + MCP 优先？
 
@@ -1883,7 +1890,7 @@ Xira 还应该从 PicoClaw 的经验里保留三个教训：
 9. 实现 run log / artifact store v0：本地 `.xira/runs/<run_id>/`，支持导出。
 10. 实现 verification runner v0：schema check、command check、agent smoke case、golden task。
 11. 实现 evolution candidate v0：失败归因、候选记录、人工 review 状态，不自动 promote。
-12. 做 TUI + Runtime API + agent profile + built-in tools + ADK tool call 的端到端 demo。
+12. 做 XiraGarden + Runtime API + agent profile + built-in tools + ADK tool call 的端到端 demo。
 13. 用一个真实 agent 任务验证：例如本地证据检索、客户资料汇总、售后处理或内部知识问答。
 14. 定义 flow pack v0 schema，把稳定 agent profile 包装成 demo flow。
 15. 把 successful ad-hoc command 保存为 command recipe，跑一次 review gate，验证 Xira 的交付闭环。
