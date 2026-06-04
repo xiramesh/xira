@@ -118,14 +118,19 @@ func TestRunAgentPersistsSessionFilesAndReloadsHistory(t *testing.T) {
 	if history := rt.SessionManager().AgentHistory(resp.SessionID, resp.AgentID); len(history) != 2 {
 		t.Fatalf("agent history len = %d, want 2: %+v", len(history), history)
 	}
-	entries, err := os.ReadDir(sessionRoot)
+	channelDir := filepath.Join(sessionRoot, "feishu")
+	entrypointDir := filepath.Join(channelDir, resp.EntrypointID)
+	entries, err := os.ReadDir(entrypointDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(entries) != 1 || !entries[0].IsDir() {
 		t.Fatalf("session entries = %+v, want one conversation dir", entries)
 	}
-	messagesPath := filepath.Join(sessionRoot, entries[0].Name(), "agents", resp.AgentID, "messages.jsonl")
+	if !strings.Contains(entries[0].Name(), "chat_group_chat-1") || !strings.Contains(entries[0].Name(), "sender_sender-1") {
+		t.Fatalf("conversation dir = %q, want readable chat and sender labels", entries[0].Name())
+	}
+	messagesPath := filepath.Join(entrypointDir, entries[0].Name(), "agents", resp.AgentID, "messages.jsonl")
 	if _, err := os.Stat(messagesPath); err != nil {
 		t.Fatalf("expected persisted messages: %v", err)
 	}

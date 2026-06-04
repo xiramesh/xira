@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -77,8 +78,8 @@ func (s *FileStore) AppendAgentTurn(input AgentTurnInput, messages []Message) er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	conversationDir := s.conversationDir(input.SessionID)
-	agentDir := s.agentDir(input.SessionID, input.AgentID)
+	conversationDir := s.conversationDirForInput(input)
+	agentDir := s.agentDirForInput(input)
 	if err := os.MkdirAll(agentDir, 0o700); err != nil {
 		return fmt.Errorf("create agent session dir: %w", err)
 	}
@@ -104,36 +105,31 @@ func (s *FileStore) LoadHistories() (map[string][]Message, map[string]map[string
 	if s == nil {
 		return histories, agentHistories, nil
 	}
-	entries, err := os.ReadDir(s.root)
-	if os.IsNotExist(err) {
-		return histories, agentHistories, nil
-	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("read session store: %w", err)
-	}
 	type orderedMessage struct {
 		message Message
 		order   int
 	}
+	combinedBySession := map[string][]orderedMessage{}
 	order := 0
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	err := filepath.WalkDir(s.root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		conversationDir := filepath.Join(s.root, entry.Name())
-		meta, err := readJSONFile[ConversationMeta](filepath.Join(conversationDir, "meta.json"))
+		if !entry.IsDir() || path == s.root {
+			return nil
+		}
+		meta, err := readJSONFile[ConversationMeta](filepath.Join(path, "meta.json"))
 		if err != nil || strings.TrimSpace(meta.SessionID) == "" {
-			continue
+			return nil
 		}
-		agentsDir := filepath.Join(conversationDir, "agents")
+		agentsDir := filepath.Join(path, "agents")
 		agentEntries, err := os.ReadDir(agentsDir)
 		if os.IsNotExist(err) {
-			continue
+			return nil
 		}
 		if err != nil {
-			return nil, nil, fmt.Errorf("read session agents: %w", err)
+			return fmt.Errorf("read session agents: %w", err)
 		}
-		var combined []orderedMessage
 		for _, agentEntry := range agentEntries {
 			if !agentEntry.IsDir() {
 				continue
@@ -146,22 +142,31 @@ func (s *FileStore) LoadHistories() (map[string][]Message, map[string]map[string
 			}
 			messages, err := readMessages(filepath.Join(agentDir, "messages.jsonl"))
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			for i := range messages {
 				if messages[i].AgentID == "" {
 					messages[i].AgentID = agentID
 				}
-				combined = append(combined, orderedMessage{message: messages[i], order: order})
+				combinedBySession[meta.SessionID] = append(combinedBySession[meta.SessionID], orderedMessage{message: messages[i], order: order})
 				order++
 			}
 			if len(messages) > 0 {
 				if agentHistories[meta.SessionID] == nil {
 					agentHistories[meta.SessionID] = map[string][]Message{}
 				}
-				agentHistories[meta.SessionID][agentID] = append([]Message(nil), messages...)
+				agentHistories[meta.SessionID][agentID] = append(agentHistories[meta.SessionID][agentID], messages...)
 			}
 		}
+		return fs.SkipDir
+	})
+	if os.IsNotExist(err) {
+		return histories, agentHistories, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("read session store: %w", err)
+	}
+	for sessionID, combined := range combinedBySession {
 		sort.SliceStable(combined, func(i, j int) bool {
 			left := combined[i].message.CreatedAt
 			right := combined[j].message.CreatedAt
@@ -171,7 +176,20 @@ func (s *FileStore) LoadHistories() (map[string][]Message, map[string]map[string
 			return left.Before(right)
 		})
 		for _, item := range combined {
-			histories[meta.SessionID] = append(histories[meta.SessionID], item.message)
+			histories[sessionID] = append(histories[sessionID], item.message)
+		}
+	}
+	for _, byAgent := range agentHistories {
+		for agentID, messages := range byAgent {
+			sort.SliceStable(messages, func(i, j int) bool {
+				left := messages[i].CreatedAt
+				right := messages[j].CreatedAt
+				if left.IsZero() || right.IsZero() || left.Equal(right) {
+					return false
+				}
+				return left.Before(right)
+			})
+			byAgent[agentID] = messages
 		}
 	}
 	return histories, agentHistories, nil
@@ -220,6 +238,88 @@ func (s *FileStore) conversationDir(sessionID string) string {
 
 func (s *FileStore) agentDir(sessionID, agentID string) string {
 	return filepath.Join(s.conversationDir(sessionID), "agents", safePathID(agentID))
+}
+
+func (s *FileStore) conversationDirForInput(input AgentTurnInput) string {
+	return filepath.Join(
+		s.root,
+		safePathID(inputChannel(input)),
+		safePathID(inputEntrypointID(input)),
+		conversationFolderName(input),
+	)
+}
+
+func (s *FileStore) agentDirForInput(input AgentTurnInput) string {
+	return filepath.Join(s.conversationDirForInput(input), "agents", safePathID(input.AgentID))
+}
+
+func conversationFolderName(input AgentTurnInput) string {
+	parts := []string{}
+	if chatID := strings.TrimSpace(input.Context.ChatID); chatID != "" && shouldIncludePathDimension(input, "chat") {
+		chatType := strings.TrimSpace(input.Context.ChatType)
+		if chatType == "" {
+			chatType = "chat"
+		}
+		parts = append(parts, "chat_"+safePathID(chatType+"_"+chatID))
+	} else if value := inputScopeValue(input, "chat"); value != "" && shouldIncludePathDimension(input, "chat") {
+		parts = append(parts, "chat_"+safePathID(value))
+	}
+	if spaceID := strings.TrimSpace(input.Context.SpaceID); spaceID != "" && !strings.EqualFold(spaceID, input.Context.ChatID) && shouldIncludePathDimension(input, "space") {
+		spaceType := strings.TrimSpace(input.Context.SpaceType)
+		if spaceType == "" {
+			spaceType = "space"
+		}
+		parts = append(parts, "space_"+safePathID(spaceType+"_"+spaceID))
+	} else if value := inputScopeValue(input, "space"); value != "" && shouldIncludePathDimension(input, "space") {
+		parts = append(parts, "space_"+safePathID(value))
+	}
+	if senderID := strings.TrimSpace(input.Context.SenderID); senderID != "" && shouldIncludePathDimension(input, "sender") {
+		parts = append(parts, "sender_"+safePathID(senderID))
+	} else if value := inputScopeValue(input, "sender"); value != "" && shouldIncludePathDimension(input, "sender") {
+		parts = append(parts, "sender_"+safePathID(value))
+	}
+	parts = append(parts, safePathID(input.SessionID))
+	return strings.Join(parts, "__")
+}
+
+func shouldIncludePathDimension(input AgentTurnInput, dimension string) bool {
+	if input.Scope == nil || len(input.Scope.Dimensions) == 0 {
+		return true
+	}
+	dimension = strings.ToLower(strings.TrimSpace(dimension))
+	for _, candidate := range input.Scope.Dimensions {
+		if strings.EqualFold(strings.TrimSpace(candidate), dimension) {
+			return true
+		}
+	}
+	return false
+}
+
+func inputScopeValue(input AgentTurnInput, dimension string) string {
+	if input.Scope == nil || len(input.Scope.Values) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(input.Scope.Values[strings.ToLower(strings.TrimSpace(dimension))])
+}
+
+func inputChannel(input AgentTurnInput) string {
+	if channel := strings.TrimSpace(input.Context.Channel); channel != "" {
+		return channel
+	}
+	if input.Scope != nil && strings.TrimSpace(input.Scope.Channel) != "" {
+		return input.Scope.Channel
+	}
+	return "unknown-channel"
+}
+
+func inputEntrypointID(input AgentTurnInput) string {
+	if entrypointID := strings.TrimSpace(input.Context.EntrypointID); entrypointID != "" {
+		return entrypointID
+	}
+	if input.Scope != nil && strings.TrimSpace(input.Scope.EntrypointID) != "" {
+		return input.Scope.EntrypointID
+	}
+	return "unknown-entrypoint"
 }
 
 func compactMessages(messages []Message) []Message {

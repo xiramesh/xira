@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ai-daming/xira/internal/channel"
 	"github.com/ai-daming/xira/internal/routing"
@@ -125,7 +126,7 @@ func TestManagerPersistsLayeredAgentSession(t *testing.T) {
 			"sender": "feishu:ou-1",
 		},
 	}
-	if err := manager.AppendAgentTurn(AgentTurnInput{
+	turn := AgentTurnInput{
 		SessionID:      "conversation:abc123",
 		AgentID:        "yangsheng-yihao",
 		AgentSessionID: "session:yangsheng-yihao:def456",
@@ -134,11 +135,12 @@ func TestManagerPersistsLayeredAgentSession(t *testing.T) {
 		Scope:          &scope,
 		UserMessage:    "hi",
 		AssistantReply: "hello",
-	}); err != nil {
+	}
+	if err := manager.AppendAgentTurn(turn); err != nil {
 		t.Fatal(err)
 	}
 
-	conversationDir := filepath.Join(root, safePathID("conversation:abc123"))
+	conversationDir := filepath.Join(root, "feishu", "feishu-yihao", conversationFolderName(turn))
 	agentDir := filepath.Join(conversationDir, "agents", safePathID("yangsheng-yihao"))
 	for _, path := range []string{
 		filepath.Join(conversationDir, "meta.json"),
@@ -191,5 +193,107 @@ func TestManagerPersistsLayeredAgentSession(t *testing.T) {
 	}
 	if agentHistory[0].Role != "user" || agentHistory[0].Content != "hi" || agentHistory[1].Role != "assistant" {
 		t.Fatalf("agent history = %+v", agentHistory)
+	}
+}
+
+func TestManagerPersistsReadableIlinkSessionPath(t *testing.T) {
+	root := t.TempDir()
+	manager, err := NewManagerWithStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := channel.NewInboundContextWithEntrypoint("ilink", "ilink-wechat", "wxid-user", map[string]string{
+		"chat_id":    "group-1",
+		"chat_type":  "group",
+		"space_id":   "group-1",
+		"space_type": "group",
+	})
+	turn := AgentTurnInput{
+		SessionID:      "conversation:ilink123",
+		AgentID:        "xira-assistant",
+		AgentSessionID: "session:xira-assistant:abc",
+		Context:        ctx,
+		UserMessage:    "hi",
+		AssistantReply: "hello",
+	}
+	if err := manager.AppendAgentTurn(turn); err != nil {
+		t.Fatal(err)
+	}
+
+	conversationDir := filepath.Join(root, "ilink", "ilink-wechat", conversationFolderName(turn))
+	if _, err := os.Stat(filepath.Join(conversationDir, "agents", "xira-assistant", "messages.jsonl")); err != nil {
+		t.Fatalf("expected readable ilink session path: %v", err)
+	}
+	if got := filepath.Base(conversationDir); got != "chat_group_group-1__sender_wxid-user__conversation_ilink123" {
+		t.Fatalf("conversation dir = %q", got)
+	}
+}
+
+func TestConversationFolderNameOnlyUsesSessionScopeDimensions(t *testing.T) {
+	ctx := channel.NewInboundContextWithEntrypoint("feishu", "feishu-default", "sender-1", map[string]string{
+		"chat_id":   "chat-1",
+		"chat_type": "group",
+	})
+	got := conversationFolderName(AgentTurnInput{
+		SessionID: "conversation:channel123",
+		Context:   ctx,
+		Scope: &SessionScope{
+			Version:    ScopeVersionV1,
+			Channel:    "feishu",
+			Dimensions: []string{"channel"},
+			Values:     map[string]string{"channel": "channel:feishu"},
+		},
+	})
+	if got != "conversation_channel123" {
+		t.Fatalf("conversation folder = %q, want only session id for channel-scoped session", got)
+	}
+}
+
+func TestManagerLoadsLegacyFlatConversationSessionPath(t *testing.T) {
+	root := t.TempDir()
+	conversationDir := filepath.Join(root, safePathID("conversation:legacy123"))
+	agentDir := filepath.Join(conversationDir, "agents", "xira-assistant")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	if err := writeJSONAtomic(filepath.Join(conversationDir, "meta.json"), ConversationMeta{
+		Version:     fileStoreVersion,
+		SessionID:   "conversation:legacy123",
+		Channel:     "feishu",
+		ChatID:      "chat-1",
+		ChatType:    "direct",
+		SenderID:    "sender-1",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		LastAgentID: "xira-assistant",
+	}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONAtomic(filepath.Join(agentDir, "meta.json"), AgentMeta{
+		Version:        fileStoreVersion,
+		SessionID:      "conversation:legacy123",
+		AgentID:        "xira-assistant",
+		AgentSessionID: "session:xira-assistant:legacy",
+		MessageCount:   2,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendJSONLines(filepath.Join(agentDir, "messages.jsonl"), []Message{
+		{Role: "user", Content: "old hi", CreatedAt: now, AgentID: "xira-assistant"},
+		{Role: "assistant", Content: "old hello", CreatedAt: now.Add(time.Nanosecond), AgentID: "xira-assistant"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewManagerWithStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := reloaded.History("conversation:legacy123")
+	if len(history) != 2 || history[0].Content != "old hi" || history[1].Content != "old hello" {
+		t.Fatalf("legacy history = %+v", history)
 	}
 }
