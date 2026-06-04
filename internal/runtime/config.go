@@ -19,6 +19,7 @@ type runtimeConfigFile struct {
 	Workspace      string `yaml:"workspace"`
 	DefaultAgentID string `yaml:"default_agent"`
 	RunRoot        string `yaml:"run_root"`
+	SessionRoot    string `yaml:"session_root"`
 	StateRoot      string `yaml:"state_root"`
 	Routes         string `yaml:"routes"`
 	Entrypoints    string `yaml:"entrypoints"`
@@ -53,6 +54,7 @@ type resolvedRuntimeConfig struct {
 	WorkspaceRoot     string
 	DefaultAgentID    string
 	RunRoot           string
+	SessionRoot       string
 	Routes            []routing.Rule
 	Entrypoints       []entrypoints.Definition
 }
@@ -92,17 +94,31 @@ func resolveRuntimeConfig(cfg Config) (resolvedRuntimeConfig, error) {
 	}
 	workspace = resolveRelativePath(baseDir, workspace)
 
+	stateRoot := strings.TrimSpace(configFile.StateRoot)
+
 	runRoot := strings.TrimSpace(cfg.RunRoot)
 	if runRoot == "" {
 		runRoot = strings.TrimSpace(configFile.RunRoot)
 	}
-	if runRoot == "" && strings.TrimSpace(configFile.StateRoot) != "" {
-		runRoot = filepath.Join(strings.TrimSpace(configFile.StateRoot), "runs")
+	if runRoot == "" && stateRoot != "" {
+		runRoot = filepath.Join(stateRoot, "runs")
 	}
 	if runRoot == "" {
 		runRoot = ".xira/runs"
 	}
 	runRoot = resolveRelativePath(baseDir, runRoot)
+
+	sessionRoot := strings.TrimSpace(cfg.SessionRoot)
+	if sessionRoot == "" {
+		sessionRoot = strings.TrimSpace(configFile.SessionRoot)
+	}
+	if sessionRoot == "" && stateRoot != "" {
+		sessionRoot = filepath.Join(stateRoot, "sessions")
+	}
+	if sessionRoot == "" {
+		sessionRoot = filepath.Join(filepath.Dir(runRoot), "sessions")
+	}
+	sessionRoot = resolveRelativePath(baseDir, sessionRoot)
 
 	routesPath := strings.TrimSpace(configFile.Routes)
 	routesRequired := false
@@ -147,6 +163,7 @@ func resolveRuntimeConfig(cfg Config) (resolvedRuntimeConfig, error) {
 		WorkspaceRoot:     workspace,
 		DefaultAgentID:    defaultAgentID,
 		RunRoot:           runRoot,
+		SessionRoot:       sessionRoot,
 		Routes:            routes,
 		Entrypoints:       entrypointDefs,
 	}, nil

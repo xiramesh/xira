@@ -9,7 +9,9 @@ import (
 
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	adkmodel "google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
+	adksession "google.golang.org/adk/session"
 	adktool "google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
@@ -81,6 +83,15 @@ func (s *Service) generateADK(
 	if err != nil {
 		return "", nil, err
 	}
+	conversationSessionID := strings.TrimSpace(req.Metadata["conversation_session_id"])
+	if err := s.hydrateADKSession(ctx, req.UserID, req.SessionID, profile.ID, conversationSessionID); err != nil {
+		recordEvent("adk.session_hydrate_failed", "adk.session", "failed to restore session history", map[string]any{
+			"agent_id":                profile.ID,
+			"agent_session_id":        req.SessionID,
+			"conversation_session_id": conversationSessionID,
+			"error":                   err.Error(),
+		})
+	}
 	var final string
 	var latestText string
 	for evt, err := range run.Run(ctx, req.UserID, req.SessionID, genai.NewContentFromText(req.Message, genai.RoleUser), adkagent.RunConfig{}) {
@@ -131,6 +142,53 @@ func (s *Service) generateADK(
 	}
 	recordAudit("adk.runner", profile.ID, true, "ADK runner completed", nil)
 	return final, toolRecords, nil
+}
+
+func (s *Service) hydrateADKSession(ctx context.Context, userID, agentSessionID, agentID, conversationSessionID string) error {
+	userID = strings.TrimSpace(userID)
+	agentSessionID = strings.TrimSpace(agentSessionID)
+	agentID = strings.TrimSpace(agentID)
+	conversationSessionID = strings.TrimSpace(conversationSessionID)
+	if s == nil || s.adkSessions == nil || s.sessions == nil || userID == "" || agentSessionID == "" {
+		return nil
+	}
+	if _, err := s.adkSessions.Get(ctx, &adksession.GetRequest{
+		AppName:   "xira",
+		UserID:    userID,
+		SessionID: agentSessionID,
+	}); err == nil {
+		return nil
+	}
+	created, err := s.adkSessions.Create(ctx, &adksession.CreateRequest{
+		AppName:   "xira",
+		UserID:    userID,
+		SessionID: agentSessionID,
+	})
+	if err != nil {
+		return err
+	}
+	if conversationSessionID == "" || agentID == "" {
+		return nil
+	}
+	for _, msg := range s.sessions.AgentHistory(conversationSessionID, agentID) {
+		event := adksession.NewEvent("xira-session-restore")
+		event.Author = "user"
+		var role genai.Role = genai.RoleUser
+		if strings.TrimSpace(msg.Role) != "user" {
+			event.Author = agentID
+			role = genai.RoleModel
+		}
+		event.LLMResponse = adkmodel.LLMResponse{
+			Content: genai.NewContentFromText(msg.Content, role),
+		}
+		if !msg.CreatedAt.IsZero() {
+			event.Timestamp = msg.CreatedAt
+		}
+		if err := s.adkSessions.AppendEvent(ctx, created.Session, event); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) adkTools(

@@ -30,6 +30,7 @@ type Config struct {
 	WorkspaceRoot  string
 	DefaultAgentID string
 	RunRoot        string
+	SessionRoot    string
 	UseMockModel   bool
 	DeepSeekClient *deepseek.Client
 }
@@ -65,6 +66,10 @@ func NewService(cfg Config) (*Service, error) {
 	if _, ok := manager.Get(resolved.DefaultAgentID); !ok {
 		return nil, fmt.Errorf("default agent %q not found", resolved.DefaultAgentID)
 	}
+	sessionManager, err := fsession.NewManagerWithStore(resolved.SessionRoot)
+	if err != nil {
+		return nil, err
+	}
 	dsClient := cfg.DeepSeekClient
 	if dsClient == nil {
 		dsClient = deepseek.New()
@@ -75,7 +80,7 @@ func NewService(cfg Config) (*Service, error) {
 		runs:          NewRunStore(resolved.RunRoot),
 		router:        routing.NewRouterWithRules(resolved.DefaultAgentID, resolved.Routes),
 		entrypoints:   entrypoints.NewRegistry(resolved.DefaultAgentID, resolved.Entrypoints),
-		sessions:      fsession.NewManager(),
+		sessions:      sessionManager,
 		adkSessions:   adksession.InMemoryService(),
 		verifier:      NewVerificationRunner(),
 		evolution:     NewEvolutionEngine(),
@@ -133,6 +138,7 @@ func (s *Service) Status() map[string]any {
 		"config_path":    s.configPath,
 		"workspace":      s.workspace,
 		"run_root":       s.runs.Root(),
+		"session_root":   s.sessions.Root(),
 		"agents":         len(s.Agents()),
 		"entrypoints":    len(s.entrypoints.Definitions()),
 		"default_agent":  s.defaultAgent,
@@ -261,6 +267,11 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	})
 
 	agentReq := req
+	agentReq.Metadata = copyTurnMetadata(req.Metadata)
+	if agentReq.Metadata == nil {
+		agentReq.Metadata = map[string]string{}
+	}
+	agentReq.Metadata["conversation_session_id"] = req.SessionID
 	agentReq.SessionID = agentSessionID
 	final, toolCalls, runErr := s.generate(ctx, profile, agentReq, recordEvent, recordAudit)
 	resp.FinalResponse = final
@@ -293,7 +304,29 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		slog.Info("agent run finished", logAttrs...)
 	}
 	if runErr == nil && resp.VerificationResult.Status == "passed" {
-		s.sessions.AppendTurn(req.SessionID, req.Message, final)
+		if err := s.sessions.AppendAgentTurn(fsession.AgentTurnInput{
+			SessionID:      req.SessionID,
+			AgentID:        profile.ID,
+			AgentSessionID: agentSessionID,
+			RunID:          runID,
+			Context:        inbound.Context,
+			Scope:          &scope,
+			UserMessage:    req.Message,
+			AssistantReply: final,
+		}); err != nil {
+			slog.Warn("session history persistence failed",
+				"run_id", runID,
+				"agent_id", profile.ID,
+				"session_id", req.SessionID,
+				"agent_session_id", agentSessionID,
+				"error", err,
+			)
+			recordEvent("session.persist_failed", "runtime", "session history persistence failed", map[string]any{
+				"session_id":       req.SessionID,
+				"agent_session_id": agentSessionID,
+				"error":            err.Error(),
+			})
+		}
 	}
 	recordEvent("run.finished", "runtime", "agent run finished", map[string]any{"status": resp.Status})
 	resp.Artifacts = []string{"artifacts/"}
@@ -314,6 +347,17 @@ func (s *Service) generate(
 		return s.mockGenerate(ctx, profile, req, recordEvent, recordAudit)
 	}
 	return s.generateADK(ctx, profile, req, recordEvent, recordAudit)
+}
+
+func copyTurnMetadata(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func (s *Service) generateNativeDeepSeek(

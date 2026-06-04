@@ -10,8 +10,11 @@ import (
 	"strings"
 	"testing"
 
+	adksession "google.golang.org/adk/session"
+
 	"github.com/ai-daming/xira/internal/agents"
 	"github.com/ai-daming/xira/internal/model/deepseek"
+	fsession "github.com/ai-daming/xira/internal/session"
 )
 
 func TestRunAgentWritesHarnessStore(t *testing.T) {
@@ -84,6 +87,102 @@ func TestDefaultAgentRespondsInMockMode(t *testing.T) {
 	}
 	if history[0].Role != "user" || history[0].Content != "hi" || history[1].Role != "assistant" {
 		t.Fatalf("session history = %+v", history)
+	}
+}
+
+func TestRunAgentPersistsSessionFilesAndReloadsHistory(t *testing.T) {
+	stateRoot := t.TempDir()
+	sessionRoot := filepath.Join(stateRoot, "sessions")
+	rt, err := NewService(Config{RunRoot: filepath.Join(stateRoot, "runs"), UseMockModel: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rt.SessionManager().Root(); got != sessionRoot {
+		t.Fatalf("session root = %q, want %q", got, sessionRoot)
+	}
+	if got := rt.Status()["session_root"]; got != sessionRoot {
+		t.Fatalf("status session_root = %v, want %q", got, sessionRoot)
+	}
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		Message: "persist me",
+		Channel: "feishu",
+		UserID:  "sender-1",
+		Metadata: map[string]string{
+			"chat_id":   "chat-1",
+			"chat_type": "group",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if history := rt.SessionManager().AgentHistory(resp.SessionID, resp.AgentID); len(history) != 2 {
+		t.Fatalf("agent history len = %d, want 2: %+v", len(history), history)
+	}
+	entries, err := os.ReadDir(sessionRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !entries[0].IsDir() {
+		t.Fatalf("session entries = %+v, want one conversation dir", entries)
+	}
+	messagesPath := filepath.Join(sessionRoot, entries[0].Name(), "agents", resp.AgentID, "messages.jsonl")
+	if _, err := os.Stat(messagesPath); err != nil {
+		t.Fatalf("expected persisted messages: %v", err)
+	}
+
+	reloaded, err := NewService(Config{RunRoot: filepath.Join(stateRoot, "runs"), UseMockModel: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := reloaded.SessionManager().History(resp.SessionID)
+	if len(history) != 2 {
+		t.Fatalf("reloaded history len = %d, want 2: %+v", len(history), history)
+	}
+	if history[0].Content != "persist me" || history[1].Content != "Mock model response: persist me" {
+		t.Fatalf("reloaded history = %+v", history)
+	}
+}
+
+func TestHydrateADKSessionRestoresPersistedAgentHistory(t *testing.T) {
+	stateRoot := t.TempDir()
+	rt, err := NewService(Config{RunRoot: filepath.Join(stateRoot, "runs"), UseMockModel: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		Message: "remember this",
+		Channel: "test",
+		UserID:  "user-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewService(Config{RunRoot: filepath.Join(stateRoot, "runs"), UseMockModel: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentSessionID := fsession.BuildAgentSessionID(resp.SessionID, resp.AgentID)
+	if err := reloaded.hydrateADKSession(context.Background(), "user-1", agentSessionID, resp.AgentID, resp.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := reloaded.adkSessions.Get(context.Background(), &adksession.GetRequest{
+		AppName:   "xira",
+		UserID:    "user-1",
+		SessionID: agentSessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := got.Session.Events()
+	if events.Len() != 2 {
+		t.Fatalf("restored event len = %d, want 2", events.Len())
+	}
+	if first := events.At(0); first.Author != "user" || contentText(first.Content) != "remember this" {
+		t.Fatalf("first restored event = %+v", first)
+	}
+	if second := events.At(1); second.Author != resp.AgentID || contentText(second.Content) != "Mock model response: remember this" {
+		t.Fatalf("second restored event = %+v", second)
 	}
 }
 

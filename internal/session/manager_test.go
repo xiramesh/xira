@@ -1,6 +1,9 @@
 package session
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ai-daming/xira/internal/channel"
@@ -98,5 +101,95 @@ func TestManagerConversationHistoryReturnsCopy(t *testing.T) {
 
 	if got[0].Content != "hi" {
 		t.Fatalf("history content = %q, want hi", got[0].Content)
+	}
+}
+
+func TestManagerPersistsLayeredAgentSession(t *testing.T) {
+	root := t.TempDir()
+	manager, err := NewManagerWithStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := channel.NewInboundContextWithEntrypoint("feishu", "feishu-yihao", "ou-1", map[string]string{
+		"app_id":    "cli-1",
+		"chat_id":   "oc-1",
+		"chat_type": "direct",
+	})
+	scope := SessionScope{
+		Version:      ScopeVersionV1,
+		EntrypointID: "feishu-yihao",
+		Channel:      "feishu",
+		Dimensions:   []string{"chat", "sender"},
+		Values: map[string]string{
+			"chat":   "direct:oc-1",
+			"sender": "feishu:ou-1",
+		},
+	}
+	if err := manager.AppendAgentTurn(AgentTurnInput{
+		SessionID:      "conversation:abc123",
+		AgentID:        "yangsheng-yihao",
+		AgentSessionID: "session:yangsheng-yihao:def456",
+		RunID:          "run-1",
+		Context:        ctx,
+		Scope:          &scope,
+		UserMessage:    "hi",
+		AssistantReply: "hello",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	conversationDir := filepath.Join(root, safePathID("conversation:abc123"))
+	agentDir := filepath.Join(conversationDir, "agents", safePathID("yangsheng-yihao"))
+	for _, path := range []string{
+		filepath.Join(conversationDir, "meta.json"),
+		filepath.Join(agentDir, "meta.json"),
+		filepath.Join(agentDir, "messages.jsonl"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s: %v", path, err)
+		}
+	}
+
+	var conversationMeta ConversationMeta
+	content, err := os.ReadFile(filepath.Join(conversationDir, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(content, &conversationMeta); err != nil {
+		t.Fatal(err)
+	}
+	if conversationMeta.SessionID != "conversation:abc123" || conversationMeta.LastAgentID != "yangsheng-yihao" {
+		t.Fatalf("conversation meta = %+v", conversationMeta)
+	}
+	if conversationMeta.ChatID != "oc-1" || conversationMeta.SenderID != "ou-1" {
+		t.Fatalf("conversation context meta = %+v", conversationMeta)
+	}
+
+	var agentMeta AgentMeta
+	content, err = os.ReadFile(filepath.Join(agentDir, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(content, &agentMeta); err != nil {
+		t.Fatal(err)
+	}
+	if agentMeta.AgentSessionID != "session:yangsheng-yihao:def456" || agentMeta.MessageCount != 2 {
+		t.Fatalf("agent meta = %+v", agentMeta)
+	}
+
+	reloaded, err := NewManagerWithStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversationHistory := reloaded.History("conversation:abc123")
+	if len(conversationHistory) != 2 {
+		t.Fatalf("conversation history len = %d, want 2: %+v", len(conversationHistory), conversationHistory)
+	}
+	agentHistory := reloaded.AgentHistory("conversation:abc123", "yangsheng-yihao")
+	if len(agentHistory) != 2 {
+		t.Fatalf("agent history len = %d, want 2: %+v", len(agentHistory), agentHistory)
+	}
+	if agentHistory[0].Role != "user" || agentHistory[0].Content != "hi" || agentHistory[1].Role != "assistant" {
+		t.Fatalf("agent history = %+v", agentHistory)
 	}
 }
