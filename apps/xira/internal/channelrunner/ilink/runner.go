@@ -2,6 +2,7 @@ package ilink
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,14 +13,20 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	openilink "github.com/openilink/openilink-sdk-go"
 
+	"github.com/ai-daming/xira/internal/channelcontrol"
 	"github.com/ai-daming/xira/internal/channelrunner/dedupe"
 	"github.com/ai-daming/xira/internal/entrypoints"
 	frt "github.com/ai-daming/xira/internal/runtime"
 )
 
-const messageDedupeTTL = time.Hour
+const (
+	messageDedupeTTL           = time.Hour
+	pairingPollIdleInterval    = 500 * time.Millisecond
+	pairingPollWaitLogInterval = 10 * time.Second
+)
 
 type client interface {
 	Monitor(context.Context, openilink.MessageHandler, *openilink.MonitorOptions) error
@@ -29,31 +36,58 @@ type client interface {
 	BaseURL() string
 }
 
+type qrClient interface {
+	FetchQRCode(context.Context) (*openilink.QRCodeResponse, error)
+	PollQRStatus(context.Context, string, ...string) (*openilink.QRStatusResponse, error)
+}
+
+type accountRecord struct {
+	AccountID string    `json:"account_id"`
+	Token     string    `json:"token"`
+	BaseURL   string    `json:"base_url,omitempty"`
+	UserID    string    `json:"user_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type accountPoller struct {
+	record   accountRecord
+	client   client
+	stateDir string
+	messages *dedupe.MessageDeduper
+	cancel   context.CancelFunc
+	runID    string
+	running  bool
+}
+
+type pairingState struct {
+	snapshot channelcontrol.PairingSnapshot
+	qrcode   string
+	baseURL  string
+}
+
 type Runner struct {
-	definition entrypoints.Definition
-	runtime    *frt.Service
-	client     client
-	token      string
-	baseURL    string
-	stateDir   string
-	syncBuf    string
+	definition      entrypoints.Definition
+	runtime         *frt.Service
+	stateDir        string
+	baseURL         string
+	allowPairing    bool
+	clientFactory   func(accountRecord) client
+	qrClientFactory func(string) qrClient
 
 	mu       sync.Mutex
 	runCtx   context.Context
 	cancel   context.CancelFunc
-	messages *dedupe.MessageDeduper
+	accounts map[string]*accountPoller
+	pairings map[string]*pairingState
 }
 
 func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot string) (*Runner, error) {
 	token := resolveValue(definition.Token, definition.TokenEnv)
-	if token == "" {
+	if token == "" && !definition.AllowRuntimePairing {
 		return nil, fmt.Errorf("ilink entrypoint %q missing token or token_env", definition.ID)
 	}
 	baseURL := resolveValue(definition.BaseURL, definition.BaseURLEnv)
-	opts := []openilink.Option{}
-	if baseURL != "" {
-		opts = append(opts, openilink.WithBaseURL(baseURL))
-	}
 	stateDir := strings.TrimSpace(definition.StateDir)
 	if stateDir == "" {
 		if strings.TrimSpace(stateRoot) == "" {
@@ -62,13 +96,42 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 		stateDir = filepath.Join(stateRoot, "channels", "ilink", safePathSegment(definition.ID))
 	}
 	runner := &Runner{
-		definition: definition,
-		runtime:    rt,
-		client:     openilink.NewClient(token, opts...),
-		token:      token,
-		baseURL:    baseURL,
-		stateDir:   stateDir,
-		messages:   dedupe.New(filepath.Join(stateDir, "dedupe.json"), messageDedupeTTL),
+		definition:   definition,
+		runtime:      rt,
+		stateDir:     stateDir,
+		baseURL:      baseURL,
+		allowPairing: definition.AllowRuntimePairing,
+		accounts:     map[string]*accountPoller{},
+		pairings:     map[string]*pairingState{},
+	}
+	runner.clientFactory = func(account accountRecord) client {
+		opts := []openilink.Option{}
+		if strings.TrimSpace(account.BaseURL) != "" {
+			opts = append(opts, openilink.WithBaseURL(account.BaseURL))
+		}
+		return openilink.NewClient(account.Token, opts...)
+	}
+	runner.qrClientFactory = func(baseURL string) qrClient {
+		opts := []openilink.Option{}
+		if strings.TrimSpace(baseURL) != "" {
+			opts = append(opts, openilink.WithBaseURL(baseURL))
+		}
+		return openilink.NewClient("", opts...)
+	}
+	if token != "" {
+		accountID := strings.TrimSpace(definition.BotID)
+		if accountID == "" {
+			accountID = "static"
+		}
+		now := time.Now()
+		runner.accounts[accountID] = runner.newAccountPoller(accountRecord{
+			AccountID: accountID,
+			Token:     token,
+			BaseURL:   baseURL,
+			UserID:    strings.TrimSpace(definition.Account),
+			CreatedAt: now,
+			UpdatedAt: now,
+		})
 	}
 	slog.Info("ilink runner configured",
 		"entrypoint_id", definition.ID,
@@ -76,6 +139,7 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 		"token_configured", token != "",
 		"base_url_configured", baseURL != "",
 		"state_dir", stateDir,
+		"allow_runtime_pairing", definition.AllowRuntimePairing,
 		"respond_to_unmentioned_group_messages", definition.RespondToUnmentionedGroupMessages,
 	)
 	return runner, nil
@@ -90,8 +154,7 @@ func (r *Runner) Channel() string {
 }
 
 func (r *Runner) Start(ctx context.Context) error {
-	initialBuf, err := r.loadSyncBuf()
-	if err != nil {
+	if err := r.loadPersistedAccounts(); err != nil {
 		return err
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -99,36 +162,23 @@ func (r *Runner) Start(ctx context.Context) error {
 	r.mu.Lock()
 	r.runCtx = runCtx
 	r.cancel = cancel
-	r.syncBuf = initialBuf
+	accounts := make([]*accountPoller, 0, len(r.accounts))
+	for _, account := range r.accounts {
+		accounts = append(accounts, account)
+	}
 	r.mu.Unlock()
 
 	slog.Info("ilink runner starting",
 		"entrypoint_id", r.definition.ID,
-		"base_url", r.client.BaseURL(),
 		"state_dir", r.stateDir,
-		"has_initial_buf", initialBuf != "",
+		"accounts", len(accounts),
+		"allow_runtime_pairing", r.allowPairing,
 	)
-	go func() {
-		err := r.client.Monitor(runCtx, r.handleMessage, &openilink.MonitorOptions{
-			InitialBuf: initialBuf,
-			OnBufUpdate: func(buf string) {
-				if err := r.saveSyncBuf(buf); err != nil {
-					slog.Warn("ilink sync cursor persist failed", "entrypoint_id", r.definition.ID, "error", err)
-				}
-			},
-			OnError: func(err error) {
-				slog.Warn("ilink monitor error", "entrypoint_id", r.definition.ID, "error", err)
-			},
-			OnSessionExpired: func() {
-				slog.Error("ilink session expired", "entrypoint_id", r.definition.ID)
-			},
-		})
-		if err != nil && runCtx.Err() == nil {
-			slog.Error("ilink runner stopped with error", "entrypoint_id", r.definition.ID, "error", err)
-			return
+	for _, account := range accounts {
+		if err := r.startAccount(runCtx, account); err != nil {
+			return err
 		}
-		slog.Info("ilink runner stopped", "entrypoint_id", r.definition.ID, "reason", runCtx.Err())
-	}()
+	}
 	return nil
 }
 
@@ -138,23 +188,367 @@ func (r *Runner) Stop(context.Context) error {
 	cancel := r.cancel
 	r.runCtx = nil
 	r.cancel = nil
+	var accountCancels []context.CancelFunc
+	for _, account := range r.accounts {
+		if account.cancel != nil {
+			accountCancels = append(accountCancels, account.cancel)
+			account.cancel = nil
+		}
+		account.running = false
+	}
 	r.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	for _, accountCancel := range accountCancels {
+		accountCancel()
+	}
 	return nil
 }
 
-func (r *Runner) handleMessage(msg openilink.WeixinMessage) {
+func (r *Runner) CreatePairing(ctx context.Context) (channelcontrol.PairingSnapshot, error) {
+	if !r.allowPairing {
+		return channelcontrol.PairingSnapshot{}, fmt.Errorf("ilink entrypoint %q does not allow runtime pairing", r.definition.ID)
+	}
+	client := r.qrClientFactory(r.baseURL)
+	qr, err := client.FetchQRCode(ctx)
+	if err != nil {
+		slog.Warn("ilink pairing qr fetch failed",
+			"entrypoint_id", r.definition.ID,
+			"base_url", r.baseURL,
+			"error", err,
+		)
+		return channelcontrol.PairingSnapshot{}, err
+	}
+	now := time.Now()
+	pairingID := "pair_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	state := &pairingState{
+		qrcode:  strings.TrimSpace(qr.QRCode),
+		baseURL: r.baseURL,
+		snapshot: channelcontrol.PairingSnapshot{
+			PairingID:      pairingID,
+			EntrypointID:   r.definition.ID,
+			Status:         channelcontrol.PairingStatusWait,
+			QRCode:         strings.TrimSpace(qr.QRCode),
+			QRImageContent: strings.TrimSpace(qr.QRCodeImgContent),
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+	}
+	r.mu.Lock()
+	r.pairings[pairingID] = state
+	runCtx := r.runCtx
+	r.mu.Unlock()
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+	slog.Info("ilink pairing created",
+		"entrypoint_id", r.definition.ID,
+		"pairing_id", pairingID,
+		"qrcode", state.snapshot.QRCode,
+		"qr_image_content", state.snapshot.QRImageContent,
+		"base_url", state.baseURL,
+	)
+	go r.pollPairing(runCtx, client, pairingID)
+	return state.snapshot, nil
+}
+
+func (r *Runner) GetPairing(pairingID string) (channelcontrol.PairingSnapshot, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state, ok := r.pairings[strings.TrimSpace(pairingID)]
+	if !ok {
+		return channelcontrol.PairingSnapshot{}, fmt.Errorf("pairing %q not found", pairingID)
+	}
+	return state.snapshot, nil
+}
+
+func (r *Runner) ListAccounts() ([]channelcontrol.AccountSnapshot, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	accounts := make([]channelcontrol.AccountSnapshot, 0, len(r.accounts))
+	for _, account := range r.accounts {
+		accounts = append(accounts, r.accountSnapshot(account))
+	}
+	return accounts, nil
+}
+
+func (r *Runner) DeleteAccount(ctx context.Context, accountID string) error {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return fmt.Errorf("account id is required")
+	}
+	r.mu.Lock()
+	account, ok := r.accounts[accountID]
+	if ok {
+		if account.cancel != nil {
+			account.cancel()
+		}
+		delete(r.accounts, accountID)
+	}
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("account %q not found", accountID)
+	}
+	if err := os.Remove(accountRecordPath(r.accountsDir(), accountID)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func (r *Runner) pollPairing(ctx context.Context, client qrClient, pairingID string) {
+	var lastWaitLog time.Time
+	for {
+		r.mu.Lock()
+		state, ok := r.pairings[pairingID]
+		if !ok {
+			r.mu.Unlock()
+			return
+		}
+		qrcode := state.qrcode
+		baseURL := state.baseURL
+		status := state.snapshot.Status
+		r.mu.Unlock()
+		if status == channelcontrol.PairingStatusConfirmed || status == channelcontrol.PairingStatusExpired || status == channelcontrol.PairingStatusFailed {
+			return
+		}
+		resp, err := client.PollQRStatus(ctx, qrcode, baseURL)
+		if err != nil {
+			slog.Warn("ilink pairing poll failed",
+				"entrypoint_id", r.definition.ID,
+				"pairing_id", pairingID,
+				"qrcode", qrcode,
+				"base_url", baseURL,
+				"previous_status", status,
+				"error", err,
+			)
+			r.updatePairing(pairingID, func(snapshot *channelcontrol.PairingSnapshot) {
+				snapshot.Status = channelcontrol.PairingStatusFailed
+				snapshot.Error = err.Error()
+			})
+			return
+		}
+		nextStatus := strings.TrimSpace(resp.Status)
+		if nextStatus != "" && nextStatus != status && nextStatus != channelcontrol.PairingStatusWait {
+			slog.Info("ilink pairing status changed",
+				"entrypoint_id", r.definition.ID,
+				"pairing_id", pairingID,
+				"qrcode", qrcode,
+				"previous_status", status,
+				"status", nextStatus,
+			)
+		}
+		switch nextStatus {
+		case channelcontrol.PairingStatusScanned:
+			r.updatePairing(pairingID, func(snapshot *channelcontrol.PairingSnapshot) {
+				snapshot.Status = channelcontrol.PairingStatusScanned
+			})
+		case channelcontrol.PairingStatusExpired:
+			r.updatePairing(pairingID, func(snapshot *channelcontrol.PairingSnapshot) {
+				snapshot.Status = channelcontrol.PairingStatusExpired
+			})
+			return
+		case channelcontrol.PairingStatusConfirmed:
+			accountID := strings.TrimSpace(resp.ILinkBotID)
+			if accountID == "" {
+				slog.Warn("ilink pairing confirmed without account id",
+					"entrypoint_id", r.definition.ID,
+					"pairing_id", pairingID,
+					"qrcode", qrcode,
+				)
+				r.updatePairing(pairingID, func(snapshot *channelcontrol.PairingSnapshot) {
+					snapshot.Status = channelcontrol.PairingStatusFailed
+					snapshot.Error = "confirmed pairing did not return ilink_bot_id"
+				})
+				return
+			}
+			now := time.Now()
+			account := accountRecord{
+				AccountID: accountID,
+				Token:     strings.TrimSpace(resp.BotToken),
+				BaseURL:   firstNonEmpty(resp.BaseURL, r.baseURL),
+				UserID:    strings.TrimSpace(resp.ILinkUserID),
+				CreatedAt: now,
+				UpdatedAt: now,
+			}
+			if account.Token == "" {
+				slog.Warn("ilink pairing confirmed without bot token",
+					"entrypoint_id", r.definition.ID,
+					"pairing_id", pairingID,
+					"qrcode", qrcode,
+					"account_id", accountID,
+					"user_id", account.UserID,
+				)
+				r.updatePairing(pairingID, func(snapshot *channelcontrol.PairingSnapshot) {
+					snapshot.Status = channelcontrol.PairingStatusFailed
+					snapshot.Error = "confirmed pairing did not return bot_token"
+				})
+				return
+			}
+			if err := r.addAccount(ctx, account, true); err != nil {
+				slog.Warn("ilink pairing account add failed",
+					"entrypoint_id", r.definition.ID,
+					"pairing_id", pairingID,
+					"qrcode", qrcode,
+					"account_id", accountID,
+					"user_id", account.UserID,
+					"base_url", account.BaseURL,
+					"error", err,
+				)
+				r.updatePairing(pairingID, func(snapshot *channelcontrol.PairingSnapshot) {
+					snapshot.Status = channelcontrol.PairingStatusFailed
+					snapshot.Error = err.Error()
+				})
+				return
+			}
+			r.updatePairing(pairingID, func(snapshot *channelcontrol.PairingSnapshot) {
+				snapshot.Status = channelcontrol.PairingStatusConfirmed
+				snapshot.AccountID = accountID
+			})
+			slog.Info("ilink pairing confirmed",
+				"entrypoint_id", r.definition.ID,
+				"pairing_id", pairingID,
+				"qrcode", qrcode,
+				"account_id", accountID,
+				"user_id", account.UserID,
+				"base_url", account.BaseURL,
+			)
+			return
+		default:
+			now := time.Now()
+			if lastWaitLog.IsZero() || now.Sub(lastWaitLog) >= pairingPollWaitLogInterval {
+				lastWaitLog = now
+				slog.Info("ilink pairing still waiting",
+					"entrypoint_id", r.definition.ID,
+					"pairing_id", pairingID,
+					"qrcode", qrcode,
+					"status", firstNonEmpty(nextStatus, channelcontrol.PairingStatusWait),
+					"base_url", baseURL,
+				)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(pairingPollIdleInterval):
+		}
+	}
+}
+
+func (r *Runner) updatePairing(pairingID string, mutate func(*channelcontrol.PairingSnapshot)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state, ok := r.pairings[pairingID]
+	if !ok {
+		return
+	}
+	mutate(&state.snapshot)
+	state.snapshot.UpdatedAt = time.Now()
+}
+
+func (r *Runner) addAccount(ctx context.Context, record accountRecord, persist bool) error {
+	record.AccountID = strings.TrimSpace(record.AccountID)
+	record.Token = strings.TrimSpace(record.Token)
+	if record.AccountID == "" {
+		return fmt.Errorf("account id is required")
+	}
+	if record.Token == "" {
+		return fmt.Errorf("account %q missing token", record.AccountID)
+	}
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now()
+	}
+	record.UpdatedAt = time.Now()
+	if persist {
+		if err := r.saveAccount(record); err != nil {
+			return err
+		}
+	}
+	poller := r.newAccountPoller(record)
+	r.mu.Lock()
+	if existing, ok := r.accounts[record.AccountID]; ok && existing.cancel != nil {
+		existing.cancel()
+	}
+	r.accounts[record.AccountID] = poller
+	runCtx := r.runCtx
+	r.mu.Unlock()
+	if runCtx != nil {
+		return r.startAccount(runCtx, poller)
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return nil
+}
+
+func (r *Runner) startAccount(ctx context.Context, account *accountPoller) error {
+	if account == nil {
+		return nil
+	}
+	initialBuf, err := loadSyncBuf(account.syncBufPath())
+	if err != nil {
+		return err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	runID := uuid.NewString()
+	r.mu.Lock()
+	if account.running && account.cancel != nil {
+		account.cancel()
+	}
+	account.cancel = cancel
+	account.runID = runID
+	account.running = true
+	r.mu.Unlock()
+	slog.Info("ilink account poller starting",
+		"entrypoint_id", r.definition.ID,
+		"account_id", account.record.AccountID,
+		"base_url", account.client.BaseURL(),
+		"state_dir", account.stateDir,
+		"has_initial_buf", initialBuf != "",
+	)
+	go func() {
+		err := account.client.Monitor(runCtx, func(msg openilink.WeixinMessage) {
+			r.handleMessage(account, msg)
+		}, &openilink.MonitorOptions{
+			InitialBuf: initialBuf,
+			OnBufUpdate: func(buf string) {
+				if err := saveSyncBuf(account.syncBufPath(), buf); err != nil {
+					slog.Warn("ilink sync cursor persist failed", "entrypoint_id", r.definition.ID, "account_id", account.record.AccountID, "error", err)
+				}
+			},
+			OnError: func(err error) {
+				slog.Warn("ilink monitor error", "entrypoint_id", r.definition.ID, "account_id", account.record.AccountID, "error", err)
+			},
+			OnSessionExpired: func() {
+				slog.Error("ilink session expired", "entrypoint_id", r.definition.ID, "account_id", account.record.AccountID)
+			},
+		})
+		if err != nil && runCtx.Err() == nil {
+			slog.Error("ilink account poller stopped with error", "entrypoint_id", r.definition.ID, "account_id", account.record.AccountID, "error", err)
+			return
+		}
+		r.mu.Lock()
+		if account.runID == runID {
+			account.running = false
+			account.cancel = nil
+			account.runID = ""
+		}
+		r.mu.Unlock()
+		slog.Info("ilink account poller stopped", "entrypoint_id", r.definition.ID, "account_id", account.record.AccountID, "reason", runCtx.Err())
+	}()
+	return nil
+}
+
+func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessage) {
 	ctx := r.currentContext()
 	if msg.MessageType == openilink.MsgTypeBot {
-		slog.Info("ilink bot echo ignored", "entrypoint_id", r.definition.ID, "message_id", messageID(msg))
+		slog.Info("ilink bot echo ignored", "entrypoint_id", r.definition.ID, "account_id", account.record.AccountID, "message_id", messageID(msg))
 		return
 	}
 	messageID := messageID(msg)
 	senderID := strings.TrimSpace(msg.FromUserID)
 	if senderID == "" {
-		slog.Warn("ilink message ignored", "entrypoint_id", r.definition.ID, "reason", "missing_sender", "message_id", messageID)
+		slog.Warn("ilink message ignored", "entrypoint_id", r.definition.ID, "account_id", account.record.AccountID, "reason", "missing_sender", "message_id", messageID)
 		return
 	}
 	chatID := chatID(msg)
@@ -165,6 +559,7 @@ func (r *Runner) handleMessage(msg openilink.WeixinMessage) {
 	}
 	slog.Info("ilink message received",
 		"entrypoint_id", r.definition.ID,
+		"account_id", account.record.AccountID,
 		"chat_id", chatID,
 		"chat_type", chatType,
 		"message_id", messageID,
@@ -176,6 +571,7 @@ func (r *Runner) handleMessage(msg openilink.WeixinMessage) {
 	if !shouldHandleMessage(chatType, r.definition) {
 		slog.Info("ilink group message ignored",
 			"entrypoint_id", r.definition.ID,
+			"account_id", account.record.AccountID,
 			"chat_id", chatID,
 			"message_id", messageID,
 			"sender_id", senderID,
@@ -184,10 +580,11 @@ func (r *Runner) handleMessage(msg openilink.WeixinMessage) {
 		)
 		return
 	}
-	dedupeKey := r.messageDedupeKey(messageID)
-	if !r.messages.Begin(dedupeKey, time.Now()) {
+	dedupeKey := account.messageDedupeKey(messageID)
+	if !account.messages.Begin(dedupeKey, time.Now()) {
 		slog.Info("ilink duplicate message ignored",
 			"entrypoint_id", r.definition.ID,
+			"account_id", account.record.AccountID,
 			"chat_id", chatID,
 			"message_id", messageID,
 			"sender_id", senderID,
@@ -198,15 +595,16 @@ func (r *Runner) handleMessage(msg openilink.WeixinMessage) {
 	messageProcessed := false
 	defer func() {
 		if messageProcessed {
-			r.messages.Complete(dedupeKey, time.Now())
+			account.messages.Complete(dedupeKey, time.Now())
 			return
 		}
-		r.messages.Forget(dedupeKey)
+		account.messages.Forget(dedupeKey)
 	}()
 
-	metadata := r.buildMetadata(msg, chatID, chatType)
+	metadata := r.buildMetadata(account, msg, chatID, chatType)
 	slog.Info("ilink dispatching message to runtime",
 		"entrypoint_id", r.definition.ID,
+		"account_id", account.record.AccountID,
 		"chat_id", chatID,
 		"chat_type", chatType,
 		"message_id", messageID,
@@ -222,6 +620,7 @@ func (r *Runner) handleMessage(msg openilink.WeixinMessage) {
 	if err != nil {
 		slog.Error("ilink runtime run failed",
 			"entrypoint_id", r.definition.ID,
+			"account_id", account.record.AccountID,
 			"chat_id", chatID,
 			"message_id", messageID,
 			"sender_id", senderID,
@@ -231,6 +630,7 @@ func (r *Runner) handleMessage(msg openilink.WeixinMessage) {
 	}
 	slog.Info("ilink runtime run completed",
 		"entrypoint_id", r.definition.ID,
+		"account_id", account.record.AccountID,
 		"run_id", resp.RunID,
 		"agent_id", resp.AgentID,
 		"status", resp.Status,
@@ -244,6 +644,7 @@ func (r *Runner) handleMessage(msg openilink.WeixinMessage) {
 	if strings.TrimSpace(resp.FinalResponse) == "" {
 		slog.Warn("ilink response skipped",
 			"entrypoint_id", r.definition.ID,
+			"account_id", account.record.AccountID,
 			"run_id", resp.RunID,
 			"chat_id", chatID,
 			"message_id", messageID,
@@ -252,9 +653,10 @@ func (r *Runner) handleMessage(msg openilink.WeixinMessage) {
 		messageProcessed = true
 		return
 	}
-	if err := r.send(ctx, msg, resp.FinalResponse); err != nil {
+	if err := r.send(ctx, account, msg, resp.FinalResponse); err != nil {
 		slog.Error("ilink response send failed",
 			"entrypoint_id", r.definition.ID,
+			"account_id", account.record.AccountID,
 			"run_id", resp.RunID,
 			"chat_id", chatID,
 			"message_id", messageID,
@@ -265,6 +667,7 @@ func (r *Runner) handleMessage(msg openilink.WeixinMessage) {
 	messageProcessed = true
 	slog.Info("ilink response sent",
 		"entrypoint_id", r.definition.ID,
+		"account_id", account.record.AccountID,
 		"run_id", resp.RunID,
 		"chat_id", chatID,
 		"message_id", messageID,
@@ -281,9 +684,11 @@ func (r *Runner) currentContext() context.Context {
 	return context.Background()
 }
 
-func (r *Runner) buildMetadata(msg openilink.WeixinMessage, chatID, chatType string) map[string]string {
+func (r *Runner) buildMetadata(account *accountPoller, msg openilink.WeixinMessage, chatID, chatType string) map[string]string {
 	metadata := map[string]string{
 		"entrypoint_id":  r.definition.ID,
+		"account":        account.record.AccountID,
+		"account_id":     account.record.AccountID,
 		"chat_id":        chatID,
 		"chat_type":      chatType,
 		"message_id":     messageID(msg),
@@ -292,13 +697,11 @@ func (r *Runner) buildMetadata(msg openilink.WeixinMessage, chatID, chatType str
 		"context_token":  strings.TrimSpace(msg.ContextToken),
 		"session_id":     strings.TrimSpace(msg.SessionID),
 		"seq":            strconv.FormatInt(msg.Seq, 10),
-		"channel_app_id": r.definition.AppID,
+		"channel_app_id": account.record.AccountID,
+		"bot_id":         account.record.AccountID,
 	}
-	if r.definition.Account != "" {
-		metadata["account"] = r.definition.Account
-	}
-	if r.definition.BotID != "" {
-		metadata["bot_id"] = r.definition.BotID
+	if account.record.UserID != "" {
+		metadata["account_user_id"] = account.record.UserID
 	}
 	if msg.GroupID != "" {
 		metadata["group_id"] = strings.TrimSpace(msg.GroupID)
@@ -311,33 +714,33 @@ func (r *Runner) buildMetadata(msg openilink.WeixinMessage, chatID, chatType str
 	return compactMetadata(metadata)
 }
 
-func (r *Runner) send(ctx context.Context, msg openilink.WeixinMessage, content string) error {
+func (r *Runner) send(ctx context.Context, account *accountPoller, msg openilink.WeixinMessage, content string) error {
 	to := strings.TrimSpace(msg.FromUserID)
 	if to == "" {
 		return fmt.Errorf("missing ilink recipient")
 	}
 	if token := strings.TrimSpace(msg.ContextToken); token != "" {
-		_, err := r.client.SendText(ctx, to, content, token)
+		_, err := account.client.SendText(ctx, to, content, token)
 		return err
 	}
-	_, err := r.client.Push(ctx, to, content)
+	_, err := account.client.Push(ctx, to, content)
 	return err
 }
 
-func (r *Runner) messageDedupeKey(messageID string) string {
+func (a *accountPoller) messageDedupeKey(messageID string) string {
 	messageID = strings.TrimSpace(messageID)
 	if messageID == "" {
 		return ""
 	}
-	return strings.TrimSpace(r.definition.ID) + ":" + messageID
+	return strings.TrimSpace(a.record.AccountID) + ":" + messageID
 }
 
-func (r *Runner) syncBufPath() string {
-	return filepath.Join(r.stateDir, "get_updates_buf")
+func (a *accountPoller) syncBufPath() string {
+	return filepath.Join(a.stateDir, "get_updates_buf")
 }
 
-func (r *Runner) loadSyncBuf() (string, error) {
-	data, err := os.ReadFile(r.syncBufPath())
+func loadSyncBuf(path string) (string, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
@@ -347,21 +750,103 @@ func (r *Runner) loadSyncBuf() (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-func (r *Runner) saveSyncBuf(buf string) error {
+func saveSyncBuf(path, buf string) error {
 	buf = strings.TrimSpace(buf)
 	if buf == "" {
 		return nil
 	}
-	if err := os.MkdirAll(r.stateDir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create ilink state dir: %w", err)
 	}
-	if err := os.WriteFile(r.syncBufPath(), []byte(buf), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(buf), 0o600); err != nil {
 		return fmt.Errorf("write ilink sync cursor: %w", err)
 	}
-	r.mu.Lock()
-	r.syncBuf = buf
-	r.mu.Unlock()
 	return nil
+}
+
+func (r *Runner) newAccountPoller(record accountRecord) *accountPoller {
+	stateDir := filepath.Join(r.accountsDir(), safePathSegment(record.AccountID))
+	return &accountPoller{
+		record:   record,
+		client:   r.clientFactory(record),
+		stateDir: stateDir,
+		messages: dedupe.New(filepath.Join(stateDir, "dedupe.json"), messageDedupeTTL),
+	}
+}
+
+func (r *Runner) loadPersistedAccounts() error {
+	entries, err := os.ReadDir(r.accountsDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(r.accountsDir(), entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var record accountRecord
+		if err := json.Unmarshal(data, &record); err != nil {
+			return fmt.Errorf("parse ilink account %s: %w", path, err)
+		}
+		record.AccountID = strings.TrimSpace(record.AccountID)
+		if record.AccountID == "" {
+			continue
+		}
+		r.mu.Lock()
+		if _, exists := r.accounts[record.AccountID]; !exists {
+			r.accounts[record.AccountID] = r.newAccountPoller(record)
+		}
+		r.mu.Unlock()
+	}
+	return nil
+}
+
+func (r *Runner) saveAccount(record accountRecord) error {
+	if err := os.MkdirAll(r.accountsDir(), 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(accountRecordPath(r.accountsDir(), record.AccountID), append(data, '\n'), 0o600)
+}
+
+func (r *Runner) accountSnapshot(account *accountPoller) channelcontrol.AccountSnapshot {
+	return channelcontrol.AccountSnapshot{
+		AccountID:    account.record.AccountID,
+		EntrypointID: r.definition.ID,
+		UserID:       account.record.UserID,
+		BaseURL:      account.record.BaseURL,
+		StateDir:     account.stateDir,
+		Running:      account.running,
+		CreatedAt:    account.record.CreatedAt,
+		UpdatedAt:    account.record.UpdatedAt,
+	}
+}
+
+func (r *Runner) accountsDir() string {
+	return filepath.Join(r.stateDir, "accounts")
+}
+
+func accountRecordPath(accountsDir, accountID string) string {
+	return filepath.Join(accountsDir, safePathSegment(accountID)+".json")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func shouldHandleMessage(chatType string, definition entrypoints.Definition) bool {

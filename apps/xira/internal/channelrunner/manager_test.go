@@ -77,6 +77,32 @@ entrypoints: workspace/entrypoints.yaml
 	}
 }
 
+func TestManagerAllowsRuntimeIlinkPairingWithoutToken(t *testing.T) {
+	instance := t.TempDir()
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+run_root: .xira/runs
+entrypoints: workspace/entrypoints.yaml
+`)
+	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
+  - id: ilink-default
+    channel: ilink
+    enabled: true
+    allow_runtime_pairing: true
+    default_agent: xira-assistant
+`)
+	writeMinimalAgent(t, filepath.Join(instance, "workspace", "agents", "xira-assistant"))
+
+	rt := newManagerTestRuntime(t, filepath.Join(instance, "xira.yaml"))
+	manager, err := NewManager(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.Count() != 1 {
+		t.Fatalf("runner count = %d, want 1", manager.Count())
+	}
+}
+
 func TestManagerRegistersIlinkEntrypoint(t *testing.T) {
 	instance := t.TempDir()
 	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace

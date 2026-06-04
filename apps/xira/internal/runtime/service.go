@@ -20,7 +20,6 @@ import (
 	"github.com/ai-daming/xira/internal/channel"
 	"github.com/ai-daming/xira/internal/entrypoints"
 	"github.com/ai-daming/xira/internal/model/deepseek"
-	"github.com/ai-daming/xira/internal/routing"
 	fsession "github.com/ai-daming/xira/internal/session"
 	rtools "github.com/ai-daming/xira/internal/tools"
 )
@@ -39,7 +38,6 @@ type Service struct {
 	agents        *agents.Manager
 	events        *EventBus
 	runs          *RunStore
-	router        *routing.Router
 	entrypoints   *entrypoints.Registry
 	sessions      *fsession.Manager
 	usage         *UsageStore
@@ -83,7 +81,6 @@ func NewService(cfg Config) (*Service, error) {
 		agents:        manager,
 		events:        NewEventBus(),
 		runs:          NewRunStore(resolved.RunRoot),
-		router:        routing.NewRouterWithRules(resolved.DefaultAgentID, resolved.Routes),
 		entrypoints:   entrypoints.NewRegistry(resolved.DefaultAgentID, resolved.Entrypoints),
 		sessions:      sessionManager,
 		usage:         NewUsageStore(resolved.StateRoot),

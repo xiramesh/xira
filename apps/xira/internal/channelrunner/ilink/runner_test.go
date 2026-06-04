@@ -1,6 +1,7 @@
 package ilink
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -28,12 +29,80 @@ func TestNewRunnerUsesTokenEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runner.token != "bot-token" {
-		t.Fatalf("token = %q", runner.token)
+	account := runner.accounts["static"]
+	if account == nil {
+		t.Fatal("static account was not registered")
+	}
+	if account.record.Token != "bot-token" {
+		t.Fatalf("token = %q", account.record.Token)
 	}
 	if runner.stateDir != filepath.Join(stateRoot, "channels", "ilink", "ilink-default") {
 		t.Fatalf("stateDir = %q", runner.stateDir)
 	}
+}
+
+func TestNewRunnerAllowsRuntimePairingWithoutToken(t *testing.T) {
+	runner, err := NewRunner(entrypoints.Definition{
+		ID:                  "ilink-default",
+		Channel:             "ilink",
+		AllowRuntimePairing: true,
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !runner.allowPairing {
+		t.Fatal("runtime pairing should be enabled")
+	}
+	if len(runner.accounts) != 0 {
+		t.Fatalf("accounts = %d, want 0", len(runner.accounts))
+	}
+}
+
+func TestCreatePairingConfirmsAndAddsAccount(t *testing.T) {
+	runner, err := NewRunner(entrypoints.Definition{
+		ID:                  "ilink-default",
+		Channel:             "ilink",
+		AllowRuntimePairing: true,
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeQR := &fakeQRClient{
+		qr: &openilink.QRCodeResponse{
+			QRCode:           "qr-key",
+			QRCodeImgContent: "https://liteapp.weixin.qq.com/q/qr-key",
+		},
+		statuses: []*openilink.QRStatusResponse{
+			{Status: "confirmed", BotToken: "bot-token", ILinkBotID: "bot-1", ILinkUserID: "user-1", BaseURL: "https://ilink.example"},
+		},
+	}
+	runner.qrClientFactory = func(string) qrClient { return fakeQR }
+	runner.clientFactory = func(record accountRecord) client { return &fakeClient{token: record.Token, baseURL: record.BaseURL} }
+	snapshot, err := runner.CreatePairing(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "wait" || snapshot.QRCode != "qr-key" {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		updated, err := runner.GetPairing(snapshot.PairingID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Status == "confirmed" {
+			if updated.AccountID != "bot-1" {
+				t.Fatalf("account id = %q", updated.AccountID)
+			}
+			if _, ok := runner.accounts["bot-1"]; !ok {
+				t.Fatal("confirmed account was not registered")
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("pairing did not confirm")
 }
 
 func TestExtractContentUsesText(t *testing.T) {
@@ -83,11 +152,9 @@ func TestChatIDAndType(t *testing.T) {
 
 func TestBuildMetadataKeepsContextTokenAndGroupScope(t *testing.T) {
 	runner := &Runner{definition: entrypoints.Definition{
-		ID:      "ilink-wechat",
-		Account: "personal-wechat",
-		AppID:   "ilink-app",
-		BotID:   "bot-1",
+		ID: "ilink-wechat",
 	}}
+	account := &accountPoller{record: accountRecord{AccountID: "bot-1", UserID: "owner-1"}}
 	msg := openilink.WeixinMessage{
 		Seq:          99,
 		MessageID:    42,
@@ -100,9 +167,12 @@ func TestBuildMetadataKeepsContextTokenAndGroupScope(t *testing.T) {
 		ContextToken: "ctx-token",
 	}
 
-	metadata := runner.buildMetadata(msg, chatID(msg), chatType(msg))
+	metadata := runner.buildMetadata(account, msg, chatID(msg), chatType(msg))
 	if metadata["entrypoint_id"] != "ilink-wechat" {
 		t.Fatalf("entrypoint_id = %q", metadata["entrypoint_id"])
+	}
+	if metadata["account_id"] != "bot-1" {
+		t.Fatalf("account_id = %q", metadata["account_id"])
 	}
 	if metadata["chat_id"] != "group-1" {
 		t.Fatalf("chat_id = %q", metadata["chat_id"])
@@ -122,14 +192,14 @@ func TestBuildMetadataKeepsContextTokenAndGroupScope(t *testing.T) {
 }
 
 func TestSyncBufPersistence(t *testing.T) {
-	runner := &Runner{stateDir: t.TempDir()}
-	if got, err := runner.loadSyncBuf(); err != nil || got != "" {
+	path := filepath.Join(t.TempDir(), "get_updates_buf")
+	if got, err := loadSyncBuf(path); err != nil || got != "" {
 		t.Fatalf("initial sync buf = %q, err=%v", got, err)
 	}
-	if err := runner.saveSyncBuf("cursor-1"); err != nil {
+	if err := saveSyncBuf(path, "cursor-1"); err != nil {
 		t.Fatal(err)
 	}
-	got, err := runner.loadSyncBuf()
+	got, err := loadSyncBuf(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,4 +221,47 @@ func TestMessageDeduperRejectsDuplicateUntilTTL(t *testing.T) {
 	if !deduper.Begin("ilink-default:42", now.Add(2*time.Minute)) {
 		t.Fatal("message should be accepted after ttl")
 	}
+}
+
+type fakeQRClient struct {
+	qr       *openilink.QRCodeResponse
+	statuses []*openilink.QRStatusResponse
+}
+
+func (f *fakeQRClient) FetchQRCode(context.Context) (*openilink.QRCodeResponse, error) {
+	return f.qr, nil
+}
+
+func (f *fakeQRClient) PollQRStatus(context.Context, string, ...string) (*openilink.QRStatusResponse, error) {
+	if len(f.statuses) == 0 {
+		return &openilink.QRStatusResponse{Status: "wait"}, nil
+	}
+	next := f.statuses[0]
+	f.statuses = f.statuses[1:]
+	return next, nil
+}
+
+type fakeClient struct {
+	token   string
+	baseURL string
+}
+
+func (f *fakeClient) Monitor(context.Context, openilink.MessageHandler, *openilink.MonitorOptions) error {
+	return nil
+}
+
+func (f *fakeClient) SendText(context.Context, string, string, string) (string, error) {
+	return "client-id", nil
+}
+
+func (f *fakeClient) Push(context.Context, string, string) (string, error) {
+	return "client-id", nil
+}
+
+func (f *fakeClient) Token() string {
+	return f.token
+}
+
+func (f *fakeClient) BaseURL() string {
+	return f.baseURL
 }

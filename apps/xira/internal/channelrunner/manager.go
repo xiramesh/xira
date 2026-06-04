@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/ai-daming/xira/internal/channelcontrol"
 	"github.com/ai-daming/xira/internal/channelrunner/feishu"
 	"github.com/ai-daming/xira/internal/channelrunner/ilink"
 	"github.com/ai-daming/xira/internal/runtime"
@@ -83,6 +84,59 @@ func (m *Manager) Count() int {
 		return 0
 	}
 	return len(m.runners)
+}
+
+func (m *Manager) CreatePairing(ctx context.Context, entrypointID string) (channelcontrol.PairingSnapshot, error) {
+	controller, err := m.pairingController(entrypointID)
+	if err != nil {
+		return channelcontrol.PairingSnapshot{}, err
+	}
+	return controller.CreatePairing(ctx)
+}
+
+func (m *Manager) GetPairing(entrypointID, pairingID string) (channelcontrol.PairingSnapshot, error) {
+	controller, err := m.pairingController(entrypointID)
+	if err != nil {
+		return channelcontrol.PairingSnapshot{}, err
+	}
+	return controller.GetPairing(pairingID)
+}
+
+func (m *Manager) ListAccounts(entrypointID string) ([]channelcontrol.AccountSnapshot, error) {
+	controller, err := m.pairingController(entrypointID)
+	if err != nil {
+		return nil, err
+	}
+	return controller.ListAccounts()
+}
+
+func (m *Manager) DeleteAccount(ctx context.Context, entrypointID, accountID string) error {
+	controller, err := m.pairingController(entrypointID)
+	if err != nil {
+		return err
+	}
+	return controller.DeleteAccount(ctx, accountID)
+}
+
+func (m *Manager) pairingController(entrypointID string) (channelcontrol.PairingController, error) {
+	entrypointID = strings.TrimSpace(entrypointID)
+	if entrypointID == "" {
+		return nil, fmt.Errorf("entrypoint id is required")
+	}
+	if m == nil {
+		return nil, fmt.Errorf("entrypoint %q is not running", entrypointID)
+	}
+	for _, runner := range m.runners {
+		if runner.ID() != entrypointID {
+			continue
+		}
+		controller, ok := runner.(channelcontrol.PairingController)
+		if !ok {
+			return nil, fmt.Errorf("entrypoint %q does not support runtime pairing", entrypointID)
+		}
+		return controller, nil
+	}
+	return nil, fmt.Errorf("entrypoint %q is not running", entrypointID)
 }
 
 func stopRunners(ctx context.Context, runners []Runner) error {

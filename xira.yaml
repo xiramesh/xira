@@ -1,5 +1,4 @@
 workspace: workspace
 default_agent: xira-assistant
 run_root: .xira/runs
-routes: workspace/routes.yaml
 entrypoints: workspace/entrypoints.yaml

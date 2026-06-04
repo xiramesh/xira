@@ -31,6 +31,7 @@ type Definition struct {
 	VerifyToken                       string                `json:"verification_token,omitempty" yaml:"verification_token,omitempty"`
 	VerifyTokenEnv                    string                `json:"verification_token_env,omitempty" yaml:"verification_token_env,omitempty"`
 	IsLark                            bool                  `json:"is_lark,omitempty" yaml:"is_lark,omitempty"`
+	AllowRuntimePairing               bool                  `json:"allow_runtime_pairing,omitempty" yaml:"allow_runtime_pairing,omitempty"`
 	RespondToUnmentionedGroupMessages bool                  `json:"respond_to_unmentioned_group_messages,omitempty" yaml:"respond_to_unmentioned_group_messages,omitempty"`
 }
 

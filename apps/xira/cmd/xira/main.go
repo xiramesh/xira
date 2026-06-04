@@ -111,7 +111,7 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 				_ = channelRunners.Stop(stopCtx)
 				slog.Info("channel runners stopped", "count", channelRunners.Count())
 			}()
-			srv := api.NewServer(rt, addr)
+			srv := api.NewServer(rt, addr, channelRunners)
 			fmt.Fprintf(cmd.OutOrStdout(), "xira runtime listening on %s (channel runners: %d)\n", srv.URL(), channelRunners.Count())
 			slog.Info("xira http server listening", "url", srv.URL(), "channel_runners", channelRunners.Count())
 			if err := srv.Start(ctx); err != nil {
