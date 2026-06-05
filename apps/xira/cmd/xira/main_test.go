@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ai-daming/xira/internal/agents"
-	"github.com/ai-daming/xira/internal/model/deepseek"
-	"github.com/ai-daming/xira/internal/runtime"
+	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/model/deepseek"
+	"github.com/xiramesh/xira/internal/runtime"
 )
 
 func TestAgentListUsesWorkspaceAgents(t *testing.T) {

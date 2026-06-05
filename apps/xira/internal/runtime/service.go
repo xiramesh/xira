@@ -17,12 +17,12 @@ import (
 	"github.com/google/uuid"
 	adksession "google.golang.org/adk/session"
 
-	"github.com/ai-daming/xira/internal/agents"
-	"github.com/ai-daming/xira/internal/channel"
-	"github.com/ai-daming/xira/internal/entrypoints"
-	"github.com/ai-daming/xira/internal/model/deepseek"
-	fsession "github.com/ai-daming/xira/internal/session"
-	rtools "github.com/ai-daming/xira/internal/tools"
+	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/model/deepseek"
+	fsession "github.com/xiramesh/xira/internal/session"
+	rtools "github.com/xiramesh/xira/internal/tools"
 )
 
 type Config struct {

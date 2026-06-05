@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ai-daming/xira/internal/runtime"
+	"github.com/xiramesh/xira/internal/runtime"
 )
 
 func TestManagerIgnoresDisabledEntrypoints(t *testing.T) {

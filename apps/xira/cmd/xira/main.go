@@ -12,10 +12,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ai-daming/xira/internal/api"
-	"github.com/ai-daming/xira/internal/channelrunner"
-	"github.com/ai-daming/xira/internal/runtime"
-	"github.com/ai-daming/xira/internal/version"
+	"github.com/xiramesh/xira/internal/api"
+	"github.com/xiramesh/xira/internal/channelrunner"
+	"github.com/xiramesh/xira/internal/runtime"
+	"github.com/xiramesh/xira/internal/version"
 )
 
 func main() {

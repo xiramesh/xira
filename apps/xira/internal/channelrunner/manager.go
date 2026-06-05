@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/ai-daming/xira/internal/channelcontrol"
-	"github.com/ai-daming/xira/internal/channelrunner/feishu"
-	"github.com/ai-daming/xira/internal/channelrunner/ilink"
-	"github.com/ai-daming/xira/internal/runtime"
+	"github.com/xiramesh/xira/internal/channelcontrol"
+	"github.com/xiramesh/xira/internal/channelrunner/feishu"
+	"github.com/xiramesh/xira/internal/channelrunner/ilink"
+	"github.com/xiramesh/xira/internal/runtime"
 )
 
 type Runner interface {

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ai-daming/xira/internal/channel"
-	"github.com/ai-daming/xira/internal/routing"
+	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/routing"
 )
 
 type Definition struct {

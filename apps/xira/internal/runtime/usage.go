@@ -14,8 +14,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/ai-daming/xira/internal/agents"
-	"github.com/ai-daming/xira/internal/model/deepseek"
+	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/model/deepseek"
 )
 
 type UsagePricing struct {

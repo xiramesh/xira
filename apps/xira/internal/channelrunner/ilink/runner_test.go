@@ -8,7 +8,7 @@ import (
 
 	openilink "github.com/openilink/openilink-sdk-go"
 
-	"github.com/ai-daming/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/entrypoints"
 )
 
 func TestNewRunnerRequiresToken(t *testing.T) {

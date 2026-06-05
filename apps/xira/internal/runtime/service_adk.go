@@ -16,9 +16,9 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 
-	"github.com/ai-daming/xira/internal/agents"
-	"github.com/ai-daming/xira/internal/model/deepseek"
-	fsession "github.com/ai-daming/xira/internal/session"
+	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/model/deepseek"
+	fsession "github.com/xiramesh/xira/internal/session"
 )
 
 func (s *Service) generateADK(

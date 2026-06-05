@@ -3,8 +3,8 @@ package entrypoints
 import (
 	"testing"
 
-	"github.com/ai-daming/xira/internal/channel"
-	"github.com/ai-daming/xira/internal/routing"
+	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/routing"
 )
 
 func TestRegistryUsesRequestedAgentWhenAllowed(t *testing.T) {

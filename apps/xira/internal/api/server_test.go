@@ -15,10 +15,10 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/ai-daming/xira/internal/agents"
-	"github.com/ai-daming/xira/internal/channelcontrol"
-	"github.com/ai-daming/xira/internal/model/deepseek"
-	frt "github.com/ai-daming/xira/internal/runtime"
+	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/channelcontrol"
+	"github.com/xiramesh/xira/internal/model/deepseek"
+	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
 func TestAgentRunAPI(t *testing.T) {

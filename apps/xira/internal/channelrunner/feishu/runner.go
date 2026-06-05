@@ -18,9 +18,9 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
-	"github.com/ai-daming/xira/internal/channelrunner/dedupe"
-	"github.com/ai-daming/xira/internal/entrypoints"
-	frt "github.com/ai-daming/xira/internal/runtime"
+	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
+	"github.com/xiramesh/xira/internal/entrypoints"
+	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
 var mentionPlaceholderRegex = regexp.MustCompile(`@_user_\d+`)

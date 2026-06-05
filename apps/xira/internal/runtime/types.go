@@ -3,7 +3,7 @@ package runtime
 import (
 	"time"
 
-	fsession "github.com/ai-daming/xira/internal/session"
+	fsession "github.com/xiramesh/xira/internal/session"
 )
 
 type EntrypointType string

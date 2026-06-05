@@ -1,4 +1,4 @@
-module github.com/ai-daming/xira
+module github.com/xiramesh/xira
 
 go 1.25.0
 

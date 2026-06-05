@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ai-daming/xira/internal/model/deepseek"
+	"github.com/xiramesh/xira/internal/model/deepseek"
 )
 
 const llmTraceEnv = "XIRA_TRACE_LLM"

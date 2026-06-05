@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-daming/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/entrypoints"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )

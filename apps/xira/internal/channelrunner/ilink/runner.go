@@ -16,10 +16,10 @@ import (
 	"github.com/google/uuid"
 	openilink "github.com/openilink/openilink-sdk-go"
 
-	"github.com/ai-daming/xira/internal/channelcontrol"
-	"github.com/ai-daming/xira/internal/channelrunner/dedupe"
-	"github.com/ai-daming/xira/internal/entrypoints"
-	frt "github.com/ai-daming/xira/internal/runtime"
+	"github.com/xiramesh/xira/internal/channelcontrol"
+	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
+	"github.com/xiramesh/xira/internal/entrypoints"
+	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
 const (

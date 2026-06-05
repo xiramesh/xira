@@ -8,9 +8,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/ai-daming/xira/internal/agents"
-	"github.com/ai-daming/xira/internal/entrypoints"
-	"github.com/ai-daming/xira/internal/routing"
+	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/routing"
 )
 
 const defaultConfigPath = "xira.yaml"

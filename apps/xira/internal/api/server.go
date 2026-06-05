@@ -12,8 +12,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/ai-daming/xira/internal/channelcontrol"
-	frt "github.com/ai-daming/xira/internal/runtime"
+	"github.com/xiramesh/xira/internal/channelcontrol"
+	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
 type Server struct {
