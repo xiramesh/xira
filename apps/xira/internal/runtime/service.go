@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -220,6 +221,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	req.SessionID = allocation.SessionID
 	agentSessionID := fsession.BuildAgentSessionID(req.SessionID, profile.ID)
 	runID := NewRunID(profile.ID, now)
+	adkRuntimeSessionID := adkSessionID(agentSessionID, runID+":"+uuid.NewString())
 	scope := allocation.Scope
 	slog.Info("agent run accepted",
 		"run_id", runID,
@@ -283,6 +285,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"bot_id":           inbound.Context.BotID,
 		"session_id":       req.SessionID,
 		"agent_session_id": agentSessionID,
+		"adk_session_id":   adkRuntimeSessionID,
 		"matched_by":       entrypointDecision.MatchedBy,
 	})
 	recordAudit("agent.run", profile.ID, true, "runtime accepted agent run", map[string]any{
@@ -306,7 +309,14 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		agentReq.Metadata = map[string]string{}
 	}
 	agentReq.Metadata["conversation_session_id"] = req.SessionID
-	agentReq.SessionID = agentSessionID
+	agentReq.Metadata["agent_session_id"] = agentSessionID
+	agentReq.SessionID = adkRuntimeSessionID
+	if err := s.runs.InitRun(runID); err != nil {
+		return TurnResponse{}, err
+	}
+	ctx = contextWithToolFailureGuard(ctx)
+	ctx = contextWithToolTrace(ctx, runID)
+	ctx = rtools.WithRunDir(ctx, s.runs.RunDir(runID))
 	ctx = s.withLLMInstrumentation(ctx, llmInstrumentationInput{
 		RunID:          runID,
 		AgentID:        profile.ID,
@@ -314,6 +324,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		Channel:        inbound.Context.Channel,
 		SessionID:      req.SessionID,
 		AgentSessionID: agentSessionID,
+		ADKSessionID:   adkRuntimeSessionID,
 		UserID:         req.UserID,
 		Pricing:        s.pricing,
 	}, recordEvent, func(call LLMCallRecord) {
@@ -368,7 +379,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 			UserMessage:    req.Message,
 			AssistantReply: final,
 		}
-		if err := s.sessions.AppendAgentTurn(sessionTurn); err != nil {
+		if err := s.sessions.AppendAgentMessages(sessionTurn, sessionMessagesForRun(req.Message, final, profile.ID, runID, toolCalls)); err != nil {
 			slog.Warn("session history persistence failed",
 				"run_id", runID,
 				"agent_id", profile.ID,
@@ -435,6 +446,107 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	return resp, runErr
 }
 
+func adkSessionID(agentSessionID, runID string) string {
+	agentSessionID = strings.TrimSpace(agentSessionID)
+	runID = strings.TrimSpace(runID)
+	if agentSessionID == "" {
+		agentSessionID = "session:unknown"
+	}
+	if runID == "" {
+		return agentSessionID
+	}
+	return agentSessionID + ":run:" + runID
+}
+
+type toolFailureGuardContextKey struct{}
+type toolTraceContextKey struct{}
+
+type toolFailureGuard struct {
+	mu       sync.Mutex
+	lastKey  string
+	failures int
+}
+
+type toolTraceContext struct {
+	runID string
+}
+
+func contextWithToolFailureGuard(ctx context.Context) context.Context {
+	return context.WithValue(ctx, toolFailureGuardContextKey{}, &toolFailureGuard{})
+}
+
+func contextWithToolTrace(ctx context.Context, runID string) context.Context {
+	return context.WithValue(ctx, toolTraceContextKey{}, toolTraceContext{runID: strings.TrimSpace(runID)})
+}
+
+func toolFailureGuardFromContext(ctx context.Context) *toolFailureGuard {
+	guard, _ := ctx.Value(toolFailureGuardContextKey{}).(*toolFailureGuard)
+	return guard
+}
+
+func toolTraceFromContext(ctx context.Context) toolTraceContext {
+	trace, _ := ctx.Value(toolTraceContextKey{}).(toolTraceContext)
+	return trace
+}
+
+func (g *toolFailureGuard) shouldBlock(name string, input map[string]any) bool {
+	if g == nil {
+		return false
+	}
+	key := toolFailureKey(name, input)
+	if key == "" {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.lastKey == key && g.failures >= 2
+}
+
+func (g *toolFailureGuard) record(name string, input map[string]any, failed bool) {
+	if g == nil {
+		return
+	}
+	key := toolFailureKey(name, input)
+	if key == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !failed {
+		g.lastKey = ""
+		g.failures = 0
+		return
+	}
+	if g.lastKey == key {
+		g.failures++
+		return
+	}
+	g.lastKey = key
+	g.failures = 1
+}
+
+func toolFailureKey(name string, input map[string]any) string {
+	name = strings.TrimSpace(name)
+	cwd := mapString(input, "cwd")
+	switch name {
+	case "shell.run":
+		command := mapString(input, "command")
+		if command == "" {
+			return ""
+		}
+		return name + "\x00" + cwd + "\x00" + command
+	case "command.run":
+		program := mapString(input, "program")
+		if program == "" {
+			return ""
+		}
+		args, _ := json.Marshal(input["args"])
+		return name + "\x00" + cwd + "\x00" + program + "\x00" + string(args)
+	default:
+		return ""
+	}
+}
+
 func (s *Service) generate(
 	ctx context.Context,
 	profile agents.Profile,
@@ -497,10 +609,7 @@ func (s *Service) generateNativeDeepSeek(
 	for _, call := range msg.ToolCalls {
 		rec := s.executeToolCall(ctx, profile, call, recordEvent, recordAudit)
 		toolRecords = append(toolRecords, rec)
-		contentBytes, _ := json.Marshal(rec.Output)
-		if rec.Error != "" {
-			contentBytes, _ = json.Marshal(map[string]any{"error": rec.Error})
-		}
+		contentBytes, _ := json.Marshal(toolOutputForModel(rec))
 		messages = append(messages, deepseek.Message{
 			Role:       "tool",
 			ToolCallID: call.ID,
@@ -564,13 +673,37 @@ func (s *Service) executeToolCall(
 	)
 	recordEvent("tool.started", rec.Name, "tool call started", rec.Input)
 	recordAudit("tool.call", rec.Name, true, "tool allowed by profile", rec.Input)
-	output, err := registry.Execute(ctx, rec.Name, rec.Input)
+	var output map[string]any
+	var err error
+	if guard := toolFailureGuardFromContext(ctx); guard != nil && guard.shouldBlock(rec.Name, rec.Input) {
+		output = repeatedToolFailureOutput(rec.Name, rec.Input)
+		err = errors.New("repeated identical failed tool command")
+	} else {
+		output, err = registry.Execute(ctx, rec.Name, rec.Input)
+	}
 	rec.Output = output
 	rec.Error = errString(err)
 	if rec.Output == nil {
 		rec.Output = map[string]any{}
 	}
+	rec.RunID = toolTraceFromContext(ctx).runID
 	rec.EndedAt = time.Now()
+	if path, persistErr := s.persistRawToolOutput(ctx, rec); persistErr != nil {
+		rec.Output["raw_output_error"] = persistErr.Error()
+		recordEvent("tool.raw_output_failed", rec.Name, "failed to persist raw tool output", map[string]any{
+			"tool":  rec.Name,
+			"error": persistErr.Error(),
+		})
+	} else if path != "" {
+		rec.Output["raw_output_path"] = path
+		recordEvent("tool.raw_output_persisted", rec.Name, "raw tool output persisted", map[string]any{
+			"tool":            rec.Name,
+			"raw_output_path": path,
+		})
+	}
+	if guard := toolFailureGuardFromContext(ctx); guard != nil {
+		guard.record(rec.Name, rec.Input, rec.Error != "")
+	}
 	if rec.Error != "" {
 		slog.Warn("tool call failed",
 			"agent_id", profile.ID,
@@ -594,6 +727,257 @@ func (s *Service) executeToolCall(
 		recordEvent("tool.finished", rec.Name, "tool call finished", map[string]any{"tool": rec.Name})
 	}
 	return rec
+}
+
+func (s *Service) persistRawToolOutput(ctx context.Context, rec ToolCallRecord) (string, error) {
+	if s == nil || s.runs == nil || rec.Output == nil {
+		return "", nil
+	}
+	if rec.Name != "command.run" && rec.Name != "shell.run" {
+		return "", nil
+	}
+	trace := toolTraceFromContext(ctx)
+	runID := strings.TrimSpace(trace.runID)
+	if runID == "" {
+		return "", nil
+	}
+	stdout, hasStdout := rec.Output["stdout"].(string)
+	stderr, hasStderr := rec.Output["stderr"].(string)
+	if !hasStdout && !hasStderr {
+		return "", nil
+	}
+	fileName := safeToolOutputFileName(rec.ID)
+	relPath := filepath.ToSlash(filepath.Join("artifacts", "tool-outputs", fileName+".json"))
+	absPath := filepath.Join(s.runs.RunDir(runID), filepath.FromSlash(relPath))
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		return "", err
+	}
+	cwd := mapString(rec.Output, "cwd")
+	if cwd == "" {
+		cwd = mapString(rec.Input, "cwd")
+	}
+	payload := map[string]any{
+		"run_id":           runID,
+		"tool_call_id":     rec.ID,
+		"tool":             rec.Name,
+		"input":            rec.Input,
+		"cwd":              cwd,
+		"env_policy":       "process environment inherited; per-tool env overrides are not supported",
+		"stdout":           stdout,
+		"stderr":           stderr,
+		"stdout_bytes":     streamBytes(rec.Output, "stdout", stdout),
+		"stderr_bytes":     streamBytes(rec.Output, "stderr", stderr),
+		"stdout_truncated": false,
+		"stderr_truncated": false,
+		"truncated":        false,
+		"exit_code":        rec.Output["exit_code"],
+		"duration_ms":      rec.Output["duration_ms"],
+		"started_at":       rec.StartedAt,
+		"ended_at":         rec.EndedAt,
+	}
+	if rec.Name == "command.run" {
+		payload["program"] = rec.Output["program"]
+		payload["args"] = rec.Output["args"]
+	} else {
+		payload["command"] = rec.Output["command"]
+	}
+	if rec.Error != "" {
+		payload["error"] = rec.Error
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(absPath, data, 0o644); err != nil {
+		return "", err
+	}
+	return relPath, nil
+}
+
+func safeToolOutputFileName(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return uuid.NewString()
+	}
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), ".-")
+	if out == "" {
+		return uuid.NewString()
+	}
+	return out
+}
+
+func streamBytes(output map[string]any, streamKey, value string) int {
+	if n, ok := intFromAny(output[streamKey+"_bytes"]); ok {
+		return n
+	}
+	return len([]byte(value))
+}
+
+func repeatedToolFailureOutput(name string, input map[string]any) map[string]any {
+	out := map[string]any{
+		"status":        "error",
+		"tool":          name,
+		"cwd":           mapString(input, "cwd"),
+		"exit_code":     nil,
+		"stdout":        "",
+		"stderr":        "",
+		"stdout_bytes":  0,
+		"stderr_bytes":  0,
+		"error":         "repeated identical failed tool command",
+		"error_message": "repeated identical failed tool command",
+		"retryable":     false,
+	}
+	if name == "command.run" {
+		out["program"] = mapString(input, "program")
+		out["args"] = input["args"]
+	} else {
+		out["command"] = mapString(input, "command")
+	}
+	return out
+}
+
+func mapString(input map[string]any, key string) string {
+	if input == nil {
+		return ""
+	}
+	value, ok := input[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func sessionMessagesForRun(userMessage, finalResponse, agentID, runID string, toolCalls []ToolCallRecord) []fsession.Message {
+	messages := []fsession.Message{
+		{
+			Role:    "user",
+			Kind:    fsession.MessageKindMessage,
+			Content: strings.TrimSpace(userMessage),
+			AgentID: agentID,
+			RunID:   runID,
+		},
+	}
+	for _, rec := range toolCalls {
+		messages = append(messages, fsession.Message{
+			Role:       "assistant",
+			Kind:       fsession.MessageKindToolCall,
+			Content:    mustJSON(rec.Input),
+			ToolCallID: rec.ID,
+			ToolName:   rec.Name,
+			AgentID:    agentID,
+			RunID:      runID,
+		})
+		messages = append(messages, fsession.Message{
+			Role:       "tool",
+			Kind:       fsession.MessageKindToolResult,
+			Content:    mustJSON(toolOutputForModel(rec)),
+			ToolCallID: rec.ID,
+			ToolName:   rec.Name,
+			AgentID:    agentID,
+			RunID:      runID,
+		})
+	}
+	messages = append(messages, fsession.Message{
+		Role:    "assistant",
+		Kind:    fsession.MessageKindMessage,
+		Content: strings.TrimSpace(finalResponse),
+		AgentID: agentID,
+		RunID:   runID,
+	})
+	return messages
+}
+
+func toolOutputForModel(rec ToolCallRecord) map[string]any {
+	out := map[string]any{}
+	for key, value := range rec.Output {
+		if key == "stdout" || key == "stderr" {
+			continue
+		}
+		out[key] = value
+	}
+	applyStreamPreview(out, rec.Output, rec.Input, "stdout", "max_stdout_bytes", 8192)
+	applyStreamPreview(out, rec.Output, rec.Input, "stderr", "max_stderr_bytes", 4096)
+	if _, ok := out["raw_output_path"]; ok && (boolFromAny(out["stdout_truncated"]) || boolFromAny(out["stderr_truncated"])) {
+		out["raw_output_hint"] = "Use tool_output.read with raw_output_path and stream=stdout or stderr to inspect more of the full output."
+	}
+	if rec.Error != "" {
+		if _, ok := out["status"]; !ok {
+			out["status"] = "error"
+		}
+		if _, ok := out["error"]; !ok {
+			out["error"] = rec.Error
+		}
+		if _, ok := out["error_message"]; !ok {
+			out["error_message"] = rec.Error
+		}
+		if _, ok := out["retryable"]; !ok {
+			out["retryable"] = true
+		}
+	} else if _, ok := out["status"]; !ok {
+		out["status"] = "ok"
+	}
+	return out
+}
+
+func boolFromAny(value any) bool {
+	v, _ := value.(bool)
+	return v
+}
+
+func applyStreamPreview(out, output, input map[string]any, streamKey, maxKey string, defaultBytes int) {
+	text, ok := output[streamKey].(string)
+	if !ok {
+		return
+	}
+	maxBytes := defaultBytes
+	if raw, ok := intFromAny(input[maxKey]); ok && raw > 0 {
+		maxBytes = raw
+	}
+	bytesLen := len([]byte(text))
+	preview := text
+	truncated := false
+	if bytesLen > maxBytes {
+		preview = string([]byte(text)[:maxBytes])
+		truncated = true
+	}
+	if _, ok := out[streamKey+"_bytes"]; !ok {
+		out[streamKey+"_bytes"] = bytesLen
+	}
+	out[streamKey+"_preview"] = preview
+	out[streamKey+"_truncated"] = truncated
+	if truncated {
+		out["truncated"] = true
+	} else if _, ok := out["truncated"]; !ok {
+		out["truncated"] = false
+	}
+}
+
+func intFromAny(value any) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	default:
+		return 0, false
+	}
 }
 
 func (s *Service) toolDefinitions(profile agents.Profile) []deepseek.Tool {
@@ -641,10 +1025,15 @@ func toolInputSummary(input map[string]any) map[string]any {
 		return nil
 	}
 	out := map[string]any{}
-	for _, key := range []string{"action", "path", "root", "query", "command", "cwd", "timeout_seconds", "max_results"} {
+	for _, key := range []string{"path", "root", "query", "program", "command", "cwd", "timeout_seconds", "max_stdout_bytes", "max_stderr_bytes", "max_results"} {
 		if value, ok := input[key]; ok {
 			out[key] = value
 		}
+	}
+	if args, ok := input["args"].([]any); ok {
+		out["args_count"] = len(args)
+	} else if args, ok := input["args"].([]string); ok {
+		out["args_count"] = len(args)
 	}
 	if content, ok := input["content"].(string); ok {
 		out["content_chars"] = utf8.RuneCountInString(content)
@@ -666,7 +1055,7 @@ func toolOutputSummary(output map[string]any) map[string]any {
 		return nil
 	}
 	out := map[string]any{}
-	for _, key := range []string{"path", "root", "bytes", "replacements", "action", "command", "cwd", "exit_code", "duration_ms", "match_count", "total_matches", "searched_files", "skipped_files", "truncated"} {
+	for _, key := range []string{"path", "root", "bytes", "replacements", "tool", "program", "command", "cwd", "exit_code", "duration_ms", "stdout_bytes", "stderr_bytes", "match_count", "total_matches", "searched_files", "skipped_files", "truncated"} {
 		if value, ok := output[key]; ok {
 			out[key] = value
 		}

@@ -181,7 +181,9 @@ func (c *Client) Stream(ctx context.Context, req ChatRequest, yield func(ChatRes
 		finish(err)
 		return
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
+	url := c.baseURL + "/chat/completions"
+	traceRaw(ctx, RawTrace{Event: "request_body", Method: http.MethodPost, URL: url, Body: body})
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		yield(ChatResponse{}, err)
 		finish(err)
@@ -196,23 +198,62 @@ func (c *Client) Stream(ctx context.Context, req ChatRequest, yield func(ChatRes
 		return
 	}
 	defer resp.Body.Close()
+	traceRaw(ctx, RawTrace{Event: "response_status", StatusCode: resp.StatusCode, Header: resp.Header.Clone()})
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(resp.Body)
+		data, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			traceRaw(ctx, RawTrace{Event: "response_error", Error: readErr.Error()})
+		}
+		traceRaw(ctx, RawTrace{Event: "response_body", Body: data})
 		err := fmt.Errorf("deepseek stream failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(data)))
 		yield(ChatResponse{}, err)
 		finish(err)
 		return
 	}
-	scanner := bufio.NewScanner(resp.Body)
+	reader := bufio.NewReader(resp.Body)
 	var rawLines []string
 	var sawData bool
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+	finishReadErr := func(err error) bool {
+		if err == nil || err == io.EOF {
+			return false
+		}
+		traceRaw(ctx, RawTrace{Event: "response_error", Error: err.Error()})
+		yield(ChatResponse{}, err)
+		finish(err)
+		return true
+	}
+	for {
+		rawLine, readErr := reader.ReadString('\n')
+		if rawLine != "" {
+			traceRaw(ctx, RawTrace{Event: "response_chunk", Body: []byte(rawLine)})
+		}
+		if rawLine == "" && readErr == io.EOF {
+			break
+		}
+		if rawLine == "" && readErr != nil {
+			traceRaw(ctx, RawTrace{Event: "response_error", Error: readErr.Error()})
+			yield(ChatResponse{}, readErr)
+			finish(readErr)
+			return
+		}
+		line := strings.TrimSpace(rawLine)
 		if line == "" || strings.HasPrefix(line, ":") {
+			if readErr == io.EOF {
+				break
+			}
+			if finishReadErr(readErr) {
+				return
+			}
 			continue
 		}
 		if !strings.HasPrefix(line, "data:") {
 			rawLines = append(rawLines, line)
+			if readErr == io.EOF {
+				break
+			}
+			if finishReadErr(readErr) {
+				return
+			}
 			continue
 		}
 		sawData = true
@@ -234,11 +275,12 @@ func (c *Client) Stream(ctx context.Context, req ChatRequest, yield func(ChatRes
 			finish(nil)
 			return
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		yield(ChatResponse{}, err)
-		finish(err)
-		return
+		if readErr == io.EOF {
+			break
+		}
+		if finishReadErr(readErr) {
+			return
+		}
 	}
 	if !sawData && len(rawLines) > 0 {
 		var full ChatResponse
@@ -261,7 +303,9 @@ func (c *Client) do(ctx context.Context, req ChatRequest, out any) error {
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
+	url := c.baseURL + "/chat/completions"
+	traceRaw(ctx, RawTrace{Event: "request_body", Method: http.MethodPost, URL: url, Body: body})
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -272,10 +316,13 @@ func (c *Client) do(ctx context.Context, req ChatRequest, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	traceRaw(ctx, RawTrace{Event: "response_status", StatusCode: resp.StatusCode, Header: resp.Header.Clone()})
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
+		traceRaw(ctx, RawTrace{Event: "response_error", Error: err.Error()})
 		return err
 	}
+	traceRaw(ctx, RawTrace{Event: "response_body", Body: data})
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("deepseek chat failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
@@ -338,13 +385,15 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 			chatReq.Temperature = &t
 		}
 		if stream {
+			stopped := false
 			var full strings.Builder
 			var streamedToolCalls []ToolCall
 			var lastModel string
 			var lastFinishReason string
 			m.client.Stream(ctx, chatReq, func(chunk ChatResponse, err error) bool {
 				if err != nil {
-					return yield(nil, err)
+					stopped = !yield(nil, err)
+					return !stopped
 				}
 				if strings.TrimSpace(chunk.Model) != "" {
 					lastModel = chunk.Model
@@ -361,10 +410,14 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 					return true
 				}
 				full.WriteString(text)
-				return yield(textResponse(text, true), nil)
+				stopped = !yield(textResponse(text, true), nil)
+				return !stopped
 			})
+			if stopped {
+				return
+			}
 			if len(streamedToolCalls) > 0 {
-				yield(responseToADK(ChatResponse{
+				if !yield(responseToADK(ChatResponse{
 					Model: lastModel,
 					Choices: []struct {
 						Index        int     `json:"index"`
@@ -375,23 +428,29 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 						Message:      Message{Role: "assistant", ToolCalls: streamedToolCalls},
 						FinishReason: "tool_calls",
 					}},
-				}, wireToOriginal), nil)
+				}, wireToOriginal), nil) {
+					return
+				}
 			} else if strings.TrimSpace(full.String()) != "" {
 				resp := textResponse(full.String(), false)
 				resp.ModelVersion = lastModel
 				resp.FinishReason = genai.FinishReason(lastFinishReason)
-				yield(resp, nil)
+				if !yield(resp, nil) {
+					return
+				}
 			} else {
-				yield(&adkmodel.LLMResponse{TurnComplete: true}, nil)
+				if !yield(&adkmodel.LLMResponse{TurnComplete: true}, nil) {
+					return
+				}
 			}
 			return
 		}
 		resp, err := m.client.Chat(ctx, chatReq)
 		if err != nil {
-			yield(nil, err)
+			_ = yield(nil, err)
 			return
 		}
-		yield(responseToADK(resp, wireToOriginal), nil)
+		_ = yield(responseToADK(resp, wireToOriginal), nil)
 	}
 }
 

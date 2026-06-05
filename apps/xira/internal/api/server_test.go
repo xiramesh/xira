@@ -358,7 +358,9 @@ model_policy:
   provider: deepseek
   model: deepseek-v4-flash
 tools:
-  - exec
+  - command.run
+  - shell.run
+  - tool_output.read
   - read_file
   - write_file
   - list_dir

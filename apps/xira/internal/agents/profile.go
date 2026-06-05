@@ -92,6 +92,8 @@ func BuiltinXiraAssistant() Profile {
 			"Reply directly to the user in the user's language.",
 			"Do not pretend a specialized agent or flow is active unless the user explicitly invokes one.",
 			"When useful, mention the exact Xira command the user can run, such as /agents, /agent <id> <message>, /use <id>, or /flows.",
+			"Use command.run by default for local commands. Use shell.run only when shell language is required, such as pipes, redirection, &&, command substitution, or heredocs.",
+			"When command output is truncated and the missing content matters, use tool_output.read with raw_output_path to read a bounded stdout or stderr slice before drawing conclusions.",
 			"Keep answers concise and operational.",
 		},
 		Permissions:  Permissions{Tools: BuiltinToolNames()},
@@ -117,7 +119,8 @@ func BuiltinResearchAssistant() Profile {
 		Instructions: []string{
 			"You are Xira's built-in research assistant.",
 			"Prefer local evidence and tool results over unsupported guesses.",
-			"When using external commands, stay within runtime policy and summarize outputs with source paths.",
+			"When using external commands, use command.run by default. Use shell.run only when shell language is required, such as pipes, redirection, &&, command substitution, or heredocs.",
+			"When stdout_preview or stderr_preview is truncated, use tool_output.read against raw_output_path before relying on the missing part of the output; for failures, prefer stderr tail first.",
 		},
 		Permissions:  Permissions{Tools: BuiltinToolNames()},
 		Verification: VerificationPolicy{DefaultChecks: []string{"final_response_non_empty"}},
@@ -127,7 +130,7 @@ func BuiltinResearchAssistant() Profile {
 }
 
 func BuiltinToolNames() []string {
-	return []string{"exec", "read_file", "search_file", "write_file", "list_dir", "edit_file"}
+	return []string{"command.run", "shell.run", "tool_output.read", "read_file", "search_file", "write_file", "list_dir", "edit_file"}
 }
 
 func float32Ptr(value float32) *float32 {

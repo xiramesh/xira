@@ -37,12 +37,22 @@ type Allocation struct {
 }
 
 type Message struct {
-	Role      string    `json:"role" yaml:"role"`
-	Content   string    `json:"content" yaml:"content"`
-	CreatedAt time.Time `json:"created_at,omitempty" yaml:"created_at,omitempty"`
-	AgentID   string    `json:"agent_id,omitempty" yaml:"agent_id,omitempty"`
-	RunID     string    `json:"run_id,omitempty" yaml:"run_id,omitempty"`
+	Role       string         `json:"role" yaml:"role"`
+	Kind       string         `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Content    string         `json:"content" yaml:"content"`
+	ToolCallID string         `json:"tool_call_id,omitempty" yaml:"tool_call_id,omitempty"`
+	ToolName   string         `json:"tool_name,omitempty" yaml:"tool_name,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	CreatedAt  time.Time      `json:"created_at,omitempty" yaml:"created_at,omitempty"`
+	AgentID    string         `json:"agent_id,omitempty" yaml:"agent_id,omitempty"`
+	RunID      string         `json:"run_id,omitempty" yaml:"run_id,omitempty"`
 }
+
+const (
+	MessageKindMessage    = "message"
+	MessageKindToolCall   = "tool_call"
+	MessageKindToolResult = "tool_result"
+)
 
 type AgentTurnInput struct {
 	SessionID      string
@@ -202,6 +212,25 @@ func (m *Manager) AppendTurn(sessionID, userMessage, assistantMessage string) {
 }
 
 func (m *Manager) AppendAgentTurn(input AgentTurnInput) error {
+	now := time.Now()
+	messages := []Message{
+		{
+			Role:      "user",
+			Kind:      MessageKindMessage,
+			Content:   strings.TrimSpace(input.UserMessage),
+			CreatedAt: now,
+		},
+		{
+			Role:      "assistant",
+			Kind:      MessageKindMessage,
+			Content:   strings.TrimSpace(input.AssistantReply),
+			CreatedAt: now.Add(time.Nanosecond),
+		},
+	}
+	return m.AppendAgentMessages(input, messages)
+}
+
+func (m *Manager) AppendAgentMessages(input AgentTurnInput, messages []Message) error {
 	if m == nil {
 		return nil
 	}
@@ -212,21 +241,16 @@ func (m *Manager) AppendAgentTurn(input AgentTurnInput) error {
 		return nil
 	}
 	now := time.Now()
-	messages := []Message{
-		{
-			Role:      "user",
-			Content:   strings.TrimSpace(input.UserMessage),
-			CreatedAt: now,
-			AgentID:   input.AgentID,
-			RunID:     strings.TrimSpace(input.RunID),
-		},
-		{
-			Role:      "assistant",
-			Content:   strings.TrimSpace(input.AssistantReply),
-			CreatedAt: now.Add(time.Nanosecond),
-			AgentID:   input.AgentID,
-			RunID:     strings.TrimSpace(input.RunID),
-		},
+	for i := range messages {
+		if messages[i].CreatedAt.IsZero() {
+			messages[i].CreatedAt = now.Add(time.Duration(i) * time.Nanosecond)
+		}
+		if strings.TrimSpace(messages[i].AgentID) == "" {
+			messages[i].AgentID = input.AgentID
+		}
+		if strings.TrimSpace(messages[i].RunID) == "" {
+			messages[i].RunID = strings.TrimSpace(input.RunID)
+		}
 	}
 	messages = compactMessages(messages)
 	if len(messages) == 0 {
@@ -245,7 +269,7 @@ func (m *Manager) AppendAgentTurn(input AgentTurnInput) error {
 	if store == nil {
 		return nil
 	}
-	return store.AppendAgentTurn(input, messages)
+	return store.AppendAgentMessages(input, messages)
 }
 
 func (m *Manager) History(sessionID string) []Message {

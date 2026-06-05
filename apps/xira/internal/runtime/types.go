@@ -100,6 +100,7 @@ type LLMCallRecord struct {
 	Channel          string         `json:"channel,omitempty" yaml:"channel,omitempty"`
 	SessionID        string         `json:"session_id,omitempty" yaml:"session_id,omitempty"`
 	AgentSessionID   string         `json:"agent_session_id,omitempty" yaml:"agent_session_id,omitempty"`
+	ADKSessionID     string         `json:"adk_session_id,omitempty" yaml:"adk_session_id,omitempty"`
 	UserID           string         `json:"user_id,omitempty" yaml:"user_id,omitempty"`
 	Provider         string         `json:"provider" yaml:"provider"`
 	Model            string         `json:"model" yaml:"model"`
@@ -123,6 +124,7 @@ type LLMCallRecord struct {
 	Currency         string         `json:"currency,omitempty" yaml:"currency,omitempty"`
 	Error            string         `json:"error,omitempty" yaml:"error,omitempty"`
 	TraceRequestPath string         `json:"trace_request_path,omitempty" yaml:"trace_request_path,omitempty"`
+	RawTracePath     string         `json:"raw_trace_path,omitempty" yaml:"raw_trace_path,omitempty"`
 	ProviderUsage    map[string]any `json:"provider_usage,omitempty" yaml:"provider_usage,omitempty"`
 }
 

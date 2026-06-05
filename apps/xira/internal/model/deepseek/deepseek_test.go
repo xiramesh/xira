@@ -162,6 +162,46 @@ func TestClientStreamWithFakeServer(t *testing.T) {
 	}
 }
 
+func TestClientStreamRecordsRawRequestAndResponseChunks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	client := New(WithBaseURLForTest(server.URL), WithAPIKey("test-key"))
+	var traces []RawTrace
+	ctx := WithRawTraceRecorder(context.Background(), func(_ context.Context, trace RawTrace) {
+		traces = append(traces, trace)
+	})
+	client.Stream(ctx, ChatRequest{Model: ModelFlash, Messages: []Message{{Role: "user", Content: "hi"}}}, func(resp ChatResponse, err error) bool {
+		if err != nil {
+			t.Fatalf("stream err: %v", err)
+		}
+		return true
+	})
+
+	var requestBody, status, firstChunk, doneChunk bool
+	for _, trace := range traces {
+		switch trace.Event {
+		case "request_body":
+			requestBody = strings.Contains(string(trace.Body), `"stream":true`) && strings.Contains(string(trace.Body), `"hi"`)
+		case "response_status":
+			status = trace.StatusCode == http.StatusOK
+		case "response_chunk":
+			if strings.Contains(string(trace.Body), `"he"`) {
+				firstChunk = true
+			}
+			if strings.Contains(string(trace.Body), "[DONE]") {
+				doneChunk = true
+			}
+		}
+	}
+	if !requestBody || !status || !firstChunk || !doneChunk {
+		t.Fatalf("raw traces = %+v, want request body, status, and response chunks", traces)
+	}
+}
+
 func TestADKModelGenerateContent(t *testing.T) {
 	var gotReq ChatRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -191,6 +231,37 @@ func TestADKModelGenerateContent(t *testing.T) {
 	}
 	if gotReq.Thinking == nil || gotReq.Thinking.Type != "disabled" {
 		t.Fatalf("thinking = %+v, want disabled", gotReq.Thinking)
+	}
+}
+
+func TestADKModelStreamStopsAfterConsumerBreak(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{\"content\":\"second\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	client := New(WithBaseURLForTest(server.URL), WithAPIKey("test-key"))
+	model, err := NewADKModel(ModelFlash, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &adkmodel.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)}}
+	var got string
+	var count int
+	for resp, err := range model.GenerateContent(context.Background(), req, true) {
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		count++
+		if resp.Content != nil && len(resp.Content.Parts) > 0 {
+			got = resp.Content.Parts[0].Text
+		}
+		break
+	}
+	if count != 1 || got != "first" {
+		t.Fatalf("stream responses count=%d got=%q, want one partial response", count, got)
 	}
 }
 

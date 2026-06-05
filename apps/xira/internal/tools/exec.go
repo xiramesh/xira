@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,62 +13,132 @@ import (
 	"time"
 )
 
-type ExecTool struct {
+const defaultCommandTimeout = 60 * time.Second
+const defaultShellTimeout = 30 * time.Second
+
+type CommandRunTool struct {
 	workspaceRoot  string
 	defaultTimeout time.Duration
 }
 
-func NewExecTool(workspaceRoot string) *ExecTool {
-	return &ExecTool{
+type ShellRunTool struct {
+	workspaceRoot  string
+	defaultTimeout time.Duration
+}
+
+func NewCommandRunTool(workspaceRoot string) *CommandRunTool {
+	return &CommandRunTool{
 		workspaceRoot:  cleanWorkspace(workspaceRoot),
-		defaultTimeout: 60 * time.Second,
+		defaultTimeout: defaultCommandTimeout,
 	}
 }
 
-func (t *ExecTool) Name() string { return "exec" }
-func (t *ExecTool) Description() string {
-	return "Execute a shell command in the Xira workspace. First version supports action=run only."
+func NewShellRunTool(workspaceRoot string) *ShellRunTool {
+	return &ShellRunTool{
+		workspaceRoot:  cleanWorkspace(workspaceRoot),
+		defaultTimeout: defaultShellTimeout,
+	}
 }
-func (t *ExecTool) Parameters() map[string]any {
+
+func (t *CommandRunTool) Name() string { return "command.run" }
+func (t *CommandRunTool) Description() string {
+	return "Run one local program with structured argv in the Xira workspace. Use this by default for commands that do not need shell pipes, redirection, command substitution, or other shell language."
+}
+func (t *CommandRunTool) Parameters() map[string]any {
 	return map[string]any{
-		"type": "object",
+		"type":                 "object",
+		"additionalProperties": false,
 		"properties": map[string]any{
-			"action":          map[string]any{"type": "string", "enum": []string{"run"}, "description": "Only run is supported in Xira v1."},
-			"command":         map[string]any{"type": "string", "description": "Shell command to execute."},
-			"cwd":             map[string]any{"type": "string", "description": "Working directory. Relative paths resolve under the workspace."},
-			"timeout_seconds": map[string]any{"type": "integer", "description": "Timeout in seconds. Defaults to 60."},
+			"program":          map[string]any{"type": "string", "description": "Executable name or path to run."},
+			"args":             map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Program arguments. Do not include the program name."},
+			"cwd":              map[string]any{"type": "string", "description": "Working directory. Relative paths resolve under the workspace."},
+			"timeout_seconds":  map[string]any{"type": "integer", "description": "Timeout in seconds. Defaults to 60."},
+			"max_stdout_bytes": map[string]any{"type": "integer", "description": "Maximum stdout preview bytes returned to the model."},
+			"max_stderr_bytes": map[string]any{"type": "integer", "description": "Maximum stderr preview bytes returned to the model."},
 		},
-		"required": []string{"action", "command"},
+		"required": []string{"program"},
 	}
 }
+func (t *CommandRunTool) Policy() ToolPolicy {
+	return ToolPolicy{Risk: "medium"}
+}
+func (t *CommandRunTool) Execute(ctx context.Context, args map[string]any) (map[string]any, error) {
+	program, _ := args["program"].(string)
+	program = strings.TrimSpace(program)
+	if program == "" {
+		return nil, fmt.Errorf("program is required")
+	}
+	if strings.ContainsAny(program, "|><;&$`\n\r") {
+		return nil, fmt.Errorf("program must be a single executable path or name; use shell.run for shell syntax")
+	}
+	argv, err := stringSliceArg(args, "args")
+	if err != nil {
+		return nil, err
+	}
+	cwd, err := resolveToolCWD(t.workspaceRoot, mapStringArg(args, "cwd"))
+	if err != nil {
+		return nil, err
+	}
+	timeout := timeoutArg(args, t.defaultTimeout)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-func (t *ExecTool) Execute(ctx context.Context, args map[string]any) (map[string]any, error) {
-	action, _ := args["action"].(string)
-	if strings.TrimSpace(action) == "" {
-		action = "run"
+	cmd := exec.CommandContext(runCtx, program, argv...)
+	cmd.Dir = cwd
+	return runProcess(runCtx, cmd, map[string]any{
+		"tool":    t.Name(),
+		"program": program,
+		"args":    argv,
+		"cwd":     cwd,
+	})
+}
+
+func (t *ShellRunTool) Name() string { return "shell.run" }
+func (t *ShellRunTool) Description() string {
+	return "Run a shell command in the Xira workspace. Use only when shell language is required, such as pipes, redirection, &&, command substitution, or heredocs."
+}
+func (t *ShellRunTool) Parameters() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"command":          map[string]any{"type": "string", "description": "Shell command to execute."},
+			"cwd":              map[string]any{"type": "string", "description": "Working directory. Relative paths resolve under the workspace."},
+			"timeout_seconds":  map[string]any{"type": "integer", "description": "Timeout in seconds. Defaults to 30."},
+			"max_stdout_bytes": map[string]any{"type": "integer", "description": "Maximum stdout preview bytes returned to the model."},
+			"max_stderr_bytes": map[string]any{"type": "integer", "description": "Maximum stderr preview bytes returned to the model."},
+		},
+		"required": []string{"command"},
 	}
-	if action != "run" {
-		return nil, fmt.Errorf("unsupported exec action %q", action)
-	}
+}
+func (t *ShellRunTool) Policy() ToolPolicy {
+	return ToolPolicy{Risk: "high"}
+}
+func (t *ShellRunTool) Execute(ctx context.Context, args map[string]any) (map[string]any, error) {
 	command, _ := args["command"].(string)
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return nil, fmt.Errorf("command is required")
 	}
-	cwd := t.workspaceRoot
-	if rawCWD, _ := args["cwd"].(string); strings.TrimSpace(rawCWD) != "" {
-		cwd = resolveCWD(t.workspaceRoot, rawCWD)
+	cwd, err := resolveToolCWD(t.workspaceRoot, mapStringArg(args, "cwd"))
+	if err != nil {
+		return nil, err
 	}
-	timeout := t.defaultTimeout
-	if raw, ok := numberArg(args, "timeout_seconds"); ok && raw > 0 {
-		timeout = time.Duration(raw) * time.Second
-	}
+	timeout := timeoutArg(args, t.defaultTimeout)
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	shell, shellArgs := shellCommand(command)
 	cmd := exec.CommandContext(runCtx, shell, shellArgs...)
 	cmd.Dir = cwd
+	return runProcess(runCtx, cmd, map[string]any{
+		"tool":    t.Name(),
+		"command": command,
+		"cwd":     cwd,
+	})
+}
+
+func runProcess(runCtx context.Context, cmd *exec.Cmd, out map[string]any) (map[string]any, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -78,34 +149,38 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) (map[string
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
 	}
-	if runCtx.Err() == context.DeadlineExceeded {
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		exitCode = -1
 		err = runCtx.Err()
 	}
-	out := map[string]any{
-		"action":      action,
-		"command":     command,
-		"cwd":         cwd,
-		"stdout":      stdout.String(),
-		"stderr":      stderr.String(),
-		"exit_code":   exitCode,
-		"duration_ms": duration.Milliseconds(),
-	}
+	out["stdout"] = stdout.String()
+	out["stderr"] = stderr.String()
+	out["stdout_bytes"] = stdout.Len()
+	out["stderr_bytes"] = stderr.Len()
+	out["exit_code"] = exitCode
+	out["duration_ms"] = duration.Milliseconds()
 	if err != nil {
 		out["error"] = err.Error()
 	}
 	return out, err
 }
 
-func resolveCWD(workspaceRoot, rawCWD string) string {
+func resolveToolCWD(workspaceRoot, rawCWD string) (string, error) {
 	rawCWD = strings.TrimSpace(rawCWD)
 	if rawCWD == "" {
-		return workspaceRoot
+		return workspaceRoot, nil
 	}
+	var cwd string
 	if filepath.IsAbs(rawCWD) {
-		return filepath.Clean(rawCWD)
+		cwd = filepath.Clean(rawCWD)
+	} else {
+		cwd = filepath.Clean(filepath.Join(workspaceRoot, rawCWD))
 	}
-	return filepath.Clean(filepath.Join(workspaceRoot, rawCWD))
+	rel, err := filepath.Rel(workspaceRoot, cwd)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("cwd must be within workspace")
+	}
+	return cwd, nil
 }
 
 func shellCommand(command string) (string, []string) {
@@ -117,6 +192,46 @@ func shellCommand(command string) (string, []string) {
 		shell = "/bin/sh"
 	}
 	return shell, []string{"-lc", command}
+}
+
+func timeoutArg(args map[string]any, fallback time.Duration) time.Duration {
+	if raw, ok := numberArg(args, "timeout_seconds"); ok && raw > 0 {
+		return time.Duration(raw) * time.Second
+	}
+	return fallback
+}
+
+func mapStringArg(args map[string]any, key string) string {
+	if args == nil {
+		return ""
+	}
+	value, ok := args[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func stringSliceArg(args map[string]any, key string) ([]string, error) {
+	if args == nil || args[key] == nil {
+		return nil, nil
+	}
+	switch value := args[key].(type) {
+	case []string:
+		return append([]string(nil), value...), nil
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			text, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s must contain only strings", key)
+			}
+			out = append(out, text)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("%s must be an array of strings", key)
+	}
 }
 
 func numberArg(args map[string]any, key string) (int, bool) {

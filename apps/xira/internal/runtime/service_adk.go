@@ -18,39 +18,8 @@ import (
 
 	"github.com/ai-daming/xira/internal/agents"
 	"github.com/ai-daming/xira/internal/model/deepseek"
+	fsession "github.com/ai-daming/xira/internal/session"
 )
-
-type adkExecArgs struct {
-	Action         string `json:"action,omitempty"`
-	Command        string `json:"command"`
-	CWD            string `json:"cwd,omitempty"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
-}
-
-type adkReadFileArgs struct {
-	Path string `json:"path"`
-}
-
-type adkSearchFileArgs struct {
-	Query      string `json:"query"`
-	Root       string `json:"root,omitempty"`
-	MaxResults int    `json:"max_results,omitempty"`
-}
-
-type adkWriteFileArgs struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-}
-
-type adkListDirArgs struct {
-	Path string `json:"path,omitempty"`
-}
-
-type adkEditFileArgs struct {
-	Path    string `json:"path"`
-	OldText string `json:"old_text"`
-	NewText string `json:"new_text"`
-}
 
 func (s *Service) generateADK(
 	ctx context.Context,
@@ -91,18 +60,21 @@ func (s *Service) generateADK(
 		return "", nil, err
 	}
 	conversationSessionID := strings.TrimSpace(req.Metadata["conversation_session_id"])
+	agentSessionID := strings.TrimSpace(req.Metadata["agent_session_id"])
 	historyMessages, historyChars, err := s.hydrateADKSession(ctx, req.UserID, req.SessionID, profile.ID, conversationSessionID)
 	if err != nil {
 		recordEvent("adk.session_hydrate_failed", "adk.session", "failed to restore session history", map[string]any{
 			"agent_id":                profile.ID,
-			"agent_session_id":        req.SessionID,
+			"agent_session_id":        agentSessionID,
+			"adk_session_id":          req.SessionID,
 			"conversation_session_id": conversationSessionID,
 			"error":                   err.Error(),
 		})
 	} else {
 		recordEvent("adk.session_hydrated", "adk.session", "restored session history", map[string]any{
 			"agent_id":                profile.ID,
-			"agent_session_id":        req.SessionID,
+			"agent_session_id":        agentSessionID,
+			"adk_session_id":          req.SessionID,
 			"conversation_session_id": conversationSessionID,
 			"messages":                historyMessages,
 			"content_chars":           historyChars,
@@ -112,7 +84,7 @@ func (s *Service) generateADK(
 	var latestText string
 	for evt, err := range run.Run(ctx, req.UserID, req.SessionID, genai.NewContentFromText(req.Message, genai.RoleUser), adkRunConfig(profile)) {
 		if err != nil {
-			return final, nil, err
+			return final, toolRecords, err
 		}
 		if evt == nil {
 			continue
@@ -154,7 +126,7 @@ func (s *Service) generateADK(
 		recordEvent("adk.empty_final", "adk.runner", "final ADK event contained no response text", map[string]any{
 			"agent_id": profile.ID,
 		})
-		return final, nil, fmt.Errorf("ADK runner produced empty final response")
+		return final, toolRecords, fmt.Errorf("ADK runner produced empty final response")
 	}
 	recordAudit("adk.runner", profile.ID, true, "ADK runner completed", nil)
 	return final, toolRecords, nil
@@ -175,28 +147,29 @@ func adkRunConfig(profile agents.Profile) adkagent.RunConfig {
 	return adkagent.RunConfig{StreamingMode: adkagent.StreamingModeNone}
 }
 
-func (s *Service) hydrateADKSession(ctx context.Context, userID, agentSessionID, agentID, conversationSessionID string) (int, int, error) {
+func (s *Service) hydrateADKSession(ctx context.Context, userID, adkSessionID, agentID, conversationSessionID string) (int, int, error) {
 	userID = strings.TrimSpace(userID)
-	agentSessionID = strings.TrimSpace(agentSessionID)
+	adkSessionID = strings.TrimSpace(adkSessionID)
 	agentID = strings.TrimSpace(agentID)
 	conversationSessionID = strings.TrimSpace(conversationSessionID)
-	if s == nil || s.adkSessions == nil || s.sessions == nil || userID == "" || agentSessionID == "" {
-		return 0, 0, nil
-	}
-	if _, err := s.adkSessions.Get(ctx, &adksession.GetRequest{
-		AppName:   "xira",
-		UserID:    userID,
-		SessionID: agentSessionID,
-	}); err == nil {
+	if s == nil || s.adkSessions == nil || s.sessions == nil || userID == "" || adkSessionID == "" {
 		return 0, 0, nil
 	}
 	created, err := s.adkSessions.Create(ctx, &adksession.CreateRequest{
 		AppName:   "xira",
 		UserID:    userID,
-		SessionID: agentSessionID,
+		SessionID: adkSessionID,
 	})
 	if err != nil {
-		return 0, 0, err
+		existing, getErr := s.adkSessions.Get(ctx, &adksession.GetRequest{
+			AppName:   "xira",
+			UserID:    userID,
+			SessionID: adkSessionID,
+		})
+		if getErr != nil {
+			return 0, 0, err
+		}
+		created = &adksession.CreateResponse{Session: existing.Session}
 	}
 	if conversationSessionID == "" || agentID == "" {
 		return 0, 0, nil
@@ -204,26 +177,74 @@ func (s *Service) hydrateADKSession(ctx context.Context, userID, agentSessionID,
 	var restored int
 	var contentChars int
 	for _, msg := range s.sessions.AgentHistory(conversationSessionID, agentID) {
-		event := adksession.NewEvent("xira-session-restore")
-		event.Author = "user"
-		var role genai.Role = genai.RoleUser
-		if strings.TrimSpace(msg.Role) != "user" {
-			event.Author = agentID
-			role = genai.RoleModel
-		}
-		event.LLMResponse = adkmodel.LLMResponse{
-			Content: genai.NewContentFromText(msg.Content, role),
+		event, chars, ok := adkEventFromSessionMessage(msg, agentID)
+		if !ok {
+			continue
 		}
 		restored++
-		contentChars += utf8.RuneCountInString(msg.Content)
-		if !msg.CreatedAt.IsZero() {
-			event.Timestamp = msg.CreatedAt
-		}
+		contentChars += chars
 		if err := s.adkSessions.AppendEvent(ctx, created.Session, event); err != nil {
 			return restored, contentChars, err
 		}
 	}
 	return restored, contentChars, nil
+}
+
+func adkEventFromSessionMessage(msg fsession.Message, agentID string) (*adksession.Event, int, bool) {
+	kind := strings.TrimSpace(msg.Kind)
+	if kind == "" {
+		kind = fsession.MessageKindMessage
+	}
+	event := adksession.NewEvent("xira-session-restore")
+	if !msg.CreatedAt.IsZero() {
+		event.Timestamp = msg.CreatedAt
+	}
+	contentChars := utf8.RuneCountInString(msg.Content)
+	switch kind {
+	case fsession.MessageKindToolCall:
+		name := strings.TrimSpace(msg.ToolName)
+		if name == "" || name == "exec" {
+			return nil, 0, false
+		}
+		args := map[string]any{}
+		if strings.TrimSpace(msg.Content) != "" {
+			_ = json.Unmarshal([]byte(msg.Content), &args)
+		}
+		content := genai.NewContentFromFunctionCall(name, args, genai.RoleModel)
+		if len(content.Parts) > 0 && content.Parts[0].FunctionCall != nil {
+			content.Parts[0].FunctionCall.ID = strings.TrimSpace(msg.ToolCallID)
+		}
+		event.Author = agentID
+		event.LLMResponse = adkmodel.LLMResponse{Content: content}
+		return event, contentChars, true
+	case fsession.MessageKindToolResult:
+		name := strings.TrimSpace(msg.ToolName)
+		if name == "" || name == "exec" {
+			return nil, 0, false
+		}
+		response := map[string]any{}
+		if err := json.Unmarshal([]byte(msg.Content), &response); err != nil {
+			response = map[string]any{"result": msg.Content}
+		}
+		content := genai.NewContentFromFunctionResponse(name, response, genai.RoleUser)
+		if len(content.Parts) > 0 && content.Parts[0].FunctionResponse != nil {
+			content.Parts[0].FunctionResponse.ID = strings.TrimSpace(msg.ToolCallID)
+		}
+		event.Author = agentID
+		event.LLMResponse = adkmodel.LLMResponse{Content: content}
+		return event, contentChars, true
+	default:
+		var role genai.Role = genai.RoleModel
+		event.Author = agentID
+		if strings.TrimSpace(msg.Role) == "user" {
+			role = genai.RoleUser
+			event.Author = "user"
+		}
+		event.LLMResponse = adkmodel.LLMResponse{
+			Content: genai.NewContentFromText(msg.Content, role),
+		}
+		return event, contentChars, true
+	}
 }
 
 func (s *Service) adkTools(
@@ -235,16 +256,12 @@ func (s *Service) adkTools(
 ) ([]adktool.Tool, error) {
 	var out []adktool.Tool
 	registry := s.toolRegistry(profile)
-	description := func(name string) string {
-		tool, ok := registry.Get(name)
-		if !ok {
-			return ""
+	run := func(toolCtx adktool.Context, name string, input map[string]any) (map[string]any, error) {
+		if input == nil {
+			input = map[string]any{}
 		}
-		return tool.Description()
-	}
-	run := func(name string, args any) (map[string]any, error) {
-		input := mapFromStruct(args)
 		call := deepseek.ToolCall{
+			ID:   strings.TrimSpace(toolCtx.FunctionCallID()),
 			Type: "function",
 			Function: deepseek.ToolCallFunction{
 				Name:      name,
@@ -253,77 +270,20 @@ func (s *Service) adkTools(
 		}
 		rec := s.executeToolCall(ctx, profile, call, recordEvent, recordAudit)
 		recordTool(rec)
-		if rec.Error != "" {
-			return rec.Output, fmt.Errorf("%s", rec.Error)
-		}
-		return rec.Output, nil
+		return toolOutputForModel(rec), nil
 	}
-	if registry.Has("exec") {
-		t, err := functiontool.New(functiontool.Config{
-			Name:        "exec",
-			Description: description("exec"),
-		}, func(_ adktool.Context, args adkExecArgs) (map[string]any, error) {
-			return run("exec", args)
-		})
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	if registry.Has("read_file") {
-		t, err := functiontool.New(functiontool.Config{
-			Name:        "read_file",
-			Description: description("read_file"),
-		}, func(_ adktool.Context, args adkReadFileArgs) (map[string]any, error) {
-			return run("read_file", args)
-		})
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	if registry.Has("search_file") {
-		t, err := functiontool.New(functiontool.Config{
-			Name:        "search_file",
-			Description: description("search_file"),
-		}, func(_ adktool.Context, args adkSearchFileArgs) (map[string]any, error) {
-			return run("search_file", args)
-		})
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	if registry.Has("write_file") {
-		t, err := functiontool.New(functiontool.Config{
-			Name:        "write_file",
-			Description: description("write_file"),
-		}, func(_ adktool.Context, args adkWriteFileArgs) (map[string]any, error) {
-			return run("write_file", args)
-		})
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	if registry.Has("list_dir") {
-		t, err := functiontool.New(functiontool.Config{
-			Name:        "list_dir",
-			Description: description("list_dir"),
-		}, func(_ adktool.Context, args adkListDirArgs) (map[string]any, error) {
-			return run("list_dir", args)
-		})
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	if registry.Has("edit_file") {
-		t, err := functiontool.New(functiontool.Config{
-			Name:        "edit_file",
-			Description: description("edit_file"),
-		}, func(_ adktool.Context, args adkEditFileArgs) (map[string]any, error) {
-			return run("edit_file", args)
+	for _, def := range registry.Definitions() {
+		def := def
+		t, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
+			Name:         def.Name,
+			Description:  def.Description,
+			InputSchema:  def.InputSchema,
+			OutputSchema: def.OutputSchema,
+			RequireConfirmationProvider: func(_ map[string]any) bool {
+				return def.Policy.RequireConfirmation
+			},
+		}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
+			return run(toolCtx, def.Name, args)
 		})
 		if err != nil {
 			return nil, err
@@ -331,18 +291,6 @@ func (s *Service) adkTools(
 		out = append(out, t)
 	}
 	return out, nil
-}
-
-func mapFromStruct(value any) map[string]any {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return map[string]any{}
-	}
-	var out map[string]any
-	if err := json.Unmarshal(data, &out); err != nil {
-		return map[string]any{}
-	}
-	return out
 }
 
 func mustJSON(value any) string {

@@ -404,7 +404,7 @@ XiraGarden 启动后应该通过 Runtime API 读取当前 workspace 中已经安
 - sessions
 - audit events
 
-XiraGarden 可以触发 agent run、flow run、tool call 查看、ad-hoc exec request 和 audit export，但所有动作都必须经过 Business Runtime。XiraGarden 不在自己进程里直接执行客户 CLI；它应该调用 Runtime API，由 Runtime 的 built-in tools 执行、记录和回传结果。
+XiraGarden 可以触发 agent run、flow run、tool call 查看、ad-hoc command request 和 audit export，但所有动作都必须经过 Business Runtime。XiraGarden 不在自己进程里直接执行客户 CLI；它应该调用 Runtime API，由 Runtime 的 built-in tools 执行、记录和回传结果。
 
 第一版应该支持：
 
@@ -414,7 +414,7 @@ XiraGarden 可以触发 agent run、flow run、tool call 查看、ad-hoc exec re
 - flow pack 列表
 - agent profile 列表
 - skill pack 列表
-- built-in exec tool
+- built-in command tools
 - tool call 日志
 - audit event 查询
 - session 查看
@@ -566,7 +566,9 @@ skills:
   - local-research
 
 tools:
-  - exec
+  - command.run
+  - shell.run
+  - tool_output.read
   - read_file
   - write_file
   - list_dir
@@ -766,7 +768,7 @@ Skill Pack Manager 不决定客户交付边界；Flow Pack Manager 才决定一�
 
 ### Built-in Tools
 
-Xira 第一版需要一组类似 Codex/PicoClaw 的最小内置工具：`exec`、`read_file`、`write_file`、`list_dir`、`edit_file`。其中 `exec` 用来执行运行前未知的 shell 命令，四个文件工具负责稳定的本地文件读写和编辑。
+Xira 第一版需要一组类似 Codex/PicoClaw 的最小内置工具：`command.run`、`shell.run`、`tool_output.read`、`read_file`、`write_file`、`list_dir`、`edit_file`。其中 `command.run` 用来以 `program + args` 结构化执行单个程序，`shell.run` 只用于管道、重定向、`&&`、heredoc 等 shell language，`tool_output.read` 用来在 stdout / stderr preview 被截断时按当前 run 的 raw output artifact 进行 bounded 二次读取，文件工具负责稳定的本地文件读写和编辑。
 
 原因：
 
@@ -775,11 +777,12 @@ Xira 第一版需要一组类似 Codex/PicoClaw 的最小内置工具：`exec`�
 - 交付工程师需要先通过 XiraGarden / agent 试跑命令、观察输出，再决定是否把它写入业务流程或后续工具声明。
 - 本地知识库、临时脚本、HTML 图表和交付产物都需要稳定的文件读写能力。
 
-`exec` 是内置平台能力，不等同于客户业务 connector。Phase 1 不为每个客户 CLI 编写专用 connector；模型如果需要探索外部工具，应通过 `exec` 调用 `which`、`--help`、`--version` 或具体命令，并把结果写入 audit/run log。
+`command.run` / `shell.run` 是内置平台能力，不等同于客户业务 connector。Phase 1 不为每个客户 CLI 编写专用 connector；模型如果需要探索外部工具，应优先通过 `command.run` 调用 `which`、`--help`、`--version` 或具体命令，只有需要 shell language 时才使用 `shell.run`，并把结果写入 audit/run log。
 
 职责：
 
-- 在指定 workspace / cwd 下执行 shell 命令。
+- 在指定 workspace / cwd 下执行结构化命令或受控 shell 命令。
+- 当命令输出被截断且缺失内容影响判断时，按 `raw_output_path` 读取 stdout / stderr 的 bounded slice 或 tail。
 - 读、写、列目录和精确替换 workspace 文件。
 - 记录 command、cwd、env 摘要、exit code、stdout / stderr 摘要和耗时。
 - 支持 timeout、取消、输出截断和流式输出。
@@ -792,7 +795,7 @@ Xira 第一版需要一组类似 Codex/PicoClaw 的最小内置工具：`exec`�
 XiraGarden / Agent
   -> Runtime API: tool call request
   -> ToolRegistry resolves built-in tool
-  -> exec / file tool executes
+  -> command.run / shell.run / tool_output.read / file tool executes
   -> RuntimeEvent stream stdout / stderr chunks
   -> AuditEvent records tool metadata
   -> optional: save command recipe artifact
@@ -802,12 +805,13 @@ XiraGarden / Agent
 
 - 默认只在当前 workspace 或 flow pack 允许的 working directory 内执行。
 - 默认不注入 secret；需要 secret 时必须显式绑定并审计。
-- `exec` 结果可以被 agent 读取，但 agent 不能绕过 runtime 直接启动 shell。
+- `command.run` / `shell.run` 结果默认只把 preview、bytes、truncated 状态和 `raw_output_path` 返回给 agent；完整 stdout / stderr 保存在当前 run artifact 中，需要更多证据时通过 `tool_output.read` bounded 读取。
+- agent 不能绕过 runtime 直接启动进程或 shell，也不能用 `tool_output.read` 读取当前 run artifact 之外的任意文件。
 - 可重复交付的客户能力应先沉淀为 flow / agent 的受控命令步骤；是否升级成独立 connector 是 Phase 1 之后的能力。
 
 ### External Tool Runtime
 
-External Tool Runtime 是客户系统和 flow / agent 之间的能力桥。Phase 1 只实现内置 `exec` 和文件工具；不实现 CLI manifest wrapper，也不把 MCP 作为第一版必需能力。
+External Tool Runtime 是客户系统和 flow / agent 之间的能力桥。Phase 1 只实现内置 `command.run`、`shell.run`、`tool_output.read` 和文件工具；不实现 CLI manifest wrapper，也不把 MCP 作为第一版必需能力。
 
 后续可以支持四类：
 
@@ -937,7 +941,7 @@ inputs:
   channel: xiragarden
   message_id: local-1
 tools_used:
-  - exec
+  - command.run
 commands_used:
   - rg --version
 verification:
@@ -1011,7 +1015,7 @@ Evolution 不应该直接改 production flow。所有改进先进入 candidate �
 
 ### Command Recipe Capture
 
-`exec` 负责探索未知命令。Phase 1 只记录可复盘的 command recipe，不把命令自动提升成 connector。
+`command.run` 负责探索结构化的单程序命令；需要 pipe、重定向、`&&`、heredoc 等 shell language 时才走 `shell.run`。Phase 1 只记录可复盘的 command recipe，不把命令自动提升成 connector。
 
 建议流程：
 
@@ -1336,7 +1340,8 @@ Customer Runtime
 - WebSocket channel
 - ADK Go runner
 - DeepSeek model adapter，只支持 `deepseek-v4-flash` / `deepseek-v4-pro`
-- 内置 `exec` 工具，用于执行运行前未知的 shell 命令
+- 内置 `command.run` / `shell.run` 工具，用于执行结构化命令和高审计 shell language
+- 内置 `tool_output.read` 工具，用于 bounded 读取当前 run 的 raw stdout / stderr artifact
 - 内置 `read_file` / `write_file` / `list_dir` / `edit_file` 文件工具
 - 一个内置 standalone agent profile
 - agent profile manager
@@ -1353,7 +1358,8 @@ Customer Runtime
 - 能从 WebSocket 发消息到 agent。
 - Agent 能通过 DeepSeek adapter 完成 chat / stream。
 - XiraGarden 能选择 agent profile 并通过 `xiragarden` channel 触发 agent run。
-- Agent 能通过 `exec` 调用本地命令。
+- Agent 能通过 `command.run` 调用结构化本地命令，并在需要 pipe / redirection 等 shell language 时通过 `shell.run` 调用。
+- Agent 能在命令输出被截断时通过 `tool_output.read` 读取当前 run raw output 的 stdout / stderr tail 或 slice。
 - Agent 能通过 `read_file` / `write_file` / `list_dir` / `edit_file` 读取、生成和修改 workspace 文件。
 - GUI 的 agent 视图能显示 runtime-discovered agent 及其允许工具。
 - Tool call 有 audit event。
@@ -1677,11 +1683,11 @@ flow、客户、渠道、权限、secrets、审计、flow pack 由 Business Runt
 - artifact policy 明确保留、脱敏、导出和删除规则。
 - evolution candidate 只生成候选，不自动改 production flow。
 
-### ADR-006：`exec` 用于探索未知工具
+### ADR-006：`command.run` / `shell.run` 用于探索未知工具，`tool_output.read` 用于补读输出证据
 
 决策：
 
-Xira 内置 `exec` 工具，允许运行运行前未知的本地命令。Phase 1 不把每个 CLI 命令包装成专用 tool 或 connector；稳定命令先沉淀为 command recipe 和 flow / agent command step。
+Xira 内置 `command.run` 和 `shell.run` 两个命令工具，允许运行运行前未知的本地命令；同时内置 `tool_output.read`，让 agent 在 stdout / stderr preview 被截断时按当前 run 的 `raw_output_path` bounded 读取更多证据。Phase 1 不把每个 CLI 命令包装成专用 tool 或 connector；稳定命令先沉淀为 command recipe 和 flow / agent command step。
 
 理由：
 
@@ -1691,14 +1697,15 @@ Xira 内置 `exec` 工具，允许运行运行前未知的本地命令。Phase 1
 
 代价：
 
-- `exec` 的安全边界必须足够清楚。
+- `command.run` / `shell.run` 的安全边界必须足够清楚，其中 `command.run` 是默认入口，`shell.run` 是高风险兜底入口。
+- `tool_output.read` 必须绑定当前 run artifact，不能变成任意文件读取能力。
 - ad-hoc command 和 flow command step 之间需要 review 流程。
 - XiraGarden / agent / API 都可能触发执行路径，runtime policy 必须统一。
 
 缓解：
 
 - 第一版只先打通工具路径；cwd 限制、风险分类、审批和 sandbox 后续再收敛，不阻塞最小 kernel。
-- review gate 检查 executable、cwd、参数、timeout、error behavior、输出截断和 audit metadata。
+- review gate 检查 executable、cwd、参数、timeout、error behavior、输出截断、raw output 读取边界和 audit metadata。
 
 ### ADR-007：XiraGarden 是 Runtime Client，不是执行器
 
@@ -1744,7 +1751,7 @@ Xira 内置 `exec` 工具，允许运行运行前未知的本地命令。Phase 1
 | Artifact 泄露客户敏感数据 | 合规和信任风险 | artifact policy、privacy checklist、脱敏标记、导出前检查 |
 | Evolution candidate 未验证就上线 | flow 行为漂移，客户现场回归 | candidate-only 默认策略，必须通过 acceptance case / golden task 和人工 review 才能 promote |
 | Context / memory 污染 | agent 后续判断被过期材料误导 | context pack 区分 required / optional / forbidden，evolution 记录来源和失效条件 |
-| `exec` 探索成果没有沉淀 | 每次客户现场都重复探索 | successful command 生成 recipe，并通过 review gate 纳入 flow / agent command step |
+| ad-hoc command 探索成果没有沉淀 | 每次客户现场都重复探索 | successful command 生成 recipe，并通过 review gate 纳入 flow / agent command step |
 
 ## 测试策略
 
@@ -1758,7 +1765,8 @@ Xira 内置 `exec` 工具，允许运行运行前未知的本地命令。Phase 1
 - DeepSeek model id whitelist tests
 - DeepSeek chat / stream contract tests
 - DeepSeek tool call mapping tests
-- exec tool timeout / audit tests
+- command.run / shell.run timeout / audit tests
+- tool_output.read bounded read / current-run path isolation tests
 - file tool read / write / list / edit tests
 - command recipe review tests
 - process integration timeout tests
@@ -1871,11 +1879,11 @@ Xira 还应该从 PicoClaw 的经验里保留三个教训：
 9. run log / artifact 默认保留多久，客户是否能一键导出或销毁？
 10. evolution candidate 的 promote 责任人是谁：交付工程师、客户管理员，还是产品维护者？
 11. 每个 flow pack 至少需要多少 golden tasks 才允许交付？
-12. exec tool 的 sandbox 后续用本地进程限制、Docker，还是客户环境提供的隔离机制？
+12. shell.run 的 sandbox 后续用本地进程限制、Docker，还是客户环境提供的隔离机制？
 13. artifact policy 是否需要区分内部证据、客户可见交付物和模型可见上下文？
 14. XiraGarden 是否默认嵌入 runtime，还是要求用户先启动 `xira serve`？
 15. 已探索成功的客户 CLI 命令什么时候可以进入 flow pack：按复用次数、客户验收、还是 artifact / audit 边界成熟度？
-16. 后续是否需要独立 connector SDK，还是长期保持 exec + MCP 优先？
+16. 后续是否需要独立 connector SDK，还是长期保持 command tools + MCP 优先？
 
 ## 推荐下一步
 
@@ -1885,8 +1893,8 @@ Xira 还应该从 PicoClaw 的经验里保留三个教训：
 4. 定义核心接口：`AgentEngine`、`TurnRequest`、`RuntimeEvent`、`ToolCall`、`VerificationResult`、`RunRecord`。
 5. 定义 agent profile v0 schema，包含 model policy、instructions、permissions、artifact policy、verification defaults。
 6. 实现 agent profile manager，并支持 `xira agent run`。
-7. 实现 built-in tools v0：`exec`、`read_file`、`write_file`、`list_dir`、`edit_file`。
-8. 实现模型工具调用路径：模型通过 `exec` 探索 `which`、`--help`、`--version` 和具体命令，不为每个 CLI 写专用 tool。
+7. 实现 built-in tools v0：`command.run`、`shell.run`、`tool_output.read`、`read_file`、`write_file`、`list_dir`、`edit_file`。
+8. 实现模型工具调用路径：模型优先通过 `command.run` 探索 `which`、`--help`、`--version` 和具体命令，需要管道/重定向时使用 `shell.run`；如果 stdout / stderr preview 被截断且缺失内容影响判断，用 `tool_output.read` 补读 tail 或 slice，不为每个 CLI 写专用 tool。
 9. 实现 run log / artifact store v0：本地 `.xira/runs/<run_id>/`，支持导出。
 10. 实现 verification runner v0：schema check、command check、agent smoke case、golden task。
 11. 实现 evolution candidate v0：失败归因、候选记录、人工 review 状态，不自动 promote。

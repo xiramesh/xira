@@ -46,7 +46,7 @@ func TestAgentRunUsesRuntimeDefaultAgent(t *testing.T) {
 
 func TestAgentRunUsesExplicitWorkspaceAgent(t *testing.T) {
 	instance := writeCLIFixture(t, "xira-assistant")
-	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "agent", "run", "--agent", "research-assistant", "--message", "please call exec")
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "agent", "run", "--agent", "research-assistant", "--message", "please call command")
 
 	var resp runtime.TurnResponse
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
@@ -55,7 +55,7 @@ func TestAgentRunUsesExplicitWorkspaceAgent(t *testing.T) {
 	if resp.AgentID != "research-assistant" {
 		t.Fatalf("AgentID = %q", resp.AgentID)
 	}
-	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "exec" {
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "command.run" {
 		t.Fatalf("ToolCalls = %+v", resp.ToolCalls)
 	}
 }
@@ -106,7 +106,7 @@ func fakeCLIDeepSeekClient(t *testing.T) *deepseek.Client {
 			body = cliDeepSeekTextResponse("fake cli tool final")
 		} else {
 			userMessage := lastCLIUserMessage(req.Messages)
-			if strings.Contains(strings.ToLower(userMessage), "exec") {
+			if strings.Contains(strings.ToLower(userMessage), "command") {
 				body = cliDeepSeekToolCallResponse()
 			} else {
 				body = cliDeepSeekTextResponse("fake cli response")
@@ -170,8 +170,8 @@ func cliDeepSeekToolCallResponse() string {
 					"id":   "call-1",
 					"type": "function",
 					"function": map[string]any{
-						"name":      "exec",
-						"arguments": `{"action":"run","command":"printf 'hello from Xira exec'"}`,
+						"name":      "command_run",
+						"arguments": `{"program":"printf","args":["hello from Xira command"]}`,
 					},
 				}},
 			},
@@ -223,7 +223,9 @@ model_policy:
   stream: true
   temperature: 0.2
 tools:
-  - exec
+  - command.run
+  - shell.run
+  - tool_output.read
   - read_file
   - write_file
   - list_dir

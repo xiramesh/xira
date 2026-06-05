@@ -2,9 +2,12 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 type Tool interface {
@@ -19,9 +22,21 @@ type Registry struct {
 }
 
 type Definition struct {
-	Name        string
-	Description string
-	Parameters  map[string]any
+	Name         string
+	Description  string
+	Parameters   map[string]any
+	InputSchema  *jsonschema.Schema
+	OutputSchema *jsonschema.Schema
+	Policy       ToolPolicy
+}
+
+type ToolPolicy struct {
+	Risk                string
+	RequireConfirmation bool
+}
+
+type PolicyProvider interface {
+	Policy() ToolPolicy
 }
 
 func NewRegistry(tools []Tool) *Registry {
@@ -41,12 +56,14 @@ func NewRegistry(tools []Tool) *Registry {
 
 func NewBuiltinRegistry(workspaceRoot string, allowed []string) *Registry {
 	all := map[string]Tool{
-		"exec":        NewExecTool(workspaceRoot),
-		"read_file":   NewReadFileTool(workspaceRoot),
-		"search_file": NewSearchFileTool(workspaceRoot),
-		"write_file":  NewWriteFileTool(workspaceRoot),
-		"list_dir":    NewListDirTool(workspaceRoot),
-		"edit_file":   NewEditFileTool(workspaceRoot),
+		"command.run":      NewCommandRunTool(workspaceRoot),
+		"shell.run":        NewShellRunTool(workspaceRoot),
+		"tool_output.read": NewToolOutputReadTool(),
+		"read_file":        NewReadFileTool(workspaceRoot),
+		"search_file":      NewSearchFileTool(workspaceRoot),
+		"write_file":       NewWriteFileTool(workspaceRoot),
+		"list_dir":         NewListDirTool(workspaceRoot),
+		"edit_file":        NewEditFileTool(workspaceRoot),
 	}
 	tools := make([]Tool, 0, len(allowed))
 	for _, name := range allowed {
@@ -91,10 +108,18 @@ func (r *Registry) Definitions() []Definition {
 	out := make([]Definition, 0, len(names))
 	for _, name := range names {
 		tool := r.tools[name]
+		parameters := tool.Parameters()
+		policy := ToolPolicy{}
+		if provider, ok := tool.(PolicyProvider); ok {
+			policy = provider.Policy()
+		}
 		out = append(out, Definition{
-			Name:        tool.Name(),
-			Description: tool.Description(),
-			Parameters:  tool.Parameters(),
+			Name:         tool.Name(),
+			Description:  tool.Description(),
+			Parameters:   parameters,
+			InputSchema:  schemaFromMap(parameters),
+			OutputSchema: &jsonschema.Schema{Type: "object"},
+			Policy:       policy,
 		})
 	}
 	return out
@@ -109,4 +134,19 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 		args = map[string]any{}
 	}
 	return tool.Execute(ctx, args)
+}
+
+func schemaFromMap(value map[string]any) *jsonschema.Schema {
+	if len(value) == 0 {
+		return &jsonschema.Schema{Type: "object"}
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return &jsonschema.Schema{Type: "object"}
+	}
+	var schema jsonschema.Schema
+	if err := json.Unmarshal(data, &schema); err != nil {
+		return &jsonschema.Schema{Type: "object"}
+	}
+	return &schema
 }

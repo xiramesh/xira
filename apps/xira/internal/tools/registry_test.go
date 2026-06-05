@@ -9,13 +9,97 @@ import (
 )
 
 func TestBuiltinRegistryFiltersAllowedTools(t *testing.T) {
-	registry := NewBuiltinRegistry(t.TempDir(), []string{"read_file", "exec", "missing"})
+	registry := NewBuiltinRegistry(t.TempDir(), []string{"read_file", "command.run", "shell.run", "tool_output.read", "exec", "missing"})
 
-	if got := strings.Join(registry.List(), ","); got != "exec,read_file" {
+	if got := strings.Join(registry.List(), ","); got != "command.run,read_file,shell.run,tool_output.read" {
 		t.Fatalf("List() = %q", got)
 	}
-	if len(registry.Definitions()) != 2 {
+	if len(registry.Definitions()) != 4 {
 		t.Fatalf("Definitions len = %d", len(registry.Definitions()))
+	}
+	if registry.Has("exec") {
+		t.Fatal("exec should not be registered")
+	}
+}
+
+func TestToolOutputReadReadsCurrentRunArtifact(t *testing.T) {
+	runDir := t.TempDir()
+	rawRel := filepath.Join("artifacts", "tool-outputs", "call-1.json")
+	rawAbs := filepath.Join(runDir, rawRel)
+	if err := os.MkdirAll(filepath.Dir(rawAbs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{
+		"tool":"shell.run",
+		"command":"go test ./...",
+		"stdout":"hello world from stdout",
+		"stderr":"warning line\nreal failure\n",
+		"stdout_bytes":23,
+		"stderr_bytes":26,
+		"exit_code":1,
+		"duration_ms":12
+	}`
+	if err := os.WriteFile(rawAbs, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewBuiltinRegistry(t.TempDir(), []string{"tool_output.read"})
+	ctx := WithRunDir(context.Background(), runDir)
+
+	tail, err := registry.Execute(ctx, "tool_output.read", map[string]any{
+		"raw_output_path": filepath.ToSlash(rawRel),
+		"stream":          "stderr",
+		"tail_lines":      1,
+	})
+	if err != nil {
+		t.Fatalf("tool_output.read tail error = %v", err)
+	}
+	if tail["content"] != "real failure\n" || tail["mode"] != "tail" || tail["stream"] != "stderr" || tail["truncated"] != true {
+		t.Fatalf("tail output = %+v", tail)
+	}
+	if tail["stream_bytes"] != 26 || tail["returned_bytes"] != 13 {
+		t.Fatalf("tail byte counts = %+v", tail)
+	}
+	if _, ok := tail["content_bytes"]; ok {
+		t.Fatalf("tail output should not expose ambiguous content_bytes: %+v", tail)
+	}
+	if tail["raw_output_path"] != "artifacts/tool-outputs/call-1.json" {
+		t.Fatalf("raw output path = %+v", tail["raw_output_path"])
+	}
+
+	slice, err := registry.Execute(ctx, "tool_output.read", map[string]any{
+		"raw_output_path": filepath.ToSlash(rawRel),
+		"stream":          "stdout",
+		"offset_bytes":    6,
+		"limit_bytes":     5,
+	})
+	if err != nil {
+		t.Fatalf("tool_output.read slice error = %v", err)
+	}
+	if slice["content"] != "world" || slice["content_offset_bytes"] != 6 || slice["next_offset_bytes"] != 11 {
+		t.Fatalf("slice output = %+v", slice)
+	}
+	if slice["stream_bytes"] != 23 || slice["returned_bytes"] != 5 {
+		t.Fatalf("slice byte counts = %+v", slice)
+	}
+}
+
+func TestToolOutputReadRejectsMissingRunContextAndOutsidePath(t *testing.T) {
+	registry := NewBuiltinRegistry(t.TempDir(), []string{"tool_output.read"})
+	_, err := registry.Execute(context.Background(), "tool_output.read", map[string]any{
+		"raw_output_path": "artifacts/tool-outputs/call-1.json",
+		"stream":          "stderr",
+	})
+	if err == nil || !strings.Contains(err.Error(), "active run context") {
+		t.Fatalf("missing run context error = %v", err)
+	}
+
+	ctx := WithRunDir(context.Background(), t.TempDir())
+	_, err = registry.Execute(ctx, "tool_output.read", map[string]any{
+		"raw_output_path": "../outside.json",
+		"stream":          "stderr",
+	})
+	if err == nil || !strings.Contains(err.Error(), "within the current run") {
+		t.Fatalf("outside path error = %v", err)
 	}
 }
 
@@ -131,18 +215,33 @@ func TestEditFileRejectsAmbiguousReplacement(t *testing.T) {
 	}
 }
 
-func TestExecRunsShellCommand(t *testing.T) {
+func TestCommandRunRunsStructuredArgvWithoutShell(t *testing.T) {
 	workspace := t.TempDir()
-	registry := NewBuiltinRegistry(workspace, []string{"exec"})
+	registry := NewBuiltinRegistry(workspace, []string{"command.run"})
 
-	out, err := registry.Execute(context.Background(), "exec", map[string]any{
-		"action":  "run",
-		"command": "printf hello > out.txt && cat out.txt",
+	out, err := registry.Execute(context.Background(), "command.run", map[string]any{
+		"program": "printf",
+		"args":    []any{"hello | cat"},
 	})
 	if err != nil {
-		t.Fatalf("exec error = %v output=%+v", err, out)
+		t.Fatalf("command.run error = %v output=%+v", err, out)
 	}
-	if out["stdout"] != "hello" {
+	if out["stdout"] != "hello | cat" {
+		t.Fatalf("stdout = %q", out["stdout"])
+	}
+}
+
+func TestShellRunSupportsPipesAndRedirection(t *testing.T) {
+	workspace := t.TempDir()
+	registry := NewBuiltinRegistry(workspace, []string{"shell.run"})
+
+	out, err := registry.Execute(context.Background(), "shell.run", map[string]any{
+		"command": "printf hello > out.txt && cat out.txt | tr a-z A-Z",
+	})
+	if err != nil {
+		t.Fatalf("shell.run error = %v output=%+v", err, out)
+	}
+	if out["stdout"] != "HELLO" {
 		t.Fatalf("stdout = %q", out["stdout"])
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "out.txt")); err != nil {

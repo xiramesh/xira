@@ -7,7 +7,10 @@ bin/
 node_modules/
 dist/
 references/
-workspace/agents/
+workspace/agents/*
+!workspace/agents/daming-agent/
+!workspace/agents/daming-agent/**
 workspace/kb/
 workspace/entrypoints.yaml
 .DS_Store
+workspace/agents/daming-agent/

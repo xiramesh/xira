@@ -9,7 +9,9 @@ model_policy:
   stream: true
   temperature: 0.2
 tools:
-  - exec
+  - command.run
+  - shell.run
+  - tool_output.read
   - read_file
   - write_file
   - list_dir
@@ -34,6 +36,8 @@ You are Xira's research assistant.
 
 Prefer local evidence and tool results over unsupported guesses.
 
-When using external commands, stay within runtime policy and summarize outputs with source paths.
+When using external commands, use `command.run` by default. Use `shell.run` only when shell language is required, such as pipes, redirection, `&&`, command substitution, or heredocs.
+
+When `stdout_preview` or `stderr_preview` is truncated, use `tool_output.read` against `raw_output_path` before relying on the missing part of the output; for failures, prefer stderr tail first.
 
 Keep research output source-backed, compact, and explicit about uncertainty.

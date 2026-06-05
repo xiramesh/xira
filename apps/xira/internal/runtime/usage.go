@@ -81,6 +81,7 @@ type llmInstrumentationInput struct {
 	Channel        string
 	SessionID      string
 	AgentSessionID string
+	ADKSessionID   string
 	UserID         string
 	Pricing        UsagePricing
 }
@@ -100,6 +101,7 @@ func (s *Service) withLLMInstrumentation(
 	}
 	ctx = deepseek.WithCallTraceRecorder(ctx, recorder.recordCall)
 	ctx = deepseek.WithRequestTraceRecorder(ctx, recorder.recordRequestTrace)
+	ctx = deepseek.WithRawTraceRecorder(ctx, recorder.recordRawTrace)
 	return ctx
 }
 
@@ -112,7 +114,10 @@ type llmCallRecorder struct {
 	mu         sync.Mutex
 	callSeq    int
 	traceSeq   int
+	rawSeq     int
+	activeRaw  int
 	tracePaths []string
+	rawPaths   []string
 }
 
 func (r *llmCallRecorder) recordRequestTrace(_ context.Context, req deepseek.ChatRequest) {
@@ -160,9 +165,15 @@ func (r *llmCallRecorder) recordCall(_ context.Context, trace deepseek.CallTrace
 		tracePath = r.tracePaths[0]
 		r.tracePaths = r.tracePaths[1:]
 	}
+	rawTracePath := ""
+	if len(r.rawPaths) > 0 {
+		rawTracePath = r.rawPaths[0]
+		r.rawPaths = r.rawPaths[1:]
+	}
 	r.mu.Unlock()
 
 	call := buildLLMCallRecord(r.input, requestIndex, tracePath, trace)
+	call.RawTracePath = rawTracePath
 	if call.UsageSource == "provider" {
 		cost, currency := usageCost(r.input.Pricing, call.Model, call.PromptTokens, call.CompletionTokens)
 		call.Cost = cost
@@ -186,6 +197,130 @@ func (r *llmCallRecorder) recordCall(_ context.Context, trace deepseek.CallTrace
 		payload["currency"] = call.Currency
 	}
 	r.recordEvent("llm.call_recorded", "deepseek", "llm call usage recorded", payload)
+}
+
+func (r *llmCallRecorder) recordRawTrace(_ context.Context, trace deepseek.RawTrace) {
+	if !llmTraceEnabled() || r.service == nil || r.service.runs == nil {
+		return
+	}
+
+	switch trace.Event {
+	case "request_body":
+		seq, relDir := r.nextRawTraceDir()
+		dir := filepath.Join(r.service.runs.RunDir(r.input.RunID), relDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			r.recordEvent("llm.raw_trace_failed", "runtime", "failed to initialize raw llm trace", map[string]any{"error": err.Error()})
+			return
+		}
+		if err := os.WriteFile(filepath.Join(dir, "request.body"), trace.Body, 0o644); err != nil {
+			r.recordEvent("llm.raw_trace_failed", "runtime", "failed to write raw llm request", map[string]any{"error": err.Error(), "path": filepath.ToSlash(filepath.Join(relDir, "request.body"))})
+			return
+		}
+		meta := map[string]any{
+			"event":       trace.Event,
+			"method":      trace.Method,
+			"url":         trace.URL,
+			"bytes":       len(trace.Body),
+			"recorded_at": time.Now(),
+		}
+		if err := writeRawTraceJSON(filepath.Join(dir, "request.meta.json"), meta); err != nil {
+			r.recordEvent("llm.raw_trace_failed", "runtime", "failed to write raw llm request metadata", map[string]any{"error": err.Error(), "path": filepath.ToSlash(filepath.Join(relDir, "request.meta.json"))})
+			return
+		}
+		r.recordEvent("llm.raw_request_traced", "deepseek", "raw llm request written", map[string]any{
+			"index": seq,
+			"path":  filepath.ToSlash(filepath.Join(relDir, "request.body")),
+			"bytes": len(trace.Body),
+		})
+	case "response_status":
+		seq, relDir := r.currentRawTraceDir()
+		if seq == 0 {
+			return
+		}
+		dir := filepath.Join(r.service.runs.RunDir(r.input.RunID), relDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			r.recordEvent("llm.raw_trace_failed", "runtime", "failed to initialize raw llm trace", map[string]any{"error": err.Error()})
+			return
+		}
+		meta := map[string]any{
+			"event":       trace.Event,
+			"status_code": trace.StatusCode,
+			"headers":     trace.Header,
+			"recorded_at": time.Now(),
+		}
+		if err := writeRawTraceJSON(filepath.Join(dir, "response.meta.json"), meta); err != nil {
+			r.recordEvent("llm.raw_trace_failed", "runtime", "failed to write raw llm response metadata", map[string]any{"error": err.Error(), "path": filepath.ToSlash(filepath.Join(relDir, "response.meta.json"))})
+			return
+		}
+		r.recordEvent("llm.raw_response_status_traced", "deepseek", "raw llm response status written", map[string]any{
+			"index":       seq,
+			"path":        filepath.ToSlash(filepath.Join(relDir, "response.meta.json")),
+			"status_code": trace.StatusCode,
+		})
+	case "response_body", "response_chunk":
+		_, relDir := r.currentRawTraceDir()
+		if relDir == "" {
+			return
+		}
+		dir := filepath.Join(r.service.runs.RunDir(r.input.RunID), relDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			r.recordEvent("llm.raw_trace_failed", "runtime", "failed to initialize raw llm trace", map[string]any{"error": err.Error()})
+			return
+		}
+		if err := appendRawTraceBytes(filepath.Join(dir, "response.body"), trace.Body); err != nil {
+			r.recordEvent("llm.raw_trace_failed", "runtime", "failed to write raw llm response", map[string]any{"error": err.Error(), "path": filepath.ToSlash(filepath.Join(relDir, "response.body"))})
+		}
+	case "response_error":
+		_, relDir := r.currentRawTraceDir()
+		if relDir == "" {
+			return
+		}
+		dir := filepath.Join(r.service.runs.RunDir(r.input.RunID), relDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			r.recordEvent("llm.raw_trace_failed", "runtime", "failed to initialize raw llm trace", map[string]any{"error": err.Error()})
+			return
+		}
+		if err := os.WriteFile(filepath.Join(dir, "response.error.txt"), []byte(trace.Error+"\n"), 0o644); err != nil {
+			r.recordEvent("llm.raw_trace_failed", "runtime", "failed to write raw llm response error", map[string]any{"error": err.Error(), "path": filepath.ToSlash(filepath.Join(relDir, "response.error.txt"))})
+		}
+	}
+}
+
+func (r *llmCallRecorder) nextRawTraceDir() (int, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rawSeq++
+	r.activeRaw = r.rawSeq
+	relDir := filepath.ToSlash(filepath.Join("llm_raw", fmt.Sprintf("%03d", r.rawSeq)))
+	r.rawPaths = append(r.rawPaths, relDir)
+	return r.rawSeq, relDir
+}
+
+func (r *llmCallRecorder) currentRawTraceDir() (int, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.activeRaw == 0 {
+		return 0, ""
+	}
+	return r.activeRaw, filepath.ToSlash(filepath.Join("llm_raw", fmt.Sprintf("%03d", r.activeRaw)))
+}
+
+func writeRawTraceJSON(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func appendRawTraceBytes(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(data)
+	return err
 }
 
 func buildLLMCallRecord(input llmInstrumentationInput, requestIndex int, tracePath string, trace deepseek.CallTrace) LLMCallRecord {
@@ -224,6 +359,7 @@ func buildLLMCallRecord(input llmInstrumentationInput, requestIndex int, tracePa
 		Channel:          input.Channel,
 		SessionID:        input.SessionID,
 		AgentSessionID:   input.AgentSessionID,
+		ADKSessionID:     input.ADKSessionID,
 		UserID:           input.UserID,
 		Provider:         "deepseek",
 		Model:            model,

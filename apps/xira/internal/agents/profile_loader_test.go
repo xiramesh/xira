@@ -20,7 +20,9 @@ model_policy:
   stream: true
   temperature: 0.2
 tools:
-  - exec
+  - command.run
+  - shell.run
+  - tool_output.read
   - search_file
   - read_file
   - write_file
@@ -66,7 +68,7 @@ Direct, careful, and source-backed.`)
 	if got := profile.InstructionText(); !strings.Contains(got, "Use local evidence before summaries.") || !strings.Contains(got, "Direct, careful, and source-backed.") {
 		t.Fatalf("InstructionText() did not include PROFILE body and SOUL.md:\n%s", got)
 	}
-	if got := strings.Join(profile.Permissions.Tools, ","); got != "exec,search_file,read_file,write_file,list_dir,edit_file" {
+	if got := strings.Join(profile.Permissions.Tools, ","); got != "command.run,shell.run,tool_output.read,search_file,read_file,write_file,list_dir,edit_file" {
 		t.Fatalf("Permissions.Tools = %q", got)
 	}
 	if got := strings.Join(profile.Session.Dimensions, ","); got != "chat,sender,channel" {
@@ -138,6 +140,40 @@ Body.
 	if !strings.Contains(err.Error(), "SOUL.md") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func TestRepositoryWorkspaceDamingAgentCanExecuteFiles(t *testing.T) {
+	workspace := filepath.Clean("../../../../workspace")
+	manager, err := LoadFromWorkspace(workspace)
+	if err != nil {
+		t.Fatalf("LoadFromWorkspace(%s) error = %v", workspace, err)
+	}
+	profile, ok := manager.Get("daming-agent")
+	if !ok {
+		t.Fatal("expected daming-agent profile")
+	}
+
+	for _, tool := range []string{"command.run", "shell.run", "tool_output.read", "read_file", "search_file", "write_file", "list_dir", "edit_file"} {
+		if !containsString(profile.Permissions.Tools, tool) {
+			t.Fatalf("daming-agent tools = %+v, missing %q", profile.Permissions.Tools, tool)
+		}
+	}
+
+	instructions := profile.InstructionText()
+	for _, want := range []string{"execute commands", "command.run", "shell.run", "tool_output.read", "stdout_preview", "timeout_seconds"} {
+		if !strings.Contains(instructions, want) {
+			t.Fatalf("daming-agent instructions missing %q:\n%s", want, instructions)
+		}
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func writeAgentProfile(t *testing.T, workspace, id, profile, soul string) {

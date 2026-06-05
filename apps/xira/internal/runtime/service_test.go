@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/ai-daming/xira/internal/agents"
 	"github.com/ai-daming/xira/internal/model/deepseek"
 	fsession "github.com/ai-daming/xira/internal/session"
+	rtools "github.com/ai-daming/xira/internal/tools"
 )
 
 func TestRunAgentWritesHarnessStore(t *testing.T) {
@@ -209,18 +211,393 @@ func TestToolLogSummariesAvoidLargeContent(t *testing.T) {
 	}
 }
 
-func TestRunAgentCanUseExecTool(t *testing.T) {
+func TestToolOutputForModelBoundsCommandStreams(t *testing.T) {
+	output := toolOutputForModel(ToolCallRecord{
+		Name:  "shell.run",
+		Input: map[string]any{"max_stdout_bytes": 4, "max_stderr_bytes": 3},
+		Output: map[string]any{
+			"stdout":          "abcdef",
+			"stderr":          "wxyz",
+			"exit_code":       0,
+			"duration_ms":     1,
+			"raw_output_path": "artifacts/tool-outputs/call-1.json",
+		},
+	})
+	if _, ok := output["stdout"]; ok {
+		t.Fatalf("model output leaked stdout: %+v", output)
+	}
+	if _, ok := output["stderr"]; ok {
+		t.Fatalf("model output leaked stderr: %+v", output)
+	}
+	if output["stdout_preview"] != "abcd" || output["stdout_bytes"] != 6 || output["stdout_truncated"] != true {
+		t.Fatalf("stdout model output = %+v", output)
+	}
+	if output["stderr_preview"] != "wxy" || output["stderr_bytes"] != 4 || output["stderr_truncated"] != true {
+		t.Fatalf("stderr model output = %+v", output)
+	}
+	if output["truncated"] != true || output["status"] != "ok" {
+		t.Fatalf("model output = %+v", output)
+	}
+	if output["raw_output_path"] != "artifacts/tool-outputs/call-1.json" {
+		t.Fatalf("model output missing raw output path: %+v", output)
+	}
+	if !strings.Contains(fmt.Sprint(output["raw_output_hint"]), "tool_output.read") {
+		t.Fatalf("model output missing raw output hint: %+v", output)
+	}
+}
+
+func TestRunAgentCanUseCommandRunTool(t *testing.T) {
 	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: agents.ResearchAssistantAgentID,
-		Message: "please call exec",
+		Message: "please call command",
 		Channel: "test",
 	})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
 	}
-	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "exec" {
-		t.Fatalf("expected exec tool call: %+v", resp.ToolCalls)
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "command.run" {
+		t.Fatalf("expected command.run tool call: %+v", resp.ToolCalls)
+	}
+}
+
+func TestRuntimeToolDefinitionsDoNotExposeExec(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	profile := agents.BuiltinResearchAssistant()
+	for _, tool := range rt.toolDefinitions(profile) {
+		if tool.Function.Name == "exec" {
+			t.Fatalf("native tool definitions exposed exec: %+v", tool)
+		}
+	}
+	adkTools, err := rt.adkTools(context.Background(), profile, func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {}, func(ToolCallRecord) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range adkTools {
+		if tool.Name() == "exec" {
+			t.Fatalf("ADK tools exposed exec: %+v", tool)
+		}
+	}
+}
+
+func TestRunAgentRejectsLegacyExecToolCall(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rec := rt.executeToolCall(
+		context.Background(),
+		agents.BuiltinResearchAssistant(),
+		deepseek.ToolCall{
+			ID:   "legacy-exec",
+			Type: "function",
+			Function: deepseek.ToolCallFunction{
+				Name:      "exec",
+				Arguments: `{"action":"run","command":"printf should-not-run"}`,
+			},
+		},
+		func(string, string, string, map[string]any) {},
+		func(string, string, bool, string, map[string]any) {},
+	)
+	if rec.Name != "exec" || rec.Error != "tool is not allowed by agent profile" {
+		t.Fatalf("legacy exec record = %+v", rec)
+	}
+}
+
+func TestRunAgentReturnsBoundedShellFailureToADKModel(t *testing.T) {
+	var requests []deepseek.ChatRequest
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		requests = append(requests, req)
+		body := deepSeekTextResponse("saw failure details")
+		if len(requests) == 1 {
+			body = deepSeekShellRunToolCallResponseWithArgs("shell-fail-1", map[string]any{
+				"command":          `printf 'tool stdout'; printf 'tool stderr' >&2; exit 7`,
+				"timeout_seconds":  5,
+				"max_stdout_bytes": 4,
+				"max_stderr_bytes": 4,
+			})
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+
+	rt := newTestService(t, Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		AgentID: agents.ResearchAssistantAgentID,
+		Message: "please call shell",
+		Channel: "test",
+	})
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "shell.run" || resp.ToolCalls[0].Error != "exit status 7" {
+		t.Fatalf("expected failed shell.run tool call: %+v", resp.ToolCalls)
+	}
+	if resp.ToolCalls[0].Output["exit_code"] != 7 || resp.ToolCalls[0].Output["stderr"] != "tool stderr" {
+		t.Fatalf("tool output = %+v", resp.ToolCalls[0].Output)
+	}
+	if resp.ToolCalls[0].Input["timeout_seconds"] != float64(5) {
+		t.Fatalf("tool input = %+v, want timeout_seconds", resp.ToolCalls[0].Input)
+	}
+	rawPath, _ := resp.ToolCalls[0].Output["raw_output_path"].(string)
+	if rawPath == "" {
+		t.Fatalf("tool output missing raw_output_path: %+v", resp.ToolCalls[0].Output)
+	}
+	rawData, err := os.ReadFile(filepath.Join(rt.RunStore().RunDir(resp.RunID), filepath.FromSlash(rawPath)))
+	if err != nil {
+		t.Fatalf("read raw output: %v", err)
+	}
+	var rawOutput map[string]any
+	if err := json.Unmarshal(rawData, &rawOutput); err != nil {
+		t.Fatalf("decode raw output: %v\n%s", err, rawData)
+	}
+	if rawOutput["tool"] != "shell.run" || rawOutput["stdout"] != "tool stdout" || rawOutput["stderr"] != "tool stderr" || rawOutput["exit_code"] != float64(7) || rawOutput["env_policy"] == "" {
+		t.Fatalf("raw output file = %+v", rawOutput)
+	}
+	if len(requests) < 2 {
+		t.Fatalf("requests len = %d, want follow-up request with tool result", len(requests))
+	}
+	var toolContent string
+	for _, message := range requests[1].Messages {
+		if message.Role == "tool" {
+			toolContent = deepseek.ContentText(message.Content)
+			break
+		}
+	}
+	for _, want := range []string{`"stdout_preview":"tool"`, `"stderr_preview":"tool"`, `"stdout_bytes":11`, `"stderr_bytes":11`, `"raw_output_path":"`, `"status":"error"`, `"exit_code":7`, `"error":"exit status 7"`, `"error_message":"exit status 7"`} {
+		if !strings.Contains(toolContent, want) {
+			t.Fatalf("tool result sent to model missing %q:\n%s", want, toolContent)
+		}
+	}
+	if strings.Contains(toolContent, `"stdout":"tool stdout"`) || strings.Contains(toolContent, `"stderr":"tool stderr"`) {
+		t.Fatalf("tool result sent raw streams to model:\n%s", toolContent)
+	}
+}
+
+func TestToolOutputReadCanReadRawOutputFromCurrentRun(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	runID := "tool-output-read-run"
+	if err := rt.RunStore().InitRun(runID); err != nil {
+		t.Fatal(err)
+	}
+	ctx := contextWithToolTrace(context.Background(), runID)
+	ctx = rtools.WithRunDir(ctx, rt.RunStore().RunDir(runID))
+	profile := agents.BuiltinResearchAssistant()
+	shellRec := rt.executeToolCall(
+		ctx,
+		profile,
+		deepseek.ToolCall{
+			ID:   "shell-with-long-stderr",
+			Type: "function",
+			Function: deepseek.ToolCallFunction{
+				Name:      "shell.run",
+				Arguments: `{"command":"printf 'stdout head'; printf 'warning line\nreal failure\n' >&2; exit 9","max_stderr_bytes":4}`,
+			},
+		},
+		func(string, string, string, map[string]any) {},
+		func(string, string, bool, string, map[string]any) {},
+	)
+	rawPath, _ := shellRec.Output["raw_output_path"].(string)
+	if rawPath == "" {
+		t.Fatalf("shell output missing raw_output_path: %+v", shellRec)
+	}
+	readRec := rt.executeToolCall(
+		ctx,
+		profile,
+		deepseek.ToolCall{
+			ID:   "read-stderr-tail",
+			Type: "function",
+			Function: deepseek.ToolCallFunction{
+				Name:      "tool_output.read",
+				Arguments: mustJSON(map[string]any{"raw_output_path": rawPath, "stream": "stderr", "tail_lines": 1}),
+			},
+		},
+		func(string, string, string, map[string]any) {},
+		func(string, string, bool, string, map[string]any) {},
+	)
+	if readRec.Error != "" {
+		t.Fatalf("tool_output.read error = %s output=%+v", readRec.Error, readRec.Output)
+	}
+	if readRec.Output["content"] != "real failure\n" || readRec.Output["mode"] != "tail" || readRec.Output["stream"] != "stderr" {
+		t.Fatalf("tool_output.read output = %+v", readRec.Output)
+	}
+}
+
+func TestRunAgentPersistsToolTranscriptMessages(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		AgentID: agents.ResearchAssistantAgentID,
+		Message: "please call command",
+		Channel: "test",
+	})
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	history := rt.SessionManager().AgentHistory(resp.SessionID, resp.AgentID)
+	if len(history) != 4 {
+		t.Fatalf("agent history len = %d, want 4: %+v", len(history), history)
+	}
+	if history[0].Role != "user" || history[0].Kind != fsession.MessageKindMessage {
+		t.Fatalf("user transcript message = %+v", history[0])
+	}
+	if history[1].Role != "assistant" || history[1].Kind != fsession.MessageKindToolCall || history[1].ToolName != "command.run" || history[1].ToolCallID == "" {
+		t.Fatalf("tool call transcript message = %+v", history[1])
+	}
+	if !strings.Contains(history[1].Content, `"program":"printf"`) || !strings.Contains(history[1].Content, "hello from Xira command") {
+		t.Fatalf("tool call content = %s", history[1].Content)
+	}
+	if history[2].Role != "tool" || history[2].Kind != fsession.MessageKindToolResult || history[2].ToolName != "command.run" || history[2].ToolCallID != history[1].ToolCallID {
+		t.Fatalf("tool result transcript message = %+v", history[2])
+	}
+	for _, want := range []string{`"status":"ok"`, `"exit_code":0`, `"stdout_preview":"hello from Xira command"`} {
+		if !strings.Contains(history[2].Content, want) {
+			t.Fatalf("tool result content missing %q:\n%s", want, history[2].Content)
+		}
+	}
+	if history[3].Role != "assistant" || history[3].Kind != fsession.MessageKindMessage || history[3].Content != "fake tool final" {
+		t.Fatalf("assistant final transcript message = %+v", history[3])
+	}
+}
+
+func TestHydrateADKSessionRestoresPersistedToolHistory(t *testing.T) {
+	stateRoot := t.TempDir()
+	rt := newTestService(t, Config{RunRoot: filepath.Join(stateRoot, "runs")})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		AgentID: agents.ResearchAssistantAgentID,
+		Message: "please call command",
+		Channel: "test",
+		UserID:  "user-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded := newTestService(t, Config{RunRoot: filepath.Join(stateRoot, "runs")})
+	agentSessionID := adkSessionID(fsession.BuildAgentSessionID(resp.SessionID, resp.AgentID), "rehydrate-test")
+	if restored, _, err := reloaded.hydrateADKSession(context.Background(), "user-1", agentSessionID, resp.AgentID, resp.SessionID); err != nil {
+		t.Fatal(err)
+	} else if restored != 4 {
+		t.Fatalf("restored = %d, want 4", restored)
+	}
+	got, err := reloaded.adkSessions.Get(context.Background(), &adksession.GetRequest{
+		AppName:   "xira",
+		UserID:    "user-1",
+		SessionID: agentSessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := got.Session.Events()
+	if events.Len() != 4 {
+		t.Fatalf("restored event len = %d, want 4", events.Len())
+	}
+	if call := events.At(1).Content.Parts[0].FunctionCall; call == nil || call.Name != "command.run" || call.ID == "" {
+		t.Fatalf("restored function call = %+v", events.At(1).Content.Parts[0])
+	}
+	response := events.At(2).Content.Parts[0].FunctionResponse
+	if response == nil || response.Name != "command.run" || response.ID == "" || response.Response["status"] != "ok" {
+		t.Fatalf("restored function response = %+v", events.At(2).Content.Parts[0])
+	}
+}
+
+func TestADKSessionDoesNotReuseUnpersistedToolEventsAcrossRuns(t *testing.T) {
+	var sawHello bool
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		userMessage := lastUserMessage(req.Messages)
+		body := deepSeekTextResponse("ok")
+		switch {
+		case lastRole(req.Messages) == "tool":
+			body = deepSeekTextResponse("")
+		case userMessage == "bad shell":
+			body = deepSeekShellRunToolCallResponseWithCommand("hidden-call", `printf 'hidden tool event'; exit 3`)
+		case userMessage == "hello":
+			sawHello = true
+			for _, message := range req.Messages {
+				if message.Role == "tool" && strings.Contains(deepseek.ContentText(message.Content), "hidden tool event") {
+					t.Fatalf("second run reused unpersisted tool event: %+v", req.Messages)
+				}
+			}
+			body = deepSeekTextResponse("clean hello")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	_, err := rt.RunAgent(context.Background(), TurnRequest{Message: "bad shell", Channel: "test", UserID: "user-1"})
+	if err == nil {
+		t.Fatal("expected first run to fail with empty final response")
+	}
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hello", Channel: "test", UserID: "user-1"})
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if !sawHello || resp.FinalResponse != "clean hello" {
+		t.Fatalf("second run response = %q sawHello=%v", resp.FinalResponse, sawHello)
+	}
+}
+
+func TestRepeatedFailedShellCommandIsBlockedOnThirdAttempt(t *testing.T) {
+	counterPath := filepath.Join(t.TempDir(), "shell-counter.txt")
+	command := fmt.Sprintf("printf run >> %q; printf err >&2; exit 9", counterPath)
+	var requests int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		requests++
+		body := deepSeekTextResponse("stopped after guard")
+		if requests <= 3 {
+			body = deepSeekShellRunToolCallResponseWithCommand(fmt.Sprintf("repeat-%d", requests), command)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		AgentID: agents.ResearchAssistantAgentID,
+		Message: "repeat shell",
+		Channel: "test",
+	})
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	if len(resp.ToolCalls) != 3 {
+		t.Fatalf("tool calls = %d, want 3: %+v", len(resp.ToolCalls), resp.ToolCalls)
+	}
+	third := resp.ToolCalls[2]
+	if third.Error != "repeated identical failed tool command" || third.Output["retryable"] != false {
+		t.Fatalf("third tool call = %+v", third)
+	}
+	content, err := os.ReadFile(counterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "runrun" {
+		t.Fatalf("counter content = %q, want two real executions", string(content))
 	}
 }
 
@@ -328,6 +705,48 @@ func TestRunAgentTracesLLMRequestWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestRunAgentStoresRawLLMRequestAndResponseWhenTraceEnabled(t *testing.T) {
+	t.Setenv(llmTraceEnv, "1")
+	runRoot := filepath.Join(t.TempDir(), "runs")
+	rt := newTestService(t, Config{RunRoot: runRoot})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "raw trace me", Channel: "test"})
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+
+	rawDir := filepath.Join(rt.RunStore().RunDir(resp.RunID), "llm_raw", "001")
+	requestBody, err := os.ReadFile(filepath.Join(rawDir, "request.body"))
+	if err != nil {
+		t.Fatalf("expected raw llm request: %v", err)
+	}
+	if !strings.Contains(string(requestBody), `"raw trace me"`) || !strings.Contains(string(requestBody), `"messages"`) {
+		t.Fatalf("raw request body = %s", requestBody)
+	}
+	responseBody, err := os.ReadFile(filepath.Join(rawDir, "response.body"))
+	if err != nil {
+		t.Fatalf("expected raw llm response: %v", err)
+	}
+	if !strings.Contains(string(responseBody), "fake model response: raw trace me") {
+		t.Fatalf("raw response body = %s", responseBody)
+	}
+	metaData, err := os.ReadFile(filepath.Join(rawDir, "response.meta.json"))
+	if err != nil {
+		t.Fatalf("expected raw llm response metadata: %v", err)
+	}
+	var meta struct {
+		StatusCode int `json:"status_code"`
+	}
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		t.Fatalf("decode raw response metadata: %v", err)
+	}
+	if meta.StatusCode != http.StatusOK {
+		t.Fatalf("raw response status = %d", meta.StatusCode)
+	}
+	if len(resp.LLMCalls) != 1 || resp.LLMCalls[0].RawTracePath != "llm_raw/001" {
+		t.Fatalf("llm calls = %+v, want raw trace path", resp.LLMCalls)
+	}
+}
+
 func TestRunAgentRecordsUsageWithoutLLMTrace(t *testing.T) {
 	runRoot := filepath.Join(t.TempDir(), "runs")
 	stateRoot := filepath.Join(t.TempDir(), "state")
@@ -358,11 +777,21 @@ func TestRunAgentRecordsUsageWithoutLLMTrace(t *testing.T) {
 	if call.UsageSource != "provider" || call.PromptTokens != 11 || call.CompletionTokens != 7 || call.TotalTokens != 18 {
 		t.Fatalf("llm call usage = %+v", call)
 	}
+	stableAgentSessionID := fsession.BuildAgentSessionID(resp.SessionID, resp.AgentID)
+	if call.AgentSessionID != stableAgentSessionID {
+		t.Fatalf("agent session id = %q, want stable %q", call.AgentSessionID, stableAgentSessionID)
+	}
+	if call.ADKSessionID == "" || call.ADKSessionID == call.AgentSessionID || !strings.HasPrefix(call.ADKSessionID, stableAgentSessionID+":run:"+resp.RunID+":") {
+		t.Fatalf("adk session id = %q, stable agent session id = %q", call.ADKSessionID, call.AgentSessionID)
+	}
 	if resp.Usage.CallCount != 1 || resp.Usage.TotalTokens != 18 {
 		t.Fatalf("usage summary = %+v", resp.Usage)
 	}
 	if _, err := os.Stat(filepath.Join(rt.RunStore().RunDir(resp.RunID), "llm_requests", "001.json")); !os.IsNotExist(err) {
 		t.Fatalf("llm request trace should be absent when %s is disabled: %v", llmTraceEnv, err)
+	}
+	if _, err := os.Stat(filepath.Join(rt.RunStore().RunDir(resp.RunID), "llm_raw", "001", "request.body")); !os.IsNotExist(err) {
+		t.Fatalf("raw llm trace should be absent when %s is disabled: %v", llmTraceEnv, err)
 	}
 	for _, path := range []string{
 		filepath.Join(rt.RunStore().RunDir(resp.RunID), "llm_calls.jsonl"),
@@ -372,6 +801,17 @@ func TestRunAgentRecordsUsageWithoutLLMTrace(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected usage file %s: %v", path, err)
 		}
+	}
+	ledgerData, err := os.ReadFile(filepath.Join(stateRoot, "usage-ledger.jsonl"))
+	if err != nil {
+		t.Fatalf("read usage ledger: %v", err)
+	}
+	var ledgerCall LLMCallRecord
+	if err := json.Unmarshal(bytes.TrimSpace(ledgerData), &ledgerCall); err != nil {
+		t.Fatalf("decode usage ledger: %v\n%s", err, ledgerData)
+	}
+	if ledgerCall.AgentSessionID != stableAgentSessionID || ledgerCall.ADKSessionID != call.ADKSessionID {
+		t.Fatalf("usage ledger call = %+v", ledgerCall)
 	}
 }
 
@@ -471,7 +911,7 @@ func TestExplicitAgentCanRunWorkspaceResearchAssistant(t *testing.T) {
 	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: "research-assistant",
-		Message: "please call exec",
+		Message: "please call command",
 		Channel: "test",
 	})
 	if err != nil {
@@ -480,8 +920,8 @@ func TestExplicitAgentCanRunWorkspaceResearchAssistant(t *testing.T) {
 	if resp.AgentID != "research-assistant" {
 		t.Fatalf("AgentID = %q", resp.AgentID)
 	}
-	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "exec" {
-		t.Fatalf("expected exec tool call: %+v", resp.ToolCalls)
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "command.run" {
+		t.Fatalf("expected command.run tool call: %+v", resp.ToolCalls)
 	}
 }
 
@@ -645,12 +1085,15 @@ func fakeDeepSeekClient(t *testing.T) *deepseek.Client {
 			return nil, err
 		}
 		var body string
-		if hasToolResponse(req.Messages) {
+		if lastRole(req.Messages) == "tool" {
 			body = deepSeekTextResponse("fake tool final")
 		} else {
 			userMessage := lastUserMessage(req.Messages)
-			if strings.Contains(strings.ToLower(userMessage), "exec") {
-				body = deepSeekToolCallResponse()
+			lower := strings.ToLower(userMessage)
+			if strings.Contains(lower, "shell") {
+				body = deepSeekShellRunToolCallResponseWithCommand("call-1", `printf 'hello from Xira shell'`)
+			} else if strings.Contains(lower, "command") {
+				body = deepSeekCommandRunToolCallResponse()
 			} else {
 				body = deepSeekTextResponse("fake model response: " + userMessage)
 			}
@@ -679,6 +1122,13 @@ func hasToolResponse(messages []deepseek.Message) bool {
 	return false
 }
 
+func lastRole(messages []deepseek.Message) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	return messages[len(messages)-1].Role
+}
+
 func lastUserMessage(messages []deepseek.Message) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == "user" {
@@ -702,7 +1152,22 @@ func deepSeekTextResponse(text string) string {
 	return string(data)
 }
 
-func deepSeekToolCallResponse() string {
+func deepSeekCommandRunToolCallResponse() string {
+	return deepSeekToolCallResponseWithArgs("call-1", "command_run", map[string]any{
+		"program": "printf",
+		"args":    []string{"hello from Xira command"},
+	})
+}
+
+func deepSeekShellRunToolCallResponseWithCommand(id, command string) string {
+	return deepSeekShellRunToolCallResponseWithArgs(id, map[string]any{"command": command})
+}
+
+func deepSeekShellRunToolCallResponseWithArgs(id string, args map[string]any) string {
+	return deepSeekToolCallResponseWithArgs(id, "shell_run", args)
+}
+
+func deepSeekToolCallResponseWithArgs(id, name string, args map[string]any) string {
 	data, _ := json.Marshal(map[string]any{
 		"model": "deepseek-v4-flash",
 		"choices": []map[string]any{{
@@ -710,16 +1175,21 @@ func deepSeekToolCallResponse() string {
 			"message": map[string]any{
 				"role": "assistant",
 				"tool_calls": []map[string]any{{
-					"id":   "call-1",
+					"id":   id,
 					"type": "function",
 					"function": map[string]any{
-						"name":      "exec",
-						"arguments": `{"action":"run","command":"printf 'hello from Xira exec'"}`,
+						"name":      name,
+						"arguments": mustMarshalString(args),
 					},
 				}},
 			},
 		}},
 	})
+	return string(data)
+}
+
+func mustMarshalString(value any) string {
+	data, _ := json.Marshal(value)
 	return string(data)
 }
 
@@ -770,7 +1240,9 @@ model_policy:
   stream: true
   temperature: 0.2
 tools:
-  - exec
+  - command.run
+  - shell.run
+  - tool_output.read
   - read_file
   - write_file
   - list_dir

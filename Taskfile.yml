@@ -85,7 +85,7 @@ tasks:
     cmds:
       - rm -rf {{.SMOKE_ROOT}}
       - go run ./apps/xira/cmd/xira version
-      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} --run-root {{.SMOKE_ROOT}} agent run --message "please call exec"
+      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} --run-root {{.SMOKE_ROOT}} agent run --message "please call command"
       - test -f {{.SMOKE_ROOT}}/*/run.yaml
 
   clean:

@@ -68,6 +68,10 @@ func (s *FileStore) Root() string {
 }
 
 func (s *FileStore) AppendAgentTurn(input AgentTurnInput, messages []Message) error {
+	return s.AppendAgentMessages(input, messages)
+}
+
+func (s *FileStore) AppendAgentMessages(input AgentTurnInput, messages []Message) error {
 	if s == nil {
 		return nil
 	}
@@ -326,7 +330,15 @@ func compactMessages(messages []Message) []Message {
 	out := make([]Message, 0, len(messages))
 	for _, msg := range messages {
 		msg.Role = strings.TrimSpace(msg.Role)
+		msg.Kind = strings.TrimSpace(msg.Kind)
+		if msg.Kind == "" {
+			msg.Kind = MessageKindMessage
+		}
 		msg.Content = strings.TrimSpace(msg.Content)
+		msg.ToolCallID = strings.TrimSpace(msg.ToolCallID)
+		msg.ToolName = strings.TrimSpace(msg.ToolName)
+		msg.AgentID = strings.TrimSpace(msg.AgentID)
+		msg.RunID = strings.TrimSpace(msg.RunID)
 		if msg.Role == "" || msg.Content == "" {
 			continue
 		}
