@@ -110,6 +110,32 @@ func TestMergeToolCallDeltasAppendsFunctionNameFragments(t *testing.T) {
 	}
 }
 
+func TestMergeToolCallDeltasPreservesWhitespaceArgumentFragments(t *testing.T) {
+	calls := mergeToolCallDeltas(nil, []ToolCall{{
+		Index: 0,
+		ID:    "call-1",
+		Type:  "function",
+		Function: ToolCallFunction{
+			Name:      "shell_run",
+			Arguments: `{"command":"wxview contacts --format json`,
+		},
+	}})
+	for _, fragment := range []string{" ", "2>/dev/null\"}"} {
+		calls = mergeToolCallDeltas(calls, []ToolCall{{
+			Index: 0,
+			Function: ToolCallFunction{
+				Arguments: fragment,
+			},
+		}})
+	}
+	if len(calls) != 1 {
+		t.Fatalf("tool calls = %+v", calls)
+	}
+	if calls[0].Function.Arguments != `{"command":"wxview contacts --format json 2>/dev/null"}` {
+		t.Fatalf("tool call arguments = %q", calls[0].Function.Arguments)
+	}
+}
+
 func TestMergeFullToolCallsReplacesFunctionFields(t *testing.T) {
 	calls := mergeFullToolCalls(nil, []ToolCall{{
 		Index: 0,

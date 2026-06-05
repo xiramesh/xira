@@ -633,7 +633,7 @@ func mergeToolCalls(existing, calls []ToolCall, appendFragments bool) []ToolCall
 				current.Function.Name = call.Function.Name
 			}
 		}
-		if strings.TrimSpace(call.Function.Arguments) != "" {
+		if call.Function.Arguments != "" {
 			if appendFragments {
 				current.Function.Arguments += call.Function.Arguments
 			} else {

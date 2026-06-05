@@ -4,8 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuiltinRegistryFiltersAllowedTools(t *testing.T) {
@@ -246,5 +248,30 @@ func TestShellRunSupportsPipesAndRedirection(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "out.txt")); err != nil {
 		t.Fatalf("expected shell output file: %v", err)
+	}
+}
+
+func TestShellRunTimeoutCleansUpPipelineChildren(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell pipeline semantics")
+	}
+	workspace := t.TempDir()
+	registry := NewBuiltinRegistry(workspace, []string{"shell.run"})
+
+	start := time.Now()
+	out, err := registry.Execute(context.Background(), "shell.run", map[string]any{
+		"command":         "sleep 3 | cat",
+		"timeout_seconds": 1,
+	})
+	elapsed := time.Since(start)
+
+	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("shell.run error = %v output=%+v, want deadline exceeded", err, out)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("shell.run returned after %s, want close to 1s timeout", elapsed)
+	}
+	if out["exit_code"] != -1 {
+		t.Fatalf("exit_code = %+v, want -1", out["exit_code"])
 	}
 }

@@ -84,6 +84,7 @@ func (t *CommandRunTool) Execute(ctx context.Context, args map[string]any) (map[
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, program, argv...)
+	configureCommandCancellation(cmd)
 	cmd.Dir = cwd
 	return runProcess(runCtx, cmd, map[string]any{
 		"tool":    t.Name(),
@@ -130,6 +131,7 @@ func (t *ShellRunTool) Execute(ctx context.Context, args map[string]any) (map[st
 
 	shell, shellArgs := shellCommand(command)
 	cmd := exec.CommandContext(runCtx, shell, shellArgs...)
+	configureCommandCancellation(cmd)
 	cmd.Dir = cwd
 	return runProcess(runCtx, cmd, map[string]any{
 		"tool":    t.Name(),
