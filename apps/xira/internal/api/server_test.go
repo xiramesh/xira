@@ -222,6 +222,47 @@ func TestXiraGardenEventsWebSocketReceivesChannelEvents(t *testing.T) {
 	}
 }
 
+func TestChannelEventFilterKeepsChildRunCompatibility(t *testing.T) {
+	runIDs := map[string]struct{}{"parent-run": {}}
+	child := frt.RuntimeEvent{
+		RunID:  "child-run",
+		Kind:   "agent.delegate.started",
+		Source: "runtime",
+		Payload: map[string]any{
+			"channel":       "xiragarden",
+			"entrypoint_id": "xiragarden-default",
+			"parent_run_id": "parent-run",
+			"child_run_id":  "child-run",
+		},
+		Correlation: &frt.RuntimeEventCorrelation{
+			ParentRunID: "parent-run",
+			ChildRunID:  "child-run",
+		},
+	}
+	if !eventBelongsToChannel(child, "xiragarden", runIDs) {
+		t.Fatalf("child event should belong to channel")
+	}
+	if _, ok := runIDs["child-run"]; !ok {
+		t.Fatalf("child run id was not remembered: %+v", runIDs)
+	}
+
+	scoped := frt.RuntimeEvent{
+		RunID:  "scoped-child-run",
+		Kind:   "agent.delegate.completed",
+		Source: "runtime",
+		Scope:  &frt.RuntimeEventScope{Channel: "xiragarden"},
+		Payload: map[string]any{
+			"channel": "evil-channel",
+		},
+	}
+	if !eventBelongsToChannel(scoped, "xiragarden", runIDs) {
+		t.Fatalf("scoped child event should belong to channel")
+	}
+	if eventBelongsToChannel(scoped, "evil-channel", map[string]struct{}{}) {
+		t.Fatalf("payload channel should not override scoped channel")
+	}
+}
+
 func TestEntrypointPairingAPIUsesChannelControls(t *testing.T) {
 	controls := &fakeChannelControls{
 		pairing: channelcontrol.PairingSnapshot{

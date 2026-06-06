@@ -48,14 +48,89 @@ type TurnResponse struct {
 }
 
 type RuntimeEvent struct {
-	ID       string         `json:"id" yaml:"id"`
-	RunID    string         `json:"run_id,omitempty" yaml:"run_id,omitempty"`
-	Kind     string         `json:"kind" yaml:"kind"`
-	Time     time.Time      `json:"time" yaml:"time"`
-	Source   string         `json:"source" yaml:"source"`
-	Severity string         `json:"severity,omitempty" yaml:"severity,omitempty"`
-	Message  string         `json:"message,omitempty" yaml:"message,omitempty"`
-	Payload  map[string]any `json:"payload,omitempty" yaml:"payload,omitempty"`
+	ID            string                   `json:"id" yaml:"id"`
+	SchemaVersion int                      `json:"schema_version" yaml:"schema_version"`
+	RunID         string                   `json:"run_id,omitempty" yaml:"run_id,omitempty"`
+	Kind          string                   `json:"kind" yaml:"kind"`
+	Time          time.Time                `json:"time" yaml:"time"`
+	Source        string                   `json:"source" yaml:"source"`
+	SourceDetail  *RuntimeEventSource      `json:"source_detail,omitempty" yaml:"source_detail,omitempty"`
+	Scope         *RuntimeEventScope       `json:"scope,omitempty" yaml:"scope,omitempty"`
+	Correlation   *RuntimeEventCorrelation `json:"correlation,omitempty" yaml:"correlation,omitempty"`
+	Visibility    *RuntimeEventVisibility  `json:"visibility,omitempty" yaml:"visibility,omitempty"`
+	Severity      string                   `json:"severity,omitempty" yaml:"severity,omitempty"`
+	Message       string                   `json:"message,omitempty" yaml:"message,omitempty"`
+	Payload       map[string]any           `json:"payload,omitempty" yaml:"payload,omitempty"`
+}
+
+type RuntimeEventSource struct {
+	Component string `json:"component,omitempty" yaml:"component,omitempty"`
+	Name      string `json:"name,omitempty" yaml:"name,omitempty"`
+}
+
+type RuntimeEventScope struct {
+	EntrypointID          string `json:"entrypoint_id,omitempty" yaml:"entrypoint_id,omitempty"`
+	Channel               string `json:"channel,omitempty" yaml:"channel,omitempty"`
+	Account               string `json:"account,omitempty" yaml:"account,omitempty"`
+	ChannelAppID          string `json:"channel_app_id,omitempty" yaml:"channel_app_id,omitempty"`
+	BotID                 string `json:"bot_id,omitempty" yaml:"bot_id,omitempty"`
+	ConversationSessionID string `json:"conversation_session_id,omitempty" yaml:"conversation_session_id,omitempty"`
+	AgentSessionID        string `json:"agent_session_id,omitempty" yaml:"agent_session_id,omitempty"`
+	RunID                 string `json:"run_id,omitempty" yaml:"run_id,omitempty"`
+	AgentID               string `json:"agent_id,omitempty" yaml:"agent_id,omitempty"`
+	ChildAgentID          string `json:"child_agent_id,omitempty" yaml:"child_agent_id,omitempty"`
+	ChatID                string `json:"chat_id,omitempty" yaml:"chat_id,omitempty"`
+	ChatType              string `json:"chat_type,omitempty" yaml:"chat_type,omitempty"`
+	TopicID               string `json:"topic_id,omitempty" yaml:"topic_id,omitempty"`
+	SpaceID               string `json:"space_id,omitempty" yaml:"space_id,omitempty"`
+	SpaceType             string `json:"space_type,omitempty" yaml:"space_type,omitempty"`
+	SenderID              string `json:"sender_id,omitempty" yaml:"sender_id,omitempty"`
+	MessageID             string `json:"message_id,omitempty" yaml:"message_id,omitempty"`
+	ReplyToMessageID      string `json:"reply_to_message_id,omitempty" yaml:"reply_to_message_id,omitempty"`
+	ReplyToSenderID       string `json:"reply_to_sender_id,omitempty" yaml:"reply_to_sender_id,omitempty"`
+	DelegationDepth       int    `json:"delegation_depth,omitempty" yaml:"delegation_depth,omitempty"`
+}
+
+type RuntimeEventCorrelation struct {
+	TraceID       string `json:"trace_id,omitempty" yaml:"trace_id,omitempty"`
+	ParentRunID   string `json:"parent_run_id,omitempty" yaml:"parent_run_id,omitempty"`
+	ChildRunID    string `json:"child_run_id,omitempty" yaml:"child_run_id,omitempty"`
+	ParentEventID string `json:"parent_event_id,omitempty" yaml:"parent_event_id,omitempty"`
+	ToolCallID    string `json:"tool_call_id,omitempty" yaml:"tool_call_id,omitempty"`
+}
+
+type RuntimeEventVisibility struct {
+	Conversation bool `json:"conversation" yaml:"conversation"`
+	Activity     bool `json:"activity" yaml:"activity"`
+	Inspector    bool `json:"inspector" yaml:"inspector"`
+	Audit        bool `json:"audit" yaml:"audit"`
+}
+
+type AgentRegistryEntry struct {
+	ID            string   `json:"id" yaml:"id"`
+	Name          string   `json:"name" yaml:"name"`
+	Version       string   `json:"version" yaml:"version"`
+	Description   string   `json:"description,omitempty" yaml:"description,omitempty"`
+	ProfileSource string   `json:"profile_source,omitempty" yaml:"profile_source,omitempty"`
+	Installed     bool     `json:"installed" yaml:"installed"`
+	Valid         bool     `json:"valid" yaml:"valid"`
+	Enabled       bool     `json:"enabled" yaml:"enabled"`
+	Discoverable  bool     `json:"discoverable" yaml:"discoverable"`
+	Tools         []string `json:"tools,omitempty" yaml:"tools,omitempty"`
+	InputSchema   string   `json:"input_schema" yaml:"input_schema"`
+	OutputSchema  string   `json:"output_schema" yaml:"output_schema"`
+}
+
+type DelegateAgentResult struct {
+	AgentID        string   `json:"agent_id" yaml:"agent_id"`
+	RunID          string   `json:"run_id" yaml:"run_id"`
+	Status         string   `json:"status" yaml:"status"`
+	Summary        string   `json:"summary,omitempty" yaml:"summary,omitempty"`
+	EvidenceRefs   []string `json:"evidence_refs,omitempty" yaml:"evidence_refs,omitempty"`
+	Limitations    []string `json:"limitations,omitempty" yaml:"limitations,omitempty"`
+	Confidence     string   `json:"confidence,omitempty" yaml:"confidence,omitempty"`
+	FollowupNeeded bool     `json:"followup_needed,omitempty" yaml:"followup_needed,omitempty"`
+	Error          string   `json:"error,omitempty" yaml:"error,omitempty"`
 }
 
 type AuditEvent struct {

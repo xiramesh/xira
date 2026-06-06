@@ -43,6 +43,7 @@ func NewServer(rt *frt.Service, addr string, controls ...ChannelControls) *Serve
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/status", s.status)
 	mux.HandleFunc("/api/v1/agents", s.agents)
+	mux.HandleFunc("/api/v1/agent-registry", s.agentRegistry)
 	mux.HandleFunc("/api/v1/agent-runs", s.agentRuns)
 	mux.HandleFunc("/api/v1/events", s.events)
 	mux.HandleFunc("/api/v1/channels/xiragarden/messages", s.xiragardenMessages)
@@ -103,6 +104,10 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) agents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.runtime.Agents())
+}
+
+func (s *Server) agentRegistry(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.runtime.AgentRegistry())
 }
 
 func (s *Server) agentRuns(w http.ResponseWriter, r *http.Request) {
@@ -293,11 +298,38 @@ func eventBelongsToChannel(evt frt.RuntimeEvent, channelName string, runIDs map[
 			return true
 		}
 	}
-	if normalizeChannel(payloadString(evt.Payload, "channel")) != channelName {
+	if evt.Correlation != nil {
+		if _, ok := runIDs[evt.Correlation.ParentRunID]; ok {
+			if evt.RunID != "" {
+				runIDs[evt.RunID] = struct{}{}
+			}
+			if evt.Correlation.ChildRunID != "" {
+				runIDs[evt.Correlation.ChildRunID] = struct{}{}
+			}
+			return true
+		}
+		if _, ok := runIDs[evt.Correlation.ChildRunID]; ok {
+			if evt.RunID != "" {
+				runIDs[evt.RunID] = struct{}{}
+			}
+			return true
+		}
+	}
+	var eventChannel string
+	if evt.Scope != nil {
+		eventChannel = evt.Scope.Channel
+	}
+	if eventChannel == "" {
+		eventChannel = payloadString(evt.Payload, "channel")
+	}
+	if normalizeChannel(eventChannel) != channelName {
 		return false
 	}
 	if evt.RunID != "" {
 		runIDs[evt.RunID] = struct{}{}
+	}
+	if evt.Correlation != nil && evt.Correlation.ChildRunID != "" {
+		runIDs[evt.Correlation.ChildRunID] = struct{}{}
 	}
 	return true
 }

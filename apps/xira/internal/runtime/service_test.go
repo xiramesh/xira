@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	adksession "google.golang.org/adk/session"
+	adktool "google.golang.org/adk/tool"
 
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/model/deepseek"
@@ -277,6 +278,845 @@ func TestRuntimeToolDefinitionsDoNotExposeExec(t *testing.T) {
 		if tool.Name() == "exec" {
 			t.Fatalf("ADK tools exposed exec: %+v", tool)
 		}
+	}
+}
+
+func TestAgentRegistryExposesLoadedValidEnabledProfiles(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	entries := rt.AgentRegistry()
+	if len(entries) != 2 {
+		t.Fatalf("registry entries = %+v", entries)
+	}
+	for _, entry := range entries {
+		if !entry.Installed || !entry.Valid || !entry.Enabled || !entry.Discoverable {
+			t.Fatalf("registry entry should be loaded+valid+enabled: %+v", entry)
+		}
+		if entry.InputSchema != "delegate_task_v1" || entry.OutputSchema != "delegate_result_v1" {
+			t.Fatalf("registry schemas = %+v", entry)
+		}
+	}
+	if entries[0].ID != agents.DefaultAgentID {
+		t.Fatalf("default agent should be listed first: %+v", entries)
+	}
+}
+
+func TestRuntimeOwnedToolsAreInjectedByPolicyOnly(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	defaultProfile := agents.BuiltinXiraAssistant()
+	researchProfile := agents.BuiltinResearchAssistant()
+	for _, name := range []string{"delegate_agent", "emit_status"} {
+		if rt.toolRegistry(defaultProfile).Has(name) {
+			t.Fatalf("%s should not be exposed by ordinary tool registry", name)
+		}
+	}
+
+	adkTools, err := rt.adkTools(context.Background(), defaultProfile, func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {}, func(ToolCallRecord) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !adkToolNames(adkTools)["delegate_agent"] || !adkToolNames(adkTools)["emit_status"] {
+		t.Fatalf("runtime-owned tools missing for delegated caller: %+v", adkToolNames(adkTools))
+	}
+
+	adkTools, err = rt.adkTools(context.Background(), researchProfile, func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {}, func(ToolCallRecord) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adkToolNames(adkTools)["delegate_agent"] {
+		t.Fatalf("delegate_agent should not be injected for non-delegating profile: %+v", adkToolNames(adkTools))
+	}
+	if !adkToolNames(adkTools)["emit_status"] {
+		t.Fatalf("emit_status should be available as status producer: %+v", adkToolNames(adkTools))
+	}
+}
+
+func TestRuntimeEventsUseV1EnvelopeWithLegacyFields(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		Message: "please call command",
+		Channel: "xiragarden",
+		UserID:  "user-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawCompleted, sawFinished bool
+	for _, evt := range resp.Events {
+		if evt.SchemaVersion != 1 {
+			t.Fatalf("event missing schema_version=1: %+v", evt)
+		}
+		if evt.RunID == "" || evt.Source == "" || evt.Payload == nil {
+			t.Fatalf("event missing legacy fields: %+v", evt)
+		}
+		if evt.SourceDetail == nil || evt.SourceDetail.Component == "" {
+			t.Fatalf("event missing source_detail: %+v", evt)
+		}
+		if evt.Scope == nil || evt.Scope.RunID != resp.RunID || evt.Scope.AgentID != resp.AgentID || evt.Scope.Channel != "xiragarden" {
+			t.Fatalf("event scope = %+v, want run/agent/channel", evt.Scope)
+		}
+		if got := evt.Payload["channel"]; got != "xiragarden" {
+			t.Fatalf("event payload channel = %v", got)
+		}
+		if evt.Visibility == nil || !evt.Visibility.Inspector {
+			t.Fatalf("event visibility = %+v", evt.Visibility)
+		}
+		sawCompleted = sawCompleted || evt.Kind == "tool.completed"
+		sawFinished = sawFinished || evt.Kind == "tool.finished"
+	}
+	if !sawCompleted || !sawFinished {
+		t.Fatalf("events missing tool.completed/tool.finished compatibility: %+v", eventKinds(resp.Events))
+	}
+}
+
+func TestToolStartedEventInputCannotSpoofRuntimeIdentity(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	runID := "spoof-tool-event-run"
+	base := runtimeEventBase{
+		RunID:        runID,
+		AgentID:      agents.DefaultAgentID,
+		EntrypointID: "xiragarden-default",
+		Channel:      "xiragarden",
+		TraceID:      runID,
+	}
+	var events []RuntimeEvent
+	recordEvent := func(kind, source, message string, payload map[string]any) {
+		events = append(events, newRuntimeEvent(base, kind, source, message, payload, nil))
+	}
+	ctx := contextWithToolTrace(context.Background(), runID)
+	rec := rt.executeToolCall(ctx, agents.BuiltinXiraAssistant(), deepseek.ToolCall{
+		ID:   "spoof-tool-input",
+		Type: "function",
+		Function: deepseek.ToolCallFunction{
+			Name: "command.run",
+			Arguments: mustJSON(map[string]any{
+				"program":  "printf",
+				"args":     []string{"ok"},
+				"channel":  "evil-channel",
+				"run_id":   "evil-run",
+				"agent_id": "evil-agent",
+			}),
+		},
+	}, recordEvent, func(string, string, bool, string, map[string]any) {})
+	if rec.Error != "" {
+		t.Fatalf("tool call failed: %+v", rec)
+	}
+	evt, ok := findEvent(events, "tool.started")
+	if !ok {
+		t.Fatalf("events missing tool.started: %+v", eventKinds(events))
+	}
+	if evt.Payload["channel"] != "xiragarden" || evt.Payload["run_id"] != runID || evt.Payload["agent_id"] != agents.DefaultAgentID {
+		t.Fatalf("runtime identity was not authoritative: %+v", evt.Payload)
+	}
+	if evt.Payload["input"] == nil {
+		t.Fatalf("tool input should be nested under payload.input: %+v", evt.Payload)
+	}
+}
+
+func TestToolOnlyTurnEmitsNoDelegationEvents(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		Message: "please call command",
+		Channel: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, evt := range resp.Events {
+		if strings.HasPrefix(evt.Kind, "agent.delegate.") || strings.HasPrefix(evt.Kind, "context.packet.") {
+			t.Fatalf("tool-only turn emitted delegation event %q: %+v", evt.Kind, eventKinds(resp.Events))
+		}
+	}
+}
+
+func TestAssistantStatusToolEmitsStatusEventWithoutPersistingContent(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		body := deepSeekToolCallResponseWithArgs("status-1", "emit_status", map[string]any{
+			"message": "I am checking local context.",
+		})
+		if lastRole(req.Messages) == "tool" {
+			body = deepSeekTextResponse("status final")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "emit status", Channel: "test", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("status tool should not persist as tool transcript: %+v", resp.ToolCalls)
+	}
+	statusEvent, ok := findEvent(resp.Events, "assistant.status")
+	if !ok {
+		t.Fatalf("events missing assistant.status: %+v", eventKinds(resp.Events))
+	}
+	if statusEvent.Message != "I am checking local context." || statusEvent.Payload["producer"] != "runtime.status_tool" {
+		t.Fatalf("status event = %+v", statusEvent)
+	}
+	if statusEvent.Visibility == nil || !statusEvent.Visibility.Conversation {
+		t.Fatalf("status visibility = %+v", statusEvent.Visibility)
+	}
+	history := rt.SessionManager().AgentHistory(resp.SessionID, resp.AgentID)
+	if len(history) != 2 {
+		t.Fatalf("session history len = %d, want user+final only: %+v", len(history), history)
+	}
+	for _, msg := range history {
+		if strings.Contains(msg.Content, "I am checking local context.") {
+			t.Fatalf("status text leaked into session history: %+v", history)
+		}
+	}
+}
+
+func TestAuthorizedDelegationEmitsProgressAndUsesEphemeralChildRun(t *testing.T) {
+	var childRequestSeen bool
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		system := ""
+		if len(req.Messages) > 0 {
+			system = fmt.Sprint(req.Messages[0].Content)
+		}
+		var body string
+		switch {
+		case lastRole(req.Messages) == "tool":
+			body = deepSeekTextResponse("parent synthesized final")
+		case strings.Contains(system, "Current Xira agent: research-assistant"):
+			childRequestSeen = true
+			body = deepSeekTextResponse(`{"summary":"child evidence summary","limitations":["fixture only"],"confidence":"high","followup_needed":false}`)
+		default:
+			body = deepSeekToolCallResponseWithArgs("delegate-1", "delegate_agent", map[string]any{
+				"agent_id":               agents.ResearchAssistantAgentID,
+				"task":                   "Check local profile and tool registry evidence.",
+				"context_refs":           []string{"conversation://current-turn/user-message"},
+				"expected_output_schema": "evidence_summary_v1",
+			})
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	runRoot := filepath.Join(t.TempDir(), "runs")
+	rt := newTestService(t, Config{
+		RunRoot:        runRoot,
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "please delegate", Channel: "xiragarden", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !childRequestSeen {
+		t.Fatal("child agent request was not sent")
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "delegate_agent" || resp.ToolCalls[0].Error != "" {
+		t.Fatalf("delegate tool call = %+v", resp.ToolCalls)
+	}
+	childRunID, _ := resp.ToolCalls[0].Output["run_id"].(string)
+	if childRunID == "" {
+		t.Fatalf("delegate output missing child run id: %+v", resp.ToolCalls[0].Output)
+	}
+	childRun, err := rt.RunStore().Load(childRunID)
+	if err != nil {
+		t.Fatalf("load child run %q: %v", childRunID, err)
+	}
+	if childRun.AgentID != agents.ResearchAssistantAgentID || !strings.HasPrefix(childRun.SessionID, "ephemeral_worker:") {
+		t.Fatalf("child run = %+v", childRun)
+	}
+	if history := rt.SessionManager().AgentHistory(resp.SessionID, agents.ResearchAssistantAgentID); len(history) != 0 {
+		t.Fatalf("ephemeral child should not persist research assistant session history: %+v", history)
+	}
+	for _, kind := range []string{
+		"agent.delegate.requested",
+		"agent.delegate.allowed",
+		"context.packet.started",
+		"context.item.included",
+		"context.packet.completed",
+		"agent.delegate.started",
+		"agent.delegate.completed",
+		"agent.delegate.result_delivered",
+	} {
+		evt, ok := findEvent(resp.Events, kind)
+		if !ok {
+			t.Fatalf("events missing %s: %+v", kind, eventKinds(resp.Events))
+		}
+		if evt.Correlation == nil || evt.Correlation.ParentRunID != resp.RunID || evt.Correlation.ChildRunID != childRunID {
+			t.Fatalf("%s correlation = %+v", kind, evt.Correlation)
+		}
+		if evt.Payload["channel"] != "xiragarden" || evt.Payload["entrypoint_id"] == "" {
+			t.Fatalf("%s missing legacy channel payload keys: %+v", kind, evt.Payload)
+		}
+	}
+	if refs, ok := resp.ToolCalls[0].Output["evidence_refs"].([]string); ok && len(refs) > 0 {
+		if !strings.HasPrefix(refs[0], "context://"+childRunID+"/context/") {
+			t.Fatalf("evidence refs not child-local: %+v", refs)
+		}
+	} else {
+		t.Fatalf("delegate output missing runtime context evidence refs: %+v", resp.ToolCalls[0].Output)
+	}
+	if _, err := os.Stat(filepath.Join(runRoot, childRunID, "artifacts", "context", "ctxitem_current_user_message.json")); err != nil {
+		t.Fatalf("child context item was not materialized: %v", err)
+	}
+	packet := readJSONMap(t, filepath.Join(runRoot, childRunID, "artifacts", "context", "context_packet.json"))
+	target, _ := packet["target"].(map[string]any)
+	for _, key := range []string{"profile_instruction_hash", "profile_instruction_ref", "allowed_tools_hash"} {
+		if strings.TrimSpace(fmt.Sprint(target[key])) == "" {
+			t.Fatalf("context packet target missing %s: %+v", key, target)
+		}
+	}
+	workerTarget := delegateWorkerProfile(agents.BuiltinResearchAssistant())
+	if target["profile_instruction_hash"] != instructionHash(rt.instructionText(workerTarget)) {
+		t.Fatalf("context packet target instruction hash = %v, want effective child instruction hash", target["profile_instruction_hash"])
+	}
+	if target["profile_instruction_hash"] == instructionHash(agents.BuiltinResearchAssistant().InstructionText()) {
+		t.Fatalf("context packet target instruction hash should not use raw profile instructions only")
+	}
+	if gotTools, wantTools := strings.Join(stringSliceFromAny(target["allowed_tools"]), "\n"), strings.Join(rt.toolRegistry(workerTarget).List(), "\n"); gotTools != wantTools {
+		t.Fatalf("context packet allowed tools = %q, want actual registry tools %q", gotTools, wantTools)
+	}
+	items, _ := packet["items"].([]any)
+	if len(items) == 0 {
+		t.Fatalf("context packet missing items: %+v", packet)
+	}
+	first, _ := items[0].(map[string]any)
+	for _, key := range []string{"content_hash", "source_run_id", "source_ref"} {
+		if strings.TrimSpace(fmt.Sprint(first[key])) == "" {
+			t.Fatalf("context item missing %s: %+v", key, first)
+		}
+	}
+}
+
+func TestContextPacketTargetUsesEffectiveInstructionAndActualRegistryTools(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	childRunID := "child-run"
+	if err := rt.RunStore().InitRun(childRunID); err != nil {
+		t.Fatal(err)
+	}
+	target := agents.BuiltinResearchAssistant()
+	target.Permissions.Tools = []string{"missing.tool", "command.run"}
+	workerTarget := delegateWorkerProfile(target)
+	packet, _, err := rt.buildDelegateContextPacket(runExecutionContext{
+		Base: runtimeEventBase{
+			RunID:                 "parent-run",
+			AgentID:               agents.DefaultAgentID,
+			ConversationSessionID: "conversation:test",
+			AgentSessionID:        "session:test",
+		},
+		Profile:     agents.BuiltinXiraAssistant(),
+		UserMessage: "parent message",
+	}, workerTarget, childRunID, delegateAgentInput{
+		Task:                 "check provenance",
+		ExpectedOutputSchema: delegateResultSchemaV1,
+	}, delegateCorrelationPayload("parent-run", childRunID, "delegate-call", agents.DefaultAgentID, target.ID), func(string, string, string, map[string]any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetPacket := packet.Target
+	if targetPacket["profile_instruction_hash"] != instructionHash(rt.instructionText(workerTarget)) {
+		t.Fatalf("profile_instruction_hash = %v, want effective worker instruction hash", targetPacket["profile_instruction_hash"])
+	}
+	if targetPacket["profile_instruction_hash"] == instructionHash(target.InstructionText()) {
+		t.Fatalf("profile_instruction_hash should include runtime worker instruction boundary")
+	}
+	if gotTools, wantTools := strings.Join(stringSliceFromAny(targetPacket["allowed_tools"]), "\n"), "command.run"; gotTools != wantTools {
+		t.Fatalf("allowed_tools = %q, want actual registry tools %q", gotTools, wantTools)
+	}
+}
+
+func TestDelegateRejectsUnauthorizedDepthAndParallelBeforeChildRun(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	base := runtimeEventBase{
+		RunID:        "parent-run",
+		AgentID:      agents.DefaultAgentID,
+		EntrypointID: "test-default",
+		Channel:      "test",
+		TraceID:      "parent-run",
+	}
+	recordEvent := func(string, string, string, map[string]any) {}
+	recordAudit := func(string, string, bool, string, map[string]any) {}
+	input := delegateAgentInput{
+		AgentID:              agents.ResearchAssistantAgentID,
+		Task:                 "child task",
+		ExpectedOutputSchema: delegateResultSchemaV1,
+	}
+
+	unauthorized := agents.BuiltinXiraAssistant()
+	unauthorized.Delegation.Allow = []string{"other-agent"}
+	ctx := contextWithRunExecution(context.Background(), runExecutionContext{Base: base, Profile: unauthorized, UserMessage: "parent"})
+	output, err := rt.executeDelegateAgentTool(ctx, unauthorized, input, nil, nil, "delegate-unauthorized", recordEvent, recordAudit)
+	if err == nil || !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("unauthorized error = %v output=%+v", err, output)
+	}
+	assertRejectedChildRunNotCreated(t, rt, output)
+
+	depthLimited := agents.BuiltinXiraAssistant()
+	depthLimited.Delegation.MaxDepth = 1
+	depthBase := base
+	depthBase.DelegationDepth = 1
+	ctx = contextWithRunExecution(context.Background(), runExecutionContext{Base: depthBase, Profile: depthLimited, UserMessage: "parent"})
+	output, err = rt.executeDelegateAgentTool(ctx, depthLimited, input, nil, nil, "delegate-depth", recordEvent, recordAudit)
+	if err == nil || !strings.Contains(err.Error(), "exceeds max_depth") {
+		t.Fatalf("depth error = %v output=%+v", err, output)
+	}
+	assertRejectedChildRunNotCreated(t, rt, output)
+
+	parallelLimited := agents.BuiltinXiraAssistant()
+	parallelLimited.Delegation.MaxParallel = 1
+	if _, ok := rt.reserveChildSlot(base.RunID, 1); !ok {
+		t.Fatal("failed to reserve initial child slot")
+	}
+	defer rt.releaseChildSlot(base.RunID)
+	ctx = contextWithRunExecution(context.Background(), runExecutionContext{Base: base, Profile: parallelLimited, UserMessage: "parent"})
+	output, err = rt.executeDelegateAgentTool(ctx, parallelLimited, input, nil, nil, "delegate-parallel", recordEvent, recordAudit)
+	if err == nil || !strings.Contains(err.Error(), "max_parallel") {
+		t.Fatalf("parallel error = %v output=%+v", err, output)
+	}
+	assertRejectedChildRunNotCreated(t, rt, output)
+}
+
+func TestDelegationMaxDepthZeroFromProfileRejectsChildBeforeRun(t *testing.T) {
+	instance := writeRuntimeFixture(t, agents.DefaultAgentID, []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "workspace", "agents", "xira-assistant", "PROFILE.md"), `---
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.1
+description: Default Xira runtime assistant.
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-flash
+delegation:
+  enabled: true
+  allow:
+    - research-assistant
+  max_depth: 0
+verification:
+  default_checks:
+    - final_response_non_empty
+---
+# Working Contract
+
+Do not create child runs.
+`)
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
+	caller, ok := rt.agents.Get(agents.DefaultAgentID)
+	if !ok {
+		t.Fatal("missing xira assistant")
+	}
+	if policy := caller.NormalizedDelegationPolicy(); policy.MaxDepth != 0 {
+		t.Fatalf("caller max_depth = %d, want explicit 0", policy.MaxDepth)
+	}
+	base := runtimeEventBase{
+		RunID:        "parent-run",
+		AgentID:      agents.DefaultAgentID,
+		EntrypointID: "test-default",
+		Channel:      "test",
+		TraceID:      "parent-run",
+	}
+	ctx := contextWithRunExecution(context.Background(), runExecutionContext{Base: base, Profile: caller, UserMessage: "parent"})
+	output, err := rt.executeDelegateAgentTool(ctx, caller, delegateAgentInput{
+		AgentID:              agents.ResearchAssistantAgentID,
+		Task:                 "should be depth blocked",
+		ExpectedOutputSchema: delegateResultSchemaV1,
+	}, nil, nil, "delegate-depth-zero", func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {})
+	if err == nil || !strings.Contains(err.Error(), "exceeds max_depth 0") {
+		t.Fatalf("depth-zero error = %v output=%+v", err, output)
+	}
+	assertRejectedChildRunNotCreated(t, rt, output)
+}
+
+func TestDelegationContextTruncationIsVisibleToParent(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		system := ""
+		if len(req.Messages) > 0 {
+			system = fmt.Sprint(req.Messages[0].Content)
+		}
+		var body string
+		switch {
+		case lastRole(req.Messages) == "tool":
+			body = deepSeekTextResponse("parent final after truncation")
+		case strings.Contains(system, "Current Xira agent: research-assistant"):
+			body = deepSeekTextResponse(`{"summary":"truncated context handled","confidence":"medium","followup_needed":false}`)
+		default:
+			body = deepSeekToolCallResponseWithArgs("delegate-truncate", "delegate_agent", map[string]any{
+				"agent_id":     agents.ResearchAssistantAgentID,
+				"task":         "summarize bounded context",
+				"context_refs": []string{"conversation://current-turn/user-message"},
+			})
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		Message: strings.Repeat("x", 2500),
+		Channel: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := findEvent(resp.Events, "context.packet.truncated"); !ok {
+		t.Fatalf("events missing context.packet.truncated: %+v", eventKinds(resp.Events))
+	}
+	completed, ok := findEvent(resp.Events, "context.packet.completed")
+	if !ok || completed.Payload["truncated"] != true {
+		t.Fatalf("context.packet.completed = %+v", completed)
+	}
+}
+
+func TestDelegateTimeoutPreventsLateSuccessEvents(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		system := ""
+		if len(req.Messages) > 0 {
+			system = fmt.Sprint(req.Messages[0].Content)
+		}
+		switch {
+		case lastRole(req.Messages) == "tool":
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(deepSeekTextResponse("timeout handled")))}, nil
+		case strings.Contains(system, "Current Xira agent: research-assistant"):
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		default:
+			body := deepSeekToolCallResponseWithArgs("delegate-timeout", "delegate_agent", map[string]any{
+				"agent_id":        agents.ResearchAssistantAgentID,
+				"task":            "slow child work",
+				"max_duration_ms": 1,
+			})
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate slowly", Channel: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := findEvent(resp.Events, "agent.delegate.timeout"); !ok {
+		t.Fatalf("events missing timeout: %+v", eventKinds(resp.Events))
+	}
+	for _, forbidden := range []string{"agent.delegate.completed", "agent.delegate.result_delivered"} {
+		if _, ok := findEvent(resp.Events, forbidden); ok {
+			t.Fatalf("timeout should not emit %s: %+v", forbidden, eventKinds(resp.Events))
+		}
+	}
+	if len(resp.ToolCalls) != 1 || !strings.Contains(resp.ToolCalls[0].Error, "context deadline exceeded") {
+		t.Fatalf("timeout delegate tool call = %+v", resp.ToolCalls)
+	}
+}
+
+func TestDelegateOversizedDurationClampsToPolicyMax(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		system := ""
+		if len(req.Messages) > 0 {
+			system = fmt.Sprint(req.Messages[0].Content)
+		}
+		var body string
+		switch {
+		case lastRole(req.Messages) == "tool":
+			body = deepSeekTextResponse("parent synthesized final")
+		case strings.Contains(system, "Current Xira agent: research-assistant"):
+			body = deepSeekTextResponse(`{"summary":"bounded child completed","confidence":"high","followup_needed":false}`)
+		default:
+			body = deepSeekToolCallResponseWithArgs("delegate-clamped-duration", "delegate_agent", map[string]any{
+				"agent_id":        agents.ResearchAssistantAgentID,
+				"task":            "finish quickly despite oversized request",
+				"max_duration_ms": 300000,
+			})
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate oversized duration", Channel: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed, ok := findEvent(resp.Events, "agent.delegate.allowed")
+	if !ok {
+		t.Fatalf("events missing agent.delegate.allowed: %+v", eventKinds(resp.Events))
+	}
+	if allowed.Payload["requested_max_duration_ms"] != 300000 || allowed.Payload["effective_max_duration_ms"] != 120000 {
+		t.Fatalf("duration was not clamped: %+v", allowed.Payload)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Error != "" {
+		t.Fatalf("oversized duration should not reject delegation: %+v", resp.ToolCalls)
+	}
+}
+
+func TestDelegateAgentRejectsEmptyChildResultAsInvalidChildResult(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		system := ""
+		if len(req.Messages) > 0 {
+			system = fmt.Sprint(req.Messages[0].Content)
+		}
+		var body string
+		switch {
+		case lastRole(req.Messages) == "tool":
+			body = deepSeekTextResponse("empty result rejected")
+		case strings.Contains(system, "Current Xira agent: research-assistant"):
+			body = deepSeekTextResponse(`{}`)
+		default:
+			body = deepSeekToolCallResponseWithArgs("delegate-empty-result", "delegate_agent", map[string]any{
+				"agent_id": agents.ResearchAssistantAgentID,
+				"task":     "return empty result",
+			})
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate empty result", Channel: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "delegate_agent" {
+		t.Fatalf("tool calls = %+v", resp.ToolCalls)
+	}
+	if resp.ToolCalls[0].Output["error"] != "invalid_child_result" || resp.ToolCalls[0].Output["reason"] != "result_schema_failed" {
+		t.Fatalf("empty child result output = %+v", resp.ToolCalls[0].Output)
+	}
+	if _, ok := findEvent(resp.Events, "agent.delegate.completed"); ok {
+		t.Fatalf("invalid child result should not complete: %+v", eventKinds(resp.Events))
+	}
+	failed, ok := findEvent(resp.Events, "agent.delegate.failed")
+	if !ok || failed.Payload["reason"] != "result_schema_failed" || failed.Payload["error"] != "invalid_child_result" || failed.Payload["raw_child_result_path"] == "" {
+		t.Fatalf("invalid child result failure event = %+v", failed)
+	}
+	childRunID, _ := resp.ToolCalls[0].Output["run_id"].(string)
+	if childRunID == "" {
+		t.Fatalf("missing child run id: %+v", resp.ToolCalls[0].Output)
+	}
+	if _, err := os.Stat(filepath.Join(rt.RunStore().RunDir(childRunID), "artifacts", "delegate-result", "rejected.json")); err != nil {
+		t.Fatalf("rejected child result artifact missing: %v", err)
+	}
+}
+
+func TestDelegateAgentRejectsSpoofedRuntimeFieldsBeforeChildRun(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	base := runtimeEventBase{
+		RunID:        "parent-run",
+		AgentID:      agents.DefaultAgentID,
+		EntrypointID: "test-default",
+		Channel:      "test",
+		TraceID:      "parent-run",
+	}
+	var events []RuntimeEvent
+	recordEvent := func(kind, source, message string, payload map[string]any) {
+		events = append(events, newRuntimeEvent(base, kind, source, message, payload, nil))
+	}
+	recordAudit := func(string, string, bool, string, map[string]any) {}
+	caller := agents.BuiltinXiraAssistant()
+	ctx := contextWithRunExecution(context.Background(), runExecutionContext{Base: base, Profile: caller, UserMessage: "parent"})
+	output, err := rt.executeDelegateAgentTool(ctx, caller, delegateAgentInput{
+		AgentID:              agents.ResearchAssistantAgentID,
+		Task:                 "try to spoof runtime fields",
+		ExpectedOutputSchema: delegateResultSchemaV1,
+	}, []string{"metadata", "scope"}, nil, "delegate-spoof", recordEvent, recordAudit)
+	if err == nil || !strings.Contains(err.Error(), "runtime-owned field") {
+		t.Fatalf("spoofed-field error = %v output=%+v", err, output)
+	}
+	assertRejectedChildRunNotCreated(t, rt, output)
+	if _, ok := findEvent(events, "agent.delegate.started"); ok {
+		t.Fatalf("spoofed delegate request should reject before child start: %+v", eventKinds(events))
+	}
+	rejected, ok := findEvent(events, "agent.delegate.rejected")
+	if !ok || !strings.Contains(rejected.Message, "runtime-owned field") {
+		t.Fatalf("missing rejection event: %+v", events)
+	}
+}
+
+func TestDelegateAgentRejectsUnknownInputFieldsBeforeChildRun(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	base := runtimeEventBase{
+		RunID:        "parent-run",
+		AgentID:      agents.DefaultAgentID,
+		EntrypointID: "test-default",
+		Channel:      "test",
+		TraceID:      "parent-run",
+	}
+	var events []RuntimeEvent
+	recordEvent := func(kind, source, message string, payload map[string]any) {
+		events = append(events, newRuntimeEvent(base, kind, source, message, payload, nil))
+	}
+	recordAudit := func(string, string, bool, string, map[string]any) {}
+	caller := agents.BuiltinXiraAssistant()
+	ctx := contextWithRunExecution(context.Background(), runExecutionContext{Base: base, Profile: caller, UserMessage: "parent"})
+	output, err := rt.executeDelegateAgentTool(ctx, caller, delegateAgentInput{
+		AgentID:              agents.ResearchAssistantAgentID,
+		Task:                 "try unknown field",
+		ExpectedOutputSchema: delegateResultSchemaV1,
+	}, nil, []string{"label"}, "delegate-unknown", recordEvent, recordAudit)
+	if err == nil || !strings.Contains(err.Error(), "unsupported field") {
+		t.Fatalf("unknown-field error = %v output=%+v", err, output)
+	}
+	assertRejectedChildRunNotCreated(t, rt, output)
+	rejected, ok := findEvent(events, "agent.delegate.rejected")
+	if !ok || rejected.Payload["unsupported_input_fields"] == nil {
+		t.Fatalf("missing unsupported-field rejection event: %+v", events)
+	}
+}
+
+func TestDelegateAgentRejectsForgedChildResultRefs(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		system := ""
+		if len(req.Messages) > 0 {
+			system = fmt.Sprint(req.Messages[0].Content)
+		}
+		var body string
+		switch {
+		case lastRole(req.Messages) == "tool":
+			body = deepSeekTextResponse("forged result rejected")
+		case strings.Contains(system, "Current Xira agent: research-assistant"):
+			body = deepSeekTextResponse(`{"agent_id":"evil-agent","summary":"bad","evidence_refs":["workspace://secret"],"confidence":"high","followup_needed":false}`)
+		default:
+			body = deepSeekToolCallResponseWithArgs("delegate-forged-result", "delegate_agent", map[string]any{
+				"agent_id": agents.ResearchAssistantAgentID,
+				"task":     "return forged evidence refs",
+			})
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate forged result", Channel: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "delegate_agent" {
+		t.Fatalf("tool calls = %+v", resp.ToolCalls)
+	}
+	if resp.ToolCalls[0].Error == "" || !strings.Contains(resp.ToolCalls[0].Error, "forged") {
+		t.Fatalf("delegate tool should reject forged child output: %+v", resp.ToolCalls[0])
+	}
+	if failed, ok := findEvent(resp.Events, "agent.delegate.failed"); !ok || !strings.Contains(failed.Message, "forged") {
+		t.Fatalf("missing forged-result failure event: %+v", resp.Events)
+	}
+}
+
+func TestDelegateAgentRejectsUnregisteredChildArtifactEvidenceRef(t *testing.T) {
+	childRunID := "child-run"
+	contextRef := "context://" + childRunID + "/context/ctxitem_current_user_message"
+	_, err := validateDelegateAgentResult(
+		`{"summary":"bad artifact ref","evidence_refs":["artifact://child-run/artifacts/tool-outputs/fake.json"],"confidence":"high","followup_needed":false}`,
+		agents.ResearchAssistantAgentID,
+		childRunID,
+		[]string{contextRef},
+		map[string]struct{}{contextRef: {}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "forged delegate result evidence ref") {
+		t.Fatalf("validateDelegateAgentResult error = %v, want forged artifact ref rejection", err)
+	}
+}
+
+func TestDelegateEvidenceRefsAllowExistingChildToolArtifact(t *testing.T) {
+	runRoot := filepath.Join(t.TempDir(), "runs")
+	rt := newTestService(t, Config{RunRoot: runRoot})
+	childRunID := "child-run"
+	if err := rt.RunStore().InitRun(childRunID); err != nil {
+		t.Fatal(err)
+	}
+	rawPath := "artifacts/tool-outputs/call-1.json"
+	if err := writeJSONFile(filepath.Join(rt.RunStore().RunDir(childRunID), filepath.FromSlash(rawPath)), map[string]any{
+		"run_id":       childRunID,
+		"tool_call_id": "call-1",
+		"tool":         "command.run",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	contextRef := "context://" + childRunID + "/context/ctxitem_current_user_message"
+	artifactRef := "artifact://" + childRunID + "/" + rawPath
+	allowed := rt.allowedDelegateEvidenceRefs(childRunID, agents.BuiltinResearchAssistant(), []string{contextRef}, TurnResponse{
+		RunID:   childRunID,
+		AgentID: agents.ResearchAssistantAgentID,
+		ToolCalls: []ToolCallRecord{{
+			RunID:  childRunID,
+			Name:   "command.run",
+			Output: map[string]any{"raw_output_path": rawPath},
+		}},
+	})
+	if _, ok := allowed[artifactRef]; !ok {
+		t.Fatalf("allowed evidence refs missing tool artifact %q: %+v", artifactRef, allowed)
+	}
+	result, err := validateDelegateAgentResult(
+		`{"summary":"tool artifact is real","evidence_refs":["`+artifactRef+`"],"confidence":"high","followup_needed":false}`,
+		agents.ResearchAssistantAgentID,
+		childRunID,
+		[]string{contextRef},
+		allowed,
+	)
+	if err != nil {
+		t.Fatalf("validateDelegateAgentResult returned error: %v", err)
+	}
+	if !containsString(result.EvidenceRefs, artifactRef) {
+		t.Fatalf("result evidence refs missing artifact ref: %+v", result.EvidenceRefs)
+	}
+}
+
+func TestUnauthorizedDelegationRecordsCapabilityGap(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	base := runtimeEventBase{
+		RunID:        "parent-run",
+		AgentID:      agents.DefaultAgentID,
+		EntrypointID: "test-default",
+		Channel:      "test",
+		TraceID:      "parent-run",
+	}
+	var events []RuntimeEvent
+	recordEvent := func(kind, source, message string, payload map[string]any) {
+		events = append(events, newRuntimeEvent(base, kind, source, message, payload, nil))
+	}
+	recordAudit := func(string, string, bool, string, map[string]any) {}
+	caller := agents.BuiltinXiraAssistant()
+	caller.Delegation.Allow = []string{"other-agent"}
+	ctx := contextWithRunExecution(context.Background(), runExecutionContext{Base: base, Profile: caller, UserMessage: "parent"})
+	_, err := rt.executeDelegateAgentTool(ctx, caller, delegateAgentInput{
+		AgentID:              agents.ResearchAssistantAgentID,
+		Task:                 "needs unavailable specialist",
+		ExpectedOutputSchema: delegateResultSchemaV1,
+	}, nil, nil, "delegate-capability-gap", recordEvent, recordAudit)
+	if err == nil {
+		t.Fatal("expected unauthorized delegation error")
+	}
+	gap, ok := findEvent(events, "capability_gap")
+	if !ok {
+		t.Fatalf("events missing capability_gap: %+v", eventKinds(events))
+	}
+	if gap.Visibility == nil || !gap.Visibility.Conversation || !gap.Visibility.Activity || !gap.Visibility.Inspector || !gap.Visibility.Audit {
+		t.Fatalf("capability gap visibility = %+v", gap.Visibility)
 	}
 }
 
@@ -1120,6 +1960,66 @@ func hasToolResponse(messages []deepseek.Message) bool {
 		}
 	}
 	return false
+}
+
+func adkToolNames(tools []adktool.Tool) map[string]bool {
+	out := map[string]bool{}
+	for _, tool := range tools {
+		out[tool.Name()] = true
+	}
+	return out
+}
+
+func eventKinds(events []RuntimeEvent) []string {
+	kinds := make([]string, 0, len(events))
+	for _, event := range events {
+		kinds = append(kinds, event.Kind)
+	}
+	return kinds
+}
+
+func findEvent(events []RuntimeEvent, kind string) (RuntimeEvent, bool) {
+	for _, event := range events {
+		if event.Kind == kind {
+			return event, true
+		}
+	}
+	return RuntimeEvent{}, false
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func assertRejectedChildRunNotCreated(t *testing.T, rt *Service, output map[string]any) {
+	t.Helper()
+	childRunID, _ := output["run_id"].(string)
+	if childRunID == "" {
+		t.Fatalf("rejected output missing child run id: %+v", output)
+	}
+	if _, err := os.Stat(rt.RunStore().RunDir(childRunID)); err == nil {
+		t.Fatalf("rejected delegation created child run dir %q", childRunID)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat child run dir: %v", err)
+	}
+}
+
+func readJSONMap(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("decode %s: %v\n%s", path, err, data)
+	}
+	return out
 }
 
 func lastRole(messages []deepseek.Message) string {
