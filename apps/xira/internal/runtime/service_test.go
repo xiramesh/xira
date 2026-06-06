@@ -497,7 +497,7 @@ func TestAuthorizedDelegationEmitsProgressAndUsesEphemeralChildRun(t *testing.T)
 				"agent_id":               agents.ResearchAssistantAgentID,
 				"task":                   "Check local profile and tool registry evidence.",
 				"context_refs":           []string{"conversation://current-turn/user-message"},
-				"expected_output_schema": "evidence_summary_v1",
+				"expected_output_schema": delegateResultSchemaV1,
 			})
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
@@ -625,6 +625,90 @@ func TestContextPacketTargetUsesEffectiveInstructionAndActualRegistryTools(t *te
 	}
 	if gotTools, wantTools := strings.Join(stringSliceFromAny(targetPacket["allowed_tools"]), "\n"), "command.run"; gotTools != wantTools {
 		t.Fatalf("allowed_tools = %q, want actual registry tools %q", gotTools, wantTools)
+	}
+}
+
+func TestContextPacketMaterializesParentToolOutputRef(t *testing.T) {
+	runRoot := filepath.Join(t.TempDir(), "runs")
+	rt := newTestService(t, Config{RunRoot: runRoot})
+	parentRunID := "parent-run"
+	childRunID := "child-run"
+	if err := rt.RunStore().InitRun(parentRunID); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.RunStore().InitRun(childRunID); err != nil {
+		t.Fatal(err)
+	}
+	rawPath := "artifacts/tool-outputs/call-1.json"
+	longStdout := strings.Repeat("parent evidence ", 300)
+	if err := writeJSONFile(filepath.Join(rt.RunStore().RunDir(parentRunID), filepath.FromSlash(rawPath)), map[string]any{
+		"run_id":       parentRunID,
+		"tool_call_id": "call-1",
+		"tool":         "command.run",
+		"stdout":       longStdout,
+		"stderr":       "warning",
+		"exit_code":    0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var events []RuntimeEvent
+	base := runtimeEventBase{RunID: parentRunID, AgentID: agents.DefaultAgentID}
+	packet, refs, err := rt.buildDelegateContextPacket(runExecutionContext{
+		Base:        base,
+		Profile:     agents.BuiltinXiraAssistant(),
+		UserMessage: "parent message",
+	}, delegateWorkerProfile(agents.BuiltinResearchAssistant()), childRunID, delegateAgentInput{
+		Task:                 "inspect parent evidence",
+		ContextRefs:          []string{rawPath},
+		ExpectedOutputSchema: delegateResultSchemaV1,
+	}, delegateCorrelationPayload(parentRunID, childRunID, "delegate-materialize", agents.DefaultAgentID, agents.ResearchAssistantAgentID), func(kind, source, message string, payload map[string]any) {
+		events = append(events, newRuntimeEvent(base, kind, source, message, payload, nil))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packet.Items) != 1 {
+		t.Fatalf("context items = %+v", packet.Items)
+	}
+	item := packet.Items[0]
+	if item.Kind != "tool_result" || item.Source != "parent_tool_output" || item.SourceRunID != parentRunID || item.SourceToolCallID != "call-1" {
+		t.Fatalf("materialized item = %+v", item)
+	}
+	wantContextRef := "context://" + childRunID + "/context/ctxitem_tool_output_call-1"
+	wantArtifactRef := "artifact://" + childRunID + "/artifacts/tool-outputs/context_call-1.json"
+	if item.Ref != wantContextRef || item.ArtifactRef != wantArtifactRef {
+		t.Fatalf("item refs = %+v, want %s and %s", item, wantContextRef, wantArtifactRef)
+	}
+	if !containsString(refs, wantContextRef) || !containsString(refs, wantArtifactRef) {
+		t.Fatalf("canonical refs = %+v", refs)
+	}
+	allowedRefs := rt.allowedDelegateEvidenceRefs(childRunID, delegateWorkerProfile(agents.BuiltinResearchAssistant()), refs, TurnResponse{})
+	if _, ok := allowedRefs[wantArtifactRef]; !ok {
+		t.Fatalf("materialized artifact ref not allowed for child result evidence: %+v", allowedRefs)
+	}
+	if _, err := validateDelegateAgentResult(
+		fmt.Sprintf(`{"summary":"uses copied artifact","evidence_refs":[%q],"confidence":"high","followup_needed":false}`, wantArtifactRef),
+		agents.ResearchAssistantAgentID,
+		childRunID,
+		refs,
+		allowedRefs,
+	); err != nil {
+		t.Fatalf("materialized artifact evidence ref should validate: %v", err)
+	}
+	if strings.Contains(item.ContentPreview, longStdout) {
+		t.Fatal("context preview includes unbounded parent stdout")
+	}
+	copied := readJSONMap(t, filepath.Join(rt.RunStore().RunDir(childRunID), "artifacts", "tool-outputs", "context_call-1.json"))
+	if copied["run_id"] != childRunID || copied["source_run_id"] != parentRunID || copied["source_ref"] != rawPath || copied["stdout"] != longStdout {
+		t.Fatalf("copied child-local artifact = %+v", copied)
+	}
+	if _, ok := findEvent(events, "context.item.included"); !ok {
+		t.Fatalf("missing included event: %+v", eventKinds(events))
+	}
+	for _, event := range events {
+		if event.Kind == "context.item.redacted" && event.Payload["source_ref"] == rawPath {
+			t.Fatalf("materialized ref was also redacted: %+v", event)
+		}
 	}
 }
 
@@ -981,6 +1065,40 @@ func TestDelegateAgentRejectsUnknownInputFieldsBeforeChildRun(t *testing.T) {
 	rejected, ok := findEvent(events, "agent.delegate.rejected")
 	if !ok || rejected.Payload["unsupported_input_fields"] == nil {
 		t.Fatalf("missing unsupported-field rejection event: %+v", events)
+	}
+}
+
+func TestDelegateAgentRejectsUnsupportedExpectedOutputSchemaBeforeChildRun(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	base := runtimeEventBase{
+		RunID:        "parent-run",
+		AgentID:      agents.DefaultAgentID,
+		EntrypointID: "test-default",
+		Channel:      "test",
+		TraceID:      "parent-run",
+	}
+	var events []RuntimeEvent
+	recordEvent := func(kind, source, message string, payload map[string]any) {
+		events = append(events, newRuntimeEvent(base, kind, source, message, payload, nil))
+	}
+	recordAudit := func(string, string, bool, string, map[string]any) {}
+	caller := agents.BuiltinXiraAssistant()
+	ctx := contextWithRunExecution(context.Background(), runExecutionContext{Base: base, Profile: caller, UserMessage: "parent"})
+	output, err := rt.executeDelegateAgentTool(ctx, caller, delegateAgentInput{
+		AgentID:              agents.ResearchAssistantAgentID,
+		Task:                 "try unsupported schema",
+		ExpectedOutputSchema: "evidence_summary_v1",
+	}, nil, nil, "delegate-schema", recordEvent, recordAudit)
+	if err == nil || !strings.Contains(err.Error(), "unsupported expected_output_schema") {
+		t.Fatalf("schema error = %v output=%+v", err, output)
+	}
+	assertRejectedChildRunNotCreated(t, rt, output)
+	if _, ok := findEvent(events, "agent.delegate.started"); ok {
+		t.Fatalf("unsupported schema should reject before child start: %+v", eventKinds(events))
+	}
+	rejected, ok := findEvent(events, "agent.delegate.rejected")
+	if !ok || rejected.Payload["supported_schema"] != delegateResultSchemaV1 || rejected.Payload["expected_output_schema"] != "evidence_summary_v1" {
+		t.Fatalf("missing schema rejection payload: %+v", events)
 	}
 }
 
@@ -1652,6 +1770,81 @@ func TestRunAgentRecordsUsageWithoutLLMTrace(t *testing.T) {
 	}
 	if ledgerCall.AgentSessionID != stableAgentSessionID || ledgerCall.ADKSessionID != call.ADKSessionID {
 		t.Fatalf("usage ledger call = %+v", ledgerCall)
+	}
+}
+
+func TestDelegatedChildRunAppendsLLMCallsToUsageLedger(t *testing.T) {
+	runRoot := filepath.Join(t.TempDir(), "runs")
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		system := ""
+		if len(req.Messages) > 0 {
+			system = fmt.Sprint(req.Messages[0].Content)
+		}
+		var body string
+		switch {
+		case lastRole(req.Messages) == "tool":
+			body = deepSeekTextResponse("parent final with child usage")
+		case strings.Contains(system, "Current Xira agent: research-assistant"):
+			body = deepSeekTextResponse(`{"summary":"child usage recorded","confidence":"high","followup_needed":false}`)
+		default:
+			body = deepSeekToolCallResponseWithArgs("delegate-usage", "delegate_agent", map[string]any{
+				"agent_id": agents.ResearchAssistantAgentID,
+				"task":     "produce child usage",
+			})
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        runRoot,
+		StateRoot:      stateRoot,
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and track usage", Channel: "test"})
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "delegate_agent" || resp.ToolCalls[0].Error != "" {
+		t.Fatalf("delegate tool call = %+v", resp.ToolCalls)
+	}
+	childRunID, _ := resp.ToolCalls[0].Output["run_id"].(string)
+	if childRunID == "" {
+		t.Fatalf("delegate output missing child run id: %+v", resp.ToolCalls[0].Output)
+	}
+	ledgerData, err := os.ReadFile(filepath.Join(stateRoot, "usage-ledger.jsonl"))
+	if err != nil {
+		t.Fatalf("read usage ledger: %v", err)
+	}
+	var childCallFound bool
+	var parentCallCount int
+	for _, line := range bytes.Split(bytes.TrimSpace(ledgerData), []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var call LLMCallRecord
+		if err := json.Unmarshal(line, &call); err != nil {
+			t.Fatalf("decode usage ledger line: %v\n%s", err, ledgerData)
+		}
+		if call.RunID == childRunID && call.AgentID == agents.ResearchAssistantAgentID {
+			childCallFound = true
+		}
+		if call.RunID == resp.RunID && call.AgentID == resp.AgentID {
+			parentCallCount++
+		}
+	}
+	if !childCallFound {
+		t.Fatalf("usage ledger missing child run %q call:\n%s", childRunID, ledgerData)
+	}
+	if parentCallCount == 0 {
+		t.Fatalf("usage ledger missing parent calls:\n%s", ledgerData)
 	}
 }
 

@@ -88,20 +88,31 @@ type delegateContextPacket struct {
 }
 
 type delegateContextItem struct {
-	ID             string `json:"id"`
-	Kind           string `json:"kind"`
-	Source         string `json:"source"`
-	SourceRef      string `json:"source_ref,omitempty"`
-	SourceRunID    string `json:"source_run_id,omitempty"`
-	SourceAgentID  string `json:"source_agent_id,omitempty"`
-	OwnerAgent     string `json:"owner_agent"`
-	Visibility     string `json:"visibility"`
-	ContentPreview string `json:"content_preview"`
-	ContentHash    string `json:"content_hash"`
-	IncludedChars  int    `json:"included_chars"`
-	Redacted       bool   `json:"redacted"`
-	Truncated      bool   `json:"truncated"`
-	Ref            string `json:"ref"`
+	ID                 string `json:"id"`
+	Kind               string `json:"kind"`
+	Source             string `json:"source"`
+	SourceRef          string `json:"source_ref,omitempty"`
+	SourceRunID        string `json:"source_run_id,omitempty"`
+	SourceAgentID      string `json:"source_agent_id,omitempty"`
+	SourceToolCallID   string `json:"source_tool_call_id,omitempty"`
+	SourceArtifactPath string `json:"source_artifact_path,omitempty"`
+	ArtifactRef        string `json:"artifact_ref,omitempty"`
+	OwnerAgent         string `json:"owner_agent"`
+	Visibility         string `json:"visibility"`
+	ContentPreview     string `json:"content_preview"`
+	ContentHash        string `json:"content_hash"`
+	IncludedChars      int    `json:"included_chars"`
+	Redacted           bool   `json:"redacted"`
+	Truncated          bool   `json:"truncated"`
+	Ref                string `json:"ref"`
+}
+
+type resolvedContextArtifact struct {
+	SourceRef        string
+	SourceRunID      string
+	SourceToolCallID string
+	RelPath          string
+	AbsPath          string
 }
 
 type modelDelegateResult struct {
@@ -223,7 +234,7 @@ func delegateAgentInputSchema() *jsonschema.Schema {
 			"agent_id":               {Type: "string"},
 			"task":                   {Type: "string"},
 			"context_refs":           {Type: "array", Items: &jsonschema.Schema{Type: "string"}},
-			"expected_output_schema": {Type: "string"},
+			"expected_output_schema": {Type: "string", Enum: []any{delegateResultSchemaV1}},
 			"max_duration_ms":        {Type: "integer"},
 		},
 		Required:             []string{"agent_id", "task"},
@@ -373,6 +384,17 @@ func (s *Service) executeDelegateAgentTool(
 			"rejected_before_child":    true,
 		}))
 		recordAudit("agent.delegate", input.AgentID, false, err.Error(), map[string]any{"unsupported_input_fields": unsupportedFields})
+		return delegateErrorOutput(input.AgentID, childRunID, "rejected", err), err
+	}
+	if input.ExpectedOutputSchema != delegateResultSchemaV1 {
+		err := fmt.Errorf("unsupported expected_output_schema %q; only %s is supported in Phase 1", input.ExpectedOutputSchema, delegateResultSchemaV1)
+		recordEvent("agent.delegate.rejected", "runtime", err.Error(), mergeAnyMaps(correlationPayload, map[string]any{
+			"reason":                 err.Error(),
+			"expected_output_schema": input.ExpectedOutputSchema,
+			"supported_schema":       delegateResultSchemaV1,
+			"rejected_before_child":  true,
+		}))
+		recordAudit("agent.delegate", input.AgentID, false, err.Error(), map[string]any{"expected_output_schema": input.ExpectedOutputSchema})
 		return delegateErrorOutput(input.AgentID, childRunID, "rejected", err), err
 	}
 	policy := caller.NormalizedDelegationPolicy()
@@ -588,6 +610,32 @@ func (s *Service) buildDelegateContextPacket(
 		if ref == "conversation://current-turn" || ref == "conversation://current-turn/user-message" {
 			continue
 		}
+		item, materializedRefs, ok, err := s.materializeParentToolOutputContextRef(exec, childRunID, ref, 2000)
+		if err != nil {
+			return packet, nil, err
+		}
+		if ok {
+			packet.Items = append(packet.Items, item)
+			packet.Truncated = packet.Truncated || item.Truncated
+			canonicalRefs = append(canonicalRefs, materializedRefs...)
+			recordEvent("context.item.included", "runtime", "context item included", mergeAnyMaps(correlationPayload, map[string]any{
+				"context_packet_id": packet.ID,
+				"context_item_id":   item.ID,
+				"context_ref":       item.Ref,
+				"artifact_ref":      item.ArtifactRef,
+				"source":            item.Source,
+				"source_ref":        item.SourceRef,
+				"included_chars":    item.IncludedChars,
+				"truncated":         item.Truncated,
+			}))
+			if item.Truncated {
+				recordEvent("context.packet.truncated", "runtime", "context packet truncated", mergeAnyMaps(correlationPayload, map[string]any{
+					"context_packet_id": packet.ID,
+					"reason":            "context item exceeded max chars",
+				}))
+			}
+			continue
+		}
 		recordEvent("context.item.redacted", "runtime", "context ref redacted", mergeAnyMaps(correlationPayload, map[string]any{
 			"context_packet_id": packet.ID,
 			"source_ref":        ref,
@@ -607,12 +655,171 @@ func (s *Service) buildDelegateContextPacket(
 	return packet, canonicalRefs, nil
 }
 
+func (s *Service) materializeParentToolOutputContextRef(exec runExecutionContext, childRunID, ref string, maxChars int) (delegateContextItem, []string, bool, error) {
+	resolved, ok := s.resolveParentToolOutputContextRef(exec, ref)
+	if !ok {
+		return delegateContextItem{}, nil, false, nil
+	}
+	data, err := os.ReadFile(resolved.AbsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return delegateContextItem{}, nil, false, nil
+		}
+		return delegateContextItem{}, nil, false, err
+	}
+	raw := map[string]any{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return delegateContextItem{}, nil, false, fmt.Errorf("decode context ref %q: %w", ref, err)
+	}
+	if resolved.SourceToolCallID == "" {
+		resolved.SourceToolCallID = anyString(raw["tool_call_id"])
+	}
+	if resolved.SourceToolCallID == "" {
+		resolved.SourceToolCallID = shortID()
+	}
+	childRelPath := filepath.ToSlash(filepath.Join("artifacts", "tool-outputs", "context_"+safeToolOutputFileName(resolved.SourceToolCallID)+".json"))
+	artifactRef := "artifact://" + childRunID + "/" + childRelPath
+	copied := copyAnyMap(raw)
+	if copied == nil {
+		copied = map[string]any{}
+	}
+	copied["run_id"] = childRunID
+	copied["source_run_id"] = resolved.SourceRunID
+	copied["source_ref"] = resolved.SourceRef
+	copied["source_artifact_path"] = resolved.RelPath
+	copied["source_tool_call_id"] = resolved.SourceToolCallID
+	copied["materialized_by"] = "delegate_context_resolver"
+	if err := writeJSONFile(filepath.Join(s.runs.RunDir(childRunID), filepath.FromSlash(childRelPath)), copied); err != nil {
+		return delegateContextItem{}, nil, false, err
+	}
+	preview, truncated := toolOutputContextPreview(copied, maxChars)
+	item, err := s.materializeContextItem(childRunID, delegateContextItem{
+		ID:                 "ctxitem_tool_output_" + safeToolOutputFileName(resolved.SourceToolCallID),
+		Kind:               "tool_result",
+		Source:             "parent_tool_output",
+		SourceRef:          resolved.SourceRef,
+		SourceRunID:        resolved.SourceRunID,
+		SourceAgentID:      exec.Profile.ID,
+		SourceToolCallID:   resolved.SourceToolCallID,
+		SourceArtifactPath: resolved.RelPath,
+		ArtifactRef:        artifactRef,
+		OwnerAgent:         exec.Profile.ID,
+		Visibility:         "child_only",
+		Truncated:          truncated,
+	}, preview, maxChars)
+	if err != nil {
+		return delegateContextItem{}, nil, false, err
+	}
+	item.Truncated = item.Truncated || truncated
+	return item, []string{item.Ref, artifactRef}, true, nil
+}
+
+func (s *Service) resolveParentToolOutputContextRef(exec runExecutionContext, ref string) (resolvedContextArtifact, bool) {
+	if s == nil || s.runs == nil {
+		return resolvedContextArtifact{}, false
+	}
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return resolvedContextArtifact{}, false
+	}
+	parentRunID := strings.TrimSpace(exec.Base.RunID)
+	if parentRunID == "" {
+		return resolvedContextArtifact{}, false
+	}
+	sourceRunID := parentRunID
+	relPath := ""
+	toolCallID := ""
+	switch {
+	case strings.HasPrefix(ref, "artifact://"):
+		rest := strings.TrimPrefix(ref, "artifact://")
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) != parentRunID {
+			return resolvedContextArtifact{}, false
+		}
+		relPath = parts[1]
+	case strings.HasPrefix(ref, "tool://"):
+		rest := strings.TrimPrefix(ref, "tool://")
+		parts := strings.Split(rest, "/")
+		if len(parts) != 3 || strings.TrimSpace(parts[0]) != parentRunID || parts[2] != "output" {
+			return resolvedContextArtifact{}, false
+		}
+		toolCallID = strings.TrimSpace(parts[1])
+		if toolCallID == "" {
+			return resolvedContextArtifact{}, false
+		}
+		relPath = filepath.ToSlash(filepath.Join("artifacts", "tool-outputs", safeToolOutputFileName(toolCallID)+".json"))
+	default:
+		relPath = ref
+	}
+	cleanPath, ok := cleanChildArtifactPath(relPath)
+	if !ok {
+		return resolvedContextArtifact{}, false
+	}
+	if cleanPath != "artifacts/tool-outputs" && !strings.HasPrefix(cleanPath, "artifacts/tool-outputs/") {
+		return resolvedContextArtifact{}, false
+	}
+	if path.Ext(cleanPath) != ".json" {
+		return resolvedContextArtifact{}, false
+	}
+	absPath := filepath.Join(s.runs.RunDir(sourceRunID), filepath.FromSlash(cleanPath))
+	info, err := os.Stat(absPath)
+	if err != nil || info.IsDir() || !info.Mode().IsRegular() {
+		return resolvedContextArtifact{}, false
+	}
+	return resolvedContextArtifact{
+		SourceRef:        ref,
+		SourceRunID:      sourceRunID,
+		SourceToolCallID: toolCallID,
+		RelPath:          cleanPath,
+		AbsPath:          absPath,
+	}, true
+}
+
+func toolOutputContextPreview(raw map[string]any, maxChars int) (string, bool) {
+	preview := copyAnyMap(raw)
+	if preview == nil {
+		preview = map[string]any{}
+	}
+	truncated := false
+	for _, stream := range []string{"stdout", "stderr"} {
+		text, _ := raw[stream].(string)
+		delete(preview, stream)
+		if text == "" {
+			continue
+		}
+		limit := maxChars / 2
+		if limit <= 0 {
+			limit = 1000
+		}
+		streamPreview := previewText(text, limit)
+		preview[stream+"_preview"] = streamPreview
+		preview[stream+"_bytes"] = len([]byte(text))
+		streamTruncated := streamPreview != text
+		preview[stream+"_truncated"] = streamTruncated
+		truncated = truncated || streamTruncated
+	}
+	data, err := json.Marshal(preview)
+	if err != nil {
+		return "", truncated
+	}
+	text := string(data)
+	if maxChars <= 0 {
+		return text, truncated
+	}
+	runes := []rune(text)
+	if len(runes) <= maxChars {
+		return text, truncated
+	}
+	return string(runes[:maxChars]) + "...", true
+}
+
 func (s *Service) materializeContextItem(childRunID string, item delegateContextItem, content string, maxChars int) (delegateContextItem, error) {
 	runes := []rune(content)
-	item.Truncated = maxChars > 0 && len(runes) > maxChars
-	if item.Truncated {
+	contentTruncated := maxChars > 0 && len(runes) > maxChars
+	if contentTruncated {
 		runes = runes[:maxChars]
 	}
+	item.Truncated = item.Truncated || contentTruncated
 	item.ContentPreview = string(runes)
 	item.ContentHash = instructionHash(content)
 	item.IncludedChars = utf8.RuneCountInString(item.ContentPreview)
@@ -752,6 +959,32 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 	resp.Status = "completed"
 	if runErr != nil || resp.VerificationResult.Status != "passed" {
 		resp.Status = "failed"
+	}
+	if len(resp.LLMCalls) > 0 {
+		payload := map[string]any{
+			"call_count":        resp.Usage.CallCount,
+			"completed_calls":   resp.Usage.CompletedCalls,
+			"failed_calls":      resp.Usage.FailedCalls,
+			"prompt_tokens":     resp.Usage.PromptTokens,
+			"completion_tokens": resp.Usage.CompletionTokens,
+			"total_tokens":      resp.Usage.TotalTokens,
+			"usage_sources":     resp.Usage.UsageSources,
+		}
+		if resp.Usage.Cost != nil {
+			payload["cost"] = *resp.Usage.Cost
+			payload["currency"] = resp.Usage.Currency
+		}
+		recordChildEvent("llm.usage_summary", "runtime", "child llm usage summarized", payload)
+		if s.usage != nil {
+			if err := s.usage.AppendCalls(resp.LLMCalls); err != nil {
+				recordChildEvent("usage.ledger_failed", "runtime", "child usage ledger append failed", map[string]any{"error": err.Error()})
+			} else {
+				recordChildEvent("usage.ledger_appended", "runtime", "child usage ledger appended", map[string]any{
+					"calls": len(resp.LLMCalls),
+					"path":  filepathJoinSlash(s.usage.Root(), "usage-ledger.jsonl"),
+				})
+			}
+		}
 	}
 	recordChildEvent("run.finished", "runtime", "child agent run finished", map[string]any{
 		"status":              resp.Status,
@@ -894,7 +1127,8 @@ func (s *Service) allowedDelegateEvidenceRefs(childRunID string, target agents.P
 		if ref == "" {
 			continue
 		}
-		if strings.HasPrefix(ref, "context://"+childRunID+"/context/") {
+		if strings.HasPrefix(ref, "context://"+childRunID+"/context/") ||
+			strings.HasPrefix(ref, "artifact://"+childRunID+"/artifacts/tool-outputs/") {
 			allowed[ref] = struct{}{}
 		}
 	}
