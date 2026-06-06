@@ -27,6 +27,7 @@ type profileFrontmatter struct {
 	Tools        []string           `yaml:"tools"`
 	Session      SessionPolicy      `yaml:"session"`
 	Permissions  Permissions        `yaml:"permissions"`
+	Delegation   DelegationPolicy   `yaml:"delegation"`
 	Verification VerificationPolicy `yaml:"verification"`
 	Artifacts    ArtifactPolicy     `yaml:"artifacts"`
 	Evolution    EvolutionPolicy    `yaml:"evolution"`
@@ -121,6 +122,7 @@ func LoadProfileDir(agentDir string) (Profile, error) {
 		MCPServers:   frontmatter.MCPServers,
 		Session:      frontmatter.Session,
 		Permissions:  permissions,
+		Delegation:   frontmatter.Delegation,
 		Verification: frontmatter.Verification,
 		Artifacts:    frontmatter.Artifacts,
 		Evolution:    frontmatter.Evolution,

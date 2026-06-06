@@ -36,23 +36,25 @@ type Config struct {
 }
 
 type Service struct {
-	agents        *agents.Manager
-	events        *EventBus
-	runs          *RunStore
-	entrypoints   *entrypoints.Registry
-	sessions      *fsession.Manager
-	usage         *UsageStore
-	adkSessions   adksession.Service
-	verifier      *VerificationRunner
-	evolution     *EvolutionEngine
-	deepseek      *deepseek.Client
-	configPath    string
-	workspace     string
-	stateRoot     string
-	defaultAgent  string
-	profileSource string
-	pricing       UsagePricing
-	mu            sync.RWMutex
+	agents         *agents.Manager
+	events         *EventBus
+	runs           *RunStore
+	entrypoints    *entrypoints.Registry
+	sessions       *fsession.Manager
+	usage          *UsageStore
+	adkSessions    adksession.Service
+	verifier       *VerificationRunner
+	evolution      *EvolutionEngine
+	deepseek       *deepseek.Client
+	configPath     string
+	workspace      string
+	stateRoot      string
+	defaultAgent   string
+	profileSource  string
+	pricing        UsagePricing
+	delegationMu   sync.Mutex
+	activeChildren map[string]int
+	mu             sync.RWMutex
 }
 
 func NewService(cfg Config) (*Service, error) {
@@ -79,22 +81,23 @@ func NewService(cfg Config) (*Service, error) {
 		dsClient = deepseek.New()
 	}
 	return &Service{
-		agents:        manager,
-		events:        NewEventBus(),
-		runs:          NewRunStore(resolved.RunRoot),
-		entrypoints:   entrypoints.NewRegistry(resolved.DefaultAgentID, resolved.Entrypoints),
-		sessions:      sessionManager,
-		usage:         NewUsageStore(resolved.StateRoot),
-		adkSessions:   adksession.InMemoryService(),
-		verifier:      NewVerificationRunner(),
-		evolution:     NewEvolutionEngine(),
-		deepseek:      dsClient,
-		configPath:    resolved.ConfigPath,
-		workspace:     resolved.WorkspaceRoot,
-		stateRoot:     resolved.StateRoot,
-		defaultAgent:  resolved.DefaultAgentID,
-		profileSource: profileSource,
-		pricing:       resolved.Pricing,
+		agents:         manager,
+		events:         NewEventBus(),
+		runs:           NewRunStore(resolved.RunRoot),
+		entrypoints:    entrypoints.NewRegistry(resolved.DefaultAgentID, resolved.Entrypoints),
+		sessions:       sessionManager,
+		usage:          NewUsageStore(resolved.StateRoot),
+		adkSessions:    adksession.InMemoryService(),
+		verifier:       NewVerificationRunner(),
+		evolution:      NewEvolutionEngine(),
+		deepseek:       dsClient,
+		configPath:     resolved.ConfigPath,
+		workspace:      resolved.WorkspaceRoot,
+		stateRoot:      resolved.StateRoot,
+		defaultAgent:   resolved.DefaultAgentID,
+		profileSource:  profileSource,
+		pricing:        resolved.Pricing,
+		activeChildren: map[string]int{},
 	}, nil
 }
 
@@ -145,6 +148,31 @@ func (s *Service) AgentSummaries() []ModelPolicySnapshot {
 	out := make([]ModelPolicySnapshot, 0, len(profiles))
 	for _, profile := range profiles {
 		out = append(out, modelPolicySnapshot(profile, s.profileSource))
+	}
+	return out
+}
+
+func (s *Service) AgentRegistry() []AgentRegistryEntry {
+	if s == nil {
+		return nil
+	}
+	profiles := s.Agents()
+	out := make([]AgentRegistryEntry, 0, len(profiles))
+	for _, profile := range profiles {
+		out = append(out, AgentRegistryEntry{
+			ID:            profile.ID,
+			Name:          profile.Name,
+			Version:       profile.Version,
+			Description:   profile.Description,
+			ProfileSource: s.profileSource,
+			Installed:     true,
+			Valid:         true,
+			Enabled:       true,
+			Discoverable:  true,
+			Tools:         s.toolRegistry(profile).List(),
+			InputSchema:   "delegate_task_v1",
+			OutputSchema:  "delegate_result_v1",
+		})
 	}
 	return out
 }
@@ -250,17 +278,29 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		StartedAt:      now,
 		Metadata:       req.Metadata,
 	}
+	eventBase := runtimeEventBase{
+		RunID:                 runID,
+		AgentID:               profile.ID,
+		EntrypointID:          inbound.Context.EntrypointID,
+		Channel:               inbound.Context.Channel,
+		Account:               inbound.Context.Account,
+		ChannelAppID:          inbound.Context.ChannelAppID,
+		BotID:                 inbound.Context.BotID,
+		ConversationSessionID: req.SessionID,
+		AgentSessionID:        agentSessionID,
+		ChatID:                inbound.Context.ChatID,
+		ChatType:              inbound.Context.ChatType,
+		TopicID:               inbound.Context.TopicID,
+		SpaceID:               inbound.Context.SpaceID,
+		SpaceType:             inbound.Context.SpaceType,
+		SenderID:              inbound.Context.SenderID,
+		MessageID:             inbound.Context.MessageID,
+		ReplyToMessageID:      inbound.Context.ReplyToMessageID,
+		ReplyToSenderID:       inbound.Context.ReplyToSenderID,
+		TraceID:               runID,
+	}
 	recordEvent := func(kind, source, message string, payload map[string]any) {
-		evt := RuntimeEvent{
-			ID:       uuid.NewString(),
-			RunID:    runID,
-			Kind:     kind,
-			Time:     time.Now(),
-			Source:   source,
-			Severity: "info",
-			Message:  message,
-			Payload:  payload,
-		}
+		evt := newRuntimeEvent(eventBase, kind, source, message, payload, nil)
 		resp.Events = append(resp.Events, evt)
 		s.events.Publish(evt)
 	}
@@ -316,6 +356,12 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	}
 	ctx = contextWithToolFailureGuard(ctx)
 	ctx = contextWithToolTrace(ctx, runID)
+	ctx = contextWithRunExecution(ctx, runExecutionContext{
+		Base:        eventBase,
+		Profile:     profile,
+		Request:     req,
+		UserMessage: req.Message,
+	})
 	ctx = rtools.WithRunDir(ctx, s.runs.RunDir(runID))
 	ctx = s.withLLMInstrumentation(ctx, llmInstrumentationInput{
 		RunID:          runID,
@@ -369,6 +415,9 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		slog.Info("agent run finished", logAttrs...)
 	}
 	if runErr == nil && resp.VerificationResult.Status == "passed" {
+		recordEvent("assistant.final", "runtime", "assistant final response", map[string]any{
+			"response_chars": utf8.RuneCountInString(final),
+		})
 		sessionTurn := fsession.AgentTurnInput{
 			SessionID:      req.SessionID,
 			AgentID:        profile.ID,
@@ -671,7 +720,10 @@ func (s *Service) executeToolCall(
 		"call_id", rec.ID,
 		"input", toolInputSummary(rec.Input),
 	)
-	recordEvent("tool.started", rec.Name, "tool call started", rec.Input)
+	recordEvent("tool.started", rec.Name, "tool call started", map[string]any{
+		"tool":  rec.Name,
+		"input": rec.Input,
+	})
 	recordAudit("tool.call", rec.Name, true, "tool allowed by profile", rec.Input)
 	var output map[string]any
 	var err error
@@ -724,6 +776,7 @@ func (s *Service) executeToolCall(
 			"input", toolInputSummary(rec.Input),
 			"output", toolOutputSummary(rec.Output),
 		)
+		recordEvent("tool.completed", rec.Name, "tool call completed", map[string]any{"tool": rec.Name})
 		recordEvent("tool.finished", rec.Name, "tool call finished", map[string]any{"tool": rec.Name})
 	}
 	return rec

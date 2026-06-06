@@ -79,6 +79,45 @@ Direct, careful, and source-backed.`)
 	}
 }
 
+func TestLoadProfileDirHonorsExplicitDelegationMaxDepthZero(t *testing.T) {
+	workspace := t.TempDir()
+	writeAgentProfile(t, workspace, "xira-assistant", `---
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.1
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-flash
+delegation:
+  enabled: true
+  allow:
+    - research-assistant
+  max_depth: 0
+---
+# Working Contract
+
+Do not create child runs.
+`, `# Soul
+
+Keep delegation disabled by depth.`)
+
+	manager, err := LoadFromWorkspace(workspace)
+	if err != nil {
+		t.Fatalf("LoadFromWorkspace() error = %v", err)
+	}
+	profile, ok := manager.Get("xira-assistant")
+	if !ok {
+		t.Fatal("expected xira-assistant profile")
+	}
+	policy := profile.NormalizedDelegationPolicy()
+	if policy.MaxDepth != 0 {
+		t.Fatalf("MaxDepth = %d, want explicit 0", policy.MaxDepth)
+	}
+	if policy.MaxParallel != 1 {
+		t.Fatalf("MaxParallel default = %d, want 1", policy.MaxParallel)
+	}
+}
+
 func TestLoadProfileDirRequiresIDToMatchDirectory(t *testing.T) {
 	workspace := t.TempDir()
 	writeAgentProfile(t, workspace, "copied-agent", `---

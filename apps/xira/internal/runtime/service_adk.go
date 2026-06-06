@@ -255,6 +255,11 @@ func (s *Service) adkTools(
 	recordTool func(ToolCallRecord),
 ) ([]adktool.Tool, error) {
 	var out []adktool.Tool
+	runtimeTools, err := s.runtimeADKTools(ctx, profile, recordEvent, recordAudit, recordTool)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, runtimeTools...)
 	registry := s.toolRegistry(profile)
 	run := func(toolCtx adktool.Context, name string, input map[string]any) (map[string]any, error) {
 		if input == nil {

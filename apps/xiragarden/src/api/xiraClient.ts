@@ -27,10 +27,50 @@ export type XiraGardenMessageRequest = {
 
 export type XiraRuntimeEvent = {
   id: string;
+  schema_version?: number;
   run_id?: string;
   kind: string;
   time: string;
   source: string;
+  source_detail?: {
+    component?: string;
+    name?: string;
+  };
+  scope?: {
+    entrypoint_id?: string;
+    channel?: string;
+    account?: string;
+    channel_app_id?: string;
+    bot_id?: string;
+    conversation_session_id?: string;
+    agent_session_id?: string;
+    run_id?: string;
+    agent_id?: string;
+    child_agent_id?: string;
+    chat_id?: string;
+    chat_type?: string;
+    topic_id?: string;
+    space_id?: string;
+    space_type?: string;
+    sender_id?: string;
+    message_id?: string;
+    reply_to_message_id?: string;
+    reply_to_sender_id?: string;
+    delegation_depth?: number;
+  };
+  correlation?: {
+    trace_id?: string;
+    parent_run_id?: string;
+    child_run_id?: string;
+    parent_event_id?: string;
+    tool_call_id?: string;
+  };
+  visibility?: {
+    conversation: boolean;
+    activity: boolean;
+    inspector: boolean;
+    audit: boolean;
+  };
   severity?: string;
   message?: string;
   payload?: Record<string, unknown>;

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -23,6 +25,7 @@ type Profile struct {
 	MCPServers   []string           `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
 	Session      SessionPolicy      `json:"session,omitempty" yaml:"session,omitempty"`
 	Permissions  Permissions        `json:"permissions" yaml:"permissions"`
+	Delegation   DelegationPolicy   `json:"delegation,omitempty" yaml:"delegation,omitempty"`
 	Verification VerificationPolicy `json:"verification,omitempty" yaml:"verification,omitempty"`
 	Artifacts    ArtifactPolicy     `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
 	Evolution    EvolutionPolicy    `json:"evolution,omitempty" yaml:"evolution,omitempty"`
@@ -54,6 +57,19 @@ type SessionPolicy struct {
 type Permissions struct {
 	Tools   []string `json:"tools" yaml:"tools"`
 	Secrets []string `json:"secrets,omitempty" yaml:"secrets,omitempty"`
+}
+
+type DelegationPolicy struct {
+	Enabled                 bool     `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Allow                   []string `json:"allow,omitempty" yaml:"allow,omitempty"`
+	MaxDepth                int      `json:"max_depth,omitempty" yaml:"max_depth,omitempty"`
+	MaxParallel             int      `json:"max_parallel,omitempty" yaml:"max_parallel,omitempty"`
+	DefaultMaxDurationMS    int      `json:"default_max_duration_ms,omitempty" yaml:"default_max_duration_ms,omitempty"`
+	MaxDurationMS           int      `json:"max_duration_ms,omitempty" yaml:"max_duration_ms,omitempty"`
+	ExposeChildOutputToUser bool     `json:"expose_child_output_to_user,omitempty" yaml:"expose_child_output_to_user,omitempty"`
+	ReturnTo                string   `json:"return_to,omitempty" yaml:"return_to,omitempty"`
+	ChildSessionMode        string   `json:"child_session_mode,omitempty" yaml:"child_session_mode,omitempty"`
+	maxDepthConfigured      bool
 }
 
 type VerificationPolicy struct {
@@ -96,7 +112,11 @@ func BuiltinXiraAssistant() Profile {
 			"When command output is truncated and the missing content matters, use tool_output.read with raw_output_path to read a bounded stdout or stderr slice before drawing conclusions.",
 			"Keep answers concise and operational.",
 		},
-		Permissions:  Permissions{Tools: BuiltinToolNames()},
+		Permissions: Permissions{Tools: BuiltinToolNames()},
+		Delegation: DelegationPolicy{
+			Enabled: true,
+			Allow:   []string{ResearchAssistantAgentID},
+		},
 		Verification: VerificationPolicy{DefaultChecks: []string{"final_response_non_empty"}},
 		Artifacts:    ArtifactPolicy{OutputDir: "artifacts", Retention: "local"},
 		Evolution:    EvolutionPolicy{Enabled: true, CandidateOnly: true},
@@ -141,6 +161,58 @@ func (p Profile) InstructionText() string {
 	return strings.Join(p.Instructions, "\n")
 }
 
+func (p Profile) NormalizedDelegationPolicy() DelegationPolicy {
+	return NormalizeDelegationPolicy(p.Delegation)
+}
+
+func (p *DelegationPolicy) UnmarshalYAML(node *yaml.Node) error {
+	type delegationPolicy DelegationPolicy
+	var decoded delegationPolicy
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	*p = DelegationPolicy(decoded)
+	p.maxDepthConfigured = yamlMappingHasKey(node, "max_depth")
+	return nil
+}
+
+func NormalizeDelegationPolicy(policy DelegationPolicy) DelegationPolicy {
+	normalized := policy
+	normalized.Allow = compactStrings(normalized.Allow)
+	if normalized.MaxDepth == 0 && !normalized.maxDepthConfigured {
+		normalized.MaxDepth = 1
+	}
+	if normalized.MaxParallel == 0 {
+		normalized.MaxParallel = 1
+	}
+	if normalized.DefaultMaxDurationMS == 0 {
+		normalized.DefaultMaxDurationMS = 30000
+	}
+	if normalized.MaxDurationMS == 0 {
+		normalized.MaxDurationMS = 120000
+	}
+	if strings.TrimSpace(normalized.ReturnTo) == "" {
+		normalized.ReturnTo = "caller"
+	}
+	if strings.TrimSpace(normalized.ChildSessionMode) == "" {
+		normalized.ChildSessionMode = "ephemeral_worker"
+	}
+	return normalized
+}
+
+func (p DelegationPolicy) Allows(agentID string) bool {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return false
+	}
+	for _, allowed := range p.Allow {
+		if strings.TrimSpace(allowed) == agentID {
+			return true
+		}
+	}
+	return false
+}
+
 func (p Profile) Validate() error {
 	var errs []string
 	if strings.TrimSpace(p.ID) == "" {
@@ -167,5 +239,73 @@ func (p Profile) Validate() error {
 	if p.ModelPolicy.Provider != "deepseek" {
 		return fmt.Errorf("unsupported provider %q", p.ModelPolicy.Provider)
 	}
+	if err := validateDelegationPolicy(p.NormalizedDelegationPolicy()); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateDelegationPolicy(policy DelegationPolicy) error {
+	var errs []string
+	if policy.MaxDepth < 0 {
+		errs = append(errs, "delegation.max_depth must be >= 0")
+	}
+	if policy.MaxDepth > 1 {
+		errs = append(errs, "delegation.max_depth must be 0 or 1 in Phase 1")
+	}
+	if policy.MaxParallel < 1 {
+		errs = append(errs, "delegation.max_parallel must be >= 1")
+	}
+	if policy.DefaultMaxDurationMS < 1 {
+		errs = append(errs, "delegation.default_max_duration_ms must be >= 1")
+	}
+	if policy.MaxDurationMS < policy.DefaultMaxDurationMS {
+		errs = append(errs, "delegation.max_duration_ms must be >= delegation.default_max_duration_ms")
+	}
+	switch policy.ReturnTo {
+	case "caller":
+	default:
+		errs = append(errs, "delegation.return_to must be caller")
+	}
+	switch policy.ChildSessionMode {
+	case "ephemeral_worker":
+	default:
+		errs = append(errs, "delegation.child_session_mode must be ephemeral_worker in Phase 1")
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func yamlMappingHasKey(node *yaml.Node, key string) bool {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
+}
+
+func compactStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
