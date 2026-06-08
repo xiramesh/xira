@@ -31,9 +31,21 @@ func TestAgentListUsesWorkspaceAgents(t *testing.T) {
 	}
 }
 
-func TestAgentRunUsesRuntimeDefaultAgent(t *testing.T) {
+func TestAgentRunPrintsFinalResponseByDefault(t *testing.T) {
 	instance := writeCLIFixture(t, "research-assistant")
 	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "agent", "run", "--message", "hi")
+
+	if out != "fake cli response\n" {
+		t.Fatalf("agent run output = %q", out)
+	}
+	if json.Valid([]byte(out)) {
+		t.Fatalf("agent run default output should not be JSON: %s", out)
+	}
+}
+
+func TestAgentRunJSONOutputUsesRuntimeDefaultAgent(t *testing.T) {
+	instance := writeCLIFixture(t, "research-assistant")
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "agent", "run", "--message", "hi", "--output", "json")
 
 	var resp runtime.TurnResponse
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
@@ -46,7 +58,7 @@ func TestAgentRunUsesRuntimeDefaultAgent(t *testing.T) {
 
 func TestAgentRunUsesExplicitWorkspaceAgent(t *testing.T) {
 	instance := writeCLIFixture(t, "xira-assistant")
-	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "agent", "run", "--agent", "research-assistant", "--message", "please call command")
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "agent", "run", "--agent", "research-assistant", "--message", "please call command", "--json")
 
 	var resp runtime.TurnResponse
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {

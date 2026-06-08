@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -142,24 +143,41 @@ func agentCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 	})
 	var agentID string
 	var message string
+	var outputFormat string
+	var jsonOutput bool
 	runCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run an agent profile once",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if outputFormat != "text" && outputFormat != "json" {
+				return fmt.Errorf("unsupported output format %q; expected text or json", outputFormat)
+			}
+			format := outputFormat
+			if jsonOutput {
+				format = "json"
+			}
 			rt, err := newRuntime()
 			if err != nil {
 				return err
 			}
 			defer rt.Close()
 			resp, err := rt.RunAgent(cmd.Context(), runtime.TurnRequest{AgentID: agentID, Message: message, Channel: "cli"})
-			if printErr := printJSON(cmd, resp); printErr != nil {
-				return printErr
+			if format == "json" {
+				if printErr := printJSON(cmd, resp); printErr != nil {
+					return printErr
+				}
+			} else {
+				if printErr := printFinalResponse(cmd, resp.FinalResponse); printErr != nil {
+					return printErr
+				}
 			}
 			return err
 		},
 	}
 	runCmd.Flags().StringVar(&agentID, "agent", "", "Agent profile ID; defaults to runtime default_agent")
 	runCmd.Flags().StringVar(&message, "message", "", "User message")
+	runCmd.Flags().StringVar(&outputFormat, "output", "text", "Output format: text or json")
+	runCmd.Flags().BoolVar(&jsonOutput, "json", false, "Print the full TurnResponse as JSON")
 	_ = runCmd.MarkFlagRequired("message")
 	cmd.AddCommand(runCmd)
 	return cmd
@@ -231,4 +249,15 @@ func printJSON(cmd *cobra.Command, value any) error {
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetIndent("", "  ")
 	return enc.Encode(value)
+}
+
+func printFinalResponse(cmd *cobra.Command, text string) error {
+	if _, err := fmt.Fprint(cmd.OutOrStdout(), text); err != nil {
+		return err
+	}
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		_, err := fmt.Fprintln(cmd.OutOrStdout())
+		return err
+	}
+	return nil
 }
