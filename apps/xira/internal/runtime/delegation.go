@@ -530,7 +530,10 @@ func (s *Service) buildDelegateContextPacket(
 	correlationPayload map[string]any,
 	recordEvent func(kind, source, message string, payload map[string]any),
 ) (delegateContextPacket, []string, error) {
-	targetInstruction := s.instructionText(target)
+	targetInstruction, _, err := s.instructionTextForRun(target)
+	if err != nil {
+		return delegateContextPacket{}, nil, err
+	}
 	targetTools := s.toolRegistry(target).List()
 	packet := delegateContextPacket{
 		ID:        "ctxpkt_" + shortID(),
@@ -886,7 +889,7 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 		AgentID:      req.Target.ID,
 		EntrypointID: childBase.EntrypointID,
 		SessionID:    childBase.AgentSessionID,
-		ModelPolicy:  modelPolicySnapshot(req.Target, s.profileSource),
+		ModelPolicy:  s.modelPolicySnapshot(req.Target),
 		Message:      req.Message,
 		Status:       "running",
 		StartedAt:    time.Now(),
@@ -950,7 +953,15 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 	}, recordChildEvent, func(call LLMCallRecord) {
 		resp.LLMCalls = append(resp.LLMCalls, call)
 	})
-	final, toolCalls, runErr := s.generate(childCtx, req.Target, childReq, recordChildEvent, recordChildAudit)
+	childInstruction, _, activationErr := s.instructionTextForRun(req.Target)
+	var final string
+	var toolCalls []ToolCallRecord
+	var runErr error
+	if activationErr != nil {
+		runErr = activationErr
+	} else {
+		final, toolCalls, runErr = s.generate(childCtx, req.Target, childInstruction, childReq, recordChildEvent, recordChildAudit)
+	}
 	resp.FinalResponse = final
 	resp.ToolCalls = toolCalls
 	resp.VerificationResult = s.verifier.Verify(final, req.Target.Verification.DefaultChecks)

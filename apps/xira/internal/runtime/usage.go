@@ -459,6 +459,7 @@ func modelPolicySnapshot(profile agents.Profile, profileSource string) ModelPoli
 		Temperature:     cloneFloat32(profile.ModelPolicy.Temp),
 		ThinkingType:    thinkingType(profile.ModelPolicy),
 		Tools:           append([]string{}, profile.Permissions.Tools...),
+		Skills:          append([]string{}, profile.Skills...),
 		ProfileSource:   profileSource,
 		InstructionHash: instructionHash(profile.InstructionText()),
 	}

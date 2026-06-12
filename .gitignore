@@ -7,6 +7,9 @@ bin/
 node_modules/
 dist/
 references/
+!workspace/skills/*/references/
+!workspace/skills/*/references/**
+workspace/wxview_0.3.1_darwin_arm64
 workspace/agents/*
 workspace/agents/daming-agent/
 workspace/kb/

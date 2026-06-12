@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/xiramesh/xira/internal/fileutil"
 )
 
 const (
@@ -54,12 +56,12 @@ func LoadFromWorkspace(workspaceRoot string) (*Manager, error) {
 
 	profiles := make([]Profile, 0, len(dirs))
 	for _, dir := range dirs {
-		profilePath := filepath.Join(dir, profileFileName)
-		if _, err := os.Stat(profilePath); err != nil {
-			if os.IsNotExist(err) {
+		_, err := fileutil.FindFileEqualFold(dir, profileFileName)
+		if err != nil {
+			if fileutil.IsNotExist(err) {
 				continue
 			}
-			return nil, fmt.Errorf("stat %s: %w", profilePath, err)
+			return nil, err
 		}
 		profile, err := LoadProfileDir(dir)
 		if err != nil {
@@ -74,7 +76,10 @@ func LoadFromWorkspace(workspaceRoot string) (*Manager, error) {
 }
 
 func LoadProfileDir(agentDir string) (Profile, error) {
-	profilePath := filepath.Join(agentDir, profileFileName)
+	profilePath, err := fileutil.FindFileEqualFold(agentDir, profileFileName)
+	if err != nil {
+		return Profile{}, err
+	}
 	content, err := os.ReadFile(profilePath)
 	if err != nil {
 		return Profile{}, fmt.Errorf("read %s: %w", profilePath, err)
@@ -94,7 +99,10 @@ func LoadProfileDir(agentDir string) (Profile, error) {
 	if trimmed := strings.TrimSpace(body); trimmed != "" {
 		instructions = append(instructions, trimmed)
 	}
-	soulPath := filepath.Join(agentDir, soulFileName)
+	soulPath, err := fileutil.FindFileEqualFold(agentDir, soulFileName)
+	if err != nil {
+		return Profile{}, err
+	}
 	soul, err := os.ReadFile(soulPath)
 	if err != nil {
 		return Profile{}, fmt.Errorf("read %s: %w", soulPath, err)

@@ -118,6 +118,41 @@ Keep delegation disabled by depth.`)
 	}
 }
 
+func TestLoadFromWorkspaceFindsProfileAndSoulCaseInsensitively(t *testing.T) {
+	workspace := t.TempDir()
+	dir := filepath.Join(workspace, "agents", "case-agent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "profile.md"), []byte(`---
+id: case-agent
+name: Case Agent
+version: 0.1.0
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-flash
+---
+Profile body.
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(profile.md) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "soul.MD"), []byte("Soul body."), 0o644); err != nil {
+		t.Fatalf("WriteFile(soul.MD) error = %v", err)
+	}
+
+	manager, err := LoadFromWorkspace(workspace)
+	if err != nil {
+		t.Fatalf("LoadFromWorkspace() error = %v", err)
+	}
+	profile, ok := manager.Get("case-agent")
+	if !ok {
+		t.Fatal("expected case-agent profile")
+	}
+	if got := profile.InstructionText(); !strings.Contains(got, "Profile body.") || !strings.Contains(got, "Soul body.") {
+		t.Fatalf("InstructionText() missing case-insensitive profile/soul content:\n%s", got)
+	}
+}
+
 func TestLoadProfileDirRequiresIDToMatchDirectory(t *testing.T) {
 	workspace := t.TempDir()
 	writeAgentProfile(t, workspace, "copied-agent", `---

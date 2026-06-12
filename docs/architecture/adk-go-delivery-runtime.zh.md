@@ -18,7 +18,7 @@ ADK Go 负责：
 自有运行时负责：
 
 - flow、客户、workspace、渠道、会话作用域
-- flow pack、技能包、闭源 CLI、ERP / SaaS connector 的交付与权限
+- flow pack、技能包、闭源 CLI、ERP / SaaS / 内部系统接入能力的交付与权限
 - secrets、审计、日志、策略、版本、升级、回滚
 - task spec、context pack、verification、run log、artifact、evolution candidate
 - 桌面 / Web GUI 控制台
@@ -34,7 +34,7 @@ Xira 的 `flow` 不是传统意义上的 workflow、DAG、审批流或任务编�
 
 - 从最早的一段提示词开始，沉淀成可执行 agent。
 - 再从单个 agent 上升为一个可交付的业务 flow。
-- 一个 flow 围绕客户真实业务目标组织多个 agent、skills、connectors、secrets、policy、人工审批、审计和交付物。
+- 一个 flow 围绕客户真实业务目标组织多个 agent、skills、tools、MCP、command recipe、secrets、policy、人工审批、审计和交付物。
 - 客户购买和验收的不是 prompt，也不是单个 agent，而是一个能嵌入业务流程并持续运行的 flow。
 
 因此 Xira 的产品边界应该是：
@@ -44,7 +44,7 @@ Business Flow
   -> Task Spec / Context Pack
   -> Agent Profiles
   -> Skills
-  -> Connectors
+  -> MCP / Tools / Command Recipes
   -> Tools
   -> Artifacts
   -> Verification / Evaluation
@@ -75,7 +75,7 @@ Flow Run
 - 有统一的 `xira` CLI/runtime API 入口，以及 XiraGarden GUI 入口。
 - 能把同一套 runtime 部署到不同客户环境。
 - 支持直接运行 agent，也支持运行业务 flow。
-- 每个客户获得定制化 flow packs、skills、connectors、closed-source CLI tools。
+- 每个客户获得定制化 flow packs、skills、MCP 配置、command recipe、tool 声明和 closed-source CLI tools。
 - 每个 flow 可以围绕一个业务流程组合多个 agent，而不是只交付单个 agent。
 - 客户自己的 ERP、SaaS、内部系统可以被接入。
 - agent loop 本身尽量使用统一、成熟、可维护的实现。
@@ -97,7 +97,7 @@ PicoClaw 提供的参考思想是：
 ## 设计目标
 
 1. **统一交付底座**
-   同一套 runtime 可服务不同客户，只替换配置、flows、skills、connectors、policy。
+   同一套 runtime 可服务不同客户，只替换配置、flows、skills、MCP 配置、command recipe、tool 声明和 policy。
 
 2. **ADK 原生 agent loop**
    新系统不再自己从零维护完整 LLM/tool loop，而是把 ADK Go 作为核心执行引擎。
@@ -106,13 +106,13 @@ PicoClaw 提供的参考思想是：
    agent、flow、客户、渠道、权限、审计、secrets、交付包版本不绑定 ADK 的内部抽象。
 
 4. **客户定制能力可逐步封装**
-   可以先交付 agent profile 和 connector，等业务目标、验收和复用边界稳定后，再封装成 flow pack。
+   可以先交付 agent profile、skill、command recipe 或具体 tool，等业务目标、验收和复用边界稳定后，再封装成 flow pack。
 
 5. **私有化优先**
    默认支持客户本地、客户 VPC、客户内网、单机桌面部署。云端控制平面可以后置。
 
 6. **可观测、可追责**
-   每次 agent turn、tool call、connector 调用、权限拒绝、人工审批都应该有审计事件。
+   每次 agent turn、tool call、MCP 调用、命令执行、权限拒绝、人工审批都应该有审计事件。
 
 7. **可验证、可进化**
    每个 agent run / flow run 都应该留下 run log、artifact、verification result 和可选的 evolution candidate，让客户交付能力能从真实运行中沉淀。
@@ -125,7 +125,7 @@ PicoClaw 提供的参考思想是：
 - 不在第一版支持所有 PicoClaw channel。
 - 不在第一版支持复杂 multi-agent 编排。
 - 不要求第一版所有任务都必须建模为 flow。
-- 不把客户业务 connector 编译进核心 runtime。
+- 不把客户业务系统接入逻辑编译进核心 runtime。
 - 不直接把 ADK Skills 当作 Xira 的交付格式。
 
 ## 高层架构
@@ -163,7 +163,7 @@ Capabilities
   - built-in tools
   - MCP servers
   - closed-source CLI tools
-  - HTTP / gRPC connectors
+  - HTTP / gRPC API tools
   - flow packs
   - skill packs
   - customer ERP adapters
@@ -185,7 +185,7 @@ Harness Stores
 | Channel Gateway | 飞书、WebSocket、企业微信、自定义 API | 否 |
 | Business Runtime | flow 路由、session、权限、secrets、审计、策略 | 可调用 ADK，但不被 ADK 定义 |
 | ADK Agent Core | 单 turn agent loop、tool call、event stream | 是 |
-| Capabilities | built-in tools、flow pack、skill pack、MCP、CLI、HTTP connector | 可被编译成 ADK agent / tools |
+| Capabilities | built-in tools、flow pack、skill pack、MCP、CLI、HTTP API tools | 可被编译成 ADK agent / tools |
 | Harness Stores | run log、artifact、audit、eval、evolution candidate | 否 |
 
 ## 核心原则
@@ -204,7 +204,7 @@ ADK Go 的 Runner / Event Loop 适合处理一个 turn 内的模型调用、工�
 - conversation scope
 - agent profile
 - skill pack
-- connector
+- MCP / command recipe / external tool
 - permission policy
 - secret binding
 - delivery version
@@ -235,7 +235,7 @@ Agent profile 负责定义：
 
 - model policy
 - instructions
-- allowed skills / tools / connectors
+- default skills / allowed tools / MCP servers
 - permissions
 - context binding
 - verification defaults
@@ -248,7 +248,7 @@ Xira 的交付单位应该是 flow pack。一个 flow pack 应该包含：
 - instructions
 - agent profiles
 - tools
-- connectors
+- MCP servers / command recipes / external tools
 - examples
 - permissions
 - required secrets
@@ -256,7 +256,7 @@ Xira 的交付单位应该是 flow pack。一个 flow pack 应该包含：
 - tests
 - version metadata
 
-运行时把 flow pack 装配成 agent profiles、ADK agent instructions、ADK tools、MCP server、process tool 或 HTTP connector。
+运行时把 flow pack 装配成 agent profiles、ADK agent instructions、ADK tools、MCP server、process tool 或 HTTP API tool。
 
 因此三者关系是：
 
@@ -276,15 +276,15 @@ Skill Pack
 
 Skill pack 可以继续存在，但它是 agent / flow 内部复用的能力单元，不是产品交付边界。
 
-### 4. Connectors 默认进程外
+### 4. 外部系统接入不进核心 runtime
 
-客户 ERP / SaaS / 内部系统 connector 不应该默认编译进核心 runtime。
+客户 ERP / SaaS / 内部系统接入逻辑不应该默认编译进核心 runtime，也不需要在代码层抽象成统一的外部接入类型。
 
 优先级：
 
 1. MCP server
 2. closed-source CLI over stdio / JSON
-3. HTTP / gRPC connector
+3. HTTP / gRPC API tool
 4. 原生 Go plugin / native module
 
 native module 只用于平台基础能力，不作为默认客户定制方式。
@@ -302,7 +302,7 @@ native module 只用于平台基础能力，不作为默认客户定制方式。
 - permission denied
 - human approval
 - secret access
-- connector error
+- MCP / command / external tool error
 - outbound message
 
 注意：audit log 不一定保存完整敏感内容，但要保留足够的可追溯 metadata。
@@ -317,7 +317,7 @@ Xira 不只是让 agent 能调用工具，而是要让每次真实运行都能�
 | --- | --- | --- |
 | Specify | 把客户需求变成可执行规格和验收标准 | `agent_profile.yaml`、`task_spec.yaml`、flow objective、acceptance cases |
 | Ground | 给 agent 正确上下文，排除过期材料 | context pack、source of truth、forbidden context |
-| Equip | 提供 built-in tools、connectors、MCP、skills | tool runtime、connector runtime、skill pack |
+| Equip | 提供 built-in tools、MCP、skills、command recipe、external tools | tool runtime、MCP runtime、skill pack |
 | Constrain | 限制权限、secrets、目录、网络和高风险动作 | policy、approval gate、sandbox |
 | Orchestrate | 安排 agent run 或业务 flow 的阶段、检查点和 handoff | agent plan、flow stages、protocol、handoff artifacts |
 | Verify | 用确定性检查和 eval 判断是否完成 | verification commands、schema、golden tasks |
@@ -334,7 +334,7 @@ Inbound -> Agent / Flow -> Tool / Command -> Verification -> Output
 Run Log -> Failure Attribution -> Evolution Candidate -> Verification -> Promote / Rollback
 ```
 
-第一版不追求全自动自进化，但要把证据结构先建好。否则后续无法判断一个 flow pack、skill、connector 或权限策略是否真的变好了。
+第一版不追求全自动自进化，但要把证据结构先建好。否则后续无法判断一个 flow pack、skill、tool、MCP 配置、command recipe 或权限策略是否真的变好了。
 
 ## 主要组件
 
@@ -350,7 +350,7 @@ Run Log -> Failure Attribution -> Evolution Candidate -> Verification -> Promote
 - 管理 ADK agent core
 - 加载 agent profiles
 - 加载 flow packs / skill packs
-- 注册 connectors
+- 注册 MCP servers / tools / command recipes
 - 管理 secrets
 - 写入 audit / event log
 - 暴露 health / status / logs
@@ -449,8 +449,8 @@ XiraGarden 可以触发 agent run、flow run、tool call 查看、ad-hoc command
 - allocate session scope
 - apply workspace policy
 - bind agent profiles and optional flow packs / skill packs
-- expose secrets to connector under policy
-- convert connector/tool metadata to ADK tools
+- expose secrets to tools / MCP servers under policy
+- convert MCP / tool metadata to ADK tools
 - consume ADK event stream
 - convert final / partial output to outbound messages
 - write audit events
@@ -525,7 +525,7 @@ model:
 3. 未配置 `DEEPSEEK_API_KEY` 时启动失败。
 4. tool calls 必须经过 Business Runtime 的 policy / audit wrapper。
 
-这样做的目的不是封死未来模型选择，而是让第一版先证明 Xira 的 runtime 边界、XiraGarden GUI channel、agent profile、connector、audit 链路。模型扩展应该在 `AgentEngine` 和 model adapter 稳定之后再做。
+这样做的目的不是封死未来模型选择，而是让第一版先证明 Xira 的 runtime 边界、XiraGarden GUI channel、agent profile、tool / MCP / command、audit 链路。模型扩展应该在 `AgentEngine` 和 model adapter 稳定之后再做。
 
 ### Agent Profile Manager
 
@@ -592,7 +592,7 @@ Phase 1 的最小 run 可以是：
 ```text
 Inbound message
   -> AgentProfileManager resolves `research-assistant`
-  -> BusinessRuntime applies policy / connectors
+  -> BusinessRuntime applies policy / tools / MCP
   -> ADK Runner executes one turn
   -> RunLogWriter records run
 ```
@@ -609,7 +609,7 @@ Agent profile 可以独立运行，也可以被 flow pack 引用为 `entry_agent
 | Model Policy | 绑定 provider、model、参数和白名单 | 必填 |
 | Instructions | 定义 agent 行为边界 | 必填 |
 | Context | 定义 required / optional / forbidden 上下文 | 可选，建议支持 |
-| Tools / Connectors | 定义可用外部能力 | 可选 |
+| Tools / MCP / Command Recipes | 定义可用外部能力 | 可选 |
 | Permissions | 定义 tool、command、secret 权限 | 必填 |
 | Verification Defaults | 定义轻量检查 | 可选 |
 | Artifact Policy | 定义输出目录和保留策略 | 可选，默认本地 |
@@ -619,7 +619,7 @@ Agent profile 可以独立运行，也可以被 flow pack 引用为 `entry_agent
 
 负责加载、校验、启用、禁用和升级 flow pack。
 
-Flow pack 是 agent profile 之上的业务交付包装。第一版可以先支持 agent run，再逐步把稳定 agent、connector、verification 和 artifact policy 封装成 flow pack。
+Flow pack 是 agent profile 之上的业务交付包装。第一版可以先支持 agent run，再逐步把稳定 agent、skill、tool、MCP 配置、verification 和 artifact policy 封装成 flow pack。
 
 建议 flow pack 结构：
 
@@ -745,7 +745,7 @@ evolution:
 | Context Pack | 定义 required / optional / forbidden 上下文 | 必填 |
 | Agents | 定义 entry agent 和可选 reviewer / worker | 必填 |
 | Skills | 复用能力单元 | 可选 |
-| Connectors | 声明稳定外部能力 | 可选 |
+| MCP / Tools / Command Recipes | 声明稳定外部能力 | 可选 |
 | Workflow / Protocol | 定义阶段、检查点、异常处理 | Flow 交付时必填；agent-only 可选 |
 | Verification | 定义确定性检查和验收 case | 必填 |
 | Artifact Policy | 定义产物目录、保留策略、隐私边界 | 必填 |
@@ -757,11 +757,13 @@ evolution:
 
 负责加载 flow 内可复用的能力单元。
 
+Phase 1 的具体格式见 `docs/architecture/xira-skill-pack-v0.zh.md`。Skill Pack 使用 `workspace/skills/<id>/SKILL.md`，作为 agent profile 或 flow pack 可引用的复用 instruction / capability requirement，不作为客户交付边界。
+
 职责：
 
 - 校验 skill metadata
 - 编译 skill instructions
-- 声明 skill 需要的 tools / connectors / secrets
+- 声明 skill 需要的 tools / MCP / secrets
 - 把 skill 暴露给 flow pack 选择
 
 Skill Pack Manager 不决定客户交付边界；Flow Pack Manager 才决定一个客户业务流程如何被安装、启用、升级和验收。
@@ -777,7 +779,7 @@ Xira 第一版需要一组类似 Codex/PicoClaw 的最小内置工具：`command
 - 交付工程师需要先通过 XiraGarden / agent 试跑命令、观察输出，再决定是否把它写入业务流程或后续工具声明。
 - 本地知识库、临时脚本、HTML 图表和交付产物都需要稳定的文件读写能力。
 
-`command.run` / `shell.run` 是内置平台能力，不等同于客户业务 connector。Phase 1 不为每个客户 CLI 编写专用 connector；模型如果需要探索外部工具，应优先通过 `command.run` 调用 `which`、`--help`、`--version` 或具体命令，只有需要 shell language 时才使用 `shell.run`，并把结果写入 audit/run log。
+`command.run` / `shell.run` 是内置平台能力。Phase 1 不为每个客户 CLI 编写专用代码抽象；模型如果需要探索外部工具，应优先通过 `command.run` 调用 `which`、`--help`、`--version` 或具体命令，只有需要 shell language 时才使用 `shell.run`，并把结果写入 audit/run log。
 
 职责：
 
@@ -787,7 +789,7 @@ Xira 第一版需要一组类似 Codex/PicoClaw 的最小内置工具：`command
 - 记录 command、cwd、env 摘要、exit code、stdout / stderr 摘要和耗时。
 - 支持 timeout、取消、输出截断和流式输出。
 - 所有执行都写 audit event。
-- 支持把命令调用过程记录为可复盘 recipe，但不在 Phase 1 自动生成 connector。
+- 支持把命令调用过程记录为可复盘 recipe，但不在 Phase 1 自动生成专用 tool wrapper。
 
 建议执行流程：
 
@@ -807,7 +809,7 @@ XiraGarden / Agent
 - 默认不注入 secret；需要 secret 时必须显式绑定并审计。
 - `command.run` / `shell.run` 结果默认只把 preview、bytes、truncated 状态和 `raw_output_path` 返回给 agent；完整 stdout / stderr 保存在当前 run artifact 中，需要更多证据时通过 `tool_output.read` bounded 读取。
 - agent 不能绕过 runtime 直接启动进程或 shell，也不能用 `tool_output.read` 读取当前 run artifact 之外的任意文件。
-- 可重复交付的客户能力应先沉淀为 flow / agent 的受控命令步骤；是否升级成独立 connector 是 Phase 1 之后的能力。
+- 可重复交付的客户能力应先沉淀为 flow / agent 的受控命令步骤、command recipe 或具体 tool；是否需要更强的协议化接入是 Phase 1 之后的能力。
 
 ### External Tool Runtime
 
@@ -831,13 +833,13 @@ Process CLI 后续可以支持两种模式：
 | 模式 | 用途 | 说明 |
 | --- | --- | --- |
 | Protocol CLI | 专门为 Xira 编写的闭源工具 | 走 JSON stdin/stdout 协议 |
-| Wrapped CLI | 已存在的客户 / 交付 CLI | 由 connector manifest 映射命令、参数、schema 和权限 |
+| Wrapped CLI | 已存在的客户 / 交付 CLI | 由 command recipe 或 tool manifest 映射命令、参数、schema 和权限 |
 
 Protocol CLI 建议协议：
 
 ```text
-runtime -> connector: JSON request over stdin
-connector -> runtime: JSON response over stdout
+runtime -> CLI: JSON request over stdin
+CLI -> runtime: JSON response over stdout
 ```
 
 并要求：
@@ -849,11 +851,11 @@ connector -> runtime: JSON response over stdout
 - stderr 进入 debug log
 - stdout 只承载协议输出
 
-Wrapped CLI 不要求原命令理解 Xira。运行时通过 flow pack / connector manifest 知道如何调用它。但这不是 Phase 1 的默认能力，不能在 core runtime 里硬编码任何具体 CLI。
+Wrapped CLI 不要求原命令理解 Xira。运行时通过 flow pack / command recipe / tool manifest 知道如何调用它。但这不是 Phase 1 的默认能力，不能在 core runtime 里硬编码任何具体 CLI。
 
 运行时在安装或启动 flow pack 时做 capability discovery：
 
-1. 解析 connector manifest。
+1. 解析 command recipe 或 tool manifest。
 2. 在 workspace / package bin / PATH 中解析 executable。
 3. 如配置了 `version_args`，执行版本探测并记录结果。
 4. 校验每个 tool 的 input / output schema。
@@ -862,8 +864,8 @@ Wrapped CLI 不要求原命令理解 Xira。运行时通过 flow pack / connecto
 
 注意：
 
-- Wrapped CLI connector 不扫描任意系统命令，只把 manifest 声明的 tool 暴露为可复用能力。
-- 未在 flow pack / connector manifest 中声明的 CLI 不能作为稳定 tool 自动调用；如果需要临时运行，必须走 Built-in Command Runner 的审批、sandbox 和 audit。
+- Wrapped CLI 不扫描任意系统命令，只把 manifest 声明的 tool 暴露为可复用能力。
+- 未在 flow pack / command recipe / tool manifest 中声明的 CLI 不能作为稳定 tool 自动调用；如果需要临时运行，必须走 Built-in Command Runner 的审批、sandbox 和 audit。
 - XiraGarden 展示的是 runtime-discovered agent 和其允许的 built-in tools，不是自己发现的本机命令。
 - 对客户交付 CLI，建议同时提供 `--version` 和机器可读输出；但第一版不强制 CLI 原生支持 Xira 协议。
 
@@ -872,7 +874,7 @@ Wrapped CLI 不要求原命令理解 Xira。运行时通过 flow pack / connecto
 职责：
 
 - 保存客户密钥
-- 绑定 secret 到 flow / skill / connector
+- 绑定 secret 到 flow / skill / tool / MCP server
 - 控制 tool call 时的 secret 访问
 - 记录 secret access audit event
 - 支持本地加密和企业 secret backend
@@ -977,7 +979,7 @@ Xira 的 evolution loop 负责把真实运行中的失败、成功模式和用�
    把问题归因到 Task Spec / Context / Tool / Permission / Memory / Skill / Workflow / Eval / Observability。
 
 3. Propose
-   生成具体改进候选，例如改 connector wrapper、补 eval、改 task spec、增加 approval rule。
+   生成具体改进候选，例如改 tool wrapper、补 eval、改 task spec、增加 approval rule。
 
 4. Verify
    用 acceptance case、golden task、schema check 或人工 review 验证。
@@ -1015,7 +1017,7 @@ Evolution 不应该直接改 production flow。所有改进先进入 candidate �
 
 ### Command Recipe Capture
 
-`command.run` 负责探索结构化的单程序命令；需要 pipe、重定向、`&&`、heredoc 等 shell language 时才走 `shell.run`。Phase 1 只记录可复盘的 command recipe，不把命令自动提升成 connector。
+`command.run` 负责探索结构化的单程序命令；需要 pipe、重定向、`&&`、heredoc 等 shell language 时才走 `shell.run`。Phase 1 只记录可复盘的 command recipe，不把命令自动提升成专用 tool。
 
 建议流程：
 
@@ -1054,7 +1056,7 @@ Review gate 至少检查：
 5. timeout 和错误输出行为明确。
 6. audit metadata 足够复盘。
 
-这个设计允许 Xira 像 Codex / Claude Code 一样先探索本机未知工具，同时又能把成熟命令沉淀成对 B 可交付、可验收、可回滚的 connector。
+这个设计允许 Xira 像 Codex / Claude Code 一样先探索本机未知工具，同时又能把成熟命令沉淀成对 B 可交付、可验收、可回滚的 command recipe、flow step 或具体 tool。
 
 ## 概念映射
 
@@ -1069,7 +1071,7 @@ Review gate 至少检查：
 | AgentProfile | agent | runtime 装配后创建 ADK agent |
 | FlowPack | agent + instructions + tools | runtime 编译成一个或多个 ADK agent 可用结构 |
 | SkillPack | instructions + tools | 作为 FlowPack 内部能力单元被引用 |
-| Connector | tool / MCP tool | runtime 包装为 ADK tool |
+| MCP / Command / External Tool | tool / MCP tool | runtime 包装为 ADK tool |
 | PermissionPolicy | callbacks / wrapper | 优先在 runtime 层拦截 |
 | AuditEvent | ADK event + runtime event | runtime 统一落库 |
 | OutboundMessage | final response / event | runtime 转换并投递 |
@@ -1083,11 +1085,11 @@ Review gate 至少检查：
 4. EntrypointResolver resolves channel_type + app/bot/install into entrypoint_id
 5. Agent selector uses requested `agent_id` when allowed, otherwise entrypoint.default_agent
 6. SessionManager allocates ConversationScope
-7. PolicyEngine resolves allowed skills/tools/connectors
+7. PolicyEngine resolves default skills, allowed tools, MCP servers and secrets
 8. AgentProfileManager / FlowPackManager builds instructions and tool set
 9. ADK Engine creates / loads agent session
 10. ADK Runner executes turn
-11. ConnectorRuntime handles tool calls
+11. ToolRuntime / MCP runtime handles tool calls
 12. PolicyEngine checks tool permission and secret access
 13. ADK emits events and final response
 14. VerificationRunner executes deterministic checks / acceptance cases
@@ -1168,7 +1170,7 @@ conversation_id + agent_id -> ADK session_id
 原因：
 
 - 客户交付的对象是业务 flow，不是单个 agent 能力描述。
-- 客户交付需要 permissions、secrets、connectors、tests、version。
+- 客户交付需要 permissions、secrets、MCP / command / external tool 配置、tests、version。
 - ADK Skills 更偏 agent 能力描述，不覆盖完整交付生命周期。
 - 不同语言和版本的 ADK skill 支持成熟度可能不同。
 
@@ -1181,14 +1183,16 @@ conversation_id + agent_id -> ADK session_id
   -> 编译 instructions
   -> 注册 ADK tools
   -> 启动 MCP servers
-  -> 绑定 process / HTTP connectors
+  -> 绑定 process / HTTP API tools
   -> 应用 permissions
   -> 生成 audit metadata
 ```
 
-## Connector 权限模型
+## Tool / MCP / Command 权限模型
 
-每个 connector 声明：
+Xira 不在代码层引入统一的外部接入类型。所有外部能力都落到具体执行形态：built-in tool、MCP tool、command recipe、process CLI tool、HTTP / gRPC API tool。权限上限由当前 agent profile 决定。
+
+每个稳定 tool 声明：
 
 - tool names
 - input schema
@@ -1204,7 +1208,7 @@ conversation_id + agent_id -> ADK session_id
 
 ```yaml
 id: internal-erp
-type: process
+type: process_tool
 command:
   - /opt/customer/bin/erp-tool
 
@@ -1232,7 +1236,7 @@ Runtime 在 ADK tool call 前做：
 5. 是否需要人工审批
 6. 是否超过 rate limit
 
-通过后才执行 connector。
+通过后才执行具体 tool、MCP 调用或命令。
 
 ## 权限模式与审批
 
@@ -1296,7 +1300,7 @@ Desktop App
 Customer Server
   -> xira serve
   -> customer DB / secret backend
-  -> internal ERP connectors
+  -> internal ERP MCP / command / API tools
   -> Feishu / WeCom channel
 ```
 
@@ -1408,7 +1412,7 @@ Customer Runtime
 - enterprise secret backend
 - update / rollback
 - health check
-- connector sandbox
+- tool / command sandbox
 - human approval
 - evaluation cases
 - evolution candidate review / promote / rollback
@@ -1419,7 +1423,7 @@ Customer Runtime
 - 不同客户配置完全隔离。
 - flow pack 可以回滚。
 - 关键工具调用可审批。
-- 失败 connector 可定位。
+- 失败 tool / MCP / command 可定位。
 - agent 行为可以用测试集回归。
 - flow pack 改进候选可以通过 golden task 验证后再推广。
 
@@ -1585,11 +1589,11 @@ flow、客户、渠道、权限、secrets、审计、flow pack 由 Business Runt
 - 保持 domain model 小而明确。
 - 只在 runtime 层做业务决策，ADK 层只做执行。
 
-### ADR-003：客户 connector 默认进程外
+### ADR-003：客户外部系统接入默认不进核心 runtime
 
 决策：
 
-客户定制 connector 默认使用 MCP、process CLI、HTTP / gRPC，不默认编译进核心 runtime。
+客户定制的外部系统接入默认使用 MCP、process CLI、HTTP / gRPC API tool 或 command recipe，不默认编译进核心 runtime，也不在代码层定义统一外部接入抽象。
 
 理由：
 
@@ -1607,7 +1611,7 @@ flow、客户、渠道、权限、secrets、审计、flow pack 由 Business Runt
 缓解：
 
 - 明确 JSON schema。
-- 所有 connector 调用写 audit event。
+- 所有 MCP、命令和外部 tool 调用写 audit event。
 - 提供 integration test harness。
 
 ### ADR-004：自定义 Flow Pack 格式
@@ -1619,7 +1623,7 @@ flow、客户、渠道、权限、secrets、审计、flow pack 由 Business Runt
 理由：
 
 - Xira 的客户交付对象是业务 flow，不是 prompt、agent 或 workflow DAG。
-- 客户交付需要版本、权限、secrets、tests、integrations。
+- 客户交付需要版本、权限、secrets、tests、MCP / command / external tool 配置。
 - ADK Skills 不应成为唯一交付格式。
 - 自有格式可以稳定表达业务交付需求。
 
@@ -1645,7 +1649,7 @@ flow、客户、渠道、权限、secrets、审计、flow pack 由 Business Runt
 - 很多真实工作是探索、查询、生成、排查和实施，不需要先建模成完整业务 flow。
 - ADK Go 的最小验证对象天然是 agent runner。
 - XiraGarden 第一版更适合围绕 agent profile、tool call、built-in tools 和 run log 打通体验。
-- 等 agent、connector、verification 和 artifact policy 稳定后，再沉淀成 flow pack 更符合交付演进路径。
+- 等 agent、skill、tool、verification 和 artifact policy 稳定后，再沉淀成 flow pack 更符合交付演进路径。
 
 代价：
 
@@ -1687,13 +1691,13 @@ flow、客户、渠道、权限、secrets、审计、flow pack 由 Business Runt
 
 决策：
 
-Xira 内置 `command.run` 和 `shell.run` 两个命令工具，允许运行运行前未知的本地命令；同时内置 `tool_output.read`，让 agent 在 stdout / stderr preview 被截断时按当前 run 的 `raw_output_path` bounded 读取更多证据。Phase 1 不把每个 CLI 命令包装成专用 tool 或 connector；稳定命令先沉淀为 command recipe 和 flow / agent command step。
+Xira 内置 `command.run` 和 `shell.run` 两个命令工具，允许运行运行前未知的本地命令；同时内置 `tool_output.read`，让 agent 在 stdout / stderr preview 被截断时按当前 run 的 `raw_output_path` bounded 读取更多证据。Phase 1 不把每个 CLI 命令包装成专用 tool；稳定命令先沉淀为 command recipe 和 flow / agent command step。
 
 理由：
 
 - 客户环境里的 CLI、脚本和内部工具无法在产品发布前全部预配置。
 - Codex / Claude Code 这类工具的关键能力之一，是通过 shell 发现和操作未知本地工具。
-- 对 B 交付不能长期依赖自由命令；必须把成功探索沉淀为有权限、测试、审计和复盘材料的 command recipe。是否升级为独立 connector 是后续架构决策。
+- 对 B 交付不能长期依赖自由命令；必须把成功探索沉淀为有权限、测试、审计和复盘材料的 command recipe、flow step 或具体 tool。
 
 代价：
 
@@ -1854,7 +1858,7 @@ PicoClaw 可以参考：
 Xira 还应该从 PicoClaw 的经验里保留三个教训：
 
 - Runtime event 要服务 UI 和 debug，但 audit / run log 需要更稳定，不能混在一起。
-- Hook / process hook 说明进程外扩展是有效路线，但 Xira 需要把它产品化为 connector manifest、schema 和 tests。
+- Hook / process hook 说明进程外扩展是有效路线，但 Xira 需要把它产品化为 MCP、command recipe、tool manifest、schema 和 tests。
 - Session scope 要从业务边界建模，再映射到底层 agent engine，而不是反过来。
 
 但不建议复用：
@@ -1871,7 +1875,7 @@ Xira 还应该从 PicoClaw 的经验里保留三个教训：
 1. 第一版交付目标是本地桌面还是客户服务器？
 2. 是否需要云端 package registry？
 3. flow pack 是否允许客户自己开发？
-4. connector SDK 是否需要支持 Python / Node / Go？
+4. 独立 tool SDK 是否需要支持 Python / Node / Go？
 5. audit log 是否需要满足特定行业合规要求？
 6. 是否需要 license / activation 机制？
 7. 是否允许 runtime 自动联网更新？
@@ -1883,7 +1887,7 @@ Xira 还应该从 PicoClaw 的经验里保留三个教训：
 13. artifact policy 是否需要区分内部证据、客户可见交付物和模型可见上下文？
 14. XiraGarden 是否默认嵌入 runtime，还是要求用户先启动 `xira serve`？
 15. 已探索成功的客户 CLI 命令什么时候可以进入 flow pack：按复用次数、客户验收、还是 artifact / audit 边界成熟度？
-16. 后续是否需要独立 connector SDK，还是长期保持 command tools + MCP 优先？
+16. 后续是否需要独立 tool SDK，还是长期保持 command tools + MCP 优先？
 
 ## 推荐下一步
 

@@ -22,6 +22,7 @@ import (
 	"github.com/xiramesh/xira/internal/entrypoints"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 	fsession "github.com/xiramesh/xira/internal/session"
+	"github.com/xiramesh/xira/internal/skills"
 	rtools "github.com/xiramesh/xira/internal/tools"
 )
 
@@ -37,6 +38,7 @@ type Config struct {
 
 type Service struct {
 	agents         *agents.Manager
+	skills         *skills.Manager
 	events         *EventBus
 	runs           *RunStore
 	entrypoints    *entrypoints.Registry
@@ -66,6 +68,10 @@ func NewService(cfg Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	skillManager, err := skills.LoadFromWorkspace(resolved.WorkspaceRoot)
+	if err != nil {
+		return nil, err
+	}
 	if _, ok := manager.Get(resolved.DefaultAgentID); !ok {
 		return nil, fmt.Errorf("default agent %q not found", resolved.DefaultAgentID)
 	}
@@ -82,6 +88,7 @@ func NewService(cfg Config) (*Service, error) {
 	}
 	return &Service{
 		agents:         manager,
+		skills:         skillManager,
 		events:         NewEventBus(),
 		runs:           NewRunStore(resolved.RunRoot),
 		entrypoints:    entrypoints.NewRegistry(resolved.DefaultAgentID, resolved.Entrypoints),
@@ -147,7 +154,7 @@ func (s *Service) AgentSummaries() []ModelPolicySnapshot {
 	profiles := s.Agents()
 	out := make([]ModelPolicySnapshot, 0, len(profiles))
 	for _, profile := range profiles {
-		out = append(out, modelPolicySnapshot(profile, s.profileSource))
+		out = append(out, s.modelPolicySnapshot(profile))
 	}
 	return out
 }
@@ -170,6 +177,7 @@ func (s *Service) AgentRegistry() []AgentRegistryEntry {
 			Enabled:       true,
 			Discoverable:  true,
 			Tools:         s.toolRegistry(profile).List(),
+			Skills:        compactProfileSkills(profile.Skills),
 			InputSchema:   "delegate_task_v1",
 			OutputSchema:  "delegate_result_v1",
 		})
@@ -236,6 +244,10 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	if !ok {
 		return TurnResponse{}, fmt.Errorf("agent profile %q not found", entrypointDecision.AgentID)
 	}
+	runInstruction, activeSkillIDs, err := s.instructionTextForRun(profile)
+	if err != nil {
+		return TurnResponse{}, err
+	}
 	sessionPolicy := sessionPolicyForProfile(profile, entrypointDecision.SessionPolicy)
 	allocation := s.sessions.Allocate(fsession.AllocationInput{
 		Context:           inbound.Context,
@@ -272,7 +284,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		SessionID:      req.SessionID,
 		SessionScope:   &scope,
 		RouteMatchedBy: entrypointDecision.MatchedBy,
-		ModelPolicy:    modelPolicySnapshot(profile, s.profileSource),
+		ModelPolicy:    s.modelPolicySnapshotForRun(profile, runInstruction, activeSkillIDs),
 		Message:        req.Message,
 		Status:         "running",
 		StartedAt:      now,
@@ -339,6 +351,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"temperature":      resp.ModelPolicy.Temperature,
 		"thinking_type":    resp.ModelPolicy.ThinkingType,
 		"tools":            resp.ModelPolicy.Tools,
+		"skills":           resp.ModelPolicy.Skills,
 		"profile_source":   resp.ModelPolicy.ProfileSource,
 		"instruction_hash": resp.ModelPolicy.InstructionHash,
 	})
@@ -376,7 +389,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	}, recordEvent, func(call LLMCallRecord) {
 		resp.LLMCalls = append(resp.LLMCalls, call)
 	})
-	final, toolCalls, runErr := s.generate(ctx, profile, agentReq, recordEvent, recordAudit)
+	final, toolCalls, runErr := s.generate(ctx, profile, runInstruction, agentReq, recordEvent, recordAudit)
 	resp.FinalResponse = final
 	resp.ToolCalls = toolCalls
 	resp.VerificationResult = s.verifier.Verify(final, profile.Verification.DefaultChecks)
@@ -599,11 +612,12 @@ func toolFailureKey(name string, input map[string]any) string {
 func (s *Service) generate(
 	ctx context.Context,
 	profile agents.Profile,
+	instructionText string,
 	req TurnRequest,
 	recordEvent func(kind, source, message string, payload map[string]any),
 	recordAudit func(action, target string, allowed bool, reason string, meta map[string]any),
 ) (string, []ToolCallRecord, error) {
-	return s.generateADK(ctx, profile, req, recordEvent, recordAudit)
+	return s.generateADK(ctx, profile, instructionText, req, recordEvent, recordAudit)
 }
 
 func copyTurnMetadata(values map[string]string) map[string]string {
@@ -620,6 +634,7 @@ func copyTurnMetadata(values map[string]string) map[string]string {
 func (s *Service) generateNativeDeepSeek(
 	ctx context.Context,
 	profile agents.Profile,
+	instructionText string,
 	req TurnRequest,
 	recordEvent func(kind, source, message string, payload map[string]any),
 	recordAudit func(action, target string, allowed bool, reason string, meta map[string]any),
@@ -629,7 +644,7 @@ func (s *Service) generateNativeDeepSeek(
 		return "", nil, fmt.Errorf("unsupported model %q", modelID)
 	}
 	messages := []deepseek.Message{
-		{Role: "system", Content: s.instructionText(profile)},
+		{Role: "system", Content: instructionText},
 		{Role: "user", Content: req.Message},
 	}
 	tools := s.toolDefinitions(profile)
@@ -1054,7 +1069,33 @@ func (s *Service) toolRegistry(profile agents.Profile) *rtools.Registry {
 }
 
 func (s *Service) instructionText(profile agents.Profile) string {
+	if skillText := s.skillInstructionText(profile); skillText != "" {
+		return s.composeInstructionText(profile, []string{skillText})
+	}
+	return s.composeInstructionText(profile, nil)
+}
+
+func (s *Service) instructionTextForRun(profile agents.Profile) (string, []string, error) {
+	activeSkills, activeSkillIDs, err := s.activateSkills(profile, profile.Skills)
+	if err != nil {
+		return "", nil, err
+	}
+	blocks := make([]string, 0, len(activeSkills))
+	for _, skill := range activeSkills {
+		blocks = append(blocks, skill.InstructionBlock())
+	}
+	return s.composeInstructionText(profile, blocks), activeSkillIDs, nil
+}
+
+func (s *Service) composeInstructionText(profile agents.Profile, skillBlocks []string) string {
 	base := strings.TrimSpace(profile.InstructionText())
+	if skillText := strings.TrimSpace(strings.Join(skillBlocks, "\n\n")); skillText != "" {
+		if base == "" {
+			base = skillText
+		} else {
+			base += "\n\n" + skillText
+		}
+	}
 	tools := s.toolRegistry(profile).List()
 	identity := fmt.Sprintf(
 		"Current Xira agent: %s (%s).\nThis agent profile and runtime instruction are authoritative. If prior assistant messages or model defaults conflict with this agent identity, follow the current profile and correct the conflict. When asked who you are or which agent is active, answer as this Xira agent; do not identify as the underlying model provider unless the user explicitly asks about the model provider.",
@@ -1071,6 +1112,128 @@ func (s *Service) instructionText(profile agents.Profile) string {
 		return "# Runtime Identity\n\n" + identity + "\n\n# Runtime Capabilities\n\n" + capability
 	}
 	return base + "\n\n# Runtime Identity\n\n" + identity + "\n\n# Runtime Capabilities\n\n" + capability
+}
+
+func (s *Service) activateSkills(profile agents.Profile, skillIDs []string) ([]skills.Skill, []string, error) {
+	if len(skillIDs) == 0 {
+		return nil, nil, nil
+	}
+	if s == nil || s.skills == nil {
+		return nil, nil, fmt.Errorf("agent profile %q references skills but no skill registry is available", profile.ID)
+	}
+	knownTools := rtools.NewBuiltinRegistry(s.workspace, agents.BuiltinToolNames())
+	seen := map[string]struct{}{}
+	active := make([]skills.Skill, 0, len(skillIDs))
+	activeIDs := make([]string, 0, len(skillIDs))
+	for _, skillID := range skillIDs {
+		skillID = strings.TrimSpace(skillID)
+		if skillID == "" {
+			continue
+		}
+		if _, ok := seen[skillID]; ok {
+			continue
+		}
+		seen[skillID] = struct{}{}
+		skill, ok := s.skills.Get(skillID)
+		if !ok {
+			return nil, nil, fmt.Errorf("agent profile %q references missing skill %q", profile.ID, skillID)
+		}
+		if err := validateSkillActivation(profile, skill, knownTools); err != nil {
+			return nil, nil, err
+		}
+		active = append(active, skill)
+		activeIDs = append(activeIDs, skill.ID)
+	}
+	return active, activeIDs, nil
+}
+
+func (s *Service) skillInstructionText(profile agents.Profile) string {
+	if s == nil || s.skills == nil {
+		return ""
+	}
+	var blocks []string
+	seen := map[string]struct{}{}
+	for _, id := range profile.Skills {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		skill, ok := s.skills.Get(id)
+		if !ok {
+			continue
+		}
+		blocks = append(blocks, skill.InstructionBlock())
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+func (s *Service) modelPolicySnapshot(profile agents.Profile) ModelPolicySnapshot {
+	snapshot := modelPolicySnapshot(profile, s.profileSource)
+	snapshot.Skills = compactProfileSkills(profile.Skills)
+	snapshot.InstructionHash = instructionHash(s.instructionText(profile))
+	return snapshot
+}
+
+func (s *Service) modelPolicySnapshotForRun(profile agents.Profile, instructionText string, activeSkillIDs []string) ModelPolicySnapshot {
+	snapshot := modelPolicySnapshot(profile, s.profileSource)
+	snapshot.Skills = append([]string{}, activeSkillIDs...)
+	snapshot.InstructionHash = instructionHash(instructionText)
+	return snapshot
+}
+
+func validateSkillActivation(profile agents.Profile, skill skills.Skill, knownTools *rtools.Registry) error {
+	for _, tool := range skill.Requires.Tools {
+		if !knownTools.Has(tool) {
+			return fmt.Errorf("skill %q requires unknown tool %q", skill.ID, tool)
+		}
+		if !stringListContains(profile.Permissions.Tools, tool) {
+			return fmt.Errorf("agent profile %q references skill %q but does not allow required tool %q", profile.ID, skill.ID, tool)
+		}
+	}
+	for _, secret := range skill.Requires.Secrets {
+		if !stringListContains(profile.Permissions.Secrets, secret) {
+			return fmt.Errorf("agent profile %q references skill %q but does not allow required secret %q", profile.ID, skill.ID, secret)
+		}
+	}
+	for _, server := range skill.Requires.MCPServers {
+		if !stringListContains(profile.MCPServers, server) {
+			return fmt.Errorf("agent profile %q references skill %q but does not allow required MCP server %q", profile.ID, skill.ID, server)
+		}
+	}
+	return nil
+}
+
+func stringListContains(values []string, want string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func compactProfileSkills(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func toolInputSummary(input map[string]any) map[string]any {

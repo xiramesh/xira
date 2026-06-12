@@ -117,6 +117,7 @@ type AgentRegistryEntry struct {
 	Enabled       bool     `json:"enabled" yaml:"enabled"`
 	Discoverable  bool     `json:"discoverable" yaml:"discoverable"`
 	Tools         []string `json:"tools,omitempty" yaml:"tools,omitempty"`
+	Skills        []string `json:"skills,omitempty" yaml:"skills,omitempty"`
 	InputSchema   string   `json:"input_schema" yaml:"input_schema"`
 	OutputSchema  string   `json:"output_schema" yaml:"output_schema"`
 }
@@ -164,6 +165,7 @@ type ModelPolicySnapshot struct {
 	Temperature     *float32 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
 	ThinkingType    string   `json:"thinking_type,omitempty" yaml:"thinking_type,omitempty"`
 	Tools           []string `json:"tools,omitempty" yaml:"tools,omitempty"`
+	Skills          []string `json:"skills,omitempty" yaml:"skills,omitempty"`
 	ProfileSource   string   `json:"profile_source,omitempty" yaml:"profile_source,omitempty"`
 	InstructionHash string   `json:"instruction_hash,omitempty" yaml:"instruction_hash,omitempty"`
 }

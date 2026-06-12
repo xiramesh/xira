@@ -24,6 +24,7 @@ import (
 func (s *Service) generateADK(
 	ctx context.Context,
 	profile agents.Profile,
+	instructionText string,
 	req TurnRequest,
 	recordEvent func(kind, source, message string, payload map[string]any),
 	recordAudit func(action, target string, allowed bool, reason string, meta map[string]any),
@@ -43,7 +44,7 @@ func (s *Service) generateADK(
 		Name:                  profile.ID,
 		Description:           profile.Description,
 		Model:                 adkModel,
-		Instruction:           s.instructionText(profile),
+		Instruction:           instructionText,
 		Tools:                 tools,
 		GenerateContentConfig: generateContentConfig(profile),
 	})

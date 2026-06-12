@@ -300,6 +300,189 @@ func TestAgentRegistryExposesLoadedValidEnabledProfiles(t *testing.T) {
 	}
 }
 
+func TestNewServiceLoadsWorkspaceSkillsIntoAgentInstructions(t *testing.T) {
+	instance := writeRuntimeFixture(t, "research-assistant", []string{"chat", "sender"})
+	writeLocalResearchSkill(t, instance, []string{"search_file", "read_file"})
+	writeFile(t, filepath.Join(instance, "workspace", "agents", "research-assistant", "PROFILE.md"), `---
+id: research-assistant
+name: Research Assistant
+version: 0.1.1
+description: Evidence-first research assistant.
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-flash
+  stream: true
+  temperature: 0.2
+skills:
+  - local-research
+tools:
+  - search_file
+  - read_file
+session:
+  dimensions:
+    - chat
+    - sender
+verification:
+  default_checks:
+    - final_response_non_empty
+---
+# Working Contract
+
+Use local evidence before summaries.
+`)
+
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
+	profile, ok := rt.agents.Get("research-assistant")
+	if !ok {
+		t.Fatal("expected research-assistant profile")
+	}
+	instructions := rt.instructionText(profile)
+	if !strings.Contains(instructions, "# Loaded Skill: local-research v0.1.0") || !strings.Contains(instructions, "Prefer workspace search before reading files.") {
+		t.Fatalf("compiled instructions missing skill block:\n%s", instructions)
+	}
+	entries := rt.AgentRegistry()
+	if len(entries) == 0 || !containsString(entries[0].Skills, "local-research") {
+		t.Fatalf("agent registry should expose loaded skill: %+v", entries)
+	}
+	if !containsString(rt.AgentSummaries()[0].Skills, "local-research") {
+		t.Fatalf("agent summary should expose loaded skill: %+v", rt.AgentSummaries()[0])
+	}
+}
+
+func TestRunAgentRejectsDefaultSkillRequiredToolOutsideProfilePermissions(t *testing.T) {
+	instance := writeRuntimeFixture(t, "research-assistant", []string{"chat", "sender"})
+	writeLocalResearchSkill(t, instance, []string{"shell.run"})
+	writeFile(t, filepath.Join(instance, "workspace", "agents", "research-assistant", "PROFILE.md"), `---
+id: research-assistant
+name: Research Assistant
+version: 0.1.1
+description: Evidence-first research assistant.
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-flash
+skills:
+  - local-research
+tools:
+  - read_file
+---
+# Working Contract
+
+Use local evidence before summaries.
+`)
+
+	rt, err := NewService(Config{
+		ConfigPath:     filepath.Join(instance, "xira.yaml"),
+		DeepSeekClient: fakeDeepSeekClient(t),
+	})
+	if err != nil {
+		t.Fatalf("NewService() should not validate default skills at startup: %v", err)
+	}
+
+	_, err = rt.RunAgent(context.Background(), TurnRequest{Message: "use local research", Channel: "test", UserID: "user-1"})
+	if err == nil {
+		t.Fatal("expected skill activation permission error")
+	}
+	if !strings.Contains(err.Error(), `does not allow required tool "shell.run"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunAgentRejectsDefaultSkillRequirementsOutsideProfileScope(t *testing.T) {
+	instance := writeRuntimeFixture(t, "research-assistant", []string{"chat", "sender"})
+	skillDir := filepath.Join(instance, "workspace", "skills", "local-research")
+	writeFile(t, filepath.Join(skillDir, "SKILL.md"), `---
+schema_version: xira.skill.v0
+id: local-research
+name: Local Research
+version: 0.1.0
+description: Source-backed local research skill.
+activation:
+  mode: explicit
+requires:
+  tools:
+    - read_file
+  secrets:
+    - customer-api-key
+  mcp_servers:
+    - filesystem
+---
+# Instructions
+
+Prefer workspace search before reading files.
+`)
+	writeFile(t, filepath.Join(instance, "workspace", "agents", "research-assistant", "PROFILE.md"), `---
+id: research-assistant
+name: Research Assistant
+version: 0.1.1
+description: Evidence-first research assistant.
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-flash
+skills:
+  - local-research
+permissions:
+  tools:
+    - read_file
+---
+# Working Contract
+
+Use local evidence before summaries.
+`)
+
+	rt, err := NewService(Config{
+		ConfigPath:     filepath.Join(instance, "xira.yaml"),
+		DeepSeekClient: fakeDeepSeekClient(t),
+	})
+	if err != nil {
+		t.Fatalf("NewService() should not validate default skills at startup: %v", err)
+	}
+
+	_, err = rt.RunAgent(context.Background(), TurnRequest{Message: "use local research", Channel: "test", UserID: "user-1"})
+	if err == nil {
+		t.Fatal("expected skill activation secret permission error")
+	}
+	if !strings.Contains(err.Error(), `does not allow required secret "customer-api-key"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	writeFile(t, filepath.Join(instance, "workspace", "agents", "research-assistant", "PROFILE.md"), `---
+id: research-assistant
+name: Research Assistant
+version: 0.1.1
+description: Evidence-first research assistant.
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-flash
+skills:
+  - local-research
+mcp_servers: []
+permissions:
+  tools:
+    - read_file
+  secrets:
+    - customer-api-key
+---
+# Working Contract
+
+Use local evidence before summaries.
+`)
+
+	rt, err = NewService(Config{
+		ConfigPath:     filepath.Join(instance, "xira.yaml"),
+		DeepSeekClient: fakeDeepSeekClient(t),
+	})
+	if err != nil {
+		t.Fatalf("NewService() with secret permission should succeed: %v", err)
+	}
+	_, err = rt.RunAgent(context.Background(), TurnRequest{Message: "use local research", Channel: "test", UserID: "user-1"})
+	if err == nil {
+		t.Fatal("expected skill activation MCP permission error")
+	}
+	if !strings.Contains(err.Error(), `does not allow required MCP server "filesystem"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRuntimeOwnedToolsAreInjectedByPolicyOnly(t *testing.T) {
 	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	defaultProfile := agents.BuiltinXiraAssistant()
@@ -2362,6 +2545,36 @@ Use local evidence before summaries.
 
 Careful and source-backed.`)
 	return instance
+}
+
+func writeLocalResearchSkill(t *testing.T, instance string, requiredTools []string) {
+	t.Helper()
+	skillDir := filepath.Join(instance, "workspace", "skills", "local-research")
+	writeFile(t, filepath.Join(skillDir, "SKILL.md"), `---
+schema_version: xira.skill.v0
+id: local-research
+name: Local Research
+version: 0.1.0
+description: Source-backed local research skill.
+activation:
+  mode: explicit
+requires:
+  tools:
+`+yamlStringList(requiredTools, "    ")+`context:
+  includes:
+    - references/
+verification:
+  default_checks:
+    - final_response_non_empty
+artifacts:
+  output_dir: artifacts/skills/local-research
+  retention: local
+---
+# Instructions
+
+Prefer workspace search before reading files.
+`)
+	writeFile(t, filepath.Join(skillDir, "references", "usage.md"), "Use local evidence and cite file paths.\n")
 }
 
 func writeRuntimeFixtureWithEntrypoints(t *testing.T) string {
