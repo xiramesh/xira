@@ -1,7 +1,7 @@
 # Xira
 
 Xira is the Go runtime application for this repository. It owns the CLI, HTTP API
-server, channel runners, session store, run audit store, model integration, and
+server, channel runners, session store, run audit store, model adapter, and
 built-in runtime tools.
 
 The private Go implementation lives under `apps/xira/internal`. GUI applications
