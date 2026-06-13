@@ -1,0 +1,42 @@
+schema_version: xira.flow_acceptance.v0
+flow_id: devrun
+cases:
+  - id: ad_hoc_reaches_design
+    input:
+      entrypoint: ad_hoc
+      repo: /tmp/example-repo
+      request: Add a small health check endpoint.
+    expect:
+      starts_at: intake
+      required_slots:
+        intake:
+          - task_spec
+          - acceptance_criteria
+        design:
+          - design_doc
+          - implementation_plan
+          - verification_plan
+
+  - id: bugfix_reproduces_before_design
+    input:
+      entrypoint: bugfix
+      repo: /tmp/example-repo
+      bug_report: The session restore test fails after restart.
+    expect:
+      starts_at: reproduce
+      required_slots:
+        reproduce:
+          - reproduction_status
+          - evidence
+          - suspected_area
+
+  - id: merge_waits_for_approval
+    input:
+      entrypoint: ad_hoc
+      repo: /tmp/example-repo
+      request: Fix typo in README.
+      runtime_policy:
+        require_merge_approval: true
+    expect:
+      waits_at: approve_merge
+      pending_signal: approval

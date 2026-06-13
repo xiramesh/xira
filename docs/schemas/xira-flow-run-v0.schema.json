@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xira.local/schemas/xira-flow-run-v0.schema.json",
+  "title": "Xira Flow Run State v0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "flow_run_id",
+    "flow_id",
+    "flow_version",
+    "status",
+    "current_step_id",
+    "input",
+    "steps",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "xira.flow_run.v0"
+    },
+    "flow_run_id": {
+      "type": "string",
+      "pattern": "^fr_[A-Za-z0-9_-]+$"
+    },
+    "flow_id": {
+      "$ref": "#/$defs/id"
+    },
+    "flow_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "created",
+        "running",
+        "waiting_signal",
+        "waiting_approval",
+        "recoverable",
+        "failed",
+        "cancelled",
+        "completed"
+      ]
+    },
+    "current_step_id": {
+      "$ref": "#/$defs/id"
+    },
+    "entrypoint_id": {
+      "$ref": "#/$defs/id"
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "steps": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/stepState"
+      }
+    },
+    "pending_signals": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/path"
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stepState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "completed",
+            "waiting",
+            "skipped",
+            "failed",
+            "recoverable"
+          ]
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ended_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "child_run_id": {
+          "type": "string"
+        },
+        "approval_id": {
+          "type": "string"
+        },
+        "signal": {
+          "type": "string"
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/outputValue"
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/path"
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      }
+    },
+    "outputValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/path"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/path"
+          }
+        },
+        "value": true,
+        "summary": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

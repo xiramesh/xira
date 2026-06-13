@@ -1,0 +1,88 @@
+schema_version: xira.flow_run.v0
+flow_run_id: fr_20260613_devrun_001
+flow_id: devrun
+flow_version: 0.1.0
+entrypoint_id: ad_hoc
+status: waiting_approval
+current_step_id: approve_merge
+input:
+  repo: /Users/yinwm/work/flowdeck
+  request: Implement the first Flow schema and DevRun example.
+steps:
+  intake:
+    status: completed
+    started_at: "2026-06-13T10:00:00Z"
+    ended_at: "2026-06-13T10:03:00Z"
+    child_run_id: 20260613-100000-dev-intake
+    outputs:
+      task_spec:
+        artifact: artifacts/intake/task_spec.yaml
+      acceptance_criteria:
+        artifact: artifacts/intake/acceptance.md
+  design:
+    status: completed
+    started_at: "2026-06-13T10:03:00Z"
+    ended_at: "2026-06-13T10:09:00Z"
+    child_run_id: 20260613-100300-dev-architect
+    outputs:
+      design_doc:
+        artifact: artifacts/design/design.md
+      implementation_plan:
+        artifact: artifacts/design/implementation_plan.md
+      verification_plan:
+        artifact: artifacts/design/verification_plan.yaml
+  prepare_branch:
+    status: completed
+    child_run_id: 20260613-100900-dev-git-operator
+    outputs:
+      branch:
+        value: xira/devrun-fr_20260613_devrun_001
+  implement:
+    status: completed
+    child_run_id: 20260613-101000-dev-implementer
+    outputs:
+      change_summary:
+        artifact: artifacts/implement/change_summary.md
+      changed_files:
+        artifact: artifacts/implement/changed_files.yaml
+      risk_notes:
+        artifact: artifacts/implement/risk_notes.md
+  verify:
+    status: completed
+    child_run_id: 20260613-101500-dev-verifier
+    outputs:
+      verification_result:
+        artifact: artifacts/verify/result.json
+  create_pr:
+    status: completed
+    child_run_id: 20260613-102000-dev-git-operator
+    outputs:
+      pr:
+        value:
+          url: https://github.example/xira/flowdeck/pull/123
+  review:
+    status: completed
+    child_run_id: 20260613-102500-dev-reviewer
+    outputs:
+      review_report:
+        artifact: artifacts/review/review.md
+      blocking_findings_count:
+        value: 0
+      merge_recommendation:
+        value: approve
+  fix_or_approve:
+    status: completed
+    outputs:
+      decision:
+        value: approve_merge
+  approve_merge:
+    status: waiting
+    approval_id: apr_20260613_002
+pending_signals:
+  - approval:apr_20260613_002
+artifacts:
+  - artifacts/intake/task_spec.yaml
+  - artifacts/design/implementation_plan.md
+  - artifacts/review/review.md
+created_at: "2026-06-13T10:00:00Z"
+updated_at: "2026-06-13T10:30:00Z"
