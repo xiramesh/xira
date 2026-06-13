@@ -2,26 +2,22 @@
 
 > 对象文档：`docs/architecture/xira-agent-hitl-v0.zh.md`
 > 评审基准：分支 `feature/agent-hitl-v0` 当前代码（`apps/xira/internal/runtime/{types.go,service.go,service_adk.go}`、`apps/xira/internal/tools/registry.go`）
-> 结论：方向正确，地基有一个未验证前提，且有一个现成能力没接通，导致 v0 可能交付一个"看起来安全、实际安全增益接近零"的协作型 HITL。
+> 评审历史：
+> - **R1**（首轮）：基于原始草案，提出 P0/P1/P2 共 10 项问题。
+> - **R2**（本轮）：文档已采纳 R1 全部意见并修订，R1 闭环；针对修订版提出 5 项新问题 N1–N5。
 
 ## 总体评价
 
-认同的设计决策：
+文档方向正确，且 R1 反馈被**实质性地采纳**（不是"已记录"，而是改了结构）：
 
-- HITL 定位为 runtime 基础能力而非 Flow 独占。
-- HumanRequest 作为持久化中断信封，question/scope/context/resolution 概念面清晰。
-- 不阻塞 HTTP，靠"新 turn 恢复"而非挂起 goroutine。
-- 用 run 内 `HumanRequestCollector` 做短路，避免 `executeToolCall` 直接污染 `TurnResponse`。
-- 不在第一版内置"命令风险分类器"——这个判断本身是对的。
+- HITL 定位为 runtime 基础能力，HumanRequest 持久化中断信封。
+- 拆分"协作型 HITL / 强制型 HITL"，明确 v0 不自带 runtime 强制安全边界的旧表述已修正。
+- 接通现成的 `ToolPolicy.RequireConfirmation`，按 `request_source` 区分 snapshot replay 与 agent 继续。
+- native 路径明确依赖 session hydration，并诚实标注"无 hydration 前只能支持 clarification/choice"。
 
-需要否决或重新定义的决策：
+但修订版把"强制型 replay"做成子系统后，**新引入了 5 个实现级硬坑**，其中两个（N1、N2）是必须现在拍板、不能挂"待确认"的。
 
-- native 路径"approve 后由 agent 在后续 turn 自己继续"这一核心前提，在当前代码上**跑不起来**。
-- v0 不接通任何 runtime 强制 gate，HITL 退化为"绅士协议"。
-- approval / clarification 在 v0 语义塌缩，文档未承认。
-- `human.signal` 的来源可信度存在设计矛盾。
-
-严重度分级：
+严重度分级沿用：
 
 ```text
 P0 必须在 v0 实现前解决
@@ -31,216 +27,144 @@ P2 边界与文档完整性,可在落地顺序里补
 
 ---
 
-## P0-1：native 路径不是 agentic loop，Resume 设计的前提不成立
+## R1 闭环确认
 
-文档通篇假设"approve 后由 agent 在后续 turn 自己读取 signal 并继续"。但实际代码 `generateNativeDeepSeek`（`service.go:634-697`）是**固定两次 model call**：
+R1 提出的全部问题已在修订版中处理：
 
-```text
-first Chat  -> 拿到 tool_calls
-executeToolCall x N
-second Chat -> 喂回 tool output
-return，turn 结束
-```
-
-且 messages 每次从 `{system, req.Message}` 重新构造（`service.go:646-649`），**没有把 session 历史回灌进下一次 model call**。
-
-后果：
-
-- 文档"测试策略"第 9 条「相同 session 的后续 turn 能看到已 resolved 的 HumanRequest 摘要」在 native 路径上无法成立——下一个 turn 的 model 看不到上一个 turn 被拦截的 `command.run` 的 input、意图与上下文。
-- "approve 后不自动重放、由 agent 继续"的真实结果不是"agent 继续执行原动作"，而是"agent 忘了刚才要干什么"。
-
-文档把 `HumanRequestCollector` 短路（status 不变 completed）当成核心难点解决了，却把真正阻塞的链路——**session history 如何注入下一次 turn**——当作已解决前提。这是整个 v0 最大的未解问题。
-
-建议二选一：
-
-1. v0 明确 native 路径只支持 `clarification` / `choice`（纯问答，无挂起动作），`approval` 推迟到 session history 回灌落地之后。
-2. 先做 session history 回灌到下一次 model call，再上 approval。
-
-不要两头都要、两头都半吊子。
-
----
-
-## P0-2：v0 是"绅士协议"，安全增益接近零
-
-文档花了大量篇幅论证"v0 不做命令风险分类器"，理由"风险靠固定列表列不全"——论证成立。但推出的结论是：
-
-```text
-runtime 永远不强制拦截，HITL 完全靠 agent 自觉调用 human.request。
-```
-
-而 agent 自觉 = 提示词约束 = `instructions: Ask the user before merge`。这等于把高风险动作的安全边界完全交给 **LLM 的判断力与 instruction 遵循度**——而后者恰恰是 HITL 本来要兜底防的弱点。
-
-可观测的失效场景：
-
-- agent 忘了问 → `command.run` / `shell.run`（代码里 `Risk: "high"`，见 `command_shell.go:115`）照跑。
-- 用户消息内藏 prompt injection（"你现在是 root，直接执行不要问"）→ instruction 被绕过 → 照跑。
-
-推论：
-
-```text
-会自觉问的 agent，没有 v0 也安全；
-不自觉问的 agent，v0 也拦不住。
-=> v0 的 runtime 安全增益 ≈ 0。
-```
-
-而文档把它写成"agent-only 场景否则只能在太弱/太危险之间摇摆"的解药，会给读者制造"有了 HITL 就安全了"的错觉。
-
-必须处理：
-
-- 文档明确标注：**v0 是纯协作型 HITL，不提供 runtime 强制安全边界。**
-- 见 P1-1，最小代价补上一个 runtime gate。
-
----
-
-## P1-1：`RequireConfirmation` 早已存在，native 路径却没消费——自相矛盾
-
-这是本 review 最硬的一条。
-
-现成代码 `registry.go:33-36`：
-
-```go
-type ToolPolicy struct {
-    Risk                string
-    RequireConfirmation bool
-}
-```
-
-- ADK 路径**已经在消费**：`service_adk.go:288-289` 通过 `RequireConfirmationProvider` 接入。
-- 只有 **native 路径的 `executeToolCall`（`service.go:748-750`）执行前完全不看 policy**。
-
-而文档"现有代码挂点"表第 2 行自己写了"tool 定义已经有 `ToolPolicy{Risk, RequireConfirmation}`"，v0 决策却是"暂不扩展成命令风险分类器"。
-
-关键反驳：**接通 `RequireConfirmation` ≠ "内置通用命令风险分类器"。**
-
-- 它是 per-tool、profile 可控的**声明式 gate**。
-- profile 声明该 tool 需确认，native 路径执行前检查 `RequireConfirmation == true`，强制创建 approval HumanRequest 并短路。
-- 这正是文档想要的"确定性来自业务配置而非硬编码列表"，而且代码已有一半。
-
-不接它的唯一代价，就是 P0-2 那个安全幻觉变成现实。
-
-建议：
-
-```text
-v0 native 路径 executeToolCall 执行前检查 def.Policy.RequireConfirmation；
-true 时强制创建 approval HumanRequest 并短路（走 collector）。
-```
-
-便宜、现成、声明式、不违背任何已定原则，立刻把 v0 从"绅士协议"升级到"有 runtime 兜底"。
-
----
-
-## P1-2："不自动重放"可能选反了——它比重放更危险
-
-文档理由："被拦截的 tool input 可能过期（cwd/branch/文件状态变了）"。
-
-合理，但只看了一面。反面更可怕：
-
-| 策略 | 批准-执行一致性 | 风险类型 |
+| R1 问题 | 修订位置 | 结论 |
 | --- | --- | --- |
-| 自动重放 + input 快照 | 批准 A，执行 A，不可篡改 | 数据过期（可检测） |
-| agent 重新构造命令 | 批准 A，agent 重新生成可能产出 B | 命令被改（不可检测） |
+| P0-1 native 非 loop / session 回灌前提不成立 | "Native 路径的 session 回灌前置条件"（514–545）；落地顺序第 3 步；545 行诚实标注无 hydration 前的限制 | ✅ 到位 |
+| P0-2 v0 是"绅士协议"，安全增益≈0 | 摘要拆"协作型/强制型"，明确不接 gate 即为协作协议 | ✅ |
+| P1-1 `RequireConfirmation` 已存在却不接 | 触发来源/已定决策/ADK 关系（815）；并补"ADK 已消费、native 必须消费，否则同 profile 不同 engine 行为不一致" | ✅ 比原建议更深 |
+| P1-2 "不自动重放"可能选反 | 按来源分流：snapshot replay vs agent 继续 | ✅ |
+| P1-3 approval 语义塌缩 | 新增 `request_source`/`trust_level`/`action_snapshot`；approval 两类表 | ✅ 把"塌缩"转为"明确两类" |
+| P1-4 `human.signal` 来源可信度矛盾 | 重命名 HumanResponse/`human.respond`；信任分级表；校验改为"只接受 inbound 当前消息" | ✅ |
+| P2-1 status 边界 | 新增"状态与统计边界"（907–921） | ✅ |
+| P2-2 allowlist 冲突 | 新增"Runtime Control Tools 与 Allowlist"（923–944） | ✅ |
+| P2-3 无限追问 | 新增"去重与限流"（946–957） | ✅ |
+| P2-4 跨 turn 状态恢复 | 新增"跨 Turn 状态恢复"（959–984） | ✅ |
 
-典型场景：用户以为批准的是 `git push origin HEAD`，agent 重新生成时变成 `git push origin main --force`。在 prompt injection 下，"批准什么 vs 执行什么"对不上是经典陷阱。
+R1 全部闭环。以下为 R2 新增问题。
 
-**过期是数据问题（可检测），被改是安全问题（不可检测）。** 文档把前者当否决理由，未权衡后者。
+---
 
-建议按来源区分两种 approval，分别用策略：
+## R2 新增问题
+
+### N1（P0）：snapshot replay 会再次撞上 RequireConfirmation gate → 死循环
+
+强制型 approval approve 后，runtime 要"按 action snapshot 重放"（591 行），即真正执行那个 `command.run`。但重放执行的仍是同一个 tool，其 `def.Policy.RequireConfirmation` 仍为 true。若 replay 走 `executeToolCall`：
 
 ```text
-拦截型 approval（RequireConfirmation，有明确 tool input 快照）
-  -> 快照 + 自动重放，保证"批准什么就执行什么"
-
-agent 主动 approval（human.request 主动创建，无确定 input）
-  -> agent 继续，可容忍重新构造
+replay command.run
+  -> executeToolCall 检查 RequireConfirmation == true
+  -> 再次创建 HumanRequest
+  -> 再次 waiting_human
+  -> 死循环
 ```
 
-不要一刀切。
+文档只写了"replay 最多执行一次"（982）和"replay 不让 agent 重新构造 input"（1018 测试），**完全没说 replay 执行时如何 bypass 同一个 gate**。这是 replay 能否跑通的命门，不是边角。
 
----
-
-## P1-3：approval 语义在 v0 塌缩，文档未承认
-
-v0 同时支持 `approval` / `clarification` / `choice`，又决定"approve 后不自动重放"。
-
-| kind | 语义 | v0 实际行为 |
-| --- | --- | --- |
-| clarification | 纯问答，回答后继续 | ✅ 符合 |
-| choice | 多方案选择 | ✅ 符合 |
-| approval | 隐含一个被挂起的危险动作 | ❌ 无执行力 |
-
-不重放时，approve 之后 agent 要自己重新构造命令。于是 `approval` 塌缩成一个**语义标记，runtime 无任何强制力**。
-
-文档在第 405-433 行论证"不重放更符合 agent-first"，却没承认：**v0 里 approval ≈ clarification。**
-
-必须：文档明确写出 v0 的 approval 是"意图标记"，不携带执行保证；执行力来自 P1-1 的 RequireConfirmation 路径或未来的重放。否则 `approval` 这个 kind 名会误导实现者。
-
----
-
-## P1-4：`human.signal` 来源可信度存在设计矛盾
-
-文档校验要求：
+必须显式定义一条 replay 执行通道：
 
 ```text
-source message 必须来自用户，不允许 agent 伪造用户批准。
+replay 执行带 replay=true 标记
+  -> 跳过 RequireConfirmation gate
+  -> 仍走审计、快照校验、幂等检查
 ```
 
-但 `human.signal` 是 **agent 调用的 tool**。agent 完全可以自己生成 approve，并填一个合法的 `source_message_id`——因为 agent 与 runtime 都能读 session 历史，runtime 无法区分该 id 是否真对应一条"用户发的"消息。
+并在测试策略补一条："replay 执行的 tool 不再触发二次 RequireConfirmation。"
 
-矛盾：**把"解释用户意图"这个不可信操作交给 agent，又想让 runtime 校验来源真实性。两者不可兼得。**
+### N2（P0）：approve 之后，谁触发 replay + resume？契约悬空
 
-真正可信的路径只有一条：**CLI / API 结构化 signal，用户身份由 transport 层认证**。
+跨 turn 恢复流程（965–977）画的是"RunAgent start -> if resume_human_request_id -> replay"。即 **replay 发生在下一次 RunAgent 开始时**，依赖外部再发一次请求驱动。
 
-建议：
+那么 `POST /human-requests/{id}/responses` approve 之后，系统处于悬空态：
 
-- 自然语言路径在 v0 明确标注"低信任，agent 自负其责"。
-- 或者由 channel runner（transport 层，而非 agent）来打 source 标记。
-- 现在文档把两条路径并列、声称"同等校验"，不成立，必须改。
+```text
+已 approved，但未 replay，也无人继续
+-> 必须等用户再发一条消息，才会触发下一个 RunAgent -> 才 replay
+```
+
+这与"不阻塞 HTTP"形成软矛盾，且**体验是断的**：用户点了 approve 以为动作执行了，实际系统在等下一条消息。IM channel 场景尤其糟——用户不可能知道还要"再发一句话"。
+
+文档把此问题甩到"待确认问题 5"（1037），但它**不是可挂起的小问题**，直接决定 responses API 契约：该 POST 是同步执行 replay 并返回结果，还是纯落库等异步触发？这是 v0 决策点。
+
+建议现在就定：
+
+```text
+responses API 在 runtime_tool_gate approve 时同步触发 replay，
+把 replay 结果/状态一并返回，不依赖下一条消息。
+```
+
+### N3（P1）：channel 的 router_structured 能否 enforce 强制 approval——默认值含糊
+
+信任表（96 行）：`channel 结构化 shortcut，由 router 解析` 标为"中到高，**取决于 channel 认证**"，可用于强制 approval 是"可以配置为可以"。
+
+"取决于"在安全语境里太软。现实里 IM channel（飞书/微信 bot）的"用户身份"常不可靠：群成员、可冒充 sender、无强认证 webhook。若 `git push` 的强制 approval 能被 IM 群里一句 `/approve` 放行，等于把强制 gate 焊在纸糊的墙上。
+
+必须给 v0 明确默认，不能含糊：
+
+```text
+v0 默认：仅 transport_authenticated（CLI/API/本地 UI）可 resolve runtime_tool_gate approval。
+channel router_structured 默认 deny 强制 approval，需显式 per-channel 配置开启。
+```
+
+文档现为"可配置"但无默认值，实现者大概率图省事默认允许——默认值方向错会出事。
+
+### N4（P1）：native/ADK 不对称——ADK 路径的 hydration 完全没写
+
+文档对 native session hydration 写得很细（514–545、875 挂点表新增行）。但 ADK 路径只有一句"创建/保存/resolve/replay 由 Xira runtime 负责"（813）。
+
+问题：ADK 有自己的 session 机制。强制型 approval 的 HumanResponse 和 replay result，**怎么注入到 ADK session context 让 ADK agent 读到？** 一行都没有。落地顺序第 3 步也只写 "native session hydration"。
+
+若 v0 要保证"ADK / native 对 RequireConfirmation 行为一致"（测试策略 1017），则 response/replay 注入也必须一致——否则 native 能 resume、ADK 不能 resume，正是 815 行自己反对的"同 profile 不同 engine 行为不一致"。
+
+二选一，不能假装对称：
+
+1. v0 把 ADK hydration 也写出来；或
+2. 明确"v0 snapshot replay 仅 native，ADK 路径强制 approval 暂只创建不自动 replay"。
+
+### N5（P1）：native hydration 依赖一个尚不存在的 compaction 能力
+
+native hydration 要注入"compacted prior messages + request/response/replay summary + current message"（531–535）。但 native 路径是固定 2 次 call、从 `{system, req.Message}` 重建，**当前代码无 compaction/历史窗口机制**。session 一长，全量回灌直接顶爆 context window。
+
+文档用"compacted"一词带过，但这是 native hydration 能否落地的硬依赖。必须二选一：
+
+1. 标注"v0 native hydration 需一个最小 compaction/滑动窗口，否则历史超 N 轮会失效"；或
+2. v0 只回灌最近 K 轮 + HumanRequest 摘要，显式截断。
+
+否则实现者会在 compaction 上卡很久。
 
 ---
 
-## P2：边界与文档完整性
+## 框架外提醒
 
-### P2-1：status 字段边界
+修订版把 HITL 做成"协作型 + 强制型"双层。结构对了，但要警惕一个心理陷阱：**强制型（replay）的复杂度远高于协作型**——snapshot、hash、TTL、bypass gate（N1）、悬空触发（N2）、ADK 对称（N4）、compaction（N5）。这五条全是强制型带来的。
 
-`TurnResponse.Status` 现为硬编码 string（`service.go:398-400` "completed"/"failed"）。新增 `waiting_human` 时需明确：
+若 v0 想真正能交付，可考虑**把强制型 approval 的 replay 收敛到最小范围**：
 
-- `waiting_human` 时 `EndedAt` 是否填充？
-- `Usage ledger`（`service.go:476` 那段）是否记录？算"未结束"还是"已结束等恢复"？
+```text
+v0 强制型 replay 仅支持 CLI/API + 本地 workspace 的 RequireConfirmation tool；
+channel 强制 approval 推到 v0.1。
+```
 
-否则污染 run 统计与 usage 聚合。
-
-### P2-2：allowlist 冲突
-
-`NewBuiltinRegistry`（`registry.go:57`）按 allowlist 注册。"所有 agent 默认可用 human.request/human.signal"与该模型冲突——是硬塞进每个 profile registry，还是绕过 allowlist？文档未给实现方式。
-
-### P2-3：无限追问风险
-
-agent 可随时 `human.request`，deny 后无去重/限流/退避。native 路径只有 2 轮 model call，agent 可能在一个 turn 内陷入"问-被拒-再问"循环直接卡死。
-
-建议：同一 scope 内对相同 question 做去重；连续 deny 后强制终止 turn。
-
-### P2-4：跨 turn 状态恢复未画
-
-`HumanRequestCollector` 是 run 内的；但跨 turn resume 需要从 file store 重新 load pending。这段流程（id 分配、并发写、原子性、resume 时如何 reload pending list 注入上下文）文档完全没画，落地顺序里也没有该环节。
+这样 N2/N3/N4 的影响面都缩到最小，而协作型（澄清/选择/低风险确认）的核心价值不受影响。否则 v0 会被 replay 链路的工程复杂度拖住，反而连协作型都上不了线。
 
 ---
 
 ## 一句话总结
 
 ```text
-文档设计感很好，但被一个没说破的前提（native 路径能跨 turn 继续执行）
-和一个没接通的现成能力（RequireConfirmation）架空。
-
-结果：一个优雅的协作型 HITL，但——
-  - 不能保证"该问的会问"    （P0-2 / P1-1）
-  - 不能保证"批准的会被正确执行"（P0-1 / P1-2 / P1-3）
-  - 不能保证"批准真的来自用户"  （P1-4）
+R1 反馈已全部闭环，文档质量合格。
+但修订引入的"强制型 replay"子系统有 5 个实现级硬坑（N1–N5），
+其中 N1（死循环）和 N2（悬空触发）必须现在拍板，不能挂"待确认"。
 ```
 
-## 优先级建议
+## R2 优先级建议
 
-1. **P0-1** 先回答：native 路径 session history 如何注入下一个 turn。地基，没它其余全是空中楼阁。
-2. **P1-1** native 路径接通现成的 `RequireConfirmation` gate。最小代价把 v0 从"幻觉"变"真兜底"。
-3. **P1-2** 拦截型 approval 走"快照+重放"，agent 主动 approval 才走"agent 继续"。
-4. **P1-4** 自然语言 signal 明确标注低信任，可信路径只留 CLI/API。
-5. **P1-3 / P2** 把 approval≈clarification（v0）、status 边界、allowlist 实现、去重限流、跨 turn reload 补进文档与"已定决策"。
+1. **N1** 定义 replay 执行的 bypass 通道，避免二次 RequireConfirmation 死循环。
+2. **N2** 拍板 responses API 契约：强制型 approve 同步触发 replay，不依赖下一条消息。
+3. **N3** 给 channel router_structured 一个安全默认（默认 deny 强制 approval）。
+4. **N4** ADK hydration：要么写出来，要么明确 v0 不支持 ADK 路径强制 replay。
+5. **N5** native hydration 的 compaction 依赖：要么做最小滑动窗口，要么显式截断。
+6. 视交付压力，评估是否把 v0 强制型 replay 收敛到 CLI/API + 本地 workspace。

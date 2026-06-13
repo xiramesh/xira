@@ -92,7 +92,7 @@ HumanResponse 可以来自两种入口：
 | 来源 | 信任级别 | 可用于强制型 approval |
 | --- | --- | --- |
 | CLI / API / UI button | 高，用户身份由 transport 层确认 | 可以 |
-| channel 结构化 shortcut，且由 channel/router 解析成 HumanResponse | 中到高，取决于 channel 认证 | 可以配置为可以 |
+| channel 结构化 shortcut，且由 channel/router 解析成 HumanResponse | 中，取决于 channel 认证 | v0 默认不可以，需显式 per-channel 开启 |
 | agent 解释自然语言后调用 `human.respond` | 低，语义解释由 LLM 完成 | v0 默认不可以 |
 
 `HumanResponse.signal` 常见值：
@@ -530,10 +530,33 @@ RunAgent 分配 session
   -> load replay result if metadata.resume_human_request_id exists
   -> build native messages:
        system
-       compacted prior user/assistant/tool messages
+       latest K prior user/assistant/tool messages
        human request/response/replay summary
        current user message
 ```
+
+v0 不做语义级 compaction。v0 采用最小滑动窗口：
+
+```text
+always include:
+  active pending HumanRequests
+  recently resolved HumanResponses
+  replay results for the current session
+
+history window:
+  latest K session messages
+  capped by max_history_chars
+  older messages are omitted with a truncation marker
+```
+
+建议默认：
+
+```text
+K = 20 session messages
+max_history_chars = 24000
+```
+
+如果后续需要更长上下文，再单独实现 session summary / semantic compaction；不要把它隐藏在 HITL v0 里。
 
 同时，`waiting_human` run 也要写入 session history，至少包含：
 
@@ -542,7 +565,7 @@ RunAgent 分配 session
 - 如果是 `runtime_tool_gate`，保存 tool call input 快照引用。
 - runtime 给用户的 waiting message。
 
-没有 native session hydration 前，v0 只能可靠支持 `clarification` / `choice` 这类纯问答；不能声称支持 approval resume。
+没有对应 engine 的 HITL hydration 前，v0 只能可靠支持 `clarification` / `choice` 这类纯问答；不能声称支持 approval resume。
 
 ### approve 后是否自动重放 tool call
 
@@ -561,8 +584,8 @@ agent 调用 command.run
 runtime 拦截 tool call A
   -> 保存 action_snapshot(A)
   -> 用户结构化 approve
-  -> runtime 检查 snapshot 未过期、未重放、scope 匹配
-  -> runtime 执行 action_snapshot(A)
+  -> runtime 检查 snapshot 未过期、未重放、scope 匹配、trust_level 足够
+  -> runtime 以 replay execution mode 执行 action_snapshot(A)
   -> 保存 replay result
   -> 后续 turn 把 replay result 注入 agent 上下文
 ```
@@ -573,6 +596,32 @@ runtime 拦截 tool call A
 - agent 不能在 approve 后重新生成一个 B。
 - snapshot 过期是数据问题，可以用 TTL、cwd、workspace revision、input hash 检查发现。
 - 重新构造命令导致“批准 A 执行 B”是安全问题，runtime 很难检测。
+
+### replay execution mode
+
+snapshot replay 不能直接重新走普通 `executeToolCall` gate，否则同一个 `RequireConfirmation=true` tool 会再次创建 HumanRequest，形成死循环。
+
+v0 必须定义专用 replay execution mode：
+
+```text
+executeReplay(action_snapshot, human_response)
+  -> require request_source=runtime_tool_gate
+  -> require response.signal=approve
+  -> require response.trust_level=transport_authenticated
+     or explicitly enabled router_structured channel
+  -> require snapshot not expired
+  -> require snapshot input_hash matches persisted input
+  -> require replay_status is pending
+  -> execute tool with replay=true
+       bypass RequireConfirmation gate
+       keep all tool allowlist/workspace/path/timeout checks
+       keep audit and raw output persistence
+  -> atomically write replay_status completed/failed
+```
+
+`replay=true` 只跳过二次 `RequireConfirmation`。它不能跳过 tool allowlist、workspace path checks、timeout、secret policy、audit、raw output capture。
+
+测试必须覆盖：replay 执行的 tool 不再触发第二个 HumanRequest。
 
 对 `agent_request`，v0 不自动重放，因为本来就没有 runtime 捕获的确定 tool input。它仍然走 agent-first：
 
@@ -626,14 +675,15 @@ Channel slash command 只是可选快捷写法：
 /answer hr_20260613_002 repo 是 /Users/yinwm/work/flowdeck
 ```
 
-v0 决策：channel 里的自然语言回复先作为普通消息进入 runtime router。`/approve` / `/deny` / `/answer` 可以先作为普通消息进入 runtime router；如果要用于强制型 approval，必须由 channel/router 解析成结构化 HumanResponse 并带上 transport 层用户身份。
+v0 决策：channel 里的自然语言回复先作为普通消息进入 runtime router。`/approve` / `/deny` / `/answer` 可以先作为普通消息进入 runtime router；如果要用于强制型 approval，必须由 channel/router 解析成结构化 HumanResponse、带上 transport 层用户身份，并且该 channel 显式开启 strong approval。
 
 原因：
 
 - channel runner 保持薄，只做消息归一化。
 - agent 可以看到用户的自然语言上下文，不局限于机械命令。
 - 与“agent_request 由 agent 继续、runtime_tool_gate 由 snapshot replay”一致。
-- 未来如果 UI 需要秒级审批 inbox，再增加专门 API 或 channel shortcut。
+- v0 默认只有 CLI / API / local UI 的 `transport_authenticated` response 可以 resolve 强制型 approval。
+- channel `router_structured` 默认拒绝强制型 approval，除非 per-channel 配置显式开启。
 
 自然语言 response 路径：
 
@@ -667,6 +717,52 @@ Response body：
   "source": "api"
 }
 ```
+
+### responses API 契约
+
+`POST /api/v1/human-requests/{id}/responses` 不只是落库。
+
+v0 决策：
+
+```text
+request_source=runtime_tool_gate
+  + response.signal=approve
+  + trust_level 足够
+  -> responses API 同步触发 snapshot replay
+  -> response body 返回 HumanResponse + replay status/result ref
+
+其他 request_source 或非 approve response
+  -> responses API 只 resolve HumanRequest
+```
+
+返回示例：
+
+```json
+{
+  "human_response": {
+    "id": "hres_20260613_001",
+    "human_request_id": "hr_20260613_001",
+    "signal": "approve",
+    "trust_level": "transport_authenticated"
+  },
+  "human_request": {
+    "id": "hr_20260613_001",
+    "status": "approved"
+  },
+  "replay": {
+    "status": "completed",
+    "artifact": ".xira/runs/fr_001/replay/call_001.json",
+    "tool": "command.run"
+  }
+}
+```
+
+这解决两个问题：
+
+- 用户 approve 后，动作立即执行，不需要再发一条消息触发下一个 `RunAgent`。
+- HTTP 不等待用户；用户已经在这个请求里给出 response，runtime 只执行一个有 timeout 的 tool replay。
+
+v0 不自动启动新的 model call 来生成后续自然语言总结。CLI/API/Channel 可以直接展示 replay result；后续 agent turn 会通过 hydration 看到 replay result。
 
 ## Runtime 状态变化
 
@@ -785,9 +881,13 @@ command.run -> v0 不做内置风险分类器，但执行 ToolPolicy.RequireConf
 runtime_tool_gate approval -> snapshot + runtime replay
 agent_request approval -> agent 后续 turn 继续，不提供执行一致性保证
 channel 自然语言回复 -> 普通消息 + 低信任 human.respond
-CLI/API/UI/结构化 channel response -> 可用于强制型 approval
-native DeepSeek -> v0 必须实现 session history / HumanRequest / replay result 回灌
-state root -> 暂定 .xira/state/human-requests
+CLI/API/local UI transport_authenticated response -> 可用于强制型 approval
+channel router_structured response -> 默认不能用于强制型 approval，需 per-channel 显式开启
+responses API -> 强制型 approve 同步触发 replay 并返回 replay status/result ref
+replay execution -> 使用 replay=true bypass 二次 RequireConfirmation，但保留其他校验
+native DeepSeek -> v0 必须实现滑动窗口 hydration + HumanRequest / HumanResponse / replay result 回灌
+ADK -> v0 必须通过 session AgentHistory 注入同一份 HITL context
+state root -> 暂定 .xira/state/human-requests + .xira/state/human-responses
 ```
 
 `state root` 仍然保留为轻度待验证项，因为后续如果 session store / run store 已经有统一 state root，应该跟随现有目录结构。
@@ -813,6 +913,37 @@ Xira HumanRequest 才是 runtime 权威状态。
 实现时，`RequireConfirmationProvider` 可以先和 Xira policy 保持一致，但真正的创建、保存、resolve、snapshot replay 应由 Xira runtime 完成。
 
 当前 ADK adapter 已经消费 `def.Policy.RequireConfirmation`。v0 必须让 native DeepSeek 路径也在 `executeToolCall` 前消费同一个字段，否则同一个 profile 在不同 agent engine 下会有不同安全行为。
+
+## ADK Hydration
+
+ADK 路径也必须看到 HumanRequest / HumanResponse / replay result，否则 native 和 ADK 的 resume 行为会不一致。
+
+v0 不为 ADK 设计第二套 HITL 状态。做法是：
+
+```text
+HumanRequest / HumanResponse / replay result
+  -> 写入 HITL store
+  -> 同时写入 session AgentHistory，作为 runtime context message
+  -> hydrateADKSession 读取 AgentHistory
+  -> adkEventFromSessionMessage 转为 ADK session event
+```
+
+建议新增 session message kind：
+
+```text
+human_request_summary
+human_response_summary
+human_replay_result
+```
+
+如果 v0 不新增 kind，也可以先用 `kind=message`、`role=user`、`metadata.producer=runtime.hitl` 写入一段结构化摘要，让 ADK session hydration 以普通用户上下文恢复。
+
+约束：
+
+- ADK 和 native 使用同一份 HITL store。
+- ADK 和 native 使用同一套 replay result。
+- ADK 不自己决定 replay；replay 仍由 Xira `responses` API / runtime 执行。
+- `RequireConfirmationProvider` 只是 adapter 层提示，不能替代 Xira HumanRequest 状态。
 
 ## 与 Flow 的关系
 
@@ -846,7 +977,7 @@ v0 推荐先实现：
 2. `human.request` / `human.respond` 内置 tool。
 3. `TurnResponse.HumanRequests`。
 4. `waiting_human` run status。
-5. native session hydration：回灌 history、pending/resolved HumanRequest、replay result。
+5. native / ADK HITL hydration：回灌 history、pending/resolved HumanRequest/HumanResponse、replay result。
 6. native `RequireConfirmation` gate。
 7. snapshot replay for `runtime_tool_gate` approval。
 8. API list/show/response。
@@ -874,7 +1005,7 @@ v0 暂不实现：
 | `apps/xira/internal/runtime/service.go` | `RunAgent` 创建 run、调用 `generate`、最后统一设置 completed/failed | 增加 waiting_human 分支；`waiting_human` 不算 failed，也不写成 completed |
 | `apps/xira/internal/runtime/service.go` | `generateNativeDeepSeek` 每次从 `{system, req.Message}` 重建 messages | 增加 native session hydration，把 AgentHistory、HumanRequest summary、replay result 注入 messages |
 | `apps/xira/internal/runtime/service.go` | `executeToolCall` 是 native DeepSeek 路径的 tool 执行入口 | v0 支持 `human.request` / `human.respond`，并在执行普通 tool 前检查 `RequireConfirmation` |
-| `apps/xira/internal/runtime/service_adk.go` | ADK tool adapter 已接 `RequireConfirmationProvider` | v0 不依赖 ADK confirmation 做持久化；HumanRequest 的创建、保存、resolve、snapshot replay 由 Xira runtime 负责 |
+| `apps/xira/internal/runtime/service_adk.go` | ADK tool adapter 已接 `RequireConfirmationProvider`，且 ADK 有自己的 session 机制 | v0 不依赖 ADK confirmation 做持久化；HumanRequest 的创建、保存、resolve、snapshot replay 由 Xira runtime 负责，并通过 AgentHistory 注入 ADK session context |
 | `apps/xira/internal/api` | 已有 run/status 类 HTTP API | 增加 human request list/show/response API |
 | `apps/xira/internal/cli` 或现有 CLI 命令入口 | 已有本地操作入口 | 增加 `xira human list/show/approve/deny/answer` |
 
@@ -887,7 +1018,7 @@ HITL 不能只是返回一个普通 tool output。
 如果已经创建 pending HumanRequest，runtime 必须能把这个状态带回 RunAgent，
 让最终 run.status = waiting_human，而不是 completed 或 failed。
 
-同时，HITL 也不能只做当前 run 内 collector。跨 turn resume 必须从 file store 重新加载 pending/resolved HumanRequest、action snapshot 和 replay result，并注入下一次 native model call。
+同时，HITL 也不能只做当前 run 内 collector。跨 turn resume 必须从 file store 重新加载 pending/resolved HumanRequest、action snapshot 和 replay result，并注入下一次 native / ADK model context。
 ```
 
 建议实现一个 run 内 collector：
@@ -967,14 +1098,18 @@ RunAgent start
   -> allocate session
   -> load pending HumanRequests by session_id / agent_id
   -> load recently resolved HumanResponses
+  -> load replay results by session_id / agent_id
   -> if resume_human_request_id:
        load request
        validate response
-       if request_source=runtime_tool_gate and approved:
-         replay action_snapshot if not replayed
-         persist replay result
+       attach request/response/replay result summary
+  -> repair path:
+       if an approved runtime_tool_gate request has replay_status=pending:
+         executeReplay only if request is still valid and not replayed
   -> inject compact summary into model context
 ```
+
+正常路径下，`runtime_tool_gate` replay 由 `POST /human-requests/{id}/responses` 同步触发。`RunAgent start` 里的 replay 只作为恢复性补偿，用于处理 response 写入成功但 replay 因进程崩溃/超时未完成的状态。
 
 并发要求：
 
@@ -989,9 +1124,9 @@ RunAgent start
 
 1. `hitl` 数据模型和 file store。
 2. runtime control tools：`human.request` / `human.respond` + `TurnResponse.HumanRequests`。
-3. `waiting_human` 状态、session history 写入、native session hydration。
+3. `waiting_human` 状态、session history 写入、native/ADK HITL hydration。
 4. native `RequireConfirmation` gate + action snapshot。
-5. structured response resolve + snapshot replay。
+5. structured response resolve + synchronous snapshot replay。
 6. API / CLI response resolve。
 
 第一阶段可以只做 file store，不需要数据库：
@@ -1015,8 +1150,13 @@ RunAgent start
 - 所有 agent profile 默认都能看到 `human.request` 和 `human.respond`。
 - native 路径执行 `RequireConfirmation=true` 的 tool 时不执行原 tool，而是生成 `runtime_tool_gate` HumanRequest 和 action snapshot。
 - ADK / native 对 `RequireConfirmation` 的可见行为一致。
+- ADK hydration 能看到 HumanRequest、HumanResponse 和 replay result 摘要。
 - 结构化 approve 后 runtime 按 action snapshot 重放，且不会让 agent 重新构造 tool input。
+- `POST /human-requests/{id}/responses` 对强制型 approve 同步触发 replay 并返回 replay status/result ref。
+- replay 执行使用 `replay=true`，不会二次触发 `RequireConfirmation`。
 - 同一个 action snapshot 最多 replay 一次。
+- channel `router_structured` 默认不能 resolve `runtime_tool_gate` approval，除非 per-channel 显式开启。
+- native hydration 只注入最新 K 条消息 / max_history_chars + HITL 摘要，不无界回灌 session。
 - 用户说“没问题干吧”时，agent 可以通过 `human.respond` 把唯一低信任 pending request resolve 为 approved。
 - 低信任 `human.respond` 不能 resolve `runtime_tool_gate` approval。
 - 多个 pending request 时，agent 不应该直接 resolve，而应该追问。
@@ -1032,9 +1172,8 @@ RunAgent start
 
 1. `.xira/state/human-requests` 是否和现有 run/session state root 完全一致？
 2. API/CLI resolve 后是否也要写入 session memory，还是只写 HumanRequest store 和 run audit？
-3. channel slash shortcut 是否需要一个轻量 parser，把 `/approve hr_xxx` 转成结构化 HumanResponse，从而可用于强制型 approval？
-4. snapshot replay 的默认 TTL 是多少？是否需要记录 workspace revision / git HEAD？
-5. replay result 是否立即触发 agent resume，还是等下一条用户消息触发？
+3. snapshot replay 的默认 TTL 是多少？是否需要记录 workspace revision / git HEAD？
+4. channel strong approval 的 per-channel 配置应该放 entrypoint config 还是 workspace policy？
 
 ## 推荐下一步
 
@@ -1044,9 +1183,9 @@ RunAgent start
 human.request tool
 human.respond tool
 HumanRequest file store
-native session hydration
+native/ADK HITL hydration
 RequireConfirmation gate
-snapshot replay
+synchronous snapshot replay
 TurnResponse.human_requests
 CLI/API response resolve
 waiting_human 状态传播
