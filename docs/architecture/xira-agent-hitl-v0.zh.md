@@ -207,6 +207,16 @@ agent 发现需要用户介入时，调用 runtime tool：
 human.request
 ```
 
+v0 决策：`human.request` 是所有 agent 都可用的内置 runtime tool，不需要在每个 agent profile 里单独声明 permission。
+
+原因：
+
+- HITL 是 agent runtime 的基础能力。
+- 轻量 agent-only 场景也需要随时问人。
+- 是否问人应该由 agent 的任务上下文、instructions、当前不确定性共同决定，而不是由 profile 的 tool allowlist 决定。
+
+runtime 仍然需要对 `human.request` 做审计和基本校验，例如 question 不能为空、kind 必须合法、options 结构必须合法。
+
 示例：
 
 ```json
@@ -240,30 +250,29 @@ agent 主动请求主要覆盖语义层：
 
 ### 2. Runtime 强制拦截
 
-runtime 在执行 tool 前做 policy check。
+runtime 可以在执行 tool 前做 policy check，但 v0 不把“命令风险分类器”作为核心能力。
 
-如果动作需要用户确认，runtime 不执行 tool，而是创建 `HumanRequest(kind: approval)`。
+v0 决策：不要在第一版内置 `command.run` 风险分类器。
 
-示例触发规则：
+原因：
 
-| 动作 | v0 默认 |
+- 命令风险不可能靠固定列表列全。
+- 同一个命令在不同 repo、不同 cwd、不同客户环境里的风险不同。
+- 过早做分类器会制造一种假的确定性。
+
+v0 更合理的边界是：
+
+| 能力 | v0 默认 |
 | --- | --- |
+| `human.request` | 所有 agent 可用 |
 | `read_file` / `search_file` / `list_dir` | 不问 |
-| `write_file` / `edit_file` | 可配置，默认 ask |
-| `command.run` | 按 program/args 风险判断 |
-| `shell.run` | 默认 ask |
-| `git push` / `gh pr merge` | 必问 |
-| `rm`, `mv`, `chmod`, `curl`, deploy 命令 | ask 或 deny |
+| `write_file` / `edit_file` | 不默认 ask |
+| `tool_output.read` | 不问 |
+| `command.run` / `shell.run` | 不做内置风险分类 |
 
-runtime 强制拦截覆盖安全/权限层：
+也就是说，v0 的核心不是“runtime 猜命令风险”，而是先把 HumanRequest / HumanSignal / waiting_human / audit 链路做出来。
 
-- 文件写入
-- shell language
-- destructive command
-- network write
-- secret access
-- customer system write
-- production / publish / merge
+如果某个业务或交付环境需要更确定的边界，应该通过 agent profile、workspace policy、flow step instructions、客户环境配置来声明，而不是把命令列表硬编码在 HITL core 里。
 
 ## Tool Approval v0 行为
 
@@ -316,6 +325,36 @@ POST /agent-runs/{run_id}/resume
 
 但 v0 不必强行恢复同一个 goroutine 或同一个 model call。
 
+### approve 后是否自动重放 tool call
+
+这里的“自动重放”指：
+
+```text
+agent 调用 command.run
+  -> runtime 拦截并创建 HumanRequest
+  -> 用户 approve
+  -> runtime 不再问 agent，直接拿刚才那份 tool call input 执行一次
+```
+
+另一个方案是：
+
+```text
+agent 调用 command.run
+  -> runtime 拦截并创建 HumanRequest
+  -> 用户 approve
+  -> 后续 turn 把 approve signal 放进上下文
+  -> agent 自己决定是否重新调用 command.run
+```
+
+v0 先选第二种：不自动重放，由 agent 在后续 turn 里自己继续。
+
+原因：
+
+- 更符合 agent-first：批准只是一个 signal，不等于 runtime 接管执行策略。
+- 被拦截的 tool input 可能已经过期，例如 cwd、branch、文件状态、用户意图发生变化。
+- `/approve hr_xxx` 作为普通消息进入 runtime router 后，也天然适合让 agent 读到 signal 再继续。
+- 自动重放可以作为未来能力，但需要更严格的幂等、过期检查和 tool input 快照。
+
 ## 用户交互
 
 CLI：
@@ -335,6 +374,15 @@ Channel slash command：
 /deny hr_20260613_001
 /answer hr_20260613_002 repo 是 /Users/yinwm/work/flowdeck
 ```
+
+v0 决策：channel 里的 `/approve` / `/deny` / `/answer` 先作为普通消息进入 runtime router，不让 channel runner 直接处理。
+
+原因：
+
+- channel runner 保持薄，只做消息归一化。
+- agent 可以看到用户的自然语言上下文，不局限于机械命令。
+- 与“approve 后不自动重放，由 agent 继续”一致。
+- 未来如果 UI 需要秒级审批 inbox，再增加专门 API 或 channel shortcut。
 
 API：
 
@@ -419,46 +467,51 @@ tool.approval_required
 
 ## Policy v0
 
-v0 不需要完整 policy engine，但要有可测试的最小规则。
+v0 不做完整 policy engine，也不做 `command.run` 风险分类器。
 
-建议：
+第一版只保留最小运行时事实：
 
 ```text
+human.request -> allow for all agents
 read_file/search_file/list_dir -> allow
-write_file/edit_file -> ask
-command.run -> classify by program/args
-shell.run -> ask
+write_file/edit_file -> allow by default
 tool_output.read -> allow
-human.request -> allow
+command.run/shell.run -> no built-in classifier
 ```
 
-`command.run` 简单分类：
+如果需要更确定的执行边界，由业务配置决定：
 
 ```text
-read_only:
-  rg, grep, sed, awk, cat, ls, pwd, git status, git diff, gh pr view
-
-write_local:
-  gofmt, task test, npm test, git switch, git add, git commit
-
-write_remote:
-  git push, gh pr create, gh pr merge
-
-destructive:
-  rm, mv, chmod, chown, git reset --hard
+agent profile instructions
+agent profile tool allowlist
+workspace policy
+flow step instructions / constraints
+customer deployment policy
 ```
 
-v0 决策：
+例如开发类 agent 可以被提示：
+
+```yaml
+instructions:
+  - Use /skill code-implementation for code edits.
+  - Ask the user before merge, publish, or remote destructive operations.
+  - Keep changes scoped to files implied by the task.
+```
+
+这类确定性来自业务上下文和 agent instruction，不来自 HITL core 的硬编码命令分类。
+
+## 已定决策
 
 ```text
-read_only -> allow
-write_local -> ask
-write_remote -> ask
-destructive -> ask or deny, default ask
-shell.run -> ask
+human.request -> 所有 agent 默认可用
+write_file/edit_file -> v0 不默认 ask
+command.run -> v0 不做内置风险分类器
+approve 后 -> v0 不自动重放原 tool call，由 agent 在后续 turn 继续
+channel /approve -> v0 作为普通消息进入 runtime router
+state root -> 暂定 .xira/state/human-requests
 ```
 
-这些规则后续应该进入 profile / workspace / flow policy。
+`state root` 仍然保留为轻度待验证项，因为后续如果 session store / run store 已经有统一 state root，应该跟随现有目录结构。
 
 ## 与 ADK Tool Confirmation 的关系
 
@@ -510,7 +563,7 @@ v0 推荐先实现：
 2. `human.request` 内置 tool。
 3. `TurnResponse.HumanRequests`。
 4. `waiting_human` run status。
-5. command/shell/write tool approval gate。
+5. agent 主动创建 HumanRequest 的 run 状态传播。
 6. API list/show/signal。
 7. CLI list/show/approve/deny/answer。
 8. tests。
@@ -531,17 +584,17 @@ v0 暂不实现：
 | 文件 | 现状 | HITL v0 改动 |
 | --- | --- | --- |
 | `apps/xira/internal/runtime/types.go` | `TurnRequest` / `TurnResponse` 已经是 run 的外部协议 | 给 `TurnResponse` 增加 `HumanRequests []hitl.HumanRequest`，并允许 `Status = waiting_human` |
-| `apps/xira/internal/tools/registry.go` | tool 定义已经有 `ToolPolicy{Risk, RequireConfirmation}` | 扩展 policy 表达，或在 runtime 层增加 `PolicyDecider`，不要把审批逻辑塞进每个 tool |
+| `apps/xira/internal/tools/registry.go` | tool 定义已经有 `ToolPolicy{Risk, RequireConfirmation}` | v0 暂不扩展成命令风险分类器；后续如需强制审批，由业务 policy 接入 |
 | `apps/xira/internal/runtime/service.go` | `RunAgent` 创建 run、调用 `generate`、最后统一设置 completed/failed | 增加 waiting_human 分支：有 pending HumanRequest 时不算 failed，也不写成 completed |
-| `apps/xira/internal/runtime/service.go` | `executeToolCall` 是 native DeepSeek 路径的 tool 执行入口 | 在 `registry.Execute` 前做 HITL gate；需要确认时创建 request，不执行原 tool |
-| `apps/xira/internal/runtime/service_adk.go` | ADK tool adapter 已接 `RequireConfirmationProvider` | 让 provider 和 Xira policy 对齐；但 HumanRequest 的创建、保存、resolve 仍在 Xira runtime |
+| `apps/xira/internal/runtime/service.go` | `executeToolCall` 是 native DeepSeek 路径的 tool 执行入口 | v0 先支持 `human.request` 产生 pending request；后续业务 policy 可在这里接强制 gate |
+| `apps/xira/internal/runtime/service_adk.go` | ADK tool adapter 已接 `RequireConfirmationProvider` | v0 不依赖 ADK confirmation；HumanRequest 的创建、保存、resolve 由 Xira runtime 负责 |
 | `apps/xira/internal/api` | 已有 run/status 类 HTTP API | 增加 human request list/show/signal API |
 | `apps/xira/internal/cli` 或现有 CLI 命令入口 | 已有本地操作入口 | 增加 `xira human list/show/approve/deny/answer` |
 
 一个重要约束：
 
 ```text
-HITL gate 不能只是返回一个普通 tool output。
+HITL 不能只是返回一个普通 tool output。
 
 因为 native DeepSeek 路径里，tool output 之后当前实现会继续发第二次 model call。
 如果已经创建 pending HumanRequest，runtime 必须能把这个状态带回 RunAgent，
@@ -558,7 +611,7 @@ type HumanRequestCollector interface {
 }
 ```
 
-`RunAgent` 创建 collector 并放入 context。`executeToolCall` 创建 HumanRequest 后写入 collector，返回一个 `waiting_human` tool output。`generateNativeDeepSeek` 每次 tool call 后检查 collector，如果已有 pending request，则短路返回。`RunAgent` 再把 collector 内容写入 `TurnResponse.HumanRequests`，并设置 `Status = waiting_human`。
+`RunAgent` 创建 collector 并放入 context。`human.request` tool 创建 HumanRequest 后写入 collector，返回一个 `waiting_human` tool output。`generateNativeDeepSeek` 每次 tool call 后检查 collector，如果已有 pending request，则短路返回。`RunAgent` 再把 collector 内容写入 `TurnResponse.HumanRequests`，并设置 `Status = waiting_human`。
 
 这比让 `executeToolCall` 直接修改 `TurnResponse` 更干净，因为 native DeepSeek、ADK adapter、未来 Flow Kernel 都可以共享同一个 HITL collector / store。
 
@@ -568,7 +621,7 @@ type HumanRequestCollector interface {
 
 1. `hitl` 数据模型和 file store。
 2. `human.request` 内置 tool + `TurnResponse.HumanRequests`。
-3. runtime tool gate + `waiting_human` 状态传播。
+3. agent 主动请求 + `waiting_human` 状态传播。
 4. API / CLI signal resolve。
 
 第一阶段可以只做 file store，不需要数据库：
@@ -583,6 +636,7 @@ type HumanRequestCollector interface {
 - UI inbox。
 - policy 配置文件。
 - approve 后自动 replay 原 tool call。
+- runtime 强制 tool gate。
 - flow step scope。
 
 ## 测试策略
@@ -590,21 +644,17 @@ type HumanRequestCollector interface {
 必须覆盖：
 
 - agent 主动调用 `human.request` 会生成 pending HumanRequest。
-- `shell.run` 被 policy 拦截时不会执行命令。
-- `write_file` 被 ask policy 拦截时不会写文件。
+- 所有 agent profile 默认都能看到 `human.request`。
 - approve signal 会把 HumanRequest 改成 approved。
 - deny signal 会把 HumanRequest 改成 denied。
 - run log 和 audit 中能看到 request 和 signal。
 - 相同 session 的后续 turn 能看到已 resolved 的 HumanRequest 摘要。
 
-## 开放问题
+## 待确认问题
 
-1. `human.request` 是否应该作为普通 tool 暴露给所有 agent，还是需要 profile permission？
-2. `write_file` 默认 ask 会不会让开发体验过重？
-3. `command.run` 的风险分类第一版放代码里，还是放 workspace policy 文件？
-4. approve 后是否允许 runtime 自动重放原 tool call，还是必须让 agent 自己重试？
-5. channel 里 `/approve hr_xxx` 应该由 channel runner 直接处理，还是作为普通消息进入 runtime router？
-6. HumanRequest 的 state root 应该放 `.xira/state/human-requests` 还是 `.xira/human-requests`？
+1. `.xira/state/human-requests` 是否和现有 run/session state root 完全一致？
+2. `human.request` 的 signal 是否只通过后续普通 turn 注入，还是 API/CLI resolve 后也要写入 session memory？
+3. channel 里的 `/approve hr_xxx` 是否需要一个轻量 parser，把它转成结构化 metadata，同时仍然作为普通消息进入 runtime？
 
 ## 推荐下一步
 
@@ -615,7 +665,7 @@ human.request tool
 HumanRequest file store
 TurnResponse.human_requests
 CLI/API resolve
-shell.run approval gate
+waiting_human 状态传播
 ```
 
 不要先做完整 policy，也不要先接 Flow。完成后再回到 Flow schema，把 flow 的 `human_approval` 和 agent-generated HumanRequest 的关系补清楚。
