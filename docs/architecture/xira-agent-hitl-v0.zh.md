@@ -34,7 +34,7 @@ review 后修正的核心边界：
 
 ```text
 协作型 HITL：
-  agent 主动 human.request / human.signal。
+  agent 主动 human.request / human.respond。
   解决澄清、选择、低风险确认。
   不声明自己提供 runtime 强制安全边界。
 
@@ -65,8 +65,8 @@ agent 正在执行
   -> 需要人补充信息、做选择或批准风险动作
   -> runtime 创建 HumanRequest
   -> agent run 返回 waiting_human
-  -> 用户发送 signal
-  -> runtime 保存 signal
+  -> 用户提交 HumanResponse
+  -> runtime 保存 HumanResponse
   -> 后续 agent run / resume turn 读取这个结果继续
 ```
 
@@ -75,27 +75,27 @@ HumanRequest 的核心职责：
 - 告诉用户现在需要决定什么。
 - 记录它属于哪个 agent run / session。
 - 保存上下文、选项、状态和审计信息。
-- 接收用户 signal。
+- 接收用户 HumanResponse。
 - 让后续 resume 能找到人类决定。
 
-### HumanSignal
+### HumanResponse
 
-HumanSignal 是用户对 HumanRequest 的回复。
+HumanResponse 是用户对 HumanRequest 的回复。
 
-HumanSignal 可以来自两种入口：
+HumanResponse 可以来自两种入口：
 
 - 结构化入口：CLI / API 直接提交 `approve`、`deny`、`answer`、`choose`。
-- 普通消息入口：用户说“没问题干吧”“先别动”“按方案 A”，agent 理解后调用 `human.signal`，runtime 校验状态并落库。
+- 普通消息入口：用户说“没问题干吧”“先别动”“按方案 A”，agent 理解后调用 `human.respond`，runtime 校验状态并落库。
 
 两种入口的信任级别不同：
 
 | 来源 | 信任级别 | 可用于强制型 approval |
 | --- | --- | --- |
 | CLI / API / UI button | 高，用户身份由 transport 层确认 | 可以 |
-| channel 结构化 shortcut，且由 channel/router 解析 | 中到高，取决于 channel 认证 | 可以配置为可以 |
-| agent 解释自然语言后调用 `human.signal` | 低，语义解释由 LLM 完成 | v0 默认不可以 |
+| channel 结构化 shortcut，且由 channel/router 解析成 HumanResponse | 中到高，取决于 channel 认证 | 可以配置为可以 |
+| agent 解释自然语言后调用 `human.respond` | 低，语义解释由 LLM 完成 | v0 默认不可以 |
 
-常见 signal：
+`HumanResponse.signal` 常见值：
 
 - `approve`
 - `deny`
@@ -103,11 +103,11 @@ HumanSignal 可以来自两种入口：
 - `choose`
 - `cancel`
 
-HumanSignal 不直接执行动作。它只是改变 HumanRequest 状态，并为后续 agent run / tool retry / snapshot replay 提供依据。
+HumanResponse 不直接执行动作。它只是改变 HumanRequest 状态，并为后续 agent run / tool retry / snapshot replay 提供依据。
 
 普通消息入口里，agent 不能只在最终回复里说“用户同意了”。它必须调用 runtime tool，把解释结果变成可审计的状态变更。
 
-但 `human.signal` 只能证明“某个 agent 把某条用户消息解释成了某个 signal”，不能证明用户语义上一定批准了风险动作。强制型 approval 必须依赖结构化 signal，或者依赖 transport/router 直接解析出来的结构化 signal。
+但 `human.respond` 只能证明“某个 agent 把某条用户消息解释成了某个 HumanResponse”，不能证明用户语义上一定批准了风险动作。强制型 approval 必须依赖结构化 HumanResponse，或者依赖 transport/router 直接解析出来的结构化 HumanResponse。
 
 ## HumanRequest 类型
 
@@ -223,11 +223,11 @@ resolution:
 
 `approval` 只有在 `request_source=runtime_tool_gate` 且有 `action_snapshot` 时，才表示“有一个被 runtime 挂起的确定动作”。`request_source=agent_request` 的 approval 更接近“意图确认”，不能承诺批准后执行的动作一定等于用户当时理解的动作。
 
-### HumanSignal 数据结构草案
+### HumanResponse 数据结构草案
 
 ```yaml
-schema_version: xira.human_signal.v0
-id: hs_20260613_001
+schema_version: xira.human_response.v0
+id: hres_20260613_001
 human_request_id: hr_20260613_001
 signal: approve
 actor:
@@ -244,7 +244,7 @@ reason: 用户明确允许继续执行当前 pending request。
 created_at: 2026-06-13T22:35:00+08:00
 ```
 
-结构化 API / CLI 入口可以没有 `interpreter`，因为 signal 是用户直接提交的。普通消息入口必须记录 `interpreter`，因为 agent 在这里负责把自然语言解释成结构化 signal。
+结构化 API / CLI 入口可以没有 `interpreter`，因为 response 是用户直接提交的。普通消息入口必须记录 `interpreter`，因为 agent 在这里负责把自然语言解释成 `HumanResponse.signal`。
 
 ## Scope 设计
 
@@ -333,7 +333,7 @@ agent 主动请求主要覆盖语义层：
 - 多方案选择
 - 需要用户确认意图
 
-### 2. Agent 提交用户 signal
+### 2. Agent 提交 HumanResponse
 
 用户不需要必须使用 `/approve` 这类命令。用户可以用自然语言回复 pending HumanRequest：
 
@@ -350,7 +350,7 @@ agent 看到 session 里有 pending HumanRequest 后，负责判断这条普通�
 如果能明确判断，agent 调用 runtime tool：
 
 ```text
-human.signal
+human.respond
 ```
 
 示例：
@@ -370,17 +370,17 @@ runtime 负责校验：
 
 - request 必须存在且状态是 `pending`。
 - request 必须属于当前 session / actor 可见范围。
-- signal 必须符合 request kind 和 options。
+- `response.signal` 必须符合 request kind 和 options。
 - source message 必须来自当前 inbound user message，或来自 transport/router 提供的用户消息引用；不接受 agent 任意填写历史 message id 作为高信任来源。
 - 同一个 request 只能 resolve 一次。
 
-但 runtime 不能校验 LLM 对自然语言的语义理解是否正确。因此 v0 对 `human.signal` 做信任分级：
+但 runtime 不能校验 LLM 对自然语言的语义理解是否正确。因此 v0 对 `human.respond` 做信任分级：
 
 - 可以 resolve `clarification` / `choice`。
 - 可以 resolve `request_source=agent_request` 的低风险 approval。
 - 默认不能 resolve `request_source=runtime_tool_gate` 的强制型 approval。
 
-强制型 approval 必须走 CLI / API / UI button，或走 channel/router 直接解析出的结构化 signal。也就是说，“没问题干吧”可以成为好的交互体验，但不能默认成为高风险 tool gate 的唯一安全依据。
+强制型 approval 必须走 CLI / API / UI button，或走 channel/router 直接解析出的结构化 HumanResponse。也就是说，“没问题干吧”可以成为好的交互体验，但不能默认成为高风险 tool gate 的唯一安全依据。
 
 如果当前 session 只有一个 pending request，`没问题干吧` 可以被解释为对它的 `approve`。
 
@@ -431,13 +431,13 @@ v0 更合理的边界是：
 | 能力 | v0 默认 |
 | --- | --- |
 | `human.request` | 所有 agent 可用 |
-| `human.signal` | 所有 agent 可用，但按信任级别限制 resolve 范围 |
+| `human.respond` | 所有 agent 可用，但按信任级别限制 resolve 范围 |
 | `read_file` / `search_file` / `list_dir` | 不问 |
 | `write_file` / `edit_file` | 不默认 ask |
 | `tool_output.read` | 不问 |
 | `command.run` / `shell.run` | 不做内置风险分类，但尊重 `RequireConfirmation` |
 
-也就是说，v0 的核心不是“runtime 猜命令风险”，而是把 HumanRequest / HumanSignal / waiting_human / audit 链路做出来，并接通已有的声明式 gate。
+也就是说，v0 的核心不是“runtime 猜命令风险”，而是把 HumanRequest / HumanResponse / waiting_human / audit 链路做出来，并接通已有的声明式 gate。
 
 如果某个业务或交付环境需要更确定的边界，应该通过 agent profile、workspace policy、flow step instructions、客户环境配置来声明，而不是把命令列表硬编码在 HITL core 里。
 
@@ -458,7 +458,7 @@ approval 分两类，不能一刀切：
 4. agent run 状态变成 `waiting_human`。
 5. TurnResponse 返回 `human_requests`。
 6. 用户 approve / deny。
-7. agent 通过后续普通 turn 读取 signal，或者通过 `human.signal` 将用户普通消息 resolve 成 signal。
+7. agent 通过后续普通 turn 读取 HumanResponse，或者通过 `human.respond` 将用户普通消息 resolve 成 HumanResponse。
 
 这类 approval 是协作型确认，不提供“批准什么就一定执行什么”的保证。
 
@@ -469,7 +469,7 @@ approval 分两类，不能一刀切：
 3. 不执行原 tool。
 4. ToolCallRecord 记录为 `waiting_human`。
 5. agent run 状态变成 `waiting_human`。
-6. 用户通过结构化 signal approve / deny。
+6. 用户通过结构化 HumanResponse approve / deny。
 7. approve 后 runtime 只允许按 `action_snapshot` 重放，不让 agent 重新构造命令。
 
 工具返回给模型的内容类似：
@@ -495,11 +495,11 @@ POST /agent-runs
   -> agent 创建 HumanRequest
   -> run.status = waiting_human
 
-POST /human-requests/{id}/signals
+POST /human-requests/{id}/responses
   -> status = approved / denied / answered
 
 POST /agent-runs with same session_id and metadata.resume_human_request_id
-  -> runtime 把 HumanSignal 注入上下文
+  -> runtime 把 HumanResponse 注入上下文
   -> agent 继续
 ```
 
@@ -519,7 +519,7 @@ POST /agent-runs/{run_id}/resume
 first Chat -> tool_calls -> executeToolCall -> second Chat -> return
 ```
 
-并且每次 `generateNativeDeepSeek` 都从 `{system, req.Message}` 重建 messages。如果不把 session history、pending HumanRequest、resolved HumanSignal、snapshot replay result 回灌到下一次 model call，所谓“后续 turn 继续”在 native 路径上不会成立。
+并且每次 `generateNativeDeepSeek` 都从 `{system, req.Message}` 重建 messages。如果不把 session history、pending HumanRequest、resolved HumanResponse、snapshot replay result 回灌到下一次 model call，所谓“后续 turn 继续”在 native 路径上不会成立。
 
 所以 v0 必须增加 native session hydration：
 
@@ -531,7 +531,7 @@ RunAgent 分配 session
   -> build native messages:
        system
        compacted prior user/assistant/tool messages
-       human request/signal/replay summary
+       human request/response/replay summary
        current user message
 ```
 
@@ -579,7 +579,7 @@ runtime 拦截 tool call A
 ```text
 agent 调用 human.request
   -> 用户 approve
-  -> 后续 turn 把 approve signal 放进上下文
+  -> 后续 turn 把 approve response 放进上下文
   -> agent 自己决定下一步
 ```
 
@@ -614,9 +614,9 @@ Channel 普通消息：
 
 这些消息先作为普通消息进入 runtime router。runtime 给 agent 注入当前 session 的 pending HumanRequest 摘要，agent 判断这条消息是否在回答某个 request。
 
-如果判断明确，agent 可以调用 `human.signal`。如果判断不明确，agent 继续追问。
+如果判断明确，agent 可以调用 `human.respond`。如果判断不明确，agent 继续追问。
 
-注意：自然语言 signal 是低信任路径，默认只能 resolve 澄清、选择、协作型 approval。对 `request_source=runtime_tool_gate` 的强制型 approval，v0 需要结构化 signal。
+注意：自然语言 response 是低信任路径，默认只能 resolve 澄清、选择、协作型 approval。对 `request_source=runtime_tool_gate` 的强制型 approval，v0 需要结构化 HumanResponse。
 
 Channel slash command 只是可选快捷写法：
 
@@ -626,7 +626,7 @@ Channel slash command 只是可选快捷写法：
 /answer hr_20260613_002 repo 是 /Users/yinwm/work/flowdeck
 ```
 
-v0 决策：channel 里的自然语言回复先作为普通消息进入 runtime router。`/approve` / `/deny` / `/answer` 可以先作为普通消息进入 runtime router；如果要用于强制型 approval，必须由 channel/router 解析成结构化 signal 并带上 transport 层用户身份。
+v0 决策：channel 里的自然语言回复先作为普通消息进入 runtime router。`/approve` / `/deny` / `/answer` 可以先作为普通消息进入 runtime router；如果要用于强制型 approval，必须由 channel/router 解析成结构化 HumanResponse 并带上 transport 层用户身份。
 
 原因：
 
@@ -635,17 +635,17 @@ v0 决策：channel 里的自然语言回复先作为普通消息进入 runtime 
 - 与“agent_request 由 agent 继续、runtime_tool_gate 由 snapshot replay”一致。
 - 未来如果 UI 需要秒级审批 inbox，再增加专门 API 或 channel shortcut。
 
-自然语言 signal 路径：
+自然语言 response 路径：
 
 ```text
 用户消息："没问题干吧"
   -> runtime router 接收普通消息
   -> runtime 注入 pending HumanRequest 摘要
   -> agent 判断这是 approve
-  -> agent 调用 human.signal
+  -> agent 调用 human.respond
   -> runtime 校验 session / actor / request 状态与信任级别
-  -> 如果 request 允许低信任 signal，HumanRequest.status = approved
-  -> 如果 request 是强制型 approval，runtime 拒绝低信任 signal 并要求结构化 approve
+  -> 如果 request 允许低信任 response，HumanRequest.status = approved
+  -> 如果 request 是强制型 approval，runtime 拒绝低信任 response 并要求结构化 approve
   -> run log 和 audit 记录原始用户消息、解释结果和 trust_level
 ```
 
@@ -654,10 +654,10 @@ API：
 ```text
 GET  /api/v1/human-requests
 GET  /api/v1/human-requests/{id}
-POST /api/v1/human-requests/{id}/signals
+POST /api/v1/human-requests/{id}/responses
 ```
 
-Signal body：
+Response body：
 
 ```json
 {
@@ -686,6 +686,7 @@ HumanRequest 也写入：
 
 ```text
 .xira/state/human-requests/
+.xira/state/human-responses/
 ```
 
 或：
@@ -698,22 +699,25 @@ HumanRequest 也写入：
 
 ```text
 .xira/state/human-requests/<human_request_id>.yaml
+.xira/state/human-responses/<human_response_id>.yaml
 ```
 
 run log 继续保存摘要：
 
 ```text
 .xira/runs/<run_id>/human_requests.jsonl
+.xira/runs/<run_id>/human_responses.jsonl
 ```
 
 ## Audit / Event
 
-每个 HumanRequest 和 HumanSignal 都应该有 event 和 audit。
+每个 HumanRequest 和 HumanResponse 都应该有 event 和 audit。
 
 Runtime events：
 
 ```text
 human.request.created
+human.response.created
 human.request.resolved
 human.request.expired
 ```
@@ -722,7 +726,7 @@ Audit events：
 
 ```text
 human.request
-human.signal
+human.response
 tool.approval_required
 ```
 
@@ -730,9 +734,9 @@ tool.approval_required
 
 - audit 不一定保存完整敏感内容。
 - 必须保存足够复盘的信息：谁问、问什么、属于哪个 run、谁批准、什么时候批准。
-- 自然语言 signal 必须保存原始用户消息引用，例如 `source_message_id`、`source_text_preview`、`interpreted_by_agent_id`。
+- 自然语言 response 必须保存原始用户消息引用，例如 `source_message_id`、`source_text_preview`、`interpreted_by_agent_id`。
 - audit 中要区分 `actor` 和 `interpreter`：批准者是用户，解释者是 agent。
-- signal 必须记录 `trust_level`：`transport_authenticated`、`router_structured` 或 `agent_interpreted`。
+- HumanResponse 必须记录 `trust_level`：`transport_authenticated`、`router_structured` 或 `agent_interpreted`。
 - runtime snapshot replay 必须记录 action snapshot hash、replay status、replay output ref、过期/拒绝原因。
 
 ## Policy v0
@@ -743,7 +747,7 @@ v0 不做完整 policy engine，也不做 `command.run` 风险分类器。
 
 ```text
 human.request -> allow for all agents
-human.signal -> allow for all agents, but trust-limited
+human.respond -> allow for all agents, but trust-limited
 read_file/search_file/list_dir -> allow
 write_file/edit_file -> allow by default
 tool_output.read -> allow
@@ -775,13 +779,13 @@ instructions:
 
 ```text
 human.request -> 所有 agent 默认可用
-human.signal -> 所有 agent 默认可用，但默认是低信任 agent_interpreted signal
+human.respond -> 所有 agent 默认可用，但默认是低信任 agent_interpreted response
 write_file/edit_file -> v0 不默认 ask
 command.run -> v0 不做内置风险分类器，但执行 ToolPolicy.RequireConfirmation
 runtime_tool_gate approval -> snapshot + runtime replay
 agent_request approval -> agent 后续 turn 继续，不提供执行一致性保证
-channel 自然语言回复 -> 普通消息 + 低信任 human.signal
-CLI/API/UI/结构化 channel signal -> 可用于强制型 approval
+channel 自然语言回复 -> 普通消息 + 低信任 human.respond
+CLI/API/UI/结构化 channel response -> 可用于强制型 approval
 native DeepSeek -> v0 必须实现 session history / HumanRequest / replay result 回灌
 state root -> 暂定 .xira/state/human-requests
 ```
@@ -796,7 +800,7 @@ state root -> 暂定 .xira/state/human-requests
 
 - Xira 还要支持非 ADK agent engine。
 - Xira 要把 request 持久化到 state store。
-- Xira 要支持 channel / CLI / API signal。
+- Xira 要支持 channel / CLI / API response。
 - Xira 要生成自己的 audit 和 run log。
 
 因此：
@@ -839,13 +843,13 @@ v0 推荐先实现：
    - list/get/create/resolve
    - action snapshot
    - replay result
-2. `human.request` / `human.signal` 内置 tool。
+2. `human.request` / `human.respond` 内置 tool。
 3. `TurnResponse.HumanRequests`。
 4. `waiting_human` run status。
 5. native session hydration：回灌 history、pending/resolved HumanRequest、replay result。
 6. native `RequireConfirmation` gate。
 7. snapshot replay for `runtime_tool_gate` approval。
-8. API list/show/signal。
+8. API list/show/response。
 9. CLI list/show/approve/deny/answer。
 10. tests。
 
@@ -869,9 +873,9 @@ v0 暂不实现：
 | `apps/xira/internal/tools/registry.go` | tool 定义已经有 `ToolPolicy{Risk, RequireConfirmation}` | 不扩展成命令风险分类器；v0 直接消费 `RequireConfirmation` |
 | `apps/xira/internal/runtime/service.go` | `RunAgent` 创建 run、调用 `generate`、最后统一设置 completed/failed | 增加 waiting_human 分支；`waiting_human` 不算 failed，也不写成 completed |
 | `apps/xira/internal/runtime/service.go` | `generateNativeDeepSeek` 每次从 `{system, req.Message}` 重建 messages | 增加 native session hydration，把 AgentHistory、HumanRequest summary、replay result 注入 messages |
-| `apps/xira/internal/runtime/service.go` | `executeToolCall` 是 native DeepSeek 路径的 tool 执行入口 | v0 支持 `human.request` / `human.signal`，并在执行普通 tool 前检查 `RequireConfirmation` |
+| `apps/xira/internal/runtime/service.go` | `executeToolCall` 是 native DeepSeek 路径的 tool 执行入口 | v0 支持 `human.request` / `human.respond`，并在执行普通 tool 前检查 `RequireConfirmation` |
 | `apps/xira/internal/runtime/service_adk.go` | ADK tool adapter 已接 `RequireConfirmationProvider` | v0 不依赖 ADK confirmation 做持久化；HumanRequest 的创建、保存、resolve、snapshot replay 由 Xira runtime 负责 |
-| `apps/xira/internal/api` | 已有 run/status 类 HTTP API | 增加 human request list/show/signal API |
+| `apps/xira/internal/api` | 已有 run/status 类 HTTP API | 增加 human request list/show/response API |
 | `apps/xira/internal/cli` 或现有 CLI 命令入口 | 已有本地操作入口 | 增加 `xira human list/show/approve/deny/answer` |
 
 一个重要约束：
@@ -896,7 +900,7 @@ type HumanRequestCollector interface {
 }
 ```
 
-`RunAgent` 创建 collector 并放入 context。`human.request` tool 创建 HumanRequest 后写入 collector，返回一个 `waiting_human` tool output。`human.signal` tool resolve HumanRequest 后写入 event / audit。`executeToolCall` 遇到 `RequireConfirmation` 时创建强制型 HumanRequest 和 action snapshot。`generateNativeDeepSeek` 每次 tool call 后检查 collector，如果已有 pending request，则短路返回。`RunAgent` 再把 collector 内容写入 `TurnResponse.HumanRequests`，并设置 `Status = waiting_human`。
+`RunAgent` 创建 collector 并放入 context。`human.request` tool 创建 HumanRequest 后写入 collector，返回一个 `waiting_human` tool output。`human.respond` tool resolve HumanRequest 后写入 event / audit。`executeToolCall` 遇到 `RequireConfirmation` 时创建强制型 HumanRequest 和 action snapshot。`generateNativeDeepSeek` 每次 tool call 后检查 collector，如果已有 pending request，则短路返回。`RunAgent` 再把 collector 内容写入 `TurnResponse.HumanRequests`，并设置 `Status = waiting_human`。
 
 这比让 `executeToolCall` 直接修改 `TurnResponse` 更干净，因为 native DeepSeek、ADK adapter、未来 Flow Kernel 都可以共享同一个 HITL collector / store。
 
@@ -918,7 +922,7 @@ v0 约定：
 
 ## Runtime Control Tools 与 Allowlist
 
-当前 builtin tool registry 按 profile `Permissions.Tools` allowlist 注册。`human.request` / `human.signal` 又要求所有 agent 默认可用。
+当前 builtin tool registry 按 profile `Permissions.Tools` allowlist 注册。`human.request` / `human.respond` 又要求所有 agent 默认可用。
 
 v0 实现方式：
 
@@ -927,16 +931,16 @@ profile tools:
   read_file, command.run, ...
 
 runtime control tools:
-  human.request, human.signal, emit_status, delegate_agent ...
+  human.request, human.respond, emit_status, delegate_agent ...
 ```
 
-`human.request` / `human.signal` 不放进普通 profile allowlist；它们作为 runtime control tools 注入 native / ADK tool surface。
+`human.request` / `human.respond` 不放进普通 profile allowlist；它们作为 runtime control tools 注入 native / ADK tool surface。
 
 约束：
 
 - profile allowlist 仍然控制业务工具。
 - runtime control tools 由 runtime 自己校验输入、scope、trust_level。
-- `human.signal` 不能因为“所有 agent 可见”就绕过 HumanRequest scope/trust 校验。
+- `human.respond` 不能因为“所有 agent 可见”就绕过 HumanRequest scope/trust 校验。
 - instruction 里的 “Available tools” 需要包含 runtime control tools，否则 agent 不知道可以调用。
 
 ## 去重与限流
@@ -962,10 +966,10 @@ v0 resume 数据流：
 RunAgent start
   -> allocate session
   -> load pending HumanRequests by session_id / agent_id
-  -> load recently resolved HumanSignals
+  -> load recently resolved HumanResponses
   -> if resume_human_request_id:
        load request
-       validate signal
+       validate response
        if request_source=runtime_tool_gate and approved:
          replay action_snapshot if not replayed
          persist replay result
@@ -984,11 +988,11 @@ RunAgent start
 建议拆成六个小提交：
 
 1. `hitl` 数据模型和 file store。
-2. runtime control tools：`human.request` / `human.signal` + `TurnResponse.HumanRequests`。
+2. runtime control tools：`human.request` / `human.respond` + `TurnResponse.HumanRequests`。
 3. `waiting_human` 状态、session history 写入、native session hydration。
 4. native `RequireConfirmation` gate + action snapshot。
-5. structured signal resolve + snapshot replay。
-6. API / CLI signal resolve。
+5. structured response resolve + snapshot replay。
+6. API / CLI response resolve。
 
 第一阶段可以只做 file store，不需要数据库：
 
@@ -1008,18 +1012,18 @@ RunAgent start
 必须覆盖：
 
 - agent 主动调用 `human.request` 会生成 pending HumanRequest。
-- 所有 agent profile 默认都能看到 `human.request` 和 `human.signal`。
+- 所有 agent profile 默认都能看到 `human.request` 和 `human.respond`。
 - native 路径执行 `RequireConfirmation=true` 的 tool 时不执行原 tool，而是生成 `runtime_tool_gate` HumanRequest 和 action snapshot。
 - ADK / native 对 `RequireConfirmation` 的可见行为一致。
 - 结构化 approve 后 runtime 按 action snapshot 重放，且不会让 agent 重新构造 tool input。
 - 同一个 action snapshot 最多 replay 一次。
-- 用户说“没问题干吧”时，agent 可以通过 `human.signal` 把唯一低信任 pending request resolve 为 approved。
-- 低信任 `human.signal` 不能 resolve `runtime_tool_gate` approval。
+- 用户说“没问题干吧”时，agent 可以通过 `human.respond` 把唯一低信任 pending request resolve 为 approved。
+- 低信任 `human.respond` 不能 resolve `runtime_tool_gate` approval。
 - 多个 pending request 时，agent 不应该直接 resolve，而应该追问。
 - 不明确回复不能直接 resolve 为 approved。
-- approve signal 会把 HumanRequest 改成 approved。
-- deny signal 会把 HumanRequest 改成 denied。
-- run log 和 audit 中能看到 request 和 signal。
+- `response.signal=approve` 会把 HumanRequest 改成 approved。
+- `response.signal=deny` 会把 HumanRequest 改成 denied。
+- run log 和 audit 中能看到 request 和 response。
 - waiting_human run 填充 EndedAt，写 usage ledger，不生成 failure evolution candidate。
 - 相同 session 的后续 native turn 能看到已 resolved HumanRequest、pending HumanRequest 和 replay result 摘要。
 - 重复 question 会返回已有 HumanRequest，连续 deny 后不会无限追问。
@@ -1028,7 +1032,7 @@ RunAgent start
 
 1. `.xira/state/human-requests` 是否和现有 run/session state root 完全一致？
 2. API/CLI resolve 后是否也要写入 session memory，还是只写 HumanRequest store 和 run audit？
-3. channel slash shortcut 是否需要一个轻量 parser，把 `/approve hr_xxx` 转成结构化 signal，从而可用于强制型 approval？
+3. channel slash shortcut 是否需要一个轻量 parser，把 `/approve hr_xxx` 转成结构化 HumanResponse，从而可用于强制型 approval？
 4. snapshot replay 的默认 TTL 是多少？是否需要记录 workspace revision / git HEAD？
 5. replay result 是否立即触发 agent resume，还是等下一条用户消息触发？
 
@@ -1038,13 +1042,13 @@ RunAgent start
 
 ```text
 human.request tool
-human.signal tool
+human.respond tool
 HumanRequest file store
 native session hydration
 RequireConfirmation gate
 snapshot replay
 TurnResponse.human_requests
-CLI/API resolve
+CLI/API response resolve
 waiting_human 状态传播
 ```
 
