@@ -66,6 +66,11 @@ HumanRequest 的核心职责：
 
 HumanSignal 是用户对 HumanRequest 的回复。
 
+HumanSignal 可以来自两种入口：
+
+- 结构化入口：CLI / API 直接提交 `approve`、`deny`、`answer`、`choose`。
+- 普通消息入口：用户说“没问题干吧”“先别动”“按方案 A”，agent 理解后调用 `human.signal`，runtime 校验并落库。
+
 常见 signal：
 
 - `approve`
@@ -75,6 +80,8 @@ HumanSignal 是用户对 HumanRequest 的回复。
 - `cancel`
 
 HumanSignal 不直接执行动作。它只是改变 HumanRequest 状态，并为后续 agent run / tool retry 提供依据。
+
+普通消息入口里，agent 不能只在最终回复里说“用户同意了”。它必须调用 runtime tool，把解释结果变成可审计的状态变更。
 
 ## HumanRequest 类型
 
@@ -160,6 +167,29 @@ resolution:
 - options
 - timestamps
 - resolution
+
+### HumanSignal 数据结构草案
+
+```yaml
+schema_version: xira.human_signal.v0
+id: hs_20260613_001
+human_request_id: hr_20260613_001
+signal: approve
+actor:
+  type: user
+  id: user-local
+interpreter:
+  type: agent
+  id: xira-assistant
+source:
+  type: user_message
+  message_id: msg_20260613_001
+  text_preview: 没问题干吧
+reason: 用户明确允许继续执行当前 pending request。
+created_at: 2026-06-13T22:35:00+08:00
+```
+
+结构化 API / CLI 入口可以没有 `interpreter`，因为 signal 是用户直接提交的。普通消息入口必须记录 `interpreter`，因为 agent 在这里负责把自然语言解释成结构化 signal。
 
 ## Scope 设计
 
@@ -248,7 +278,54 @@ agent 主动请求主要覆盖语义层：
 - 多方案选择
 - 需要用户确认意图
 
-### 2. Runtime 强制拦截
+### 2. Agent 提交用户 signal
+
+用户不需要必须使用 `/approve` 这类命令。用户可以用自然语言回复 pending HumanRequest：
+
+```text
+没问题干吧
+可以
+先别动
+按方案 A
+这个不要做
+```
+
+agent 看到 session 里有 pending HumanRequest 后，负责判断这条普通消息是不是对某个 request 的回复。
+
+如果能明确判断，agent 调用 runtime tool：
+
+```text
+human.signal
+```
+
+示例：
+
+```json
+{
+  "human_request_id": "hr_20260613_001",
+  "signal": "approve",
+  "source": "user_message",
+  "source_message_id": "msg_20260613_001",
+  "source_text": "没问题干吧",
+  "reason": "用户明确允许继续执行当前 pending request。"
+}
+```
+
+runtime 负责校验：
+
+- request 必须存在且状态是 `pending`。
+- request 必须属于当前 session / actor 可见范围。
+- signal 必须符合 request kind 和 options。
+- source message 必须来自用户，不允许 agent 伪造用户批准。
+- 同一个 request 只能 resolve 一次。
+
+如果当前 session 只有一个 pending request，`没问题干吧` 可以被解释为对它的 `approve`。
+
+如果有多个 pending request，agent 应该追问用户指的是哪一个，而不是猜。
+
+如果用户表达不明确，例如“看着办”，agent 不应该直接提交 approve，而应该继续澄清。
+
+### 3. Runtime 强制拦截
 
 runtime 可以在执行 tool 前做 policy check，但 v0 不把“命令风险分类器”作为核心能力。
 
@@ -274,17 +351,17 @@ v0 更合理的边界是：
 
 如果某个业务或交付环境需要更确定的边界，应该通过 agent profile、workspace policy、flow step instructions、客户环境配置来声明，而不是把命令列表硬编码在 HITL core 里。
 
-## Tool Approval v0 行为
+## Approval HumanRequest v0 行为
 
-当 tool 需要人工确认：
+当 agent 认为某个动作需要人工确认，或者未来 runtime policy gate 要求确认：
 
-1. `executeToolCall` 创建 HumanRequest。
-2. 不执行原 tool。
-3. ToolCallRecord 记录为 waiting human。
+1. `human.request(kind: approval)` 创建 HumanRequest。
+2. 当前动作不继续执行。
+3. ToolCallRecord 或 runtime event 记录为 waiting human。
 4. agent run 状态变成 `waiting_human`。
 5. TurnResponse 返回 `human_requests`。
 6. 用户 approve / deny。
-7. 后续 resume turn 或 agent retry 读取该 signal。
+7. agent 通过后续普通 turn 读取 signal，或者通过 `human.signal` 将用户普通消息 resolve 成 signal。
 
 工具返回给模型的内容类似：
 
@@ -367,7 +444,21 @@ xira human deny hr_20260613_001
 xira human answer hr_20260613_002 --message "repo 是 /Users/yinwm/work/flowdeck"
 ```
 
-Channel slash command：
+Channel 普通消息：
+
+```text
+没问题干吧
+可以，继续
+先别动
+按方案 A
+这个不要做
+```
+
+这些消息先作为普通消息进入 runtime router。runtime 给 agent 注入当前 session 的 pending HumanRequest 摘要，agent 判断这条消息是否在回答某个 request。
+
+如果判断明确，agent 调用 `human.signal`。如果判断不明确，agent 继续追问。
+
+Channel slash command 只是可选快捷写法：
 
 ```text
 /approve hr_20260613_001
@@ -375,7 +466,7 @@ Channel slash command：
 /answer hr_20260613_002 repo 是 /Users/yinwm/work/flowdeck
 ```
 
-v0 决策：channel 里的 `/approve` / `/deny` / `/answer` 先作为普通消息进入 runtime router，不让 channel runner 直接处理。
+v0 决策：channel 里的自然语言回复和 `/approve` / `/deny` / `/answer` 都先作为普通消息进入 runtime router，不让 channel runner 直接处理。
 
 原因：
 
@@ -383,6 +474,19 @@ v0 决策：channel 里的 `/approve` / `/deny` / `/answer` 先作为普通消�
 - agent 可以看到用户的自然语言上下文，不局限于机械命令。
 - 与“approve 后不自动重放，由 agent 继续”一致。
 - 未来如果 UI 需要秒级审批 inbox，再增加专门 API 或 channel shortcut。
+
+自然语言 signal 路径：
+
+```text
+用户消息："没问题干吧"
+  -> runtime router 接收普通消息
+  -> runtime 注入 pending HumanRequest 摘要
+  -> agent 判断这是 approve
+  -> agent 调用 human.signal
+  -> runtime 校验 session / actor / request 状态
+  -> HumanRequest.status = approved
+  -> run log 和 audit 记录原始用户消息与解释结果
+```
 
 API：
 
@@ -398,7 +502,8 @@ Signal body：
 {
   "signal": "approve",
   "actor": "user-local",
-  "message": "Allow once."
+  "message": "Allow once.",
+  "source": "api"
 }
 ```
 
@@ -464,6 +569,8 @@ tool.approval_required
 
 - audit 不一定保存完整敏感内容。
 - 必须保存足够复盘的信息：谁问、问什么、属于哪个 run、谁批准、什么时候批准。
+- 自然语言 signal 必须保存原始用户消息引用，例如 `source_message_id`、`source_text_preview`、`interpreted_by_agent_id`。
+- audit 中要区分 `actor` 和 `interpreter`：批准者是用户，解释者是 agent。
 
 ## Policy v0
 
@@ -473,6 +580,7 @@ v0 不做完整 policy engine，也不做 `command.run` 风险分类器。
 
 ```text
 human.request -> allow for all agents
+human.signal -> allow for all agents, but runtime validates scope and source
 read_file/search_file/list_dir -> allow
 write_file/edit_file -> allow by default
 tool_output.read -> allow
@@ -504,10 +612,11 @@ instructions:
 
 ```text
 human.request -> 所有 agent 默认可用
+human.signal -> 所有 agent 默认可用，但只能提交当前 session 可验证的用户 signal
 write_file/edit_file -> v0 不默认 ask
 command.run -> v0 不做内置风险分类器
 approve 后 -> v0 不自动重放原 tool call，由 agent 在后续 turn 继续
-channel /approve -> v0 作为普通消息进入 runtime router
+channel 自然语言回复 / slash shortcut -> v0 都作为普通消息进入 runtime router
 state root -> 暂定 .xira/state/human-requests
 ```
 
@@ -560,7 +669,7 @@ v0 推荐先实现：
    - types
    - file store
    - list/get/create/resolve
-2. `human.request` 内置 tool。
+2. `human.request` / `human.signal` 内置 tool。
 3. `TurnResponse.HumanRequests`。
 4. `waiting_human` run status。
 5. agent 主动创建 HumanRequest 的 run 状态传播。
@@ -586,7 +695,7 @@ v0 暂不实现：
 | `apps/xira/internal/runtime/types.go` | `TurnRequest` / `TurnResponse` 已经是 run 的外部协议 | 给 `TurnResponse` 增加 `HumanRequests []hitl.HumanRequest`，并允许 `Status = waiting_human` |
 | `apps/xira/internal/tools/registry.go` | tool 定义已经有 `ToolPolicy{Risk, RequireConfirmation}` | v0 暂不扩展成命令风险分类器；后续如需强制审批，由业务 policy 接入 |
 | `apps/xira/internal/runtime/service.go` | `RunAgent` 创建 run、调用 `generate`、最后统一设置 completed/failed | 增加 waiting_human 分支：有 pending HumanRequest 时不算 failed，也不写成 completed |
-| `apps/xira/internal/runtime/service.go` | `executeToolCall` 是 native DeepSeek 路径的 tool 执行入口 | v0 先支持 `human.request` 产生 pending request；后续业务 policy 可在这里接强制 gate |
+| `apps/xira/internal/runtime/service.go` | `executeToolCall` 是 native DeepSeek 路径的 tool 执行入口 | v0 先支持 `human.request` 产生 pending request，支持 `human.signal` resolve request；后续业务 policy 可在这里接强制 gate |
 | `apps/xira/internal/runtime/service_adk.go` | ADK tool adapter 已接 `RequireConfirmationProvider` | v0 不依赖 ADK confirmation；HumanRequest 的创建、保存、resolve 由 Xira runtime 负责 |
 | `apps/xira/internal/api` | 已有 run/status 类 HTTP API | 增加 human request list/show/signal API |
 | `apps/xira/internal/cli` 或现有 CLI 命令入口 | 已有本地操作入口 | 增加 `xira human list/show/approve/deny/answer` |
@@ -611,7 +720,7 @@ type HumanRequestCollector interface {
 }
 ```
 
-`RunAgent` 创建 collector 并放入 context。`human.request` tool 创建 HumanRequest 后写入 collector，返回一个 `waiting_human` tool output。`generateNativeDeepSeek` 每次 tool call 后检查 collector，如果已有 pending request，则短路返回。`RunAgent` 再把 collector 内容写入 `TurnResponse.HumanRequests`，并设置 `Status = waiting_human`。
+`RunAgent` 创建 collector 并放入 context。`human.request` tool 创建 HumanRequest 后写入 collector，返回一个 `waiting_human` tool output。`human.signal` tool resolve HumanRequest 后写入 event / audit。`generateNativeDeepSeek` 每次 tool call 后检查 collector，如果已有 pending request，则短路返回。`RunAgent` 再把 collector 内容写入 `TurnResponse.HumanRequests`，并设置 `Status = waiting_human`。
 
 这比让 `executeToolCall` 直接修改 `TurnResponse` 更干净，因为 native DeepSeek、ADK adapter、未来 Flow Kernel 都可以共享同一个 HITL collector / store。
 
@@ -620,8 +729,8 @@ type HumanRequestCollector interface {
 建议拆成四个小提交：
 
 1. `hitl` 数据模型和 file store。
-2. `human.request` 内置 tool + `TurnResponse.HumanRequests`。
-3. agent 主动请求 + `waiting_human` 状态传播。
+2. `human.request` / `human.signal` 内置 tool + `TurnResponse.HumanRequests`。
+3. agent 主动请求、自然语言 signal resolve、`waiting_human` 状态传播。
 4. API / CLI signal resolve。
 
 第一阶段可以只做 file store，不需要数据库：
@@ -644,7 +753,10 @@ type HumanRequestCollector interface {
 必须覆盖：
 
 - agent 主动调用 `human.request` 会生成 pending HumanRequest。
-- 所有 agent profile 默认都能看到 `human.request`。
+- 所有 agent profile 默认都能看到 `human.request` 和 `human.signal`。
+- 用户说“没问题干吧”时，agent 可以通过 `human.signal` 把唯一 pending request resolve 为 approved。
+- 多个 pending request 时，agent 不应该直接 resolve，而应该追问。
+- 不明确回复不能直接 resolve 为 approved。
 - approve signal 会把 HumanRequest 改成 approved。
 - deny signal 会把 HumanRequest 改成 denied。
 - run log 和 audit 中能看到 request 和 signal。
@@ -653,8 +765,8 @@ type HumanRequestCollector interface {
 ## 待确认问题
 
 1. `.xira/state/human-requests` 是否和现有 run/session state root 完全一致？
-2. `human.request` 的 signal 是否只通过后续普通 turn 注入，还是 API/CLI resolve 后也要写入 session memory？
-3. channel 里的 `/approve hr_xxx` 是否需要一个轻量 parser，把它转成结构化 metadata，同时仍然作为普通消息进入 runtime？
+2. API/CLI resolve 后是否也要写入 session memory，还是只写 HumanRequest store 和 run audit？
+3. channel slash shortcut 是否需要一个轻量 parser，把 `/approve hr_xxx` 转成结构化 metadata，同时仍然作为普通消息进入 runtime？
 
 ## 推荐下一步
 
@@ -662,6 +774,7 @@ type HumanRequestCollector interface {
 
 ```text
 human.request tool
+human.signal tool
 HumanRequest file store
 TurnResponse.human_requests
 CLI/API resolve
