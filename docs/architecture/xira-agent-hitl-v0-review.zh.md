@@ -1,21 +1,23 @@
 # Xira Agent HITL v0 设计 Review
 
 > 对象文档：`docs/architecture/xira-agent-hitl-v0.zh.md`
-> 评审基准：分支 `feature/agent-hitl-v0` 当前代码（`apps/xira/internal/runtime/{types.go,service.go,service_adk.go}`、`apps/xira/internal/tools/registry.go`）
+> 评审基准：分支 `feature/agent-hitl-v0` 当前代码（`apps/xira/internal/runtime/{types.go,service.go,service_adk.go,config.go}`、`apps/xira/internal/tools/registry.go`）
 > 评审历史：
 > - **R1**（首轮）：基于原始草案，提出 P0/P1/P2 共 10 项问题。
-> - **R2**（本轮）：文档已采纳 R1 全部意见并修订，R1 闭环；针对修订版提出 5 项新问题 N1–N5。
+> - **R2**（第二轮）：文档采纳 R1 全部意见，R1 闭环；针对修订版提出 N1–N5。
+> - **R3**（本轮）：文档采纳 R2 全部意见并主动引入 `workspace_id`，R2 闭环；针对修订版提出 M1–M5。主线架构已收敛，剩余均为实现层工程洞。
 
 ## 总体评价
 
-文档方向正确，且 R1 反馈被**实质性地采纳**（不是"已记录"，而是改了结构）：
+文档经过三轮修订，**主线架构已收敛得很干净**：
 
-- HITL 定位为 runtime 基础能力，HumanRequest 持久化中断信封。
-- 拆分"协作型 HITL / 强制型 HITL"，明确 v0 不自带 runtime 强制安全边界的旧表述已修正。
-- 接通现成的 `ToolPolicy.RequireConfirmation`，按 `request_source` 区分 snapshot replay 与 agent 继续。
-- native 路径明确依赖 session hydration，并诚实标注"无 hydration 前只能支持 clarification/choice"。
+- 协作型 / 强制型 HITL 双层，`request_source` / `trust_level` 分流。
+- `runtime_tool_gate` approval 走 snapshot + 同步 replay，`agent_request` approval 走 agent 继续。
+- native / ADK 共享同一份 HITL store + hydration。
+- 强制型 approval 的信任默认值收敛到 transport_authenticated。
+- 主动引入 `workspace_id` 分离"运行中断点"与"资源/权限归属"。
 
-但修订版把"强制型 replay"做成子系统后，**新引入了 5 个实现级硬坑**，其中两个（N1、N2）是必须现在拍板、不能挂"待确认"的。
+R3 剩余问题（M1–M5）**全部是实现层工程洞，不是架构洞**。但其中 M1（replay 并发状态机）和 M3（workspace_id 载体）是两个会卡住整个 replay 链路的硬依赖，建议先拍板再进落地顺序第 1 步。
 
 严重度分级沿用：
 
@@ -29,142 +31,147 @@ P2 边界与文档完整性,可在落地顺序里补
 
 ## R1 闭环确认
 
-R1 提出的全部问题已在修订版中处理：
+R1 提出的 10 项问题已在文档第二轮修订中处理（详见下表），R3 不再重复展开。
 
-| R1 问题 | 修订位置 | 结论 |
-| --- | --- | --- |
-| P0-1 native 非 loop / session 回灌前提不成立 | "Native 路径的 session 回灌前置条件"（514–545）；落地顺序第 3 步；545 行诚实标注无 hydration 前的限制 | ✅ 到位 |
-| P0-2 v0 是"绅士协议"，安全增益≈0 | 摘要拆"协作型/强制型"，明确不接 gate 即为协作协议 | ✅ |
-| P1-1 `RequireConfirmation` 已存在却不接 | 触发来源/已定决策/ADK 关系（815）；并补"ADK 已消费、native 必须消费，否则同 profile 不同 engine 行为不一致" | ✅ 比原建议更深 |
-| P1-2 "不自动重放"可能选反 | 按来源分流：snapshot replay vs agent 继续 | ✅ |
-| P1-3 approval 语义塌缩 | 新增 `request_source`/`trust_level`/`action_snapshot`；approval 两类表 | ✅ 把"塌缩"转为"明确两类" |
-| P1-4 `human.signal` 来源可信度矛盾 | 重命名 HumanResponse/`human.respond`；信任分级表；校验改为"只接受 inbound 当前消息" | ✅ |
-| P2-1 status 边界 | 新增"状态与统计边界"（907–921） | ✅ |
-| P2-2 allowlist 冲突 | 新增"Runtime Control Tools 与 Allowlist"（923–944） | ✅ |
-| P2-3 无限追问 | 新增"去重与限流"（946–957） | ✅ |
-| P2-4 跨 turn 状态恢复 | 新增"跨 Turn 状态恢复"（959–984） | ✅ |
-
-R1 全部闭环。以下为 R2 新增问题。
+| R1 问题 | 结论 |
+| --- | --- |
+| P0-1 native 非 loop / session 回灌前提 | ✅ |
+| P0-2 v0 是"绅士协议"，安全增益≈0 | ✅ |
+| P1-1 `RequireConfirmation` 已存在却不接 | ✅ |
+| P1-2 "不自动重放"可能选反 | ✅ |
+| P1-3 approval 语义塌缩 | ✅ |
+| P1-4 `human.signal` 来源可信度矛盾 | ✅ |
+| P2-1 status 边界 | ✅ |
+| P2-2 allowlist 冲突 | ✅ |
+| P2-3 无限追问 | ✅ |
+| P2-4 跨 turn 状态恢复 | ✅ |
 
 ---
 
-## R2 新增问题
+## R2 闭环确认
 
-### N1（P0）：snapshot replay 会再次撞上 RequireConfirmation gate → 死循环
+R2 提出的 N1–N5 已在文档第三轮修订中处理：
 
-强制型 approval approve 后，runtime 要"按 action snapshot 重放"（591 行），即真正执行那个 `command.run`。但重放执行的仍是同一个 tool，其 `def.Policy.RequireConfirmation` 仍为 true。若 replay 走 `executeToolCall`：
+| R2 问题 | 修订位置 | 结论 |
+| --- | --- | --- |
+| N1 replay 死循环 | 新增"replay execution mode"（643–667）：`executeReplay` + `replay=true` bypass RequireConfirmation，**保留** allowlist/path/timeout/audit | ✅ 精准——只跳 gate，不跳其他校验 |
+| N2 approve 后悬空 | "responses API 契约"（764–808）同步触发 replay；跨 turn 中的 replay **降级为补偿路径**（1157），只处理崩溃 | ✅ 主路径同步 + 补偿路径异步，拆法正确 |
+| N3 channel 默认值 | 信任表（96）改为"v0 默认不可以，需 per-channel 开启"；已定决策 928 | ✅ 默认值方向正确 |
+| N4 ADK hydration | 新增"ADK Hydration"（961–990），通过 AgentHistory + session message kind 共享同一份 HITL store | ✅ 未另起一套状态 |
+| N5 compaction | 滑动窗口 K=20 / max_history_chars=24000（581–602），明确不做语义 compaction | ✅ 截断边界清晰 |
 
-```text
-replay command.run
-  -> executeToolCall 检查 RequireConfirmation == true
-  -> 再次创建 HumanRequest
-  -> 再次 waiting_human
-  -> 死循环
-```
+另：文档主动引入 `workspace_id`（把运行中断点与资源归属分离），方向正确。
 
-文档只写了"replay 最多执行一次"（982）和"replay 不让 agent 重新构造 input"（1018 测试），**完全没说 replay 执行时如何 bypass 同一个 gate**。这是 replay 能否跑通的命门，不是边角。
+R2 全部闭环。以下为 R3 新增问题。
 
-必须显式定义一条 replay 执行通道：
+---
 
-```text
-replay 执行带 replay=true 标记
-  -> 跳过 RequireConfirmation gate
-  -> 仍走审计、快照校验、幂等检查
-```
+## R3 新增问题
 
-并在测试策略补一条："replay 执行的 tool 不再触发二次 RequireConfirmation。"
+### M1（P0）：同步 replay 引入新的并发安全洞——`replay_status` 缺 `running` 中间态
 
-### N2（P0）：approve 之后，谁触发 replay + resume？契约悬空
+N2 的解法是"responses API 同步触发 replay"。这带来一个文档未处理的新问题。
 
-跨 turn 恢复流程（965–977）画的是"RunAgent start -> if resume_human_request_id -> replay"。即 **replay 发生在下一次 RunAgent 开始时**，依赖外部再发一次请求驱动。
-
-那么 `POST /human-requests/{id}/responses` approve 之后，系统处于悬空态：
+`replay_status` 当前只有 `pending / completed / failed`（189、662 行），**没有 `running`**。考虑以下序列：
 
 ```text
-已 approved，但未 replay，也无人继续
--> 必须等用户再发一条消息，才会触发下一个 RunAgent -> 才 replay
+POST /responses approve
+  -> runtime 看到 replay_status=pending，开始执行 replay（git push，耗时 40s）
+  -> HTTP 客户端 30s 超时，连接断开
+  -> 客户端重试 POST /responses approve（或用户再点一次）
+  -> runtime 仍看到 replay_status=pending（第一次还没写完）
+  -> 第二次也执行 replay
+  -> 违反"replay 必须最多执行一次"（1162）
 ```
 
-这与"不阻塞 HTTP"形成软矛盾，且**体验是断的**：用户点了 approve 以为动作执行了，实际系统在等下一条消息。IM channel 场景尤其糟——用户不可能知道还要"再发一句话"。
+这是 N2 解法自己制造的并发洞：同步执行可能很慢的 tool + 可重试的 HTTP + 无中间态的状态机 = 并发重放。
 
-文档把此问题甩到"待确认问题 5"（1037），但它**不是可挂起的小问题**，直接决定 responses API 契约：该 POST 是同步执行 replay 并返回结果，还是纯落库等异步触发？这是 v0 决策点。
+更隐蔽的是，它**重新制造了 N2 想消灭的悬空**，只是从"approve-signal 悬空"变成"replay-result 悬空"——HTTP 超时后客户端拿到 connection error，但 replay 仍在后台跑，用户不知执行了没有。补偿路径（RunAgent start 检查 `replay_status=pending` 重试，1152–1157）只覆盖"进程崩溃"，**不覆盖"还在跑"**——进程没崩、只是 HTTP 超时，后台那次的 status 仍是 pending，又触发一次。
 
-建议现在就定：
+必须修：
 
 ```text
-responses API 在 runtime_tool_gate approve 时同步触发 replay，
-把 replay 结果/状态一并返回，不依赖下一条消息。
+replay_status: pending -> running -> completed/failed
+POST /responses 抢占式 CAS 把 pending 置 running（失败说明已有别人在跑）
+running 期间的重试请求直接返回 replay 进行中状态，不重复执行
 ```
 
-### N3（P1）：channel 的 router_structured 能否 enforce 强制 approval——默认值含糊
+至少补 `running` 中间态 + 原子抢占。否则"最多一次"在同步 HTTP 下保证不了。
 
-信任表（96 行）：`channel 结构化 shortcut，由 router 解析` 标为"中到高，**取决于 channel 认证**"，可用于强制 approval 是"可以配置为可以"。
+### M2（P1）：`input_hash` 是装饰性字段，威胁模型不成立
 
-"取决于"在安全语境里太软。现实里 IM channel（飞书/微信 bot）的"用户身份"常不可靠：群成员、可冒充 sender、无强认证 webhook。若 `git push` 的强制 approval 能被 IM 群里一句 `/approve` 放行，等于把强制 gate 焊在纸糊的墙上。
+`replay execution mode` 要求 "snapshot input_hash matches persisted input"（656 行）。但 persisted input 就是 snapshot 自己——`input_hash` 必然匹配它对应的 `input`。在本地 file store 下，能改 input 的人就能改 hash，这个检查不防任何实际威胁。
 
-必须给 v0 明确默认，不能含糊：
+真正有价值的漂移检测是"批准时的环境" vs "replay 时的环境"（workspace revision / git HEAD），而那个恰被放进"待确认问题 3"。也就是说：**该有的环境漂移检测没定，不该有的 input 自洽检查占了字段。**
 
-```text
-v0 默认：仅 transport_authenticated（CLI/API/本地 UI）可 resolve runtime_tool_gate approval。
-channel router_structured 默认 deny 强制 approval，需显式 per-channel 配置开启。
-```
+建议二选一：
 
-文档现为"可配置"但无默认值，实现者大概率图省事默认允许——默认值方向错会出事。
+1. 删掉 `input_hash` 的校验语义（保留可无）；或
+2. 改名为 `env_hash`，明确它检测的是 cwd/git HEAD 等环境漂移，并给出计算口径。
 
-### N4（P1）：native/ADK 不对称——ADK 路径的 hydration 完全没写
+留着现在的 `input_hash` 会误导实现者以为 replay 有防篡改能力——实际没有。
 
-文档对 native session hydration 写得很细（514–545、875 挂点表新增行）。但 ADK 路径只有一句"创建/保存/resolve/replay 由 Xira runtime 负责"（813）。
+### M3（P1）：`workspace_id` 引入了身份概念，但 runtime 没有对应载体
 
-问题：ADK 有自己的 session 机制。强制型 approval 的 HumanResponse 和 replay result，**怎么注入到 ADK session context 让 ADK agent 读到？** 一行都没有。落地顺序第 3 步也只写 "native session hydration"。
+核对代码后发现的真实落地缺口。文档新增 `workspace_id` 顶层必填（31、135、258–274 行），示例为 `workspace_id: local`。但代码现状：
 
-若 v0 要保证"ADK / native 对 RequireConfirmation 行为一致"（测试策略 1017），则 response/replay 注入也必须一致——否则 native 能 resume、ADK 不能 resume，正是 815 行自己反对的"同 profile 不同 engine 行为不一致"。
+- runtime 里的 `workspace` 是 **`WorkspaceRoot` 文件路径**（`service.go:52` `s.workspace`、`config.go:67`），不是身份标识符。
+- `TurnRequest` **没有** `workspace_id` 字段（`types.go:16–24` 已核实为空）。
+- 那么 HumanRequest 创建时（`executeToolCall` / `human.request` tool）从哪个上下文拿到 `workspace_id`？
 
-二选一，不能假装对称：
+示例的 `local` 暗示 v0 单 workspace 硬编码。这属于"概念引入了、载体未定义"。必须现在回答三件事，否则该字段在 v0 是空壳：
 
-1. v0 把 ADK hydration 也写出来；或
-2. 明确"v0 snapshot replay 仅 native，ADK 路径强制 approval 暂只创建不自动 replay"。
+1. v0 是否假设单 workspace（固定值 `local`）？
+2. `workspace_id` 从哪解析——`TurnRequest` 要不要加字段？还是从 `entrypoint_id` / `channel` 推导？
+3. 未来多 workspace 时谁分配 id、与 `WorkspaceRoot` 的关系？
 
-### N5（P1）：native hydration 依赖一个尚不存在的 compaction 能力
+别让它变成"必填但永远填 `local`"的僵尸字段。M3 还会反向影响 file store：human-requests 要不要按 `workspace_id` 分目录？这关系到落地顺序第 1 步。
 
-native hydration 要注入"compacted prior messages + request/response/replay summary + current message"（531–535）。但 native 路径是固定 2 次 call、从 `{system, req.Message}` 重建，**当前代码无 compaction/历史窗口机制**。session 一长，全量回灌直接顶爆 context window。
+### M4（P2）：被拦截的 ToolCallRecord 与 replay result 如何闭合
 
-文档用"compacted"一词带过，但这是 native hydration 能否落地的硬依赖。必须二选一：
+正常 `command.run` 走 `executeToolCall` 产生 `ToolCallRecord`，output=`waiting_human`。replay 走 `executeReplay`，结果进独立 replay artifact（800 行 `replay.artifact`）。**原 ToolCallRecord 要不要回填 replay ref？** 审计时若看到"command.run → waiting_human"还要另去 replay artifact 找结果，两套记录容易对不上。
 
-1. 标注"v0 native hydration 需一个最小 compaction/滑动窗口，否则历史超 N 轮会失效"；或
-2. v0 只回灌最近 K 轮 + HumanRequest 摘要，显式截断。
+建议明确闭合关系：原 ToolCallRecord 在 replay 完成后回填 `replay_ref`（指向 replay artifact），保持单条 run log 可完整复盘，而非让审计者在两个文件间跳。
 
-否则实现者会在 compaction 上卡很久。
+### M5（P2，次要）：native 2-call + "一个 run 一个 pending" 的交互代价
+
+"一个 run 内最多一个 pending，创建后短路"（1131）+ native 固定 2 次 model call，意味着：第一次 call 若同时返回 `read_file` + `human.request`，collector 短路时 `read_file` 已执行，但其结果**没机会参与 agent 决定"怎么问"**——agent 实际是盲问。
+
+这是 native 架构的固有局限，文档未点明 UX 代价。建议至少在落地顺序里标注："v0 agent_request 以单 tool turn 为主，多 tool + ask 的组合需等 hydration/多轮增强"，避免实现者发现后回头改设计。
 
 ---
 
 ## 框架外提醒
 
-修订版把 HITL 做成"协作型 + 强制型"双层。结构对了，但要警惕一个心理陷阱：**强制型（replay）的复杂度远高于协作型**——snapshot、hash、TTL、bypass gate（N1）、悬空触发（N2）、ADK 对称（N4）、compaction（N5）。这五条全是强制型带来的。
+到 R3，文档主线设计已收敛。剩余问题（M1–M5）全是实现层工程洞。这其实是设计文档进入"危险安全区"的信号：架构看着都对，容易误判为"可以开工了"。
 
-若 v0 想真正能交付，可考虑**把强制型 approval 的 replay 收敛到最小范围**：
+建议**先别急着进落地顺序第 1 步**。M1（replay 并发状态机）和 M3（workspace_id 载体）是两个会卡住整个 replay 链路的硬依赖：
 
-```text
-v0 强制型 replay 仅支持 CLI/API + 本地 workspace 的 RequireConfirmation tool；
-channel 强制 approval 推到 v0.1。
-```
+- M1 不定，snapshot replay 写不出来（"最多一次"无法保证）。
+- M3 不定，连 HumanRequest 的 file store 路径都落不了（按 `workspace_id` 分目录还是不分？）。
 
-这样 N2/N3/N4 的影响面都缩到最小，而协作型（澄清/选择/低风险确认）的核心价值不受影响。否则 v0 会被 replay 链路的工程复杂度拖住，反而连协作型都上不了线。
+把这两个拍板，再开工，能省掉返工。
 
 ---
 
 ## 一句话总结
 
 ```text
-R1 反馈已全部闭环，文档质量合格。
-但修订引入的"强制型 replay"子系统有 5 个实现级硬坑（N1–N5），
-其中 N1（死循环）和 N2（悬空触发）必须现在拍板，不能挂"待确认"。
+R1（10 项）、R2（5 项）全部闭环，主线架构收敛干净。
+R3 剩余 5 项均为实现层工程洞：
+  - M1（P0）replay 并发状态机缺 running 中间态 —— 同步 replay 的"最多一次"无法保证
+  - M3（P1）workspace_id 概念引入但 runtime 无载体 —— file store 路径都落不了
+  - M2（P1）input_hash 是装饰性字段，威胁模型不成立
+  - M4（P2）被拦截 ToolCallRecord 与 replay result 闭合关系未定义
+  - M5（P2）native 2-call + 单 pending 的盲问代价未点明
+建议先拍 M1、M3 再落地。
 ```
 
-## R2 优先级建议
+## R3 优先级建议
 
-1. **N1** 定义 replay 执行的 bypass 通道，避免二次 RequireConfirmation 死循环。
-2. **N2** 拍板 responses API 契约：强制型 approve 同步触发 replay，不依赖下一条消息。
-3. **N3** 给 channel router_structured 一个安全默认（默认 deny 强制 approval）。
-4. **N4** ADK hydration：要么写出来，要么明确 v0 不支持 ADK 路径强制 replay。
-5. **N5** native hydration 的 compaction 依赖：要么做最小滑动窗口，要么显式截断。
-6. 视交付压力，评估是否把 v0 强制型 replay 收敛到 CLI/API + 本地 workspace。
+1. **M1** 给 replay_status 补 `running` 中间态 + CAS 抢占，定清"最多一次"的并发保证。
+2. **M3** 定 workspace_id 的载体（TurnRequest 字段 / 推导方式 / 是否单 workspace），并决定 file store 是否按 workspace_id 分目录。
+3. **M2** `input_hash` 删除或改名为 `env_hash` 并定义环境漂移检测口径。
+4. **M4** 定 ToolCallRecord 与 replay artifact 的闭合 ref 关系。
+5. **M5** 在落地顺序标注 v0 agent_request 的单 tool turn 边界。
+6. 视交付压力，重新评估落地顺序——M1/M3 未定前，第 4、5 步（RequireConfirmation gate + snapshot replay）无法真正完成。

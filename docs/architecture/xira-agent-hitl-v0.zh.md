@@ -28,7 +28,7 @@ HumanRequest = 运行中临时生成的人类介入请求和存档结构。
 Agent 可以主动创建 HumanRequest。
 Runtime 必须在 ToolPolicy.RequireConfirmation 为 true 时强制创建 HumanRequest。
 Flow 未来复用同一套 HumanRequest，只是 scope 指向 flow_run + step。
-每个 HumanRequest 必须归属于一个 workspace_id；workspace 是状态/权限边界，不是 scope type。
+每个 HumanRequest 必须归属于一个 canonical workspace；workspace 是状态/权限边界，不是 scope type。
 ```
 
 review 后修正的核心边界：
@@ -132,7 +132,7 @@ v0 支持三类：
 ```yaml
 schema_version: xira.human_request.v0
 id: hr_20260613_001
-workspace_id: local
+workspace: /Users/yinwm/work/flowdeck
 kind: approval
 status: pending
 request_source: runtime_tool_gate
@@ -176,7 +176,6 @@ action_snapshot:
   type: tool_call
   tool: command.run
   tool_call_id: call_001
-  input_hash: sha256:...
   input:
     program: git
     args:
@@ -185,8 +184,18 @@ action_snapshot:
       - origin
       - HEAD
     cwd: /Users/yinwm/work/flowdeck
+  env_snapshot:
+    workspace_root: /Users/yinwm/work/flowdeck
+    cwd: /Users/yinwm/work/flowdeck
+    git_head: abc1234
+    captured_at: 2026-06-13T22:30:00+08:00
+  env_hash: sha256:...
+  replay_ttl: 15m
   replay_policy: runtime_snapshot_replay
   replay_status: pending
+  replay_attempt_id:
+  replay_started_at:
+  replay_finished_at:
 
 options:
   - id: approve
@@ -205,7 +214,7 @@ resolution:
 最小 Go 类型可以比 YAML 更小，但要保留这些概念面：
 
 - identity
-- workspace_id
+- workspace
 - kind/status
 - request_source/trust_level
 - scope
@@ -255,10 +264,10 @@ HITL 是 runtime 基础能力，所以 scope 必须能覆盖 agent-only 和未�
 
 但 workspace 不是 scope。workspace 是状态边界、权限边界和文件存储边界；scope 是当前 HumanRequest 正在中断或恢复的运行对象。
 
-因此 HumanRequest 必须有顶层 `workspace_id`：
+因此 HumanRequest 必须有顶层 `workspace`：
 
 ```yaml
-workspace_id: local
+workspace: /Users/yinwm/work/flowdeck
 scope:
   type: agent_run
   id: 20260613-223000-xira-assistant
@@ -271,7 +280,41 @@ agent_workspace
 flow_workspace
 ```
 
-原因是这会把“运行中断点”和“资源/权限归属”混在一个字段里。一个 workspace 里可以同时有 agent-only run、agent session、flow run、flow step，它们都应该共享同一个 `workspace_id`，但 scope 指向不同的运行对象。
+原因是这会把“运行中断点”和“资源/权限归属”混在一个字段里。一个 workspace 里可以同时有 agent-only run、agent session、flow run、flow step，它们都应该共享同一个 canonical `workspace`，但 scope 指向不同的运行对象。
+
+### workspace v0 载体
+
+v0 先按“一个 runtime service 实例对应一个 workspace”实现。
+
+`workspace` 由 runtime 配置解析，不从 agent 输出里取，也不让普通 `TurnRequest` 任意指定：
+
+```yaml
+workspace: /Users/yinwm/work/flowdeck
+state_root: .xira/state
+```
+
+v0 约定：
+
+- `workspace` 是 canonical absolute path，和现有 `WorkspaceRoot` 对齐。
+- HumanRequest 创建时从 `Service` / runtime context 读取 canonical `workspace`。
+- API/CLI 如果携带 `workspace`，只能用于校验必须等于当前 runtime workspace；不能用它切换 workspace。
+- 未来多 workspace 时，由 transport / control plane 先选择 workspace，再进入 runtime；`TurnRequest.workspace` 只作为已认证 workspace 的回显或校验字段，不作为 agent 可控输入。
+
+不使用 `workspace_id` 或 `local` 这类弱身份。`local` 在每台机器、每个 runtime 里都会重复，不能作为稳定边界。
+
+file store v0 需要目录分片时，使用 runtime 内部派生的 `workspace_key`，不要把它暴露成业务协议：
+
+```text
+workspace_key = "ws_" + first16(hex(sha256(canonical_workspace)))
+```
+
+按 `workspace_key` 分目录，避免后续多 workspace 或共享 state root 时混写：
+
+```text
+.xira/state/workspaces/<workspace_key>/human-requests/<human_request_id>.yaml
+.xira/state/workspaces/<workspace_key>/human-responses/<human_response_id>.yaml
+.xira/state/workspaces/<workspace_key>/replay-results/<human_request_id>.yaml
+```
 
 v0：
 
@@ -308,7 +351,7 @@ scope:
 如果未来需要“workspace 级批准”，例如“在当前 workspace 内允许某 agent 本 session 使用某个 tool”，也不要新增 `agent_workspace` scope。它应该表现为某次 HumanResponse 的效果：
 
 ```yaml
-workspace_id: local
+workspace: /Users/yinwm/work/flowdeck
 scope:
   type: agent_session
   id: cli-default:user-local
@@ -508,7 +551,7 @@ approval 分两类，不能一刀切：
 当 `RequireConfirmation` gate 拦截 tool call：
 
 1. `executeToolCall` 创建 `HumanRequest(kind: approval, request_source: runtime_tool_gate)`。
-2. runtime 保存 `action_snapshot`，包括 tool name、tool call id、input、input hash、cwd、run id。
+2. runtime 保存 `action_snapshot`，包括 tool name、tool call id、input、cwd、run id、env_snapshot、env_hash、replay_ttl。
 3. 不执行原 tool。
 4. ToolCallRecord 记录为 `waiting_human`。
 5. agent run 状态变成 `waiting_human`。
@@ -637,7 +680,7 @@ runtime 拦截 tool call A
 
 - 用户批准的是 A，就只能执行 A。
 - agent 不能在 approve 后重新生成一个 B。
-- snapshot 过期是数据问题，可以用 TTL、cwd、workspace revision、input hash 检查发现。
+- snapshot 过期是数据问题，可以用 TTL、cwd、workspace revision、env_hash 检查发现。
 - 重新构造命令导致“批准 A 执行 B”是安全问题，runtime 很难检测。
 
 ### replay execution mode
@@ -653,18 +696,84 @@ executeReplay(action_snapshot, human_response)
   -> require response.trust_level=transport_authenticated
      or explicitly enabled router_structured channel
   -> require snapshot not expired
-  -> require snapshot input_hash matches persisted input
-  -> require replay_status is pending
+  -> require env_hash still matches current replay environment
+  -> atomically claim replay:
+       replay_status pending -> running
+       set replay_attempt_id, replay_started_at, replay_lease_expires_at
+       if claim fails because status=running, return in_progress
+       if claim fails because status=completed/failed, return existing result
   -> execute tool with replay=true
        bypass RequireConfirmation gate
        keep all tool allowlist/workspace/path/timeout checks
        keep audit and raw output persistence
-  -> atomically write replay_status completed/failed
+  -> if replay_attempt_id still matches, atomically write replay_status running -> completed/failed
 ```
 
 `replay=true` 只跳过二次 `RequireConfirmation`。它不能跳过 tool allowlist、workspace path checks、timeout、secret policy、audit、raw output capture。
 
-测试必须覆盖：replay 执行的 tool 不再触发第二个 HumanRequest。
+`replay_status` 必须是状态机，不是普通字段：
+
+```text
+pending -> running -> completed
+pending -> running -> failed
+
+running + lease expired -> pending 或 failed_recoverable
+completed / failed 为终态，除非用户重新发起新的 HumanRequest
+```
+
+`POST /human-requests/{id}/responses` 的重试语义：
+
+- 第一个请求用 CAS 抢占 `pending -> running` 并开始执行 replay。
+- 并发或重试请求看到 `running` 时直接返回 replay `in_progress`，不得重复执行。
+- 请求看到 `completed` / `failed` 时返回已有 replay result，保持幂等。
+- 只有 `running` lease 过期时，补偿路径才允许重新抢占；否则不能把“HTTP 超时但进程仍在执行”误判成需要重放。
+
+`env_hash` 不是防篡改签名。v0 用它做环境漂移检测，计算口径至少包含：
+
+- `workspace_root`
+- `cwd`
+- git repo 的 `HEAD`，如果当前 workspace 是 git repo
+
+如果不是 git repo，`git_head` 为空；此时主要依赖 `cwd`、TTL 和业务约束。v0 默认 `replay_ttl = 15m`。
+
+测试必须覆盖：replay 执行的 tool 不再触发第二个 HumanRequest；并发 approve 只能有一个请求抢到 `running` 并执行 replay。
+
+### ToolCallRecord 与 replay result 闭合
+
+被 `RequireConfirmation` 拦截的原始 tool call 仍然要进入 run log，但它的状态是 `waiting_human`，不是执行成功或失败。
+
+等待时的 ToolCallRecord output 至少包含：
+
+```json
+{
+  "status": "waiting_human",
+  "human_request_id": "hr_20260613_001",
+  "action_snapshot_ref": ".xira/state/workspaces/ws_3f4a1c8e9b1200af/human-requests/hr_20260613_001.yaml",
+  "replay_status": "pending"
+}
+```
+
+replay 完成后必须写出闭合关系：
+
+```json
+{
+  "human_request_id": "hr_20260613_001",
+  "source_run_id": "20260613-223000-xira-assistant",
+  "source_tool_call_id": "call_001",
+  "replay_attempt_id": "rpa_20260613_001",
+  "replay_status": "completed",
+  "replay_ref": ".xira/runs/20260613-223000-xira-assistant/replay/call_001.json"
+}
+```
+
+v0 file store 可以用 sidecar 实现，不必原地改写 append-only `tool_calls.jsonl`：
+
+```text
+.xira/runs/<run_id>/replay/tool_replay_links.jsonl
+.xira/runs/<run_id>/replay/<source_tool_call_id>.json
+```
+
+但 API / CLI 展示 run log 时必须 materialize 这个关系，让审计者从原 ToolCallRecord 能看到 `human_request_id`、`replay_status` 和 `replay_ref`，不需要手工在多个文件之间猜关联。
 
 对 `agent_request`，v0 不自动重放，因为本来就没有 runtime 捕获的确定 tool input。它仍然走 agent-first：
 
@@ -771,7 +880,9 @@ v0 决策：
 request_source=runtime_tool_gate
   + response.signal=approve
   + trust_level 足够
-  -> responses API 同步触发 snapshot replay
+  -> responses API 同步尝试 claim replay
+  -> claim 成功则执行 snapshot replay
+  -> claim 失败则返回当前 replay 状态
   -> response body 返回 HumanResponse + replay status/result ref
 
 其他 request_source 或非 approve response
@@ -794,8 +905,31 @@ request_source=runtime_tool_gate
   },
   "replay": {
     "status": "completed",
+    "attempt_id": "rpa_20260613_001",
     "artifact": ".xira/runs/fr_001/replay/call_001.json",
     "tool": "command.run"
+  }
+}
+```
+
+如果同一个 approve 请求被客户端重试，而 replay 仍在执行，返回示例：
+
+```json
+{
+  "human_response": {
+    "id": "hres_20260613_001",
+    "human_request_id": "hr_20260613_001",
+    "signal": "approve",
+    "trust_level": "transport_authenticated"
+  },
+  "human_request": {
+    "id": "hr_20260613_001",
+    "status": "approved"
+  },
+  "replay": {
+    "status": "running",
+    "attempt_id": "rpa_20260613_001",
+    "started_at": "2026-06-13T22:35:00+08:00"
   }
 }
 ```
@@ -803,7 +937,8 @@ request_source=runtime_tool_gate
 这解决两个问题：
 
 - 用户 approve 后，动作立即执行，不需要再发一条消息触发下一个 `RunAgent`。
-- HTTP 不等待用户；用户已经在这个请求里给出 response，runtime 只执行一个有 timeout 的 tool replay。
+- HTTP 不等待用户；用户已经在这个请求里给出 response，runtime 只尝试抢占并执行一个有 timeout/lease 的 tool replay。
+- HTTP 重试是幂等的；`running` / `completed` / `failed` 都返回已有 replay 状态，不重复执行。
 
 v0 不自动启动新的 model call 来生成后续自然语言总结。CLI/API/Channel 可以直接展示 replay result；后续 agent turn 会通过 hydration 看到 replay result。
 
@@ -824,21 +959,9 @@ waiting_human
 HumanRequest 也写入：
 
 ```text
-.xira/state/human-requests/
-.xira/state/human-responses/
-```
-
-或：
-
-```text
-.xira/human-requests/
-```
-
-建议先放在 state root：
-
-```text
-.xira/state/human-requests/<human_request_id>.yaml
-.xira/state/human-responses/<human_response_id>.yaml
+.xira/state/workspaces/<workspace_key>/human-requests/<human_request_id>.yaml
+.xira/state/workspaces/<workspace_key>/human-responses/<human_response_id>.yaml
+.xira/state/workspaces/<workspace_key>/replay-results/<human_request_id>.yaml
 ```
 
 run log 继续保存摘要：
@@ -928,10 +1051,13 @@ CLI/API/local UI transport_authenticated response -> 可用于强制型 approval
 channel router_structured response -> 默认不能用于强制型 approval，需 per-channel 显式开启
 responses API -> 强制型 approve 同步触发 replay 并返回 replay status/result ref
 replay execution -> 使用 replay=true bypass 二次 RequireConfirmation，但保留其他校验
+replay_status -> pending/running/completed/failed；responses API 必须 CAS 抢占 running，保证最多一次
+env_hash -> 只做 replay 环境漂移检测，不做防篡改签名；v0 默认 replay_ttl=15m
 native DeepSeek -> v0 必须实现滑动窗口 hydration + HumanRequest / HumanResponse / replay result 回灌
 ADK -> v0 必须通过 session AgentHistory 注入同一份 HITL context
-workspace_id -> HumanRequest 顶层必填；不新增 agent_workspace / flow_workspace scope type
-state root -> 暂定 .xira/state/human-requests + .xira/state/human-responses
+workspace -> HumanRequest 顶层必填；v0 从 runtime config 的 canonical WorkspaceRoot 解析，不新增 agent_workspace / flow_workspace scope type
+workspace_key -> runtime 内部从 canonical workspace 派生，只用于 file store 目录分片
+state root -> 暂定 .xira/state/workspaces/<workspace_key>/{human-requests,human-responses,replay-results}
 ```
 
 `state root` 仍然保留为轻度待验证项，因为后续如果 session store / run store 已经有统一 state root，应该跟随现有目录结构。
@@ -996,7 +1122,7 @@ Flow 不重新实现 HITL。
 未来 Flow 使用同一套 HumanRequest：
 
 ```yaml
-workspace_id: local
+workspace: /Users/yinwm/work/flowdeck
 scope:
   type: flow_step
   id: fr_20260613_devrun_001:approve_merge
@@ -1018,7 +1144,9 @@ v0 推荐先实现：
    - file store
    - list/get/create/resolve
    - action snapshot
+   - env snapshot
    - replay result
+   - replay_status CAS / running lease
 2. `human.request` / `human.respond` 内置 tool。
 3. `TurnResponse.HumanRequests`。
 4. `waiting_human` run status。
@@ -1132,6 +1260,13 @@ agent 可以随时 `human.request`，所以 v0 必须避免重复追问。
 
 native 路径目前固定两次 model call，这个限制可以避免一个 turn 内反复问人。
 
+代价也要明确：
+
+- v0 的 `agent_request` 适合“单 tool turn”：agent 发现需要问人，就创建 HumanRequest 并结束当前 run。
+- 如果同一次模型输出里同时包含 `read_file` / `search_file` 和 `human.request`，runtime 可能已经执行了前面的 read-only tool，但一旦出现 pending HumanRequest 就会短路当前 run。
+- 这些已执行 tool 的结果要靠 session hydration 在后续 turn 回灌；不要期待同一个 native turn 继续把这些结果综合进“怎么问”。
+- 更完整的多 tool + ask + continue 需要未来的 agentic loop / multi-turn tool loop，不放进 HITL v0。
+
 ## 跨 Turn 状态恢复
 
 run 内 collector 只解决当前 run 短路。跨 turn resume 必须走 file store。
@@ -1150,35 +1285,42 @@ RunAgent start
        attach request/response/replay result summary
   -> repair path:
        if an approved runtime_tool_gate request has replay_status=pending:
-         executeReplay only if request is still valid and not replayed
+         try claim pending -> running, then executeReplay
+       if replay_status=running and lease expired:
+         mark stale attempt recoverable, then try claim again
   -> inject compact summary into model context
 ```
 
-正常路径下，`runtime_tool_gate` replay 由 `POST /human-requests/{id}/responses` 同步触发。`RunAgent start` 里的 replay 只作为恢复性补偿，用于处理 response 写入成功但 replay 因进程崩溃/超时未完成的状态。
+正常路径下，`runtime_tool_gate` replay 由 `POST /human-requests/{id}/responses` 同步触发。`RunAgent start` 里的 replay 只作为恢复性补偿，用于处理 response 写入成功但 replay 因进程崩溃、进程退出或 running lease 过期未完成的状态。未过期的 `running` 不能被补偿路径重复执行。
 
 并发要求：
 
 - HumanRequest resolve 必须原子写。
-- `runtime_tool_gate` replay 必须最多执行一次。
+- `runtime_tool_gate` replay 必须通过 CAS 抢占 `pending -> running`，最多一个执行者。
+- `running` 必须有 `replay_attempt_id`、`replay_started_at`、`replay_lease_expires_at`。
 - replay result 写入 request state 和 run artifact。
 - 如果 replay 失败，HumanRequest 不回到 pending，而是记录 `replay_failed`，让 agent/用户决定下一步。
 
 ## 落地顺序
 
-建议拆成六个小提交：
+建议拆成七个小提交：
 
-1. `hitl` 数据模型和 file store。
-2. runtime control tools：`human.request` / `human.respond` + `TurnResponse.HumanRequests`。
-3. `waiting_human` 状态、session history 写入、native/ADK HITL hydration。
-4. native `RequireConfirmation` gate + action snapshot。
-5. structured response resolve + synchronous snapshot replay。
-6. API / CLI response resolve。
+1. `workspace` canonicalization + internal `workspace_key` state root。
+2. `hitl` 数据模型和 file store，包括 replay_status CAS / running lease。
+3. runtime control tools：`human.request` / `human.respond` + `TurnResponse.HumanRequests`。
+4. `waiting_human` 状态、session history 写入、native/ADK HITL hydration。
+5. native `RequireConfirmation` gate + action snapshot / env_snapshot。
+6. structured response resolve + synchronous snapshot replay。
+7. API / CLI response resolve。
 
 第一阶段可以只做 file store，不需要数据库：
 
 ```text
-.xira/state/human-requests/<human_request_id>.yaml
+.xira/state/workspaces/<workspace_key>/human-requests/<human_request_id>.yaml
+.xira/state/workspaces/<workspace_key>/human-responses/<human_response_id>.yaml
+.xira/state/workspaces/<workspace_key>/replay-results/<human_request_id>.yaml
 .xira/runs/<run_id>/human_requests.jsonl
+.xira/runs/<run_id>/replay/tool_replay_links.jsonl
 ```
 
 第二阶段再考虑：
@@ -1194,14 +1336,20 @@ RunAgent start
 - agent 主动调用 `human.request` 会生成 pending HumanRequest。
 - 所有 agent profile 默认都能看到 `human.request` 和 `human.respond`。
 - native 路径执行 `RequireConfirmation=true` 的 tool 时不执行原 tool，而是生成 `runtime_tool_gate` HumanRequest 和 action snapshot。
+- HumanRequest 记录 canonical `workspace`，file store 使用内部 `workspace_key` 分目录，不使用 `workspace_id` 或 `local` 这类弱身份。
 - ADK / native 对 `RequireConfirmation` 的可见行为一致。
 - ADK hydration 能看到 HumanRequest、HumanResponse 和 replay result 摘要。
 - 结构化 approve 后 runtime 按 action snapshot 重放，且不会让 agent 重新构造 tool input。
 - `POST /human-requests/{id}/responses` 对强制型 approve 同步触发 replay 并返回 replay status/result ref。
+- 并发 `POST /human-requests/{id}/responses` 只有一个请求能 CAS 抢占 `pending -> running` 并执行 replay，其他请求返回 `running` 或已有结果。
+- HTTP 超时后的重试不会在未过期 `running` lease 上重复执行 replay。
 - replay 执行使用 `replay=true`，不会二次触发 `RequireConfirmation`。
+- replay 环境漂移检测使用 `env_hash`，默认包含 canonical workspace、cwd、git HEAD；`env_hash` 不声明防篡改。
 - 同一个 action snapshot 最多 replay 一次。
+- 原始 ToolCallRecord 能通过 materialized `replay_ref` 看到 replay result，不需要审计者手动拼多个文件。
 - channel `router_structured` 默认不能 resolve `runtime_tool_gate` approval，除非 per-channel 显式开启。
 - native hydration 只注入最新 K 条消息 / max_history_chars + HITL 摘要，不无界回灌 session。
+- native v0 对 `agent_request` 以单 pending tool turn 为主；多 tool + ask 的组合可能先执行部分 read-only tool，再因 pending request 短路，不能期待同一 turn 内继续综合这些结果。
 - 用户说“没问题干吧”时，agent 可以通过 `human.respond` 把唯一低信任 pending request resolve 为 approved。
 - 低信任 `human.respond` 不能 resolve `runtime_tool_gate` approval。
 - 多个 pending request 时，agent 不应该直接 resolve，而应该追问。
@@ -1215,9 +1363,9 @@ RunAgent start
 
 ## 待确认问题
 
-1. `.xira/state/human-requests` 是否和现有 run/session state root 完全一致？
+1. `.xira/state/workspaces/<workspace_key>` 是否和现有 run/session state root 完全一致？
 2. API/CLI resolve 后是否也要写入 session memory，还是只写 HumanRequest store 和 run audit？
-3. snapshot replay 的默认 TTL 是多少？是否需要记录 workspace revision / git HEAD？
+3. `replay_ttl=15m` 是否需要进入 workspace policy 配置？
 4. channel strong approval 的 per-channel 配置应该放 entrypoint config 还是 workspace policy？
 
 ## 推荐下一步
@@ -1228,9 +1376,10 @@ RunAgent start
 human.request tool
 human.respond tool
 HumanRequest file store
+workspace canonicalization
 native/ADK HITL hydration
 RequireConfirmation gate
-synchronous snapshot replay
+synchronous snapshot replay with CAS
 TurnResponse.human_requests
 CLI/API response resolve
 waiting_human 状态传播
