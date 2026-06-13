@@ -1112,6 +1112,23 @@ v0 决策：channel 里的自然语言回复先作为普通消息进入 runtime 
 - v0 默认只有 CLI / API / local UI 的 `transport_authenticated` response 可以 resolve 强制型 approval。
 - channel `router_structured` 默认拒绝强制型 approval，除非 per-channel 配置显式开启。
 
+channel strong approval 放 entrypoint config，默认关闭：
+
+```yaml
+entrypoints:
+  - id: feishu-support
+    type: channel
+    channel: feishu
+    hitl:
+      strong_approval:
+        enabled: false
+        accepted_response_sources:
+          - router_structured
+        require_transport_identity: true
+```
+
+只有当某个 entrypoint 的身份链路足够可信时，才能显式改成 `enabled: true`。workspace policy 不应该把所有 channel 一次性打开。
+
 自然语言 response 路径：
 
 ```text
@@ -1257,6 +1274,19 @@ run log 继续保存摘要：
 .xira/runs/<run_id>/human_responses.jsonl
 ```
 
+API / CLI resolve 后还必须写入 session AgentHistory 摘要，用于后续 native / ADK hydration：
+
+```text
+kind: human_response_summary
+producer: runtime.hitl
+human_request_id: hr_...
+human_response_id: hres_...
+signal: approve
+replay_status: completed|running|failed|none
+```
+
+不把完整 HumanResponse 当作普通用户消息注入；只写结构化摘要，避免污染后续 agent 的对话语义。
+
 ## Audit / Event
 
 每个 HumanRequest 和 HumanResponse 都应该有 event 和 audit。
@@ -1329,6 +1359,16 @@ flow step instructions / constraints
 customer deployment policy
 ```
 
+workspace policy v0 只放 workspace 级默认值，不放具体 channel 信任开关。例如 replay TTL：
+
+```yaml
+hitl:
+  replay:
+    ttl: 15m
+```
+
+如果未配置，runtime 使用默认 `15m`。具体 channel 是否能做 strong approval 不放在 workspace policy，因为这是入口身份可信度问题，不是 workspace 全局能力。
+
 例如开发类 agent 可以被提示：
 
 ```yaml
@@ -1365,10 +1405,24 @@ native DeepSeek -> v0 必须实现滑动窗口 hydration + HumanRequest / HumanR
 ADK -> v0 必须通过 session AgentHistory 注入同一份 HITL context
 workspace -> HumanRequest 顶层必填；v0 从 runtime config 的 canonical WorkspaceRoot 解析，不新增 agent_workspace / flow_workspace scope type
 workspace_key -> runtime 内部从 canonical workspace 派生，只用于 file store 目录分片
-state root -> 暂定 .xira/state/workspaces/<workspace_key>/{human-requests,human-responses,replay-results}
+state root -> HITL state 使用 state_root/workspaces/<workspace_key>/{human-requests,human-responses,replay-results}，不并入 run/session root
+API/CLI resolve -> 写 HumanRequest store + run audit + session AgentHistory 摘要
+replay_ttl -> workspace policy 可配置，未配置时使用默认 15m
+channel strong approval -> per-entrypoint config 显式开启，不放 workspace policy 默认打开
 ```
 
-`state root` 仍然保留为轻度待验证项，因为后续如果 session store / run store 已经有统一 state root，应该跟随现有目录结构。
+`state_root` 是 HITL / session / run 等状态的共同根，但子目录职责不同：
+
+```text
+state_root/
+  workspaces/<workspace_key>/human-requests/
+  workspaces/<workspace_key>/human-responses/
+  workspaces/<workspace_key>/replay-results/
+  sessions/
+  runs/ 或外部 run_root
+```
+
+HumanRequest store 是权威状态；run log 保存当次 run 的摘要；session AgentHistory 保存给后续 agent hydration 用的摘要。三者用途不同，不能只写其中一个。
 
 ## 与 ADK Tool Confirmation 的关系
 
@@ -1711,6 +1765,7 @@ parent run waiting_human because child waiting_human
 - HumanRequest 记录 canonical `workspace`，file store 使用内部 `workspace_key` 分目录，不使用 `workspace_id` 或 `local` 这类弱身份。
 - ADK / native 对 `RequireConfirmation` 的可见行为一致。
 - ADK hydration 能看到 HumanRequest、HumanResponse 和 replay result 摘要。
+- API/CLI resolve 后写入 HumanRequest store、run audit，并写 session AgentHistory 摘要；后续 agent turn 能看到该摘要。
 - 结构化 approve 后 runtime 按 action snapshot 重放，且不会让 agent 重新构造 tool input。
 - `POST /human-requests/{id}/responses` 对强制型 approve 同步触发 replay 并返回 replay status/result ref。
 - 并发 `POST /human-requests/{id}/responses` 只有一个请求能 CAS 抢占 `pending -> running` 并执行 replay，其他请求返回 `running` 或已有结果。
@@ -1733,12 +1788,27 @@ parent run waiting_human because child waiting_human
 - 相同 session 的后续 native turn 能看到已 resolved HumanRequest、pending HumanRequest 和 replay result 摘要。
 - 重复 question 会返回已有 HumanRequest，连续 deny 后不会无限追问。
 
-## 待确认问题
+## 已关闭决策
 
-1. `.xira/state/workspaces/<workspace_key>` 是否和现有 run/session state root 完全一致？
-2. API/CLI resolve 后是否也要写入 session memory，还是只写 HumanRequest store 和 run audit？
-3. `replay_ttl=15m` 是否需要进入 workspace policy 配置？
-4. channel strong approval 的 per-channel 配置应该放 entrypoint config 还是 workspace policy？
+```text
+HITL state root:
+  使用 state_root/workspaces/<workspace_key>/...
+  不并入 run root 或 session root。
+
+API/CLI resolve:
+  必须写 HumanRequest store。
+  必须写 run audit / run summary。
+  必须写 session AgentHistory 摘要，供后续 native / ADK hydration。
+
+replay_ttl:
+  workspace policy 可配置。
+  未配置时默认 15m。
+
+channel strong approval:
+  放 entrypoint config。
+  每个 channel / entrypoint 显式开启。
+  workspace policy 不默认打开 channel strong approval。
+```
 
 ## 推荐下一步
 
