@@ -28,6 +28,7 @@ HumanRequest = 运行中临时生成的人类介入请求和存档结构。
 Agent 可以主动创建 HumanRequest。
 Runtime 必须在 ToolPolicy.RequireConfirmation 为 true 时强制创建 HumanRequest。
 Flow 未来复用同一套 HumanRequest，只是 scope 指向 flow_run + step。
+每个 HumanRequest 必须归属于一个 workspace_id；workspace 是状态/权限边界，不是 scope type。
 ```
 
 review 后修正的核心边界：
@@ -131,6 +132,7 @@ v0 支持三类：
 ```yaml
 schema_version: xira.human_request.v0
 id: hr_20260613_001
+workspace_id: local
 kind: approval
 status: pending
 request_source: runtime_tool_gate
@@ -203,6 +205,7 @@ resolution:
 最小 Go 类型可以比 YAML 更小，但要保留这些概念面：
 
 - identity
+- workspace_id
 - kind/status
 - request_source/trust_level
 - scope
@@ -250,6 +253,26 @@ created_at: 2026-06-13T22:35:00+08:00
 
 HITL 是 runtime 基础能力，所以 scope 必须能覆盖 agent-only 和未来 flow。
 
+但 workspace 不是 scope。workspace 是状态边界、权限边界和文件存储边界；scope 是当前 HumanRequest 正在中断或恢复的运行对象。
+
+因此 HumanRequest 必须有顶层 `workspace_id`：
+
+```yaml
+workspace_id: local
+scope:
+  type: agent_run
+  id: 20260613-223000-xira-assistant
+```
+
+不要把 workspace 写成 scope type：
+
+```text
+agent_workspace
+flow_workspace
+```
+
+原因是这会把“运行中断点”和“资源/权限归属”混在一个字段里。一个 workspace 里可以同时有 agent-only run、agent session、flow run、flow step，它们都应该共享同一个 `workspace_id`，但 scope 指向不同的运行对象。
+
 v0：
 
 ```text
@@ -281,6 +304,26 @@ scope:
 - `agent_session`：请求绑定会话，适合澄清信息和跨 turn answer。
 - `flow_run`：未来绑定整个 flow。
 - `flow_step`：未来绑定 flow 的某个 step。
+
+如果未来需要“workspace 级批准”，例如“在当前 workspace 内允许某 agent 本 session 使用某个 tool”，也不要新增 `agent_workspace` scope。它应该表现为某次 HumanResponse 的效果：
+
+```yaml
+workspace_id: local
+scope:
+  type: agent_session
+  id: cli-default:user-local
+
+response_effect:
+  type: workspace_grant
+  subject:
+    type: agent
+    id: dev-implementer
+  permission:
+    tool: command.run
+  duration: session
+```
+
+也就是说，workspace 级能力属于 policy / grant / response_effect，不属于 HumanRequest 的 primary scope。
 
 ## 两种触发来源
 
@@ -887,6 +930,7 @@ responses API -> 强制型 approve 同步触发 replay 并返回 replay status/r
 replay execution -> 使用 replay=true bypass 二次 RequireConfirmation，但保留其他校验
 native DeepSeek -> v0 必须实现滑动窗口 hydration + HumanRequest / HumanResponse / replay result 回灌
 ADK -> v0 必须通过 session AgentHistory 注入同一份 HITL context
+workspace_id -> HumanRequest 顶层必填；不新增 agent_workspace / flow_workspace scope type
 state root -> 暂定 .xira/state/human-requests + .xira/state/human-responses
 ```
 
@@ -952,6 +996,7 @@ Flow 不重新实现 HITL。
 未来 Flow 使用同一套 HumanRequest：
 
 ```yaml
+workspace_id: local
 scope:
   type: flow_step
   id: fr_20260613_devrun_001:approve_merge
