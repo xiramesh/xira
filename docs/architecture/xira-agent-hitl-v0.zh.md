@@ -24,9 +24,11 @@ v0 设计结论：
 
 ```text
 HumanRequest = 运行中临时生成的人类介入请求和存档结构。
+AgentDelegation = 父 agent 通过 delegate_agent 启动的子 agent run 边界。
 
 Agent 可以主动创建 HumanRequest。
 Runtime 必须在 ToolPolicy.RequireConfirmation 为 true 时强制创建 HumanRequest。
+Parent agent 可以用宽松输入调用 child agent，但 child context / child result / waiting / join 语义由 runtime 定义。
 Flow 未来复用同一套 HumanRequest，只是 scope 指向 flow_run + step。
 每个 HumanRequest 必须归属于一个 canonical workspace；workspace 是状态/权限边界，不是 scope type。
 ```
@@ -54,8 +56,38 @@ review 后修正的核心边界：
 - 不让 HTTP request 长时间阻塞等待用户。
 - 不实现跨进程自动继续执行复杂 agent loop。
 - 不把 HITL 设计成只服务审批；它也服务澄清、选择和风险门禁。
+- 不做 fire-and-forget delegation。
+- 不把 parent agent 的完整 session history、隐藏推理或全部 tool outputs 默认传给 child agent。
+- 不让 child agent 直接继承 parent 的全部 tools、secrets 或权限。
 
 ## 核心概念
+
+### AgentDelegation
+
+AgentDelegation 是父 agent 通过 `delegate_agent` 启动的子 agent run。
+
+它不是 workflow step，也不是要求父 agent 填一个强 schema 的任务对象。父 agent 的调用保持宽松：
+
+```json
+{
+  "agent_id": "reviewer",
+  "task": "帮我 review 这次改动，重点看 HITL replay 状态机。",
+  "context_refs": [
+    "tool://parent_run/call_001/output"
+  ]
+}
+```
+
+runtime 必须在这个宽松调用外层补齐四个确定语义：
+
+```text
+1. child agent 看到什么 context
+2. child agent 回传什么
+3. parent agent 是否等待 child
+4. parent agent 能不能并行启动多个 child
+```
+
+这四个语义是 Agent HITL 和未来 Flow 的共同前置。否则 child run 里发生的工具调用、HITL、文件改动和审计都会从 parent run 视角消失。
 
 ### HumanRequest
 
@@ -367,6 +399,249 @@ response_effect:
 ```
 
 也就是说，workspace 级能力属于 policy / grant / response_effect，不属于 HumanRequest 的 primary scope。
+
+## Agent Delegation v0 行为
+
+Xira 的 agent 调用保持松散。`delegate_agent` 不要求父 agent 提交完整 workflow schema，也不要求父 agent 精确描述所有上下文边界。
+
+但 runtime 必须把每次 delegation 变成一个可审计、可恢复的 child run 边界。
+
+### 1. Child agent 看到什么 context
+
+child agent 默认不继承 parent agent 的完整上下文。runtime 构造 child input context：
+
+```text
+child context =
+  parent delegate task
+  + canonical workspace
+  + parent lineage
+  + selected context refs
+  + runtime context packet summary
+  + target agent profile / tool boundary
+```
+
+v0 默认传给 child：
+
+- `task`：父 agent 调用 `delegate_agent` 时写的自然语言任务。
+- `workspace`：canonical workspace root。
+- `parent_lineage`：`parent_run_id`、`parent_tool_call_id`、`parent_agent_id`、`delegation_depth`。
+- 当前用户消息：当父 agent 没有显式 `context_refs` 时，runtime 默认包含当前 turn 的用户消息摘要。
+- `context_refs`：父 agent 显式传入的 artifact / tool output 引用。
+- `context_packet`：runtime 生成的结构化包，记录哪些上下文被包含、截断、拒绝或重写。
+- child 的 profile/tool 边界：child 能用什么 tools、profile version / instruction hash。
+
+v0 默认不传：
+
+- parent 完整 session history。
+- parent 隐藏推理。
+- parent 所有 tool outputs。
+- parent 的全部 tools、secrets 和权限。
+- 未显式引用的大文件内容。
+
+`context_refs` 是引用，不是任意路径逃逸。v0 只允许 runtime 能解析和授权的 ref，例如：
+
+```text
+conversation://current-turn/user-message
+tool://<parent_run_id>/<tool_call_id>/output
+artifact://<parent_run_id>/artifacts/tool-outputs/<tool_call_id>.json
+```
+
+runtime 对每个 ref 做 materialize：
+
+```text
+parent ref
+  -> validate belongs to parent run / allowed artifact area
+  -> copy or summarize into child run artifacts/context/
+  -> record context item with source_run_id/source_tool_call_id/content_hash/truncation
+  -> expose context://<child_run_id>/context/<item_id> to child
+```
+
+child 看到的是任务包，不是 parent transcript：
+
+```text
+You are running as a Xira delegate worker.
+
+Task:
+  帮我 review 这次改动，重点看 HITL replay 状态机。
+
+ContextPacket:
+  caller: parent agent/run/tool call
+  target: child agent/profile/tool boundary
+  items: selected refs and previews
+  output_schema: delegate_result_v1
+```
+
+### 2. Child agent 回传什么
+
+child 不把完整 transcript 塞回 parent。child run 完成后，runtime 把结果 materialize 成 `delegate_agent` tool output。
+
+v0 child 模型输出只需要返回结构化结果的业务部分：
+
+```json
+{
+  "summary": "发现 replay_status 缺 running 中间态，会导致并发重放。",
+  "evidence_refs": [
+    "context://child_run/context/ctxitem_tool_output_call_001"
+  ],
+  "limitations": [
+    "未运行完整端到端测试"
+  ],
+  "confidence": "high",
+  "followup_needed": false
+}
+```
+
+runtime 负责补齐和校验 runtime-owned 字段，交给 parent 的 tool output 是：
+
+```json
+{
+  "agent_id": "reviewer",
+  "run_id": "20260614-101010-reviewer-ab12",
+  "status": "completed",
+  "summary": "发现 replay_status 缺 running 中间态，会导致并发重放。",
+  "evidence_refs": [
+    "context://child_run/context/ctxitem_tool_output_call_001",
+    "artifact://child_run/artifacts/context/context_packet.json"
+  ],
+  "limitations": [
+    "未运行完整端到端测试"
+  ],
+  "confidence": "high",
+  "followup_needed": false
+}
+```
+
+规则：
+
+- parent 默认只看到 result envelope，不看到 child 完整 transcript。
+- child 的完整 run log、tool calls、audit、artifacts 留在 child run。
+- `evidence_refs` 只能引用 runtime 允许的 child artifacts / context refs，不能伪造 parent run 或其他 run 的 ref。
+- child 不能伪造 `agent_id`、`run_id`、`status`、`error`、policy、scope、correlation 等 runtime-owned 字段。
+- 如果 child 输出不符合 schema，runtime 返回 `status=failed` 的 delegate tool output，并保存 raw child result 供审计。
+
+未来可以扩展 `delegate_result_v2`，加入 `artifact_refs`、`changed_files`、`human_requests` 等字段；v0 先以 `summary + evidence_refs + limitations + confidence + followup_needed` 为最小闭环。
+
+### 3. Parent agent 是否等待 child
+
+v0 的 `delegate_agent` 是普通 tool 语义：parent 默认等待 child 的 tool output。
+
+```text
+parent model call
+  -> emits delegate_agent tool call
+  -> runtime starts child run
+  -> child reaches terminal or waiting state
+  -> runtime returns delegate_agent tool output to parent
+  -> parent model continues
+```
+
+等待不是无限等待。每次 delegation 必须有 effective max duration，来自 caller delegation policy 和 tool input 的 `max_duration_ms`。
+
+child 状态到 parent 的映射：
+
+| child 状态 | parent 看到什么 | parent run 状态 |
+| --- | --- | --- |
+| completed | `delegate_agent` output status=`completed` | parent 继续 |
+| failed | `delegate_agent` output status=`failed` | parent 继续，让 parent 决定补救 |
+| timeout | `delegate_agent` output status=`timeout` | parent 继续，让 parent 决定补救 |
+| waiting_human | parent tool call 挂起，记录 blocked_by child HumanRequest | parent 进入 `waiting_human` |
+
+如果 child 触发 HumanRequest：
+
+```text
+child run -> waiting_human
+parent delegate_agent tool call -> waiting_child_human
+parent run -> waiting_human
+blocked_by:
+  child_run_id
+  child_agent_id
+  child_human_request_id
+  parent_tool_call_id
+```
+
+用户 resolve child HumanRequest 后：
+
+```text
+resume child
+  -> child completes / fails / times out
+  -> runtime materializes delegate_agent tool output
+  -> parent resumes with child result
+```
+
+parent 不伪造 child 的 HumanResponse，不把 child 的 approval 改写成 parent approval。parent 只被 child 的等待状态阻塞。
+
+### 4. Parent agent 能不能并行启动多个 child
+
+可以。v0 应支持同一个 parent tool-call batch 里多个 `delegate_agent` 并行 fan-out。
+
+```text
+parent emits:
+  delegate_agent(reviewer)
+  delegate_agent(test-runner)
+  delegate_agent(security-auditor)
+
+runtime:
+  start child runs in parallel up to max_parallel
+  wait join=all
+  return one tool output per delegate_agent call
+  parent model synthesizes
+```
+
+v0 固定 join policy：
+
+```text
+join = all
+```
+
+也就是说，parent 要等同一批 child 都进入终态后才继续。如果有 child waiting_human：
+
+```text
+reviewer completed
+test-runner completed
+security-auditor waiting_human
+
+parent run -> waiting_human
+completed child results are persisted
+resume only waits on pending child
+after all child results are available, parent continues
+```
+
+并行边界由 caller profile delegation policy 控制：
+
+```yaml
+delegation:
+  enabled: true
+  allow:
+    - reviewer
+    - test-runner
+  max_parallel: 3
+  max_depth: 2
+  default_max_duration_ms: 120000
+  max_duration_ms: 300000
+  child_session_mode: ephemeral_worker
+```
+
+v0 不做：
+
+- `wait=false` / fire-and-forget。
+- `join=any`。
+- child 中间消息实时流进 parent context。
+- child 直接长期接管用户会话。
+
+### 动态生成 child agent
+
+动态生成 child agent 不改变以上四个语义。
+
+区别只在 target 来源：
+
+```text
+existing child:
+  target.agent_id + profile version
+
+generated child:
+  generated profile snapshot + generator agent/run/tool_call lineage
+```
+
+如果未来支持动态生成 agent，runtime 必须保存 generated profile snapshot，包括 instructions、tools、model policy、permissions 和创建来源。child 仍然只看 runtime 构造的 child context，仍然按 `delegate_agent` result envelope 回传。
 
 ## 两种触发来源
 
@@ -956,6 +1231,17 @@ HumanRequests []HumanRequest `json:"human_requests,omitempty" yaml:"human_reques
 waiting_human
 ```
 
+当 parent run 因 child agent 的 HumanRequest 被阻塞时，仍使用 `waiting_human`，但必须在 response / run metadata 中标明 `blocked_by`：
+
+```yaml
+blocked_by:
+  type: child_human_request
+  child_run_id: 20260614-101010-reviewer-ab12
+  child_agent_id: reviewer
+  child_human_request_id: hr_20260614_001
+  parent_tool_call_id: call_delegate_001
+```
+
 HumanRequest 也写入：
 
 ```text
@@ -982,6 +1268,18 @@ human.request.created
 human.response.created
 human.request.resolved
 human.request.expired
+agent.delegate.requested
+agent.delegate.allowed
+agent.delegate.rejected
+agent.delegate.started
+agent.delegate.completed
+agent.delegate.failed
+agent.delegate.timeout
+agent.delegate.result_delivered
+context.packet.started
+context.item.included
+context.item.redacted
+context.packet.completed
 ```
 
 Audit events：
@@ -990,6 +1288,7 @@ Audit events：
 human.request
 human.response
 tool.approval_required
+agent.delegate
 ```
 
 要求：
@@ -1000,6 +1299,9 @@ tool.approval_required
 - audit 中要区分 `actor` 和 `interpreter`：批准者是用户，解释者是 agent。
 - HumanResponse 必须记录 `trust_level`：`transport_authenticated`、`router_structured` 或 `agent_interpreted`。
 - runtime snapshot replay 必须记录 action snapshot hash、replay status、replay output ref、过期/拒绝原因。
+- agent delegation 必须记录 parent_run_id、parent_tool_call_id、child_run_id、caller_agent_id、target_agent_id、delegation_depth、max_parallel / max_depth policy 结果。
+- context packet 必须记录 included / redacted / truncated items，保留 source ref、materialized ref、content hash 和截断信息。
+- delegate result delivery 必须记录 child result schema、summary preview、evidence ref count、limitations count、confidence 和 followup_needed。
 
 ## Policy v0
 
@@ -1010,6 +1312,7 @@ v0 不做完整 policy engine，也不做 `command.run` 风险分类器。
 ```text
 human.request -> allow for all agents
 human.respond -> allow for all agents, but trust-limited
+delegate_agent -> allow only when caller delegation policy enables target agent
 read_file/search_file/list_dir -> allow
 write_file/edit_file -> allow by default
 tool_output.read -> allow
@@ -1049,6 +1352,11 @@ agent_request approval -> agent 后续 turn 继续，不提供执行一致性保
 channel 自然语言回复 -> 普通消息 + 低信任 human.respond
 CLI/API/local UI transport_authenticated response -> 可用于强制型 approval
 channel router_structured response -> 默认不能用于强制型 approval，需 per-channel 显式开启
+delegate_agent input -> 保持宽松，只要求 agent_id/task，可选 context_refs/expected_output_schema/max_duration_ms
+delegate_agent child context -> runtime 构造 scoped context packet，不默认传 parent 完整 session/tool outputs/secrets
+delegate_agent result -> child 返回 delegate_result_v1，runtime 补齐 agent_id/run_id/status 并校验证据 refs
+delegate_agent wait -> parent 默认等待 child；child waiting_human 会阻塞 parent run
+delegate_agent parallel -> 同一 parent tool-call batch 可 fan-out 多个 child，v0 join=all，受 max_parallel 限制
 responses API -> 强制型 approve 同步触发 replay 并返回 replay status/result ref
 replay execution -> 使用 replay=true bypass 二次 RequireConfirmation，但保留其他校验
 replay_status -> pending/running/completed/failed；responses API 必须 CAS 抢占 running，保证最多一次
@@ -1133,13 +1441,37 @@ scope:
 1. Flow 显式 `human_approval` step 创建 HumanRequest。
 2. Flow 的 agent step 内部触发 HumanRequest，Flow Kernel 暂停当前 step。
 
-所以 Agent HITL 是 Flow HITL 的前置能力。
+Flow 也不重新实现 agent delegation。
+
+如果 flow step 运行的是 agent，而该 agent 又调用 child agent：
+
+```text
+flow_step
+  -> parent agent run
+     -> delegate_agent tool call
+        -> child agent run
+```
+
+Flow Kernel 只需要看到 parent agent run 的状态：
+
+- child completed / failed / timeout：作为 parent `delegate_agent` tool output 回到 parent。
+- child waiting_human：parent run 进入 `waiting_human`，Flow Kernel 暂停当前 step。
+- parent resume 后，Flow step 再继续。
+
+所以 Agent HITL 和 AgentDelegation 都是 Flow HITL 的前置能力。
 
 ## 第一版实现边界
 
 v0 推荐先实现：
 
-1. `internal/hitl` 包：
+1. `delegate_agent` 运行时语义收敛：
+   - child context packet
+   - delegate_result_v1
+   - parent/child lineage
+   - parent waits child
+   - fan-out + join=all
+   - child waiting_human blocks parent
+2. `internal/hitl` 包：
    - types
    - file store
    - list/get/create/resolve
@@ -1147,15 +1479,15 @@ v0 推荐先实现：
    - env snapshot
    - replay result
    - replay_status CAS / running lease
-2. `human.request` / `human.respond` 内置 tool。
-3. `TurnResponse.HumanRequests`。
-4. `waiting_human` run status。
-5. native / ADK HITL hydration：回灌 history、pending/resolved HumanRequest/HumanResponse、replay result。
-6. native `RequireConfirmation` gate。
-7. snapshot replay for `runtime_tool_gate` approval。
-8. API list/show/response。
-9. CLI list/show/approve/deny/answer。
-10. tests。
+3. `human.request` / `human.respond` 内置 tool。
+4. `TurnResponse.HumanRequests`。
+5. `waiting_human` run status。
+6. native / ADK HITL hydration：回灌 history、pending/resolved HumanRequest/HumanResponse、replay result。
+7. native `RequireConfirmation` gate。
+8. snapshot replay for `runtime_tool_gate` approval。
+9. API list/show/response。
+10. CLI list/show/approve/deny/answer。
+11. tests。
 
 v0 暂不实现：
 
@@ -1166,6 +1498,9 @@ v0 暂不实现：
 - 超时自动处理。
 - 复杂 policy DSL。
 - 通用命令风险分类器。
+- delegation fire-and-forget。
+- delegation join=any。
+- child 直接长期接管用户会话。
 
 ## 现有代码挂点
 
@@ -1178,6 +1513,7 @@ v0 暂不实现：
 | `apps/xira/internal/runtime/service.go` | `RunAgent` 创建 run、调用 `generate`、最后统一设置 completed/failed | 增加 waiting_human 分支；`waiting_human` 不算 failed，也不写成 completed |
 | `apps/xira/internal/runtime/service.go` | `generateNativeDeepSeek` 每次从 `{system, req.Message}` 重建 messages | 增加 native session hydration，把 AgentHistory、HumanRequest summary、replay result 注入 messages |
 | `apps/xira/internal/runtime/service.go` | `executeToolCall` 是 native DeepSeek 路径的 tool 执行入口 | v0 支持 `human.request` / `human.respond`，并在执行普通 tool 前检查 `RequireConfirmation` |
+| `apps/xira/internal/runtime/delegation.go` | 已有 `delegate_agent`、context packet、child run、delegate_result_v1、max_parallel / max_depth policy | 将 delegation 四语义写成 runtime contract：child context、child result、parent wait、parallel join=all；补 child waiting_human 阻塞 parent |
 | `apps/xira/internal/runtime/service_adk.go` | ADK tool adapter 已接 `RequireConfirmationProvider`，且 ADK 有自己的 session 机制 | v0 不依赖 ADK confirmation 做持久化；HumanRequest 的创建、保存、resolve、snapshot replay 由 Xira runtime 负责，并通过 AgentHistory 注入 ADK session context |
 | `apps/xira/internal/api` | 已有 run/status 类 HTTP API | 增加 human request list/show/response API |
 | `apps/xira/internal/cli` 或现有 CLI 命令入口 | 已有本地操作入口 | 增加 `xira human list/show/approve/deny/answer` |
@@ -1226,7 +1562,7 @@ v0 约定：
 
 ## Runtime Control Tools 与 Allowlist
 
-当前 builtin tool registry 按 profile `Permissions.Tools` allowlist 注册。`human.request` / `human.respond` 又要求所有 agent 默认可用。
+当前 builtin tool registry 按 profile `Permissions.Tools` allowlist 注册。runtime control tools 不完全等同于普通业务工具。
 
 v0 实现方式：
 
@@ -1235,16 +1571,29 @@ profile tools:
   read_file, command.run, ...
 
 runtime control tools:
-  human.request, human.respond, emit_status, delegate_agent ...
+  always-on: human.request, human.respond, emit_status
+  policy-gated: delegate_agent
 ```
 
-`human.request` / `human.respond` 不放进普通 profile allowlist；它们作为 runtime control tools 注入 native / ADK tool surface。
+`human.request` / `human.respond` 不放进普通 profile allowlist；它们作为 always-on runtime control tools 注入 native / ADK tool surface。
+
+`delegate_agent` 也是 runtime control tool，但不能所有 agent 无条件可用。它由 caller profile 的 delegation policy 控制：
+
+```yaml
+delegation:
+  enabled: true
+  allow:
+    - reviewer
+  max_parallel: 3
+  max_depth: 2
+```
 
 约束：
 
 - profile allowlist 仍然控制业务工具。
 - runtime control tools 由 runtime 自己校验输入、scope、trust_level。
 - `human.respond` 不能因为“所有 agent 可见”就绕过 HumanRequest scope/trust 校验。
+- `delegate_agent` 不能因为是 runtime control tool 就绕过 delegation policy、target profile、max_depth、max_parallel 和 child context policy。
 - instruction 里的 “Available tools” 需要包含 runtime control tools，否则 agent 不知道可以调用。
 
 ## 去重与限流
@@ -1293,6 +1642,20 @@ RunAgent start
 
 正常路径下，`runtime_tool_gate` replay 由 `POST /human-requests/{id}/responses` 同步触发。`RunAgent start` 里的 replay 只作为恢复性补偿，用于处理 response 写入成功但 replay 因进程崩溃、进程退出或 running lease 过期未完成的状态。未过期的 `running` 不能被补偿路径重复执行。
 
+child delegation 的 resume 数据流：
+
+```text
+parent run waiting_human because child waiting_human
+  -> user resolves child HumanRequest
+  -> resume child run with child session/context packet
+  -> child reaches completed/failed/timeout
+  -> runtime materializes delegate_agent tool output
+  -> attach output to parent tool call
+  -> resume parent run with child result summary
+```
+
+已完成的 sibling child results 必须保留；如果 parent 同一批启动多个 child，只恢复仍在 waiting 的 child，最后按原 parent tool-call batch 顺序把所有 child outputs 回灌给 parent。
+
 并发要求：
 
 - HumanRequest resolve 必须原子写。
@@ -1303,15 +1666,16 @@ RunAgent start
 
 ## 落地顺序
 
-建议拆成七个小提交：
+建议拆成八个小提交：
 
 1. `workspace` canonicalization + internal `workspace_key` state root。
-2. `hitl` 数据模型和 file store，包括 replay_status CAS / running lease。
-3. runtime control tools：`human.request` / `human.respond` + `TurnResponse.HumanRequests`。
-4. `waiting_human` 状态、session history 写入、native/ADK HITL hydration。
-5. native `RequireConfirmation` gate + action snapshot / env_snapshot。
-6. structured response resolve + synchronous snapshot replay。
-7. API / CLI response resolve。
+2. `delegate_agent` contract：child context packet、delegate_result_v1、parent wait、fan-out join=all、child waiting_human blocks parent。
+3. `hitl` 数据模型和 file store，包括 replay_status CAS / running lease。
+4. runtime control tools：`human.request` / `human.respond` + `TurnResponse.HumanRequests`。
+5. `waiting_human` 状态、session history 写入、native/ADK HITL hydration。
+6. native `RequireConfirmation` gate + action snapshot / env_snapshot。
+7. structured response resolve + synchronous snapshot replay。
+8. API / CLI response resolve。
 
 第一阶段可以只做 file store，不需要数据库：
 
@@ -1321,6 +1685,7 @@ RunAgent start
 .xira/state/workspaces/<workspace_key>/replay-results/<human_request_id>.yaml
 .xira/runs/<run_id>/human_requests.jsonl
 .xira/runs/<run_id>/replay/tool_replay_links.jsonl
+.xira/runs/<child_run_id>/artifacts/context/context_packet.json
 ```
 
 第二阶段再考虑：
@@ -1335,6 +1700,13 @@ RunAgent start
 
 - agent 主动调用 `human.request` 会生成 pending HumanRequest。
 - 所有 agent profile 默认都能看到 `human.request` 和 `human.respond`。
+- `delegate_agent` 只在 caller delegation policy 允许时可用；未允许的 target agent 会被拒绝并记录 audit。
+- child agent 默认只看到 task、canonical workspace、parent lineage、当前用户消息摘要和显式授权的 `context_refs`，看不到 parent 完整 session history。
+- child context packet 会记录 included / redacted / truncated context item，且 context refs 只能解析 parent run 允许的 artifact/tool output。
+- child 返回 `delegate_result_v1` 后，runtime 补齐 `agent_id`、`run_id`、`status`，并拒绝 child 伪造 runtime-owned 字段。
+- parent 默认等待 child 的 delegate tool output；child completed/failed/timeout 都 materialize 成 parent 可见的 tool output。
+- child `waiting_human` 会让 parent run 进入 `waiting_human`，并记录 blocked_by child run / child HumanRequest / parent tool call。
+- 同一 parent tool-call batch 中多个 `delegate_agent` 可以并行 fan-out，v0 join=all，并受 `max_parallel` 限制。
 - native 路径执行 `RequireConfirmation=true` 的 tool 时不执行原 tool，而是生成 `runtime_tool_gate` HumanRequest 和 action snapshot。
 - HumanRequest 记录 canonical `workspace`，file store 使用内部 `workspace_key` 分目录，不使用 `workspace_id` 或 `local` 这类弱身份。
 - ADK / native 对 `RequireConfirmation` 的可见行为一致。
@@ -1370,9 +1742,14 @@ RunAgent start
 
 ## 推荐下一步
 
-先实现最小 Agent HITL：
+先收敛最小 Agent runtime boundary：
 
 ```text
+delegate_agent child context packet
+delegate_result_v1
+parent waits child
+parallel child fan-out + join=all
+child waiting_human blocks parent
 human.request tool
 human.respond tool
 HumanRequest file store
@@ -1385,4 +1762,4 @@ CLI/API response resolve
 waiting_human 状态传播
 ```
 
-不要先做完整 policy，也不要先接 Flow。完成后再回到 Flow schema，把 flow 的 `human_approval` 和 agent-generated HumanRequest 的关系补清楚。
+不要先做完整 policy，也不要先接 Flow。完成后再回到 Flow schema，把 flow 的 `human_approval`、agent-generated HumanRequest、agent delegation child run 的关系补清楚。
