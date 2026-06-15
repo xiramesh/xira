@@ -54,6 +54,8 @@ type Kernel struct {
 	Definitions DefinitionSource
 	Executor    StepExecutor
 	Policy      PolicyResolver
+	Resolver    HumanRequestResolver
+	AgentStatus AgentStatusResolver
 	Clock       func() time.Time
 }
 
@@ -352,8 +354,8 @@ func (k *Kernel) resolveDefinitionByID(ctx context.Context, run *Run) (*Definiti
 	return nil, fmt.Errorf("no definition source available for flow %q", run.FlowID)
 }
 
-// Resume is implemented in kernel_resume.go (M5). It is declared here so the
-// Kernel API is complete; the body is filled in by the resume implementation.
+// Resume is the entry point for resuming a paused flow after a HumanRequest
+// is resolved. Implemented in kernel_resume.go.
 func (k *Kernel) Resume(ctx context.Context, flowRunID, humanRequestID string) (*Run, error) {
 	return k.resume(ctx, flowRunID, humanRequestID)
 }
@@ -625,18 +627,3 @@ func appendUniqueStrings(dst []string, values ...string) []string {
 // ErrTransitionUnresolvable is returned when a completed step has branches but
 // none match and no on_success fallback is defined.
 var ErrTransitionUnresolvable = errors.New("transition unresolvable")
-
-// resume is the M5 resume entry point. Replaced with the full implementation
-// in kernel_resume.go; kept here as a not-yet-wired stub so the package
-// compiles during M3. It returns a clear error until M5 lands.
-func (k *Kernel) resume(ctx context.Context, flowRunID, humanRequestID string) (*Run, error) {
-	if k == nil || k.Store == nil {
-		return nil, fmt.Errorf("kernel store is required")
-	}
-	run, err := k.Store.GetRun(ctx, flowRunID)
-	if err != nil {
-		return nil, err
-	}
-	_ = run
-	return nil, fmt.Errorf("resume is not implemented in this milestone (flow run %q, human request %q)", flowRunID, humanRequestID)
-}
