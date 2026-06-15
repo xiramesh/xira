@@ -151,6 +151,10 @@ func (s *Service) createRuntimeToolGateHumanRequest(ctx context.Context, toolCal
 	if toolCallID == "" {
 		toolCallID = uuid.NewString()
 	}
+	contextHash, err := digestAny(args)
+	if err != nil {
+		return nil, fmt.Errorf("marshal action snapshot arguments: %w", err)
+	}
 	req, err := s.CreateHumanRequest(ctx, humanrequest.CreateRequest{
 		WorkspaceID:  s.workspace,
 		WorkspaceKey: s.WorkspaceKey(),
@@ -169,7 +173,7 @@ func (s *Service) createRuntimeToolGateHumanRequest(ctx context.Context, toolCal
 			AgentID:     exec.Profile.ID,
 			SessionID:   exec.Base.ConversationSessionID,
 			ToolCallID:  toolCallID,
-			ContextHash: digestAny(args),
+			ContextHash: contextHash,
 		},
 	})
 	if err != nil {
@@ -215,7 +219,10 @@ func (s *Service) replayApprovedActionSnapshot(ctx context.Context, req *humanre
 	if err := s.materializeApprovedActionSnapshotOutput(leased, output); err != nil {
 		return nil, s.failApprovedActionReplay(ctx, req.ID, owner, err)
 	}
-	digest := digestAny(output)
+	digest, err := digestAny(output)
+	if err != nil {
+		return nil, s.failApprovedActionReplay(ctx, req.ID, owner, fmt.Errorf("marshal replay output: %w", err))
+	}
 	completed, err := s.humanRequests.CompleteReplay(ctx, humanrequest.CompleteReplayRequest{
 		WorkspaceKey:    s.WorkspaceKey(),
 		RequestID:       req.ID,
@@ -316,17 +323,6 @@ func isHumanRequestToolWireName(name string) bool {
 	return name == "human.request" || name == "human_request"
 }
 
-type trustedHumanResponseContextKey struct{}
-
-func contextWithTrustedHumanResponse(ctx context.Context) context.Context {
-	return context.WithValue(ctx, trustedHumanResponseContextKey{}, true)
-}
-
-func trustedHumanResponseFromContext(ctx context.Context) bool {
-	trusted, _ := ctx.Value(trustedHumanResponseContextKey{}).(bool)
-	return trusted
-}
-
 func cloneAnyMap(in map[string]any) map[string]any {
 	if len(in) == 0 {
 		return nil
@@ -338,17 +334,24 @@ func cloneAnyMap(in map[string]any) map[string]any {
 	return out
 }
 
-func digestAny(value any) string {
-	data, _ := json.Marshal(value)
+func digestAny(value any) (string, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
 	sum := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
 func validateActionSnapshotDigest(snapshot *humanrequest.ActionSnapshot) error {
 	if snapshot == nil || strings.TrimSpace(snapshot.ContextHash) == "" {
 		return nil
 	}
-	if got := digestAny(snapshot.Arguments); got != snapshot.ContextHash {
+	got, err := digestAny(snapshot.Arguments)
+	if err != nil {
+		return fmt.Errorf("marshal snapshot arguments: %w", err)
+	}
+	if got != snapshot.ContextHash {
 		return fmt.Errorf("snapshot arguments changed: got %s want %s", got, snapshot.ContextHash)
 	}
 	return nil

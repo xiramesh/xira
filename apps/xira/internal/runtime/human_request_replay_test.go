@@ -81,6 +81,16 @@ func TestRequireConfirmationReturnsWaitingHuman(t *testing.T) {
 	}
 }
 
+func TestValidateActionSnapshotDigestRejectsUnmarshalableArguments(t *testing.T) {
+	err := validateActionSnapshotDigest(&humanrequest.ActionSnapshot{
+		Arguments:   map[string]any{"bad": func() {}},
+		ContextHash: "sha256:expected",
+	})
+	if err == nil || !strings.Contains(err.Error(), "marshal snapshot arguments") {
+		t.Fatalf("validateActionSnapshotDigest error = %v, want marshal failure", err)
+	}
+}
+
 func TestNativeRequireConfirmationCreatesActionSnapshot(t *testing.T) {
 	workspace := t.TempDir()
 	targetPath := filepath.Join(workspace, "native-approved.txt")

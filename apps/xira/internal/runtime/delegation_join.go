@@ -130,11 +130,11 @@ func (s *Service) loadDelegationJoinStates(parentRunID string) ([]DelegationJoin
 		}
 		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
-			return nil, err
+			continue
 		}
 		var join DelegationJoinState
 		if err := yaml.Unmarshal(data, &join); err != nil {
-			return nil, err
+			continue
 		}
 		out = append(out, join)
 	}

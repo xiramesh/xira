@@ -34,6 +34,9 @@ func TestHumanRequestToolIsAvailableToADKProfiles(t *testing.T) {
 	if !adkToolNames(tools)["human.request"] {
 		t.Fatalf("ADK tools missing human.request: %+v", adkToolNames(tools))
 	}
+	if adkToolNames(tools)["human.respond"] {
+		t.Fatalf("ADK tools should not expose human.respond to model calls: %+v", adkToolNames(tools))
+	}
 }
 
 func TestHumanRequestToolCreatesPendingRequestAndInterrupt(t *testing.T) {
@@ -388,136 +391,6 @@ func TestHumanRequestToolRejectsInvalidOptions(t *testing.T) {
 	}
 	if len(list) != 0 {
 		t.Fatalf("duplicate option request should not be persisted: %+v", list)
-	}
-}
-
-func TestHumanRespondToolRequiresTrustedRuntimeContext(t *testing.T) {
-	var requestID string
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		var req deepseek.ChatRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			return nil, err
-		}
-		var body string
-		if lastRole(req.Messages) == "tool" {
-			body = deepSeekTextResponse("respond final")
-		} else {
-			body = deepSeekToolCallResponseWithArgs("human-respond-call", "human_respond", map[string]any{
-				"request_id": requestID,
-				"kind":       "answer",
-				"message":    "model tries to self-approve",
-			})
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
-	})}
-	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		StateRoot:      filepath.Join(t.TempDir(), "state"),
-		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
-	})
-	req, err := rt.CreateHumanRequest(context.Background(), humanrequest.CreateRequest{
-		ID:           "hrq_respond_untrusted",
-		WorkspaceID:  rt.Status()["workspace"].(string),
-		WorkspaceKey: rt.WorkspaceKey(),
-		RunID:        "run-pending",
-		AgentID:      agents.DefaultAgentID,
-		SessionID:    "session-pending",
-		Kind:         humanrequest.RequestFreeform,
-		Question:     "Real human only?",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	requestID = req.ID
-
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "try to respond", Channel: "test", UserID: "user-1"})
-	if err != nil {
-		t.Fatalf("RunAgent() error = %v", err)
-	}
-	if resp.Status != "completed" {
-		t.Fatalf("run status = %q", resp.Status)
-	}
-	stored, err := rt.GetHumanRequest(context.Background(), req.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.Status != humanrequest.StatusPending || stored.Response != nil {
-		t.Fatalf("model-resolved human request = %+v", stored)
-	}
-	if _, ok := findEvent(resp.Events, "human.respond.rejected"); !ok {
-		t.Fatalf("events missing human.respond.rejected: %+v", eventKinds(resp.Events))
-	}
-}
-
-func TestHumanRespondToolCanResolveInTrustedResumeContext(t *testing.T) {
-	var requestID string
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		var req deepseek.ChatRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			return nil, err
-		}
-		var body string
-		if lastRole(req.Messages) == "tool" {
-			body = deepSeekTextResponse("trusted respond final")
-		} else {
-			body = deepSeekToolCallResponseWithArgs("human-respond-trusted-call", "human_respond", map[string]any{
-				"request_id": requestID,
-				"kind":       "answer",
-				"actor":      "runtime",
-				"message":    "trusted runtime answer",
-			})
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
-	})}
-	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		StateRoot:      filepath.Join(t.TempDir(), "state"),
-		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
-	})
-	req, err := rt.CreateHumanRequest(context.Background(), humanrequest.CreateRequest{
-		ID:           "hrq_respond_trusted",
-		WorkspaceID:  rt.Status()["workspace"].(string),
-		WorkspaceKey: rt.WorkspaceKey(),
-		RunID:        "run-pending",
-		AgentID:      agents.DefaultAgentID,
-		SessionID:    "session-pending",
-		Kind:         humanrequest.RequestFreeform,
-		Question:     "Runtime resume?",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	requestID = req.ID
-
-	profile := agents.BuiltinXiraAssistant()
-	final, _, err := rt.generateADK(
-		contextWithTrustedHumanResponse(context.Background()),
-		profile,
-		"trusted resume instruction",
-		TurnRequest{
-			Message:   "resolve trusted human response",
-			UserID:    "trusted-user",
-			SessionID: "trusted-adk-session",
-			Metadata: map[string]string{
-				"conversation_session_id": "conversation-trusted",
-				"agent_session_id":        "agent-session-trusted",
-			},
-		},
-		func(string, string, string, map[string]any) {},
-		func(string, string, bool, string, map[string]any) {},
-	)
-	if err != nil {
-		t.Fatalf("generateADK trusted human.respond error = %v", err)
-	}
-	if !strings.Contains(final, "trusted respond final") {
-		t.Fatalf("final = %q", final)
-	}
-	stored, err := rt.GetHumanRequest(context.Background(), requestID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.Status != humanrequest.StatusResolved || stored.Response == nil || stored.Response.Message != "trusted runtime answer" {
-		t.Fatalf("trusted human.respond did not resolve request: %+v", stored)
 	}
 }
 

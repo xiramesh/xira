@@ -64,6 +64,8 @@ func (s *Store) Create(ctx context.Context, input CreateRequest) (*HumanRequest,
 	id := strings.TrimSpace(input.ID)
 	if id == "" {
 		id = "hrq_" + uuid.NewString()
+	} else if err := validatePathID(id, "request id"); err != nil {
+		return nil, err
 	}
 	req := &HumanRequest{
 		ID:             id,
@@ -104,8 +106,8 @@ func (s *Store) Resolve(ctx context.Context, input ResolveRequest) (*HumanReques
 	if err := validateWorkspaceKey(input.WorkspaceKey); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(input.RequestID) == "" {
-		return nil, fmt.Errorf("%w: request id is required", ErrValidation)
+	if err := validatePathID(input.RequestID, "request id"); err != nil {
+		return nil, err
 	}
 	if err := validateResponseKind(input.Kind); err != nil {
 		return nil, err
@@ -174,8 +176,8 @@ func (s *Store) Get(ctx context.Context, workspaceKey, requestID string) (*Human
 	if err := validateWorkspaceKey(workspaceKey); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(requestID) == "" {
-		return nil, fmt.Errorf("%w: request id is required", ErrValidation)
+	if err := validatePathID(requestID, "request id"); err != nil {
+		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -204,8 +206,11 @@ func (s *Store) BeginReplay(ctx context.Context, input ReplayLeaseRequest) (*Hum
 	if err := validateWorkspaceKey(input.WorkspaceKey); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(input.RequestID) == "" || strings.TrimSpace(input.Owner) == "" {
-		return nil, fmt.Errorf("%w: request id and owner are required", ErrValidation)
+	if err := validatePathID(input.RequestID, "request id"); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(input.Owner) == "" {
+		return nil, fmt.Errorf("%w: owner is required", ErrValidation)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -259,8 +264,11 @@ func (s *Store) CompleteReplay(ctx context.Context, input CompleteReplayRequest)
 	if err := validateWorkspaceKey(input.WorkspaceKey); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(input.RequestID) == "" || strings.TrimSpace(input.Owner) == "" {
-		return nil, fmt.Errorf("%w: request id and owner are required", ErrValidation)
+	if err := validatePathID(input.RequestID, "request id"); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(input.Owner) == "" {
+		return nil, fmt.Errorf("%w: owner is required", ErrValidation)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -313,8 +321,11 @@ func (s *Store) FailReplay(ctx context.Context, input FailReplayRequest) (*Human
 	if err := validateWorkspaceKey(input.WorkspaceKey); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(input.RequestID) == "" || strings.TrimSpace(input.Owner) == "" {
-		return nil, fmt.Errorf("%w: request id and owner are required", ErrValidation)
+	if err := validatePathID(input.RequestID, "request id"); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(input.Owner) == "" {
+		return nil, fmt.Errorf("%w: owner is required", ErrValidation)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -402,6 +413,12 @@ func (s *Store) listLocked(query ListQuery) ([]HumanRequest, error) {
 }
 
 func (s *Store) loadRequest(workspaceKey, requestID string) (*HumanRequest, error) {
+	if err := validateWorkspaceKey(workspaceKey); err != nil {
+		return nil, err
+	}
+	if err := validatePathID(requestID, "request id"); err != nil {
+		return nil, err
+	}
 	path := s.requestPath(workspaceKey, requestID)
 	req, err := readYAMLFile[HumanRequest](path)
 	if os.IsNotExist(err) {
@@ -414,14 +431,41 @@ func (s *Store) loadRequest(workspaceKey, requestID string) (*HumanRequest, erro
 }
 
 func (s *Store) writeRequest(req *HumanRequest) error {
+	if req == nil {
+		return fmt.Errorf("%w: human request is required", ErrValidation)
+	}
+	if err := validateWorkspaceKey(req.WorkspaceKey); err != nil {
+		return err
+	}
+	if err := validatePathID(req.ID, "request id"); err != nil {
+		return err
+	}
 	return writeYAMLAtomic(s.requestPath(req.WorkspaceKey, req.ID), req, 0o600)
 }
 
 func (s *Store) writeResponse(workspaceKey string, response *HumanResponse) error {
+	if response == nil {
+		return fmt.Errorf("%w: human response is required", ErrValidation)
+	}
+	if err := validateWorkspaceKey(workspaceKey); err != nil {
+		return err
+	}
+	if err := validatePathID(response.ID, "response id"); err != nil {
+		return err
+	}
+	if err := validatePathID(response.RequestID, "request id"); err != nil {
+		return err
+	}
 	return writeYAMLAtomic(filepath.Join(s.workspaceDir(workspaceKey), "human-responses", response.ID+".yaml"), response, 0o600)
 }
 
 func (s *Store) writeReplayResult(workspaceKey, requestID string, replay *ReplayState) error {
+	if err := validateWorkspaceKey(workspaceKey); err != nil {
+		return err
+	}
+	if err := validatePathID(requestID, "request id"); err != nil {
+		return err
+	}
 	return writeYAMLAtomic(filepath.Join(s.workspaceDir(workspaceKey), "replay-results", requestID+".yaml"), replay, 0o600)
 }
 
@@ -440,6 +484,11 @@ func (s *Store) requestPath(workspaceKey, requestID string) string {
 func validateCreate(input CreateRequest) error {
 	if err := validateWorkspaceKey(input.WorkspaceKey); err != nil {
 		return err
+	}
+	if strings.TrimSpace(input.ID) != "" {
+		if err := validatePathID(input.ID, "request id"); err != nil {
+			return err
+		}
 	}
 	if strings.TrimSpace(input.WorkspaceID) == "" {
 		return fmt.Errorf("%w: workspace id is required", ErrValidation)
@@ -474,12 +523,19 @@ func validateCreate(input CreateRequest) error {
 }
 
 func validateWorkspaceKey(key string) error {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return fmt.Errorf("%w: workspace key is required", ErrValidation)
+	return validatePathID(key, "workspace key")
+}
+
+func validatePathID(id, label string) error {
+	id = strings.TrimSpace(id)
+	if label == "" {
+		label = "path id"
 	}
-	if strings.HasPrefix(key, ".") || strings.Contains(key, "/") || strings.Contains(key, `\`) || strings.Contains(key, "..") || filepath.IsAbs(key) {
-		return fmt.Errorf("%w: invalid workspace key %q", ErrValidation, key)
+	if id == "" {
+		return fmt.Errorf("%w: %s is required", ErrValidation, label)
+	}
+	if strings.HasPrefix(id, ".") || strings.Contains(id, "/") || strings.Contains(id, `\`) || strings.Contains(id, "..") || filepath.IsAbs(id) {
+		return fmt.Errorf("%w: invalid %s %q", ErrValidation, label, id)
 	}
 	return nil
 }

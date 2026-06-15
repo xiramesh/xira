@@ -208,7 +208,9 @@ func (s *Service) materializeDeniedDelegation(ctx context.Context, join *Delegat
 		}
 		childRun.EndedAt = now
 		childRun.VerificationResult = VerificationResult{Status: "failed", Checks: []string{"human_response_" + string(req.Response.Kind)}}
-		_ = s.runs.SaveRun(childRun)
+		if err := s.runs.SaveRun(childRun); err != nil {
+			return err
+		}
 	}
 	if err := s.materializeParentDelegateToolCall(join.ParentRunID, call.ParentToolCallID, output, anyString(output["error"])); err != nil {
 		return err

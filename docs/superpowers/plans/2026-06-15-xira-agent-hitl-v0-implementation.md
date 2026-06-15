@@ -16,7 +16,7 @@ Status as of 2026-06-15 implementation pass:
 
 - Completed: `internal/humanrequest` domain store, workspace-safe file layout, request resolve, replay CAS, replay failure recording, and audit records.
 - Completed: minimal response API before replay/resume, API list/show, and `xira human list/show/approve/deny/cancel/answer`.
-- Completed: `RunInterrupt` / `RuntimeSuspendCollector`, `waiting_human` run status, native/ADK short-circuit, `human.request`, and trusted-context `human.respond`.
+- Completed: `RunInterrupt` / `RuntimeSuspendCollector`, `waiting_human` run status, native/ADK short-circuit, `human.request`, and no model-visible `human.respond`.
 - Completed: ADK and native `RequireConfirmation` gate, action snapshot creation, synchronous approve replay, deny/cancel no-replay behavior, replay idempotency, replay lease conflict, and workspace containment enforcement for file tools.
 - Completed: delegation child `waiting_human` propagation, persisted `.xira/runs/<parent_run_id>/delegations/<delegation_join_id>.yaml`, active `max_parallel` release, persisted `max_outstanding` counting, child answer/approve resume, deny/cancel materialization, parent delegate output materialization, parent continuation after child resolution, and restart recovery.
 - Completed: deterministic fake-model E2E for direct `human.request`, runtime tool approval replay, delegation completed, delegation child waiting approve resume, delegation child waiting cancel, process restart before response, retry dedupe, and workspace isolation.
@@ -157,7 +157,7 @@ The exact struct fields may evolve during implementation, but the runtime contra
 - [x] Modify `apps/xira/internal/runtime/service.go`
   - Wire `HumanRequest` store, suspend collector, status transition to `waiting_human`, replay entry points, and native/ADK short-circuit.
 - [x] Add or modify `apps/xira/internal/runtime/human_requests.go`
-  - Runtime-owned `human.request` and `human.respond`.
+  - Runtime-owned `human.request`; HumanResponse resolve stays on API / CLI / transport-structured paths.
 - [x] Modify `apps/xira/internal/runtime/delegation.go`
   - Convert child `waiting_human` into parent suspend; persist delegation join state; separate active slots from outstanding suspended children.
 - [x] Add `apps/xira/internal/runtime/human_request_interrupt_test.go`
@@ -486,7 +486,7 @@ ok   github.com/xiramesh/xira/internal/runtime
 
 ---
 
-## Phase 4 - Runtime Control Tools: human.request And human.respond
+## Phase 4 - Runtime Control Tool: human.request
 
 ### Tests First
 
@@ -499,6 +499,7 @@ Add tests in `apps/xira/internal/runtime/human_request_interrupt_test.go`.
 - [x] `TestHumanRequestToolIsAvailableToADKProfiles`
   - Inspect ADK profile hydration.
   - Assert `human.request` schema exists.
+  - Assert `human.respond` is not exposed to model calls.
 
 - [x] `TestHumanRequestToolCreatesPendingRequestAndInterrupt`
   - Fake model calls `human.request`.
@@ -514,14 +515,6 @@ Add tests in `apps/xira/internal/runtime/human_request_interrupt_test.go`.
   - Same run, two different tool call ids or dedupe keys.
   - Assert two pending requests when the model explicitly asks two independent questions.
 
-- [x] `TestHumanRespondToolRequiresTrustedRuntimeContext`
-  - Direct model attempt to call `human.respond` without trusted runtime context is rejected.
-  - This prevents the model from self-approving its own request.
-
-- [x] `TestHumanRespondToolCanResolveInTrustedResumeContext`
-  - Runtime resume path invokes `human.respond`.
-  - Assert response is persisted.
-
 - [x] `TestHumanRequestToolRejectsInvalidOptions`
   - Empty question rejected.
   - Options with duplicate ids rejected.
@@ -530,7 +523,7 @@ Add tests in `apps/xira/internal/runtime/human_request_interrupt_test.go`.
 ### Implementation
 
 - [x] Add `human.request` as a runtime-owned tool.
-- [x] Add `human.respond` as a runtime-owned tool but only executable from trusted runtime resume context.
+- [x] Do not expose `human.respond` as a runtime-owned tool; response resolve uses API / CLI / transport-structured entrypoints.
 - [x] Ensure tool results for `human.request` are not sent back into model loop in the same run; they become `RunInterrupt`.
 - [x] Store request provenance:
   - run id
@@ -1145,7 +1138,7 @@ Use this as a final audit before requesting review.
 - [x] ADK path suspend.
 - [x] No second model call after suspend.
 - [x] No final response validation after suspend.
-- [x] Model cannot call `human.respond` to self-approve.
+- [x] Model cannot see or call `human.respond` to self-approve.
 - [ ] v0.1 follow-up: CLI approve idempotency across transport/network retry.
 - [x] CLI answer requires message.
 - [x] API returns stable machine-readable errors.

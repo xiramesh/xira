@@ -90,6 +90,100 @@ func TestStoreCreateHumanRequestRejectsPathTraversalWorkspaceKey(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsPathTraversalRequestIDs(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStore(t, root)
+	for _, requestID := range []string{"../outside", "/tmp/hrq", "nested/hrq", `nested\hrq`, "hrq..evil", ".hidden"} {
+		_, err := store.Create(context.Background(), CreateRequest{
+			ID:           requestID,
+			WorkspaceID:  "workspace",
+			WorkspaceKey: "ws_request_id",
+			RunID:        "run-1",
+			AgentID:      "agent-1",
+			SessionID:    "session-1",
+			Kind:         RequestFreeform,
+			Question:     "bad request id?",
+		})
+		if !errors.Is(err, ErrValidation) {
+			t.Fatalf("Create request id %q error = %v, want ErrValidation", requestID, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "outside.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("invalid request id wrote outside file, stat err=%v", err)
+	}
+}
+
+func TestStoreRejectsPathTraversalRequestIDOnReadResolveAndReplay(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStore(t, root)
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:           "hrq_replay_path",
+		WorkspaceID:  "workspace",
+		WorkspaceKey: "ws_replay_path",
+		RunID:        "run-1",
+		AgentID:      "agent-1",
+		SessionID:    "session-1",
+		ToolCallID:   "tool-1",
+		Kind:         RequestApproval,
+		Question:     "approve?",
+		ActionSnapshot: &ActionSnapshot{
+			ToolName:   "write_file",
+			Arguments:  map[string]any{"path": "ok.txt"},
+			RunID:      "run-1",
+			AgentID:    "agent-1",
+			SessionID:  "session-1",
+			ToolCallID: "tool-1",
+		},
+	})
+	resolved, err := store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_replay_path",
+		RequestID:    req.ID,
+		Kind:         ResponseApprove,
+		Actor:        "tester",
+	})
+	if err != nil {
+		t.Fatalf("Resolve valid request: %v", err)
+	}
+	if _, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_replay_path", RequestID: resolved.ID, Owner: "worker", LeaseDuration: time.Minute}); err != nil {
+		t.Fatalf("BeginReplay valid request: %v", err)
+	}
+
+	badID := "../" + req.ID
+	checks := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "Get", run: func() error {
+			_, err := store.Get(context.Background(), "ws_replay_path", badID)
+			return err
+		}},
+		{name: "Resolve", run: func() error {
+			_, err := store.Resolve(context.Background(), ResolveRequest{WorkspaceKey: "ws_replay_path", RequestID: badID, Kind: ResponseAnswer, Message: "no"})
+			return err
+		}},
+		{name: "BeginReplay", run: func() error {
+			_, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_replay_path", RequestID: badID, Owner: "worker", LeaseDuration: time.Minute})
+			return err
+		}},
+		{name: "CompleteReplay", run: func() error {
+			_, err := store.CompleteReplay(context.Background(), CompleteReplayRequest{WorkspaceKey: "ws_replay_path", RequestID: badID, Owner: "worker", ResultDigest: "sha256:test"})
+			return err
+		}},
+		{name: "FailReplay", run: func() error {
+			_, err := store.FailReplay(context.Background(), FailReplayRequest{WorkspaceKey: "ws_replay_path", RequestID: badID, Owner: "worker", Error: "failed"})
+			return err
+		}},
+	}
+	for _, check := range checks {
+		if err := check.run(); !errors.Is(err, ErrValidation) {
+			t.Fatalf("%s malicious request id error = %v, want ErrValidation", check.name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "workspaces", "hrq_replay_path.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("malicious request id wrote workspace sibling, stat err=%v", err)
+	}
+}
+
 func TestStoreCreateHumanRequestIsIdempotentForSameRunAndDedupeKey(t *testing.T) {
 	store := newTestStore(t, t.TempDir())
 	base := CreateRequest{

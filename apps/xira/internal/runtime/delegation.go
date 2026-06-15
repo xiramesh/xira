@@ -183,36 +183,6 @@ func (s *Service) runtimeADKTools(
 	}
 	out = append(out, humanRequestTool)
 
-	humanRespondTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
-		Name:         "human.respond",
-		Description:  "Resolve a HumanRequest only from a trusted runtime resume context. Ordinary model calls are rejected.",
-		InputSchema:  humanRespondToolInputSchema(),
-		OutputSchema: objectSchema(),
-	}, func(_ adktool.Context, args map[string]any) (map[string]any, error) {
-		requestID := strings.TrimSpace(fmt.Sprint(args["request_id"]))
-		if !trustedHumanResponseFromContext(ctx) {
-			recordEvent("human.respond.rejected", "runtime", "untrusted human.respond call rejected", map[string]any{
-				"human_request_id": requestID,
-				"reason":           "untrusted_runtime_context",
-			})
-			recordAudit("human.respond", requestID, false, "untrusted runtime context", nil)
-			return map[string]any{"status": "rejected", "error": "human.respond requires trusted runtime context"}, nil
-		}
-		resolved, err := s.ResolveHumanRequest(ctx, requestID, humanrequest.ResolveRequest{
-			Kind:    humanrequest.ResponseKind(strings.TrimSpace(fmt.Sprint(args["kind"]))),
-			Message: strings.TrimSpace(fmt.Sprint(args["message"])),
-			Actor:   strings.TrimSpace(fmt.Sprint(args["actor"])),
-		})
-		if err != nil {
-			return map[string]any{"status": "rejected", "error": err.Error()}, nil
-		}
-		return map[string]any{"status": "resolved", "human_request_id": resolved.ID}, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	out = append(out, humanRespondTool)
-
 	statusTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
 		Name:         statusToolName,
 		Description:  "Emit a user-readable progress status event. The message is an event only and is not final answer content.",
@@ -309,20 +279,6 @@ func humanRequestToolInputSchema() *jsonschema.Schema {
 			},
 		},
 		Required:             []string{"question"},
-		AdditionalProperties: rejectAllSchema(),
-	}
-}
-
-func humanRespondToolInputSchema() *jsonschema.Schema {
-	return &jsonschema.Schema{
-		Type: "object",
-		Properties: map[string]*jsonschema.Schema{
-			"request_id": {Type: "string"},
-			"kind":       {Type: "string", Enum: []any{string(humanrequest.ResponseApprove), string(humanrequest.ResponseDeny), string(humanrequest.ResponseCancel), string(humanrequest.ResponseAnswer)}},
-			"actor":      {Type: "string"},
-			"message":    {Type: "string"},
-		},
-		Required:             []string{"request_id", "kind"},
 		AdditionalProperties: rejectAllSchema(),
 	}
 }

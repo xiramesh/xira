@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -414,6 +415,45 @@ func TestDelegateResumeAfterProcessRestart(t *testing.T) {
 	}
 	if join.Status != "completed" || join.Calls[0].Status != "completed" {
 		t.Fatalf("join after restart resume = %+v", join)
+	}
+}
+
+func TestFindDelegationJoinByHumanRequestSkipsCorruptJoinFiles(t *testing.T) {
+	runRoot := filepath.Join(t.TempDir(), "runs")
+	rt := newDelegationResumeTestServiceWithRoots(t, runRoot, filepath.Join(t.TempDir(), "state"))
+	badDir := filepath.Join(runRoot, "aaa_bad_run", "delegations")
+	if err := os.MkdirAll(badDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "bad.yaml"), []byte(":\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	join := &DelegationJoinState{
+		SchemaVersion: delegationJoinSchemaVersion,
+		ID:            "djoin_valid",
+		Workspace:     rt.workspace,
+		ParentRunID:   "zzz_parent_run",
+		ParentAgentID: agents.DefaultAgentID,
+		JoinPolicy:    "all",
+		Status:        StatusWaitingHuman,
+		Calls: []DelegationJoinCall{{
+			ParentToolCallID:    "delegate-call",
+			ChildRunID:          "child-run",
+			ChildAgentID:        agents.ResearchAssistantAgentID,
+			Status:              StatusWaitingHuman,
+			ChildHumanRequestID: "hrq_target",
+		}},
+	}
+	if err := rt.saveDelegationJoinState(join); err != nil {
+		t.Fatal(err)
+	}
+
+	found, callIndex, err := rt.findDelegationJoinByHumanRequest("hrq_target")
+	if err != nil {
+		t.Fatalf("findDelegationJoinByHumanRequest returned corrupt-file error: %v", err)
+	}
+	if found == nil || found.ID != join.ID || callIndex != 0 {
+		t.Fatalf("found join=%+v callIndex=%d", found, callIndex)
 	}
 }
 
