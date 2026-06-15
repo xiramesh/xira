@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -57,6 +58,12 @@ type Kernel struct {
 	Resolver    HumanRequestResolver
 	AgentStatus AgentStatusResolver
 	Clock       func() time.Time
+
+	// registry caches definitions loaded by Start via FlowPath, so subsequent
+	// Advance/Resume calls can resolve them by flow_id without the caller
+	// re-passing the path. Guarded by registryMu.
+	registryMu sync.RWMutex
+	registry   map[string]*Definition
 }
 
 func (k *Kernel) now() time.Time {
@@ -67,7 +74,9 @@ func (k *Kernel) now() time.Time {
 }
 
 // Start loads the definition, resolves the entrypoint, creates a run, and
-// initializes the first step as pending with run status running.
+// initializes the first step as pending with run status running. The loaded
+// definition is persisted alongside the run so later Advance/Resume calls in
+// a fresh process can reload it.
 func (k *Kernel) Start(ctx context.Context, req StartRequest) (*Run, error) {
 	if k == nil || k.Store == nil {
 		return nil, fmt.Errorf("kernel store is required")
@@ -90,6 +99,10 @@ func (k *Kernel) Start(ctx context.Context, req StartRequest) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := k.Store.SaveDefinition(run.ID, def); err != nil {
+		return nil, err
+	}
+	k.registerDefinition(def)
 	_, err = k.Store.UpdateRun(ctx, run.ID, func(r *Run) error {
 		r.Status = RunRunning
 		r.Steps[startStep.ID] = StepState{Status: StepPending}
@@ -117,12 +130,43 @@ func (k *Kernel) Start(ctx context.Context, req StartRequest) (*Run, error) {
 
 func (k *Kernel) resolveDefinition(ctx context.Context, req StartRequest) (*Definition, error) {
 	if strings.TrimSpace(req.FlowPath) != "" {
-		return LoadDefinition(req.FlowPath)
+		def, err := LoadDefinition(req.FlowPath)
+		if err != nil {
+			return nil, err
+		}
+		k.registerDefinition(def)
+		return def, nil
+	}
+	if def, ok := k.lookupDefinition(req.FlowID); ok {
+		return def, nil
 	}
 	if k.Definitions != nil {
 		return k.Definitions.Definition(req.FlowID)
 	}
 	return nil, fmt.Errorf("flow path or definitions source is required")
+}
+
+// registerDefinition caches def by its flow id for later Advance/Resume.
+func (k *Kernel) registerDefinition(def *Definition) {
+	if def == nil {
+		return
+	}
+	k.registryMu.Lock()
+	defer k.registryMu.Unlock()
+	if k.registry == nil {
+		k.registry = map[string]*Definition{}
+	}
+	k.registry[def.ID] = def
+}
+
+func (k *Kernel) lookupDefinition(flowID string) (*Definition, bool) {
+	k.registryMu.RLock()
+	defer k.registryMu.RUnlock()
+	if k.registry == nil {
+		return nil, false
+	}
+	def, ok := k.registry[flowID]
+	return def, ok
 }
 
 // Advance executes the current step if it is pending/running, records the
@@ -348,8 +392,19 @@ func (k *Kernel) complete(ctx context.Context, run *Run) (*Run, error) {
 }
 
 func (k *Kernel) resolveDefinitionByID(ctx context.Context, run *Run) (*Definition, error) {
+	if def, ok := k.lookupDefinition(run.FlowID); ok {
+		return def, nil
+	}
 	if k.Definitions != nil {
-		return k.Definitions.Definition(run.FlowID)
+		if def, err := k.Definitions.Definition(run.FlowID); err == nil {
+			return def, nil
+		}
+	}
+	// Fall back to the definition persisted alongside the run (supports
+	// Advance/Resume in a fresh process that did not see the original path).
+	if def, err := k.Store.LoadDefinitionForRun(run.ID); err == nil {
+		k.registerDefinition(def)
+		return def, nil
 	}
 	return nil, fmt.Errorf("no definition source available for flow %q", run.FlowID)
 }

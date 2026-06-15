@@ -51,6 +51,7 @@ func newRootCommandWithFactory(serviceFactory func(runtime.Config) (*runtime.Ser
 	cmd.AddCommand(agentCommand(newRuntime))
 	cmd.AddCommand(runsCommand(newRuntime))
 	cmd.AddCommand(humanCommand(newRuntime))
+	cmd.AddCommand(flowCommand(newRuntime))
 	return cmd
 }
 
@@ -321,6 +322,128 @@ func optionalFloat32(value *float32) any {
 		return nil
 	}
 	return *value
+}
+
+func flowCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
+	cmd := &cobra.Command{Use: "flow", Short: "Run and inspect Xira flow runs"}
+	cmd.AddCommand(flowRunCommand(newRuntime))
+	cmd.AddCommand(flowStatusCommand(newRuntime))
+	cmd.AddCommand(flowAdvanceCommand(newRuntime))
+	cmd.AddCommand(flowResumeCommand(newRuntime))
+	return cmd
+}
+
+func flowRunCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
+	var entrypoint string
+	var inputs []string
+	cmd := &cobra.Command{
+		Use:   "run <flow-file>",
+		Short: "Start a new flow run from a flow definition file",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := newRuntime()
+			if err != nil {
+				return err
+			}
+			defer rt.Close()
+			inputMap, err := parseStringSliceFlag(inputs)
+			if err != nil {
+				return err
+			}
+			run, err := rt.StartFlow(cmd.Context(), runtime.FlowStartRequest{
+				FlowPath:     args[0],
+				EntrypointID: entrypoint,
+				Input:        inputMap,
+			})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, run)
+		},
+	}
+	cmd.Flags().StringVar(&entrypoint, "entrypoint", "", "Flow entrypoint id")
+	cmd.Flags().StringArrayVar(&inputs, "input", nil, "Flow input as key=value (repeatable)")
+	_ = cmd.MarkFlagRequired("entrypoint")
+	return cmd
+}
+
+func flowStatusCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "status <flow-run-id>",
+		Short: "Show a flow run",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := newRuntime()
+			if err != nil {
+				return err
+			}
+			defer rt.Close()
+			run, err := rt.GetFlowRun(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, run)
+		},
+	}
+	return cmd
+}
+
+func flowAdvanceCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "advance <flow-run-id>",
+		Short: "Advance a flow run by one step",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := newRuntime()
+			if err != nil {
+				return err
+			}
+			defer rt.Close()
+			run, err := rt.AdvanceFlow(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, run)
+		},
+	}
+	return cmd
+}
+
+func flowResumeCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
+	var humanRequestID string
+	cmd := &cobra.Command{
+		Use:   "resume <flow-run-id>",
+		Short: "Resume a paused flow run after a human request is resolved",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := newRuntime()
+			if err != nil {
+				return err
+			}
+			defer rt.Close()
+			run, err := rt.ResumeFlow(cmd.Context(), args[0], humanRequestID)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, run)
+		},
+	}
+	cmd.Flags().StringVar(&humanRequestID, "human-request", "", "Resolved human request id that resumes the flow")
+	_ = cmd.MarkFlagRequired("human-request")
+	return cmd
+}
+
+// parseStringSliceFlag parses repeated key=value flags into a map.
+func parseStringSliceFlag(values []string) (map[string]string, error) {
+	out := make(map[string]string, len(values))
+	for _, raw := range values {
+		idx := strings.Index(raw, "=")
+		if idx <= 0 {
+			return nil, fmt.Errorf("invalid input %q: expected key=value", raw)
+		}
+		out[raw[:idx]] = raw[idx+1:]
+	}
+	return out, nil
 }
 
 func printJSON(cmd *cobra.Command, value any) error {

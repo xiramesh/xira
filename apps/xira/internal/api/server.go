@@ -54,6 +54,8 @@ func NewServer(rt *frt.Service, addr string, controls ...ChannelControls) *Serve
 	mux.HandleFunc("/api/v1/entrypoints/", s.entrypointControls)
 	mux.HandleFunc("/api/v1/runs", s.runs)
 	mux.HandleFunc("/api/v1/runs/", s.runByID)
+	mux.HandleFunc("/api/v1/flows/runs", s.flowRuns)
+	mux.HandleFunc("/api/v1/flows/runs/", s.flowRunByID)
 	s.server = &http.Server{Addr: addr, Handler: withCORS(mux)}
 	return s
 }
@@ -471,6 +473,110 @@ func parseEntrypointControlPath(path string) (entrypointID, resource, resourceID
 		resourceID = parts[2]
 	}
 	return entrypointID, resource, resourceID, true
+}
+
+func (s *Server) flowRuns(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		FlowPath     string            `json:"flow_path"`
+		FlowID       string            `json:"flow_id"`
+		EntrypointID string            `json:"entrypoint_id"`
+		Input        map[string]string `json:"input"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.FlowPath) == "" && strings.TrimSpace(body.FlowID) == "" {
+		http.Error(w, "flow_path or flow_id is required", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.EntrypointID) == "" {
+		http.Error(w, "entrypoint_id is required", http.StatusBadRequest)
+		return
+	}
+	run, err := s.runtime.StartFlow(r.Context(), frt.FlowStartRequest{
+		FlowPath:     body.FlowPath,
+		FlowID:       body.FlowID,
+		EntrypointID: body.EntrypointID,
+		Input:        body.Input,
+	})
+	if err != nil {
+		writeJSON(w, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, run)
+}
+
+func (s *Server) flowRunByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/flows/runs/")
+	flowRunID, resource, ok := parseFlowRunPath(path)
+	if !ok || flowRunID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch resource {
+	case "":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		run, err := s.runtime.GetFlowRun(r.Context(), flowRunID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, run)
+	case "advance":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		run, err := s.runtime.AdvanceFlow(r.Context(), flowRunID)
+		if err != nil {
+			writeJSON(w, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, run)
+	case "resume":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			HumanRequestID string `json:"human_request_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(body.HumanRequestID) == "" {
+			http.Error(w, "human_request_id is required", http.StatusBadRequest)
+			return
+		}
+		run, err := s.runtime.ResumeFlow(r.Context(), flowRunID, body.HumanRequestID)
+		if err != nil {
+			writeJSON(w, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, run)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func parseFlowRunPath(path string) (flowRunID, resource string, ok bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 1 && strings.TrimSpace(parts[0]) != "" {
+		return parts[0], "", true
+	}
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

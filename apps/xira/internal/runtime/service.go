@@ -20,6 +20,7 @@ import (
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/flow"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 	fsession "github.com/xiramesh/xira/internal/session"
@@ -59,6 +60,7 @@ type Service struct {
 	pricing        UsagePricing
 	delegationMu   sync.Mutex
 	activeChildren map[string]int
+	flowKernel     *flow.Kernel
 	mu             sync.RWMutex
 }
 

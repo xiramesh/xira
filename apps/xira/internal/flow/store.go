@@ -231,6 +231,84 @@ func (s *Store) RunDir(flowRunID string) string {
 	return s.runDir(flowRunID)
 }
 
+// SaveDefinition persists the flow definition alongside the run so later
+// Advance/Resume calls (possibly in a fresh process) can reload it without
+// the caller re-passing the flow path.
+func (s *Store) SaveDefinition(flowRunID string, def *Definition) error {
+	if def == nil {
+		return fmt.Errorf("definition is required")
+	}
+	if err := validateFlowRunID(flowRunID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.runDir(flowRunID), "definition.yaml")
+	data, err := yaml.Marshal(def)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return writeAtomic(path, data, 0o644)
+}
+
+// LoadDefinitionForRun reads the persisted flow definition for a run.
+func (s *Store) LoadDefinitionForRun(flowRunID string) (*Definition, error) {
+	if err := validateFlowRunID(flowRunID); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.runDir(flowRunID), "definition.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: definition for flow run %s", ErrRunNotFound, flowRunID)
+		}
+		return nil, err
+	}
+	var def Definition
+	if err := yaml.Unmarshal(data, &def); err != nil {
+		return nil, fmt.Errorf("parse definition for run %s: %w", flowRunID, err)
+	}
+	return &def, nil
+}
+
+func writeAtomic(path string, data []byte, perm os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*.yaml")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
 // ArtifactsDir returns the artifacts subdirectory path for a run.
 func (s *Store) ArtifactsDir(flowRunID string) string {
 	return filepath.Join(s.runDir(flowRunID), "artifacts")
@@ -271,35 +349,9 @@ func (s *Store) writeRunLocked(run *Run) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := writeAtomic(path, data, 0o644); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*.yaml")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	cleanup = false
 	// Ensure artifacts dir exists for a newly created run.
 	_ = os.MkdirAll(filepath.Join(s.runDir(run.ID), "artifacts"), 0o755)
 	return nil
