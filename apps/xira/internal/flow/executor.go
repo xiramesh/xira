@@ -151,6 +151,11 @@ func (e *AgentExecutor) executeAgentStep(ctx context.Context, run *Run, def *Def
 
 // buildTurnRequest assembles an AgentTurnRequest from flow input, the step's
 // objective/instructions/constraints/required_skills, and resolved input slots.
+// It deliberately does not propagate the flow entrypoint id into the agent
+// turn request: the flow itself is the entry context, and the runtime's own
+// entrypoint registry (loaded from xira.yaml) is independent of flow
+// entrypoints. Leaving EntrypointID empty lets runtime.RunAgent fall back to
+// the default agent resolution.
 func (e *AgentExecutor) buildTurnRequest(run *Run, step Step) (AgentTurnRequest, error) {
 	resolved, err := ResolveStepInputs(run, step)
 	if err != nil {
@@ -158,10 +163,9 @@ func (e *AgentExecutor) buildTurnRequest(run *Run, step Step) (AgentTurnRequest,
 	}
 	message := buildAgentMessage(step, run.Input, resolved)
 	req := AgentTurnRequest{
-		AgentID:      step.Executor.Agent,
-		EntrypointID: run.EntrypointID,
-		Message:      message,
-		Channel:      "flow",
+		AgentID: step.Executor.Agent,
+		Message: message,
+		Channel: "flow",
 		Metadata: map[string]string{
 			"flow_run_id":  run.ID,
 			"flow_id":      run.FlowID,
