@@ -42,7 +42,7 @@ func (t *ReadFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{"type": "string", "description": "Path to read, relative to the workspace unless absolute."},
+			"path": map[string]any{"type": "string", "description": "Path to read within the workspace."},
 		},
 		"required": []string{"path"},
 	}
@@ -67,11 +67,14 @@ func (t *WriteFileTool) Name() string { return "write_file" }
 func (t *WriteFileTool) Description() string {
 	return "Create or overwrite a UTF-8 text file in the Xira workspace."
 }
+func (t *WriteFileTool) Policy() ToolPolicy {
+	return ToolPolicy{Risk: "high", RequireConfirmation: true}
+}
 func (t *WriteFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path":    map[string]any{"type": "string", "description": "Path to write, relative to the workspace unless absolute."},
+			"path":    map[string]any{"type": "string", "description": "Path to write within the workspace."},
 			"content": map[string]any{"type": "string", "description": "File content to write."},
 		},
 		"required": []string{"path", "content"},
@@ -103,7 +106,7 @@ func (t *ListDirTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{"type": "string", "description": "Directory path, relative to the workspace unless absolute. Defaults to workspace root."},
+			"path": map[string]any{"type": "string", "description": "Directory path within the workspace. Defaults to workspace root."},
 		},
 	}
 }
@@ -152,7 +155,7 @@ func (t *EditFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path":     map[string]any{"type": "string", "description": "Path to edit, relative to the workspace unless absolute."},
+			"path":     map[string]any{"type": "string", "description": "Path to edit within the workspace."},
 			"old_text": map[string]any{"type": "string", "description": "Exact existing text to replace."},
 			"new_text": map[string]any{"type": "string", "description": "Replacement text."},
 		},
@@ -208,10 +211,27 @@ func (t fileTool) resolvePath(rawPath string) (string, error) {
 	if rawPath == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	if filepath.IsAbs(rawPath) {
-		return filepath.Clean(rawPath), nil
+	workspaceRoot, err := filepath.Abs(t.workspaceRoot)
+	if err != nil {
+		return "", err
 	}
-	return filepath.Clean(filepath.Join(t.workspaceRoot, rawPath)), nil
+	workspaceRoot = filepath.Clean(workspaceRoot)
+	var path string
+	if filepath.IsAbs(rawPath) {
+		path = filepath.Clean(rawPath)
+	} else {
+		path = filepath.Clean(filepath.Join(workspaceRoot, rawPath))
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	path = filepath.Clean(path)
+	rel, err := filepath.Rel(workspaceRoot, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("path must stay within workspace")
+	}
+	return path, nil
 }
 
 func cleanWorkspace(workspaceRoot string) string {

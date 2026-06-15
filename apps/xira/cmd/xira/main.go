@@ -15,6 +15,7 @@ import (
 
 	"github.com/xiramesh/xira/internal/api"
 	"github.com/xiramesh/xira/internal/channelrunner"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/runtime"
 	"github.com/xiramesh/xira/internal/version"
 )
@@ -49,6 +50,7 @@ func newRootCommandWithFactory(serviceFactory func(runtime.Config) (*runtime.Ser
 	cmd.AddCommand(serveCommand(newRuntime))
 	cmd.AddCommand(agentCommand(newRuntime))
 	cmd.AddCommand(runsCommand(newRuntime))
+	cmd.AddCommand(humanCommand(newRuntime))
 	return cmd
 }
 
@@ -235,6 +237,82 @@ func runsCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 			return printJSON(cmd, run)
 		},
 	})
+	return cmd
+}
+
+func humanCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
+	cmd := &cobra.Command{Use: "human", Short: "Inspect and resolve human requests"}
+	var status string
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List human requests",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := newRuntime()
+			if err != nil {
+				return err
+			}
+			defer rt.Close()
+			list, err := rt.ListHumanRequests(cmd.Context(), humanrequest.RequestStatus(strings.TrimSpace(status)))
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, list)
+		},
+	})
+	cmd.Commands()[0].Flags().StringVar(&status, "status", "", "Filter by status: pending or resolved")
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "show [request-id]",
+		Short: "Show a human request",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := newRuntime()
+			if err != nil {
+				return err
+			}
+			defer rt.Close()
+			req, err := rt.GetHumanRequest(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, req)
+		},
+	})
+
+	cmd.AddCommand(humanResolveCommand(newRuntime, "approve", humanrequest.ResponseApprove, false))
+	cmd.AddCommand(humanResolveCommand(newRuntime, "deny", humanrequest.ResponseDeny, false))
+	cmd.AddCommand(humanResolveCommand(newRuntime, "cancel", humanrequest.ResponseCancel, false))
+	cmd.AddCommand(humanResolveCommand(newRuntime, "answer", humanrequest.ResponseAnswer, true))
+	return cmd
+}
+
+func humanResolveCommand(newRuntime func() (*runtime.Service, error), name string, kind humanrequest.ResponseKind, requireMessage bool) *cobra.Command {
+	var message string
+	cmd := &cobra.Command{
+		Use:   name + " [request-id]",
+		Short: strings.Title(name) + " a human request",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := newRuntime()
+			if err != nil {
+				return err
+			}
+			defer rt.Close()
+			req, err := rt.ResolveHumanRequest(cmd.Context(), args[0], humanrequest.ResolveRequest{
+				Kind:    kind,
+				Actor:   "cli",
+				Message: message,
+			})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, req)
+		},
+	}
+	cmd.Flags().StringVar(&message, "message", "", "Response message")
+	if requireMessage {
+		_ = cmd.MarkFlagRequired("message")
+	}
 	return cmd
 }
 

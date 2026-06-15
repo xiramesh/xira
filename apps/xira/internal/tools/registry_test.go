@@ -157,6 +157,42 @@ func TestFileToolsReadWriteListAndEdit(t *testing.T) {
 	}
 }
 
+func TestFileToolsRejectPathsOutsideWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewBuiltinRegistry(workspace, []string{"read_file", "write_file", "list_dir", "edit_file"})
+
+	cases := []struct {
+		name string
+		tool string
+		args map[string]any
+	}{
+		{name: "read absolute outside", tool: "read_file", args: map[string]any{"path": outside}},
+		{name: "write parent escape", tool: "write_file", args: map[string]any{"path": "../outside.txt", "content": "escape"}},
+		{name: "list parent escape", tool: "list_dir", args: map[string]any{"path": ".."}},
+		{name: "edit absolute outside", tool: "edit_file", args: map[string]any{"path": outside, "old_text": "outside", "new_text": "changed"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := registry.Execute(context.Background(), tc.tool, tc.args)
+			if err == nil || !strings.Contains(err.Error(), "within workspace") {
+				t.Fatalf("%s error = %v, want within workspace rejection", tc.tool, err)
+			}
+		})
+	}
+
+	data, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "outside" {
+		t.Fatalf("outside file changed to %q", data)
+	}
+}
+
 func TestSearchFileFindsTextMatchesInsideWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	writePath := filepath.Join(workspace, "kb", "index.md")

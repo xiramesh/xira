@@ -20,6 +20,7 @@ import (
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 	fsession "github.com/xiramesh/xira/internal/session"
 	"github.com/xiramesh/xira/internal/skills"
@@ -44,6 +45,8 @@ type Service struct {
 	entrypoints    *entrypoints.Registry
 	sessions       *fsession.Manager
 	usage          *UsageStore
+	humanRequests  *humanrequest.Store
+	humanResume    func(context.Context, humanrequest.HumanRequest) error
 	adkSessions    adksession.Service
 	verifier       *VerificationRunner
 	evolution      *EvolutionEngine
@@ -94,6 +97,7 @@ func NewService(cfg Config) (*Service, error) {
 		entrypoints:    entrypoints.NewRegistry(resolved.DefaultAgentID, resolved.Entrypoints),
 		sessions:       sessionManager,
 		usage:          NewUsageStore(resolved.StateRoot),
+		humanRequests:  mustHumanRequestStore(resolved.StateRoot),
 		adkSessions:    adksession.InMemoryService(),
 		verifier:       NewVerificationRunner(),
 		evolution:      NewEvolutionEngine(),
@@ -369,6 +373,8 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	}
 	ctx = contextWithToolFailureGuard(ctx)
 	ctx = contextWithToolTrace(ctx, runID)
+	suspendCollector := newRuntimeSuspendCollector()
+	ctx = contextWithRuntimeSuspendCollector(ctx, suspendCollector)
 	ctx = contextWithRunExecution(ctx, runExecutionContext{
 		Base:        eventBase,
 		Profile:     profile,
@@ -392,11 +398,23 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	final, toolCalls, runErr := s.generate(ctx, profile, runInstruction, agentReq, recordEvent, recordAudit)
 	resp.FinalResponse = final
 	resp.ToolCalls = toolCalls
-	resp.VerificationResult = s.verifier.Verify(final, profile.Verification.DefaultChecks)
+	if interrupt := suspendCollector.Interrupt(); interrupt != nil {
+		resp.Interrupt = interrupt
+		resp.HumanRequests = append([]humanrequest.HumanRequest(nil), interrupt.HumanRequests...)
+		resp.VerificationResult = VerificationResult{Status: StatusWaitingHuman, Checks: []string{"runtime_interrupt"}}
+		recordEvent("run.waiting_human", "runtime", "agent run waiting for human input", map[string]any{
+			"human_requests": len(interrupt.HumanRequests),
+			"blocked_by":     interrupt.Reason,
+		})
+	} else {
+		resp.VerificationResult = s.verifier.Verify(final, profile.Verification.DefaultChecks)
+	}
 	resp.EndedAt = time.Now()
 	resp.Usage = summarizeUsage(resp)
 	resp.Status = "completed"
-	if runErr != nil || resp.VerificationResult.Status != "passed" {
+	if resp.Interrupt != nil {
+		resp.Status = StatusWaitingHuman
+	} else if runErr != nil || resp.VerificationResult.Status != "passed" {
 		resp.Status = "failed"
 		resp.EvolutionCandidate = s.evolution.CandidateForFailure(runID, "run_failure", resp.VerificationResult, runErr, resp.EndedAt)
 	}
@@ -671,8 +689,39 @@ func (s *Service) generateNativeDeepSeek(
 	var toolRecords []ToolCallRecord
 	messages = append(messages, msg)
 	for _, call := range msg.ToolCalls {
+		if isHumanRequestToolWireName(call.Function.Name) {
+			args := map[string]any{}
+			_ = json.Unmarshal([]byte(call.Function.Arguments), &args)
+			req, err := s.createAgentHumanRequest(ctx, call.ID, args)
+			if err != nil {
+				recordAudit("human.request", call.ID, false, err.Error(), args)
+				return "", toolRecords, err
+			}
+			recordEvent("human.request.created", "runtime", "human request created", map[string]any{
+				"human_request_id": req.ID,
+				"kind":             req.Kind,
+				"source":           req.Source,
+				"tool_call_id":     req.ToolCallID,
+			})
+			recordAudit("human.request", req.ID, true, "agent requested human input", map[string]any{
+				"kind":         req.Kind,
+				"tool_call_id": req.ToolCallID,
+			})
+			if collector := runtimeSuspendCollectorFromContext(ctx); collector != nil && collector.HasInterrupt() {
+				recordEvent("model.suspended", "deepseek", "model loop suspended by runtime interrupt", map[string]any{
+					"model": modelID,
+				})
+				return "", toolRecords, nil
+			}
+		}
 		rec := s.executeToolCall(ctx, profile, call, recordEvent, recordAudit)
 		toolRecords = append(toolRecords, rec)
+		if collector := runtimeSuspendCollectorFromContext(ctx); collector != nil && collector.HasInterrupt() {
+			recordEvent("model.suspended", "deepseek", "model loop suspended by runtime interrupt", map[string]any{
+				"model": modelID,
+			})
+			return "", toolRecords, nil
+		}
 		contentBytes, _ := json.Marshal(toolOutputForModel(rec))
 		messages = append(messages, deepseek.Message{
 			Role:       "tool",
@@ -740,6 +789,36 @@ func (s *Service) executeToolCall(
 		"input": rec.Input,
 	})
 	recordAudit("tool.call", rec.Name, true, "tool allowed by profile", rec.Input)
+	if def, ok := registry.GetDefinition(rec.Name); ok && def.Policy.RequireConfirmation {
+		req, err := s.createRuntimeToolGateHumanRequest(ctx, rec.ID, rec.Name, rec.Input)
+		rec.EndedAt = time.Now()
+		rec.Output = map[string]any{
+			"status":           StatusWaitingHuman,
+			"human_request_id": "",
+		}
+		if err != nil {
+			rec.Error = err.Error()
+			recordEvent("human.request.failed", "runtime", "runtime tool confirmation request failed", map[string]any{
+				"tool":  rec.Name,
+				"error": err.Error(),
+			})
+			recordAudit("human.request", rec.ID, false, err.Error(), map[string]any{"tool": rec.Name})
+			return rec
+		}
+		rec.Output["human_request_id"] = req.ID
+		recordEvent("human.request.created", "runtime", "runtime tool confirmation required", map[string]any{
+			"human_request_id": req.ID,
+			"kind":             req.Kind,
+			"source":           req.Source,
+			"tool":             rec.Name,
+			"tool_call_id":     rec.ID,
+		})
+		recordAudit("human.request", req.ID, true, "runtime tool confirmation required", map[string]any{
+			"tool":         rec.Name,
+			"tool_call_id": rec.ID,
+		})
+		return rec
+	}
 	var output map[string]any
 	var err error
 	if guard := toolFailureGuardFromContext(ctx); guard != nil && guard.shouldBlock(rec.Name, rec.Input) {
@@ -1051,6 +1130,7 @@ func intFromAny(value any) (int, bool) {
 func (s *Service) toolDefinitions(profile agents.Profile) []deepseek.Tool {
 	defs := s.toolRegistry(profile).Definitions()
 	tools := make([]deepseek.Tool, 0, len(defs))
+	tools = append(tools, runtimeNativeToolDefinitions(profile)...)
 	for _, def := range defs {
 		tools = append(tools, deepseek.Tool{
 			Type: "function",
@@ -1062,6 +1142,40 @@ func (s *Service) toolDefinitions(profile agents.Profile) []deepseek.Tool {
 		})
 	}
 	return tools
+}
+
+func runtimeNativeToolDefinitions(agents.Profile) []deepseek.Tool {
+	return []deepseek.Tool{{
+		Type: "function",
+		Function: deepseek.ToolFunction{
+			Name:        deepseek.DeepSeekToolName("human.request"),
+			Description: "Pause the current agent run and ask a human for freeform input or approval.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"kind": map[string]any{
+						"type": "string",
+						"enum": []string{string(humanrequest.RequestFreeform), string(humanrequest.RequestApproval)},
+					},
+					"question": map[string]any{"type": "string"},
+					"options": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"id":    map[string]any{"type": "string"},
+								"label": map[string]any{"type": "string"},
+							},
+							"required":             []string{"id", "label"},
+							"additionalProperties": false,
+						},
+					},
+				},
+				"required":             []string{"question"},
+				"additionalProperties": false,
+			},
+		},
+	}}
 }
 
 func (s *Service) toolRegistry(profile agents.Profile) *rtools.Registry {
