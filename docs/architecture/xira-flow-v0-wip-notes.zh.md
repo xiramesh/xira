@@ -85,13 +85,23 @@ go test ./apps/xira/...
    - `agent_session`
    - `flow_run`
 
+## 回收状态（Agent HITL v0 实现后）
+
+Agent HITL v0 已落地（`apps/xira/internal/humanrequest`、`apps/xira/internal/runtime/human_requests.go` 等），上述未决问题的结论：
+
+1. HITL 已是 runtime 基础能力。`HumanRequest` 在 runtime 层承载所有 approval / clarification / risk gate，不归 Flow 独占。
+2. Agent run 通过 `human.request` 工具发起请求；runtime 工具策略通过 `RequireConfirmation` 形成 runtime tool gate。两者都生成 `HumanRequest`。
+3. Flow 的 `human_approval` 是显式控制步，由 Flow Kernel 创建 `HumanRequest`（`source=flow_human_approval`）；agent step 也可在执行中生成 `source=agent_request` 或 `source=runtime_tool_gate` 的请求。
+4. Flow Kernel 遇到 `waiting_human`（无论来源）暂停当前步，resolved 后 resume。
+5. v0 暂未做 `HumanRequest.Scope` 重构，Flow scope 写入 `Metadata`（见 `xira-flow-v0.zh.md` 的 "Flow scope metadata"）。
+
 ## 后续回收建议
 
 完成 Agent HITL 设计后，回来更新：
 
-- `docs/architecture/xira-flow-v0.zh.md`
-- `docs/schemas/xira-flow-v0.schema.json`
-- `docs/schemas/xira-flow-run-v0.schema.json`
-- DevRun 示例里的 approval / wait_signal 表达
+- `docs/architecture/xira-flow-v0.zh.md` —— 已增补 "Human-in-the-loop 与 HumanRequest" 章节。
+- `docs/schemas/xira-flow-v0.schema.json` —— 现有 `human_approval`（带 prompt/options/artifacts）已足够，v0 不扩展。
+- `docs/schemas/xira-flow-run-v0.schema.json` —— 已扩展 `waiting_human` 状态、step 的 `agent_run_id` / `human_request_ids` / `interrupt`、`pending_human_requests`。
+- DevRun 示例里的 approval / wait_signal 表达 —— `flow_run.waiting_approval.yaml` 已对齐为 `waiting_human` + `human_request_ids`。
 
-重点把 `human_approval` 和 agent-generated HITL request 的关系写清楚。
+重点把 `human_approval` 和 agent-generated HITL request 的关系写清楚 —— 已在架构文档 "Human-in-the-loop 与 HumanRequest" 写清楚。

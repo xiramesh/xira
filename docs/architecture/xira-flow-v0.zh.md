@@ -254,6 +254,54 @@ created_at: 2026-06-13T10:00:00Z
 updated_at: 2026-06-13T10:05:00Z
 ```
 
+## Human-in-the-loop 与 HumanRequest
+
+Flow v0 不实现第二套审批系统。所有 human-in-the-loop 都走 runtime 已有的 `HumanRequest`，来源分成三类：
+
+| 来源 | `source` | 触发者 | 说明 |
+| --- | --- | --- | --- |
+| Flow 显式审批 | `flow_human_approval` | Flow Kernel | `executor.type: human_approval` 控制步直接创建 `HumanRequest`，kind 为 `approval`。 |
+| Agent 主动请求 | `agent_request` | Agent runtime | agent 在执行步内调用 `human.request` 生成请求（approval 或 freeform）。 |
+| Runtime 工具闸门 | `runtime_tool_gate` | Runtime | 工具策略要求 `RequireConfirmation`，runtime 创建 approval 请求并 suspend 当前 tool call。 |
+
+三者都暂停 Flow，Kernel 只观察 parent agent run 的状态：
+
+- Flow 显式审批：步执行器创建 `HumanRequest` 后直接返回 `waiting_human`。
+- Agent 主动请求 / 工具闸门：agent runtime 在 `TurnResponse.Status` 上呈现 `waiting_human`，并附带 `HumanRequests` 和 `Interrupt`；Flow 只看 parent run 的 `waiting_human`，**不**展开 inspect 子委派内部。
+- 子委派 `waiting_human`：parent agent run 在 delegate tool call suspend 时把自己标成 `waiting_human`，Flow 据此暂停，不需要查看 child run 文件或 delegation join 状态。
+
+### 暂停与恢复语义
+
+```text
+flow.run.started
+  -> flow.step.started
+     -> flow.agent_run.started        (work step)
+     -> flow.step.waiting_human       (任一来源)
+        -> flow.human_request.linked
+  -> flow.step.completed / failed
+-> flow.run.completed / failed / canceled
+```
+
+- 暂停：当步结果为 `waiting_human` 时，step 状态 = `waiting_human`，run 状态 = `waiting_human`，`current_step_id` 停在该步，不评估 transition，`human_request_ids` 持久化到 step state。
+- 恢复：`Kernel.Resume(flowRunID, humanRequestID)` 仅当 run 处于 `waiting_human` 且当前步包含该 `humanRequestID` 时执行；加载 `HumanRequest`，pending 直接拒绝；resolved 才进入映射：
+  - 显式审批：把响应（`approve`/`deny`/`cancel`/`revise`/`reject`）映射成 step 输出 slot，再评估 transition。
+  - agent 主动请求 / 工具闸门：依赖 runtime 已有的 resume 路径（`ResolveHumanRequest` 在 approve + ActionSnapshot 时自动 replay），Flow 不发明 model-visible 的 `human.respond`，也不重复推进同一个 agent run。
+
+> WATCH：runtime 的 `ResolveHumanRequest` 在 approve 且带 `ActionSnapshot` 时会自动 replay approved tool。Flow 显式审批不携带 `ActionSnapshot`，不会触发误 replay；agent-generated / runtime tool gate 的恢复必须能证明不会双重推进（见 milestone 5/8 的回归测试）。
+
+### Flow scope metadata
+
+在 v0，`HumanRequest.Scope` 还未泛化。Flow 把 scope 写入 `Metadata`：
+
+```text
+scope_type=flow_run
+flow_run_id=<id>
+flow_step_id=<step id>
+flow_id=<flow id>
+```
+
+等后续 `HumanRequest.Scope` 重构落地再回收。
+
 ## Review Checklist
 
 请重点 review：

@@ -33,18 +33,25 @@
     },
     "status": {
       "enum": [
-        "created",
+        "pending",
         "running",
+        "waiting_human",
         "waiting_signal",
-        "waiting_approval",
         "recoverable",
         "failed",
-        "cancelled",
+        "canceled",
         "completed"
       ]
     },
     "current_step_id": {
-      "$ref": "#/$defs/id"
+      "oneOf": [
+        {
+          "$ref": "#/$defs/id"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "entrypoint_id": {
       "$ref": "#/$defs/id"
@@ -66,11 +73,22 @@
         "minLength": 1
       }
     },
+    "pending_human_requests": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
     "artifacts": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/path"
       }
+    },
+    "events_ref": {
+      "$ref": "#/$defs/path"
     },
     "created_at": {
       "type": "string",
@@ -102,6 +120,7 @@
             "pending",
             "running",
             "completed",
+            "waiting_human",
             "waiting",
             "skipped",
             "failed",
@@ -116,15 +135,34 @@
           "type": "string",
           "format": "date-time"
         },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
         "attempts": {
           "type": "integer",
           "minimum": 0
+        },
+        "agent_run_id": {
+          "type": "string"
         },
         "child_run_id": {
           "type": "string"
         },
         "approval_id": {
           "type": "string"
+        },
+        "human_request_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "interrupt": {
+          "type": "object",
+          "additionalProperties": true
         },
         "signal": {
           "type": "string"

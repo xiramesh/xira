@@ -3,7 +3,7 @@ flow_run_id: fr_20260613_devrun_001
 flow_id: devrun
 flow_version: 0.1.0
 entrypoint_id: ad_hoc
-status: waiting_approval
+status: waiting_human
 current_step_id: approve_merge
 input:
   repo: /Users/yinwm/work/flowdeck
@@ -12,8 +12,8 @@ steps:
   intake:
     status: completed
     started_at: "2026-06-13T10:00:00Z"
-    ended_at: "2026-06-13T10:03:00Z"
-    child_run_id: 20260613-100000-dev-intake
+    completed_at: "2026-06-13T10:03:00Z"
+    agent_run_id: 20260613-100000-dev-intake
     outputs:
       task_spec:
         artifact: artifacts/intake/task_spec.yaml
@@ -22,8 +22,8 @@ steps:
   design:
     status: completed
     started_at: "2026-06-13T10:03:00Z"
-    ended_at: "2026-06-13T10:09:00Z"
-    child_run_id: 20260613-100300-dev-architect
+    completed_at: "2026-06-13T10:09:00Z"
+    agent_run_id: 20260613-100300-dev-architect
     outputs:
       design_doc:
         artifact: artifacts/design/design.md
@@ -33,13 +33,13 @@ steps:
         artifact: artifacts/design/verification_plan.yaml
   prepare_branch:
     status: completed
-    child_run_id: 20260613-100900-dev-git-operator
+    agent_run_id: 20260613-100900-dev-git-operator
     outputs:
       branch:
         value: xira/devrun-fr_20260613_devrun_001
   implement:
     status: completed
-    child_run_id: 20260613-101000-dev-implementer
+    agent_run_id: 20260613-101000-dev-implementer
     outputs:
       change_summary:
         artifact: artifacts/implement/change_summary.md
@@ -49,20 +49,20 @@ steps:
         artifact: artifacts/implement/risk_notes.md
   verify:
     status: completed
-    child_run_id: 20260613-101500-dev-verifier
+    agent_run_id: 20260613-101500-dev-verifier
     outputs:
       verification_result:
         artifact: artifacts/verify/result.json
   create_pr:
     status: completed
-    child_run_id: 20260613-102000-dev-git-operator
+    agent_run_id: 20260613-102000-dev-git-operator
     outputs:
       pr:
         value:
           url: https://github.example/xira/flowdeck/pull/123
   review:
     status: completed
-    child_run_id: 20260613-102500-dev-reviewer
+    agent_run_id: 20260613-102500-dev-reviewer
     outputs:
       review_report:
         artifact: artifacts/review/review.md
@@ -76,10 +76,20 @@ steps:
       decision:
         value: approve_merge
   approve_merge:
-    status: waiting
-    approval_id: apr_20260613_002
-pending_signals:
-  - approval:apr_20260613_002
+    status: waiting_human
+    started_at: "2026-06-13T10:30:00Z"
+    human_request_ids:
+      - hrq_20260613_approve_merge_001
+    interrupt:
+      reason: flow_human_approval
+      source: flow_human_approval
+      question: Review final PR, verification, and review report before merge.
+      options:
+        - approve
+        - revise
+        - reject
+pending_human_requests:
+  - hrq_20260613_approve_merge_001
 artifacts:
   - artifacts/intake/task_spec.yaml
   - artifacts/design/implementation_plan.md
