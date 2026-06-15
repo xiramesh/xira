@@ -147,12 +147,14 @@ func (b *flowBridge) AgentStepStatus(ctx context.Context, run *flow.Run, step fl
 	return agentRun.Status, nil
 }
 
-// flowStateRoot returns the directory used for flow run persistence.
+// flowStateRoot returns the directory used for flow run persistence. The
+// flow.Store itself appends "flow-runs/<id>" under this root, so this returns
+// the state root only (avoiding a doubled "flow-runs/flow-runs" segment).
 func (s *Service) flowStateRoot() string {
 	if s == nil || s.stateRoot == "" {
-		return filepath.Join(".xira", "flow-runs")
+		return filepath.Join(".xira", "state")
 	}
-	return filepath.Join(s.stateRoot, "flow-runs")
+	return s.stateRoot
 }
 
 // FlowKernel returns (lazily creating) the flow kernel wired to this runtime.
