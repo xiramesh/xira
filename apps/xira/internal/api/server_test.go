@@ -17,6 +17,7 @@ import (
 
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/channelcontrol"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
@@ -312,6 +313,243 @@ func TestEntrypointPairingAPIUsesChannelControls(t *testing.T) {
 	}
 }
 
+func TestPostHumanRequestResponseApprove(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
+		ID:       "hrq_api_approve",
+		Kind:     humanrequest.RequestApproval,
+		Question: "Approve API test?",
+	})
+	server := NewServer(rt, "127.0.0.1:0")
+
+	resp := serveJSON(t, server, http.MethodPost, "/api/v1/human-requests/"+req.ID+"/responses", map[string]any{
+		"kind":  "approve",
+		"actor": "test-user",
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body humanrequest.HumanRequest
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.ID != req.ID || body.Status != humanrequest.StatusResolved || body.Response == nil || body.Response.Kind != humanrequest.ResponseApprove {
+		t.Fatalf("response body = %+v", body)
+	}
+}
+
+func TestPostHumanRequestResponseAnswer(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
+		ID:       "hrq_api_answer",
+		Kind:     humanrequest.RequestFreeform,
+		Question: "What next?",
+	})
+	server := NewServer(rt, "127.0.0.1:0")
+
+	resp := serveJSON(t, server, http.MethodPost, "/api/v1/human-requests/"+req.ID+"/responses", map[string]any{
+		"kind":    "answer",
+		"actor":   "test-user",
+		"message": "Use the conservative option.",
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body humanrequest.HumanRequest
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Response == nil || body.Response.Message != "Use the conservative option." {
+		t.Fatalf("response body = %+v", body)
+	}
+}
+
+func TestPostHumanRequestResponseRejectsInvalidKind(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
+		ID:       "hrq_api_invalid",
+		Kind:     humanrequest.RequestFreeform,
+		Question: "What next?",
+	})
+	server := NewServer(rt, "127.0.0.1:0")
+
+	resp := serveJSON(t, server, http.MethodPost, "/api/v1/human-requests/"+req.ID+"/responses", map[string]any{
+		"kind":  "maybe",
+		"actor": "test-user",
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	stored, err := rt.GetHumanRequest(context.Background(), req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != humanrequest.StatusPending {
+		t.Fatalf("stored request changed after invalid kind: %+v", stored)
+	}
+}
+
+func TestPostHumanRequestResponseConflictOnResolved(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
+		ID:       "hrq_api_conflict",
+		Kind:     humanrequest.RequestFreeform,
+		Question: "Answer once?",
+	})
+	server := NewServer(rt, "127.0.0.1:0")
+	first := serveJSON(t, server, http.MethodPost, "/api/v1/human-requests/"+req.ID+"/responses", map[string]any{
+		"kind":    "answer",
+		"actor":   "test-user",
+		"message": "first",
+	})
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d body=%s", first.Code, first.Body.String())
+	}
+
+	second := serveJSON(t, server, http.MethodPost, "/api/v1/human-requests/"+req.ID+"/responses", map[string]any{
+		"kind":    "deny",
+		"actor":   "test-user",
+		"message": "second",
+	})
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second status = %d body=%s", second.Code, second.Body.String())
+	}
+}
+
+func TestPostHumanRequestResponseMissingRequest(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	server := NewServer(rt, "127.0.0.1:0")
+
+	resp := serveJSON(t, server, http.MethodPost, "/api/v1/human-requests/missing/responses", map[string]any{
+		"kind":    "answer",
+		"actor":   "test-user",
+		"message": "hello",
+	})
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestPostHumanRequestResponseWrongWorkspaceDoesNotLeak(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
+		ID:       "hrq_api_workspace",
+		Kind:     humanrequest.RequestFreeform,
+		Question: "Answer in current workspace?",
+	})
+	server := NewServer(rt, "127.0.0.1:0")
+
+	resp := serveJSON(t, server, http.MethodPost, "/api/v1/human-requests/"+req.ID+"/responses", map[string]any{
+		"kind":          "answer",
+		"actor":         "test-user",
+		"message":       "hello",
+		"workspace_key": "ws_attacker",
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	stored, err := rt.GetHumanRequest(context.Background(), req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != humanrequest.StatusPending {
+		t.Fatalf("workspace override resolved request: %+v", stored)
+	}
+}
+
+func TestPostHumanRequestResponseTriggersResumeHookButDoesNotRequireReplayYet(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
+		ID:       "hrq_api_hook",
+		Kind:     humanrequest.RequestFreeform,
+		Question: "Trigger hook?",
+	})
+	var resumed []string
+	rt.SetHumanRequestResumeHook(func(_ context.Context, resolved humanrequest.HumanRequest) error {
+		resumed = append(resumed, resolved.ID)
+		return nil
+	})
+	server := NewServer(rt, "127.0.0.1:0")
+
+	resp := serveJSON(t, server, http.MethodPost, "/api/v1/human-requests/"+req.ID+"/responses", map[string]any{
+		"kind":    "answer",
+		"actor":   "test-user",
+		"message": "resume",
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if len(resumed) != 1 || resumed[0] != req.ID {
+		t.Fatalf("resume hook calls = %+v", resumed)
+	}
+}
+
+func TestListHumanRequests(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	old := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{ID: "hrq_api_list_old", Kind: humanrequest.RequestFreeform, Question: "old?"})
+	newer := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{ID: "hrq_api_list_new", Kind: humanrequest.RequestFreeform, Question: "new?"})
+	if _, err := rt.ResolveHumanRequest(context.Background(), old.ID, humanrequest.ResolveRequest{Kind: humanrequest.ResponseAnswer, Actor: "tester", Message: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(rt, "127.0.0.1:0")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/human-requests?status=pending", nil)
+	resp := httptest.NewRecorder()
+	server.server.Handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var list []humanrequest.HumanRequest
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != newer.ID || list[0].Status != humanrequest.StatusPending {
+		t.Fatalf("list = %+v", list)
+	}
+}
+
+func TestShowHumanRequest(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	created := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{ID: "hrq_api_show", Kind: humanrequest.RequestFreeform, Question: "show?"})
+	server := NewServer(rt, "127.0.0.1:0")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/human-requests/"+created.ID, nil)
+	resp := httptest.NewRecorder()
+	server.server.Handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var shown humanrequest.HumanRequest
+	if err := json.NewDecoder(resp.Body).Decode(&shown); err != nil {
+		t.Fatal(err)
+	}
+	if shown.ID != created.ID || shown.Question != "show?" {
+		t.Fatalf("shown = %+v", shown)
+	}
+}
+
+func TestShowHumanRequestMissing(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	server := NewServer(rt, "127.0.0.1:0")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/human-requests/missing", nil)
+	resp := httptest.NewRecorder()
+	server.server.Handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestListHumanRequestsRejectsInvalidStatus(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	server := NewServer(rt, "127.0.0.1:0")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/human-requests?status=maybe", nil)
+	resp := httptest.NewRecorder()
+	server.server.Handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
 func newAPITestService(t *testing.T, cfg frt.Config) *frt.Service {
 	t.Helper()
 	if cfg.DeepSeekClient == nil {
@@ -322,6 +560,43 @@ func newAPITestService(t *testing.T, cfg frt.Config) *frt.Service {
 		t.Fatal(err)
 	}
 	return rt
+}
+
+func seedAPIHumanRequest(t *testing.T, rt *frt.Service, input humanrequest.CreateRequest) *humanrequest.HumanRequest {
+	t.Helper()
+	if input.RunID == "" {
+		input.RunID = "run-api"
+	}
+	if input.AgentID == "" {
+		input.AgentID = agents.DefaultAgentID
+	}
+	if input.SessionID == "" {
+		input.SessionID = "session-api"
+	}
+	if input.WorkspaceID == "" {
+		input.WorkspaceID = rt.Status()["workspace"].(string)
+	}
+	if input.WorkspaceKey == "" {
+		input.WorkspaceKey = rt.WorkspaceKey()
+	}
+	req, err := rt.CreateHumanRequest(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+func serveJSON(t *testing.T, server *Server, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	server.server.Handler.ServeHTTP(resp, req)
+	return resp
 }
 
 func fakeAPIDeepSeekClient(t *testing.T) *deepseek.Client {

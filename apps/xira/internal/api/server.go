@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/xiramesh/xira/internal/channelcontrol"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
@@ -46,6 +47,8 @@ func NewServer(rt *frt.Service, addr string, controls ...ChannelControls) *Serve
 	mux.HandleFunc("/api/v1/agent-registry", s.agentRegistry)
 	mux.HandleFunc("/api/v1/agent-runs", s.agentRuns)
 	mux.HandleFunc("/api/v1/events", s.events)
+	mux.HandleFunc("/api/v1/human-requests", s.humanRequests)
+	mux.HandleFunc("/api/v1/human-requests/", s.humanRequestByID)
 	mux.HandleFunc("/api/v1/channels/xiragarden/messages", s.xiragardenMessages)
 	mux.HandleFunc("/api/v1/channels/xiragarden/events", s.xiragardenEvents)
 	mux.HandleFunc("/api/v1/entrypoints/", s.entrypointControls)
@@ -201,6 +204,104 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func (s *Server) humanRequestByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/human-requests/")
+	requestID, resource, ok := parseHumanRequestPath(path)
+	if !ok || requestID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if resource == "" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		req, err := s.runtime.GetHumanRequest(r.Context(), requestID)
+		if err != nil {
+			if errors.Is(err, humanrequest.ErrNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, req)
+		return
+	}
+	if resource != "responses" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Kind           humanrequest.ResponseKind `json:"kind"`
+		Actor          string                    `json:"actor"`
+		Message        string                    `json:"message"`
+		IdempotencyKey string                    `json:"idempotency_key"`
+		WorkspaceKey   string                    `json:"workspace_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.WorkspaceKey) != "" {
+		http.Error(w, "workspace_key override is not allowed", http.StatusBadRequest)
+		return
+	}
+	resolved, err := s.runtime.ResolveHumanRequest(r.Context(), requestID, humanrequest.ResolveRequest{
+		Kind:           body.Kind,
+		Actor:          body.Actor,
+		Message:        body.Message,
+		IdempotencyKey: body.IdempotencyKey,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, humanrequest.ErrNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		case errors.Is(err, humanrequest.ErrConflict):
+			http.Error(w, err.Error(), http.StatusConflict)
+		case errors.Is(err, humanrequest.ErrValidation):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, resolved)
+}
+
+func parseHumanRequestPath(path string) (requestID, resource string, ok bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 1 && strings.TrimSpace(parts[0]) != "" {
+		return parts[0], "", true
+	}
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func (s *Server) humanRequests(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	status := humanrequest.RequestStatus(strings.TrimSpace(r.URL.Query().Get("status")))
+	list, err := s.runtime.ListHumanRequests(r.Context(), status)
+	if err != nil {
+		if errors.Is(err, humanrequest.ErrValidation) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, list)
 }
 
 func (s *Server) xiragardenEvents(w http.ResponseWriter, r *http.Request) {

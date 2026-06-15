@@ -1,0 +1,741 @@
+package humanrequest
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+func TestStoreCreateHumanRequestWritesWorkspaceScopedPendingFile(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStore(t, root)
+	createdAt := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+
+	req, err := store.Create(context.Background(), CreateRequest{
+		ID:           "hrq_create",
+		WorkspaceID:  "/Users/yinwm/work/flowdeck",
+		WorkspaceKey: "ws_create",
+		RunID:        "run-1",
+		AgentID:      "agent-1",
+		SessionID:    "session-1",
+		ToolCallID:   "tool-1",
+		Kind:         RequestFreeform,
+		Question:     "Need human input?",
+		DedupeKey:    "question-hash-1",
+		CreatedAt:    createdAt,
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if req.Status != StatusPending {
+		t.Fatalf("status = %q", req.Status)
+	}
+	if req.CreatedAt.IsZero() {
+		t.Fatal("created_at is zero")
+	}
+	if req.WorkspaceID != "/Users/yinwm/work/flowdeck" || req.WorkspaceKey != "ws_create" {
+		t.Fatalf("workspace fields = %+v", req)
+	}
+	path := filepath.Join(root, "workspaces", "ws_create", "human-requests", "hrq_create.yaml")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected request file: %v", err)
+	}
+	if strings.Contains(filepath.ToSlash(path), "Users/yinwm/work/flowdeck") {
+		t.Fatalf("request path leaked raw workspace id: %s", path)
+	}
+
+	var stored HumanRequest
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("decode stored request: %v\n%s", err, data)
+	}
+	if stored.ID != req.ID || stored.Status != StatusPending || stored.Question != "Need human input?" {
+		t.Fatalf("stored request = %+v", stored)
+	}
+}
+
+func TestStoreCreateHumanRequestRejectsPathTraversalWorkspaceKey(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStore(t, root)
+	for _, workspaceKey := range []string{"", "../x", "/tmp/x", "a/../b", "a/b", `a\b`, ".hidden"} {
+		_, err := store.Create(context.Background(), CreateRequest{
+			ID:           "hrq_bad_" + strings.NewReplacer("/", "_", "\\", "_", ".", "_").Replace(workspaceKey),
+			WorkspaceID:  "workspace",
+			WorkspaceKey: workspaceKey,
+			RunID:        "run-1",
+			AgentID:      "agent-1",
+			SessionID:    "session-1",
+			Kind:         RequestFreeform,
+			Question:     "bad workspace key?",
+		})
+		if !errors.Is(err, ErrValidation) {
+			t.Fatalf("workspace_key %q error = %v, want ErrValidation", workspaceKey, err)
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("invalid creates wrote files: %+v", entries)
+	}
+}
+
+func TestStoreRejectsPathTraversalRequestIDs(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStore(t, root)
+	for _, requestID := range []string{"../outside", "/tmp/hrq", "nested/hrq", `nested\hrq`, "hrq..evil", ".hidden"} {
+		_, err := store.Create(context.Background(), CreateRequest{
+			ID:           requestID,
+			WorkspaceID:  "workspace",
+			WorkspaceKey: "ws_request_id",
+			RunID:        "run-1",
+			AgentID:      "agent-1",
+			SessionID:    "session-1",
+			Kind:         RequestFreeform,
+			Question:     "bad request id?",
+		})
+		if !errors.Is(err, ErrValidation) {
+			t.Fatalf("Create request id %q error = %v, want ErrValidation", requestID, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "outside.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("invalid request id wrote outside file, stat err=%v", err)
+	}
+}
+
+func TestStoreRejectsPathTraversalRequestIDOnReadResolveAndReplay(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStore(t, root)
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:           "hrq_replay_path",
+		WorkspaceID:  "workspace",
+		WorkspaceKey: "ws_replay_path",
+		RunID:        "run-1",
+		AgentID:      "agent-1",
+		SessionID:    "session-1",
+		ToolCallID:   "tool-1",
+		Kind:         RequestApproval,
+		Question:     "approve?",
+		ActionSnapshot: &ActionSnapshot{
+			ToolName:   "write_file",
+			Arguments:  map[string]any{"path": "ok.txt"},
+			RunID:      "run-1",
+			AgentID:    "agent-1",
+			SessionID:  "session-1",
+			ToolCallID: "tool-1",
+		},
+	})
+	resolved, err := store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_replay_path",
+		RequestID:    req.ID,
+		Kind:         ResponseApprove,
+		Actor:        "tester",
+	})
+	if err != nil {
+		t.Fatalf("Resolve valid request: %v", err)
+	}
+	if _, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_replay_path", RequestID: resolved.ID, Owner: "worker", LeaseDuration: time.Minute}); err != nil {
+		t.Fatalf("BeginReplay valid request: %v", err)
+	}
+
+	badID := "../" + req.ID
+	checks := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "Get", run: func() error {
+			_, err := store.Get(context.Background(), "ws_replay_path", badID)
+			return err
+		}},
+		{name: "Resolve", run: func() error {
+			_, err := store.Resolve(context.Background(), ResolveRequest{WorkspaceKey: "ws_replay_path", RequestID: badID, Kind: ResponseAnswer, Message: "no"})
+			return err
+		}},
+		{name: "BeginReplay", run: func() error {
+			_, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_replay_path", RequestID: badID, Owner: "worker", LeaseDuration: time.Minute})
+			return err
+		}},
+		{name: "CompleteReplay", run: func() error {
+			_, err := store.CompleteReplay(context.Background(), CompleteReplayRequest{WorkspaceKey: "ws_replay_path", RequestID: badID, Owner: "worker", ResultDigest: "sha256:test"})
+			return err
+		}},
+		{name: "FailReplay", run: func() error {
+			_, err := store.FailReplay(context.Background(), FailReplayRequest{WorkspaceKey: "ws_replay_path", RequestID: badID, Owner: "worker", Error: "failed"})
+			return err
+		}},
+	}
+	for _, check := range checks {
+		if err := check.run(); !errors.Is(err, ErrValidation) {
+			t.Fatalf("%s malicious request id error = %v, want ErrValidation", check.name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "workspaces", "hrq_replay_path.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("malicious request id wrote workspace sibling, stat err=%v", err)
+	}
+}
+
+func TestStoreCreateHumanRequestIsIdempotentForSameRunAndDedupeKey(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	base := CreateRequest{
+		ID:           "hrq_first",
+		WorkspaceID:  "workspace",
+		WorkspaceKey: "ws_dedupe",
+		RunID:        "run-1",
+		AgentID:      "agent-1",
+		SessionID:    "session-1",
+		ToolCallID:   "tool-1",
+		Kind:         RequestFreeform,
+		Question:     "same question?",
+		DedupeKey:    "same-question-hash",
+	}
+	first, err := store.Create(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dup := base
+	dup.ID = "hrq_second"
+	second, err := store.Create(context.Background(), dup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("duplicate returned id = %q, want %q", second.ID, first.ID)
+	}
+
+	distinct := base
+	distinct.ID = "hrq_distinct"
+	distinct.ToolCallID = "tool-2"
+	third, err := store.Create(context.Background(), distinct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.ID == first.ID {
+		t.Fatalf("distinct tool call reused request id %q", third.ID)
+	}
+
+	if _, err := store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_dedupe",
+		RequestID:    first.ID,
+		Kind:         ResponseAnswer,
+		Actor:        "tester",
+		Message:      "resolved",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	again := base
+	again.ID = "hrq_after_resolved"
+	afterResolved, err := store.Create(context.Background(), again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterResolved.ID == first.ID {
+		t.Fatalf("resolved request blocked a later request: %+v", afterResolved)
+	}
+}
+
+func TestStoreResolveApprovePersistsResponseAndAudit(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStore(t, root)
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:             "hrq_approve",
+		WorkspaceID:    "workspace",
+		WorkspaceKey:   "ws_resolve",
+		RunID:          "run-approve",
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+		Kind:           RequestApproval,
+		Question:       "Approve?",
+		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
+	})
+
+	resolved, err := store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_resolve",
+		RequestID:    req.ID,
+		Kind:         ResponseApprove,
+		Actor:        "user-1",
+		Message:      "approved",
+		ResolvedAt:   time.Date(2026, 6, 15, 10, 1, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Status != StatusResolved || resolved.ResolvedAt == nil {
+		t.Fatalf("resolved request = %+v", resolved)
+	}
+	if resolved.Response == nil || resolved.Response.Kind != ResponseApprove || resolved.Response.Actor != "user-1" || resolved.Response.Message != "approved" {
+		t.Fatalf("response = %+v", resolved.Response)
+	}
+	if len(resolved.Audit) == 0 || resolved.Audit[len(resolved.Audit)-1].FromStatus != StatusPending || resolved.Audit[len(resolved.Audit)-1].ToStatus != StatusResolved {
+		t.Fatalf("audit = %+v", resolved.Audit)
+	}
+	respPath := filepath.Join(root, "workspaces", "ws_resolve", "human-responses", resolved.Response.ID+".yaml")
+	if _, err := os.Stat(respPath); err != nil {
+		t.Fatalf("expected response file: %v", err)
+	}
+}
+
+func TestStoreResolveDenyPersistsResponseAndPreventsReplay(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:             "hrq_deny",
+		WorkspaceID:    "workspace",
+		WorkspaceKey:   "ws_deny",
+		RunID:          "run-deny",
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+		Kind:           RequestApproval,
+		Question:       "Approve?",
+		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
+	})
+	resolved, err := store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_deny",
+		RequestID:    req.ID,
+		Kind:         ResponseDeny,
+		Actor:        "user-1",
+		Message:      "no",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Response == nil || resolved.Response.Kind != ResponseDeny {
+		t.Fatalf("response = %+v", resolved.Response)
+	}
+	if resolved.Replay == nil || resolved.Replay.Status != ReplayDenied {
+		t.Fatalf("replay state = %+v", resolved.Replay)
+	}
+	_, err = store.BeginReplay(context.Background(), ReplayLeaseRequest{
+		WorkspaceKey:  "ws_deny",
+		RequestID:     req.ID,
+		Owner:         "worker-1",
+		LeaseDuration: time.Minute,
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("BeginReplay after deny error = %v, want ErrConflict", err)
+	}
+}
+
+func TestStoreResolveCancelPersistsCanceledSignal(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:             "hrq_cancel",
+		WorkspaceID:    "workspace",
+		WorkspaceKey:   "ws_cancel",
+		RunID:          "run-cancel",
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+		Kind:           RequestApproval,
+		Question:       "Approve?",
+		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
+	})
+	resolved, err := store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_cancel",
+		RequestID:    req.ID,
+		Kind:         ResponseCancel,
+		Actor:        "user-1",
+		Message:      "cancel it",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Response == nil || resolved.Response.Kind != ResponseCancel {
+		t.Fatalf("response = %+v", resolved.Response)
+	}
+	if resolved.Replay == nil || resolved.Replay.Status != ReplayCanceled {
+		t.Fatalf("replay state = %+v", resolved.Replay)
+	}
+}
+
+func TestStoreResolveAnswerKeepsAnswerPayload(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:           "hrq_answer",
+		WorkspaceID:  "workspace",
+		WorkspaceKey: "ws_answer",
+		RunID:        "run-answer",
+		AgentID:      "agent-1",
+		SessionID:    "session-1",
+		Kind:         RequestFreeform,
+		Question:     "What should I do?",
+	})
+	resolved, err := store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_answer",
+		RequestID:    req.ID,
+		Kind:         ResponseAnswer,
+		Actor:        "user-1",
+		Message:      "Use the safer path.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Response == nil || resolved.Response.Message != "Use the safer path." {
+		t.Fatalf("response = %+v", resolved.Response)
+	}
+	_, err = store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_answer",
+		RequestID:    "missing",
+		Kind:         ResponseAnswer,
+		Actor:        "user-1",
+		Message:      "",
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing answer error = %v, want ErrNotFound", err)
+	}
+
+	req2 := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:           "hrq_empty_answer",
+		WorkspaceID:  "workspace",
+		WorkspaceKey: "ws_answer",
+		RunID:        "run-answer",
+		AgentID:      "agent-1",
+		SessionID:    "session-1",
+		Kind:         RequestFreeform,
+		Question:     "What should I do next?",
+	})
+	_, err = store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_answer",
+		RequestID:    req2.ID,
+		Kind:         ResponseAnswer,
+		Actor:        "user-1",
+		Message:      "",
+	})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("empty answer error = %v, want ErrValidation", err)
+	}
+}
+
+func TestStoreRejectsDoubleResolve(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:           "hrq_double",
+		WorkspaceID:  "workspace",
+		WorkspaceKey: "ws_double",
+		RunID:        "run-double",
+		AgentID:      "agent-1",
+		SessionID:    "session-1",
+		Kind:         RequestFreeform,
+		Question:     "Answer once?",
+	})
+	first, err := store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_double",
+		RequestID:    req.ID,
+		Kind:         ResponseAnswer,
+		Actor:        "user-1",
+		Message:      "first",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_double",
+		RequestID:    req.ID,
+		Kind:         ResponseDeny,
+		Actor:        "user-2",
+		Message:      "second",
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("second resolve error = %v, want ErrConflict", err)
+	}
+	stored, err := store.Get(context.Background(), "ws_double", req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Response == nil || stored.Response.ID != first.Response.ID || stored.Response.Message != "first" {
+		t.Fatalf("stored response changed after conflict: %+v", stored.Response)
+	}
+}
+
+func TestStoreListPendingFiltersByWorkspaceAndStatus(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	old := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	newer := old.Add(time.Minute)
+	mustCreateHumanRequest(t, store, CreateRequest{ID: "hrq_old", WorkspaceID: "workspace", WorkspaceKey: "ws_list", RunID: "run-1", AgentID: "agent", SessionID: "session", Kind: RequestFreeform, Question: "old?", CreatedAt: old})
+	mustCreateHumanRequest(t, store, CreateRequest{ID: "hrq_new", WorkspaceID: "workspace", WorkspaceKey: "ws_list", RunID: "run-2", AgentID: "agent", SessionID: "session", Kind: RequestFreeform, Question: "new?", CreatedAt: newer})
+	other := mustCreateHumanRequest(t, store, CreateRequest{ID: "hrq_other", WorkspaceID: "other", WorkspaceKey: "ws_other", RunID: "run-3", AgentID: "agent", SessionID: "session", Kind: RequestFreeform, Question: "other?", CreatedAt: newer})
+	if _, err := store.Resolve(context.Background(), ResolveRequest{WorkspaceKey: "ws_other", RequestID: other.ID, Kind: ResponseAnswer, Actor: "user", Message: "done"}); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := store.List(context.Background(), ListQuery{WorkspaceKey: "ws_list", Status: StatusPending})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].ID != "hrq_new" || list[1].ID != "hrq_old" {
+		t.Fatalf("list = %+v", list)
+	}
+	for _, req := range list {
+		if req.WorkspaceKey != "ws_list" || req.Status != StatusPending {
+			t.Fatalf("unfiltered request in list: %+v", req)
+		}
+	}
+}
+
+func TestStoreShowMissingRequestReturnsNotFound(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:           "hrq_show",
+		WorkspaceID:  "workspace",
+		WorkspaceKey: "ws_show",
+		RunID:        "run-show",
+		AgentID:      "agent-1",
+		SessionID:    "session-1",
+		Kind:         RequestFreeform,
+		Question:     "visible?",
+	})
+	if _, err := store.Get(context.Background(), "ws_show", "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing error = %v, want ErrNotFound", err)
+	}
+	if _, err := store.Get(context.Background(), "ws_wrong", req.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong workspace error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestStoreReplayCASPendingRunningCompleted(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStore(t, root)
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:             "hrq_replay",
+		WorkspaceID:    "workspace",
+		WorkspaceKey:   "ws_replay",
+		RunID:          "run-replay",
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+		Kind:           RequestApproval,
+		Question:       "Replay?",
+		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
+	})
+	leased, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{
+		WorkspaceKey:  "ws_replay",
+		RequestID:     req.ID,
+		Owner:         "worker-1",
+		LeaseDuration: time.Minute,
+		Now:           time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leased.Replay == nil || leased.Replay.Status != ReplayRunning || leased.Replay.LeaseOwner != "worker-1" {
+		t.Fatalf("lease replay = %+v", leased.Replay)
+	}
+	_, err = store.BeginReplay(context.Background(), ReplayLeaseRequest{
+		WorkspaceKey:  "ws_replay",
+		RequestID:     req.ID,
+		Owner:         "worker-2",
+		LeaseDuration: time.Minute,
+		Now:           time.Date(2026, 6, 15, 10, 0, 30, 0, time.UTC),
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("second BeginReplay error = %v, want ErrConflict", err)
+	}
+	completed, err := store.CompleteReplay(context.Background(), CompleteReplayRequest{
+		WorkspaceKey:    "ws_replay",
+		RequestID:       req.ID,
+		Owner:           "worker-1",
+		ResultDigest:    "sha256:result",
+		IdempotencyKey:  "idem-1",
+		CompletedAt:     time.Date(2026, 6, 15, 10, 0, 45, 0, time.UTC),
+		ResultReference: "runs/run-replay/tool_calls.jsonl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Replay == nil || completed.Replay.Status != ReplayCompleted || completed.Replay.ResultDigest != "sha256:result" {
+		t.Fatalf("completed replay = %+v", completed.Replay)
+	}
+	again, err := store.CompleteReplay(context.Background(), CompleteReplayRequest{
+		WorkspaceKey:    "ws_replay",
+		RequestID:       req.ID,
+		Owner:           "worker-1",
+		ResultDigest:    "sha256:result",
+		IdempotencyKey:  "idem-1",
+		CompletedAt:     time.Date(2026, 6, 15, 10, 0, 46, 0, time.UTC),
+		ResultReference: "runs/run-replay/tool_calls.jsonl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Replay.ResultDigest != completed.Replay.ResultDigest {
+		t.Fatalf("idempotent complete changed replay: before=%+v after=%+v", completed.Replay, again.Replay)
+	}
+	resultPath := filepath.Join(root, "workspaces", "ws_replay", "replay-results", req.ID+".yaml")
+	if _, err := os.Stat(resultPath); err != nil {
+		t.Fatalf("expected replay result file: %v", err)
+	}
+}
+
+func TestStoreReplayLeaseCanRecoverAfterCrash(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:             "hrq_recover",
+		WorkspaceID:    "workspace",
+		WorkspaceKey:   "ws_recover",
+		RunID:          "run-recover",
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+		Kind:           RequestApproval,
+		Question:       "Replay?",
+		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
+	})
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	if _, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_recover", RequestID: req.ID, Owner: "worker-1", LeaseDuration: time.Minute, Now: start}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_recover", RequestID: req.ID, Owner: "worker-2", LeaseDuration: time.Minute, Now: start.Add(30 * time.Second)}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("early recovery error = %v, want ErrConflict", err)
+	}
+	recovered, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_recover", RequestID: req.ID, Owner: "worker-2", LeaseDuration: time.Minute, Now: start.Add(2 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Replay == nil || recovered.Replay.LeaseOwner != "worker-2" {
+		t.Fatalf("recovered replay = %+v", recovered.Replay)
+	}
+}
+
+func TestReplayLeaseRecoveryAfterCrash(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:             "hrq_exact_recover",
+		WorkspaceID:    "workspace",
+		WorkspaceKey:   "ws_exact_recover",
+		RunID:          "run-recover",
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+		Kind:           RequestApproval,
+		Question:       "Replay?",
+		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
+	})
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	if _, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_exact_recover", RequestID: req.ID, Owner: "worker-1", LeaseDuration: time.Minute, Now: start}); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_exact_recover", RequestID: req.ID, Owner: "worker-2", LeaseDuration: time.Minute, Now: start.Add(2 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Replay == nil || recovered.Replay.Status != ReplayRunning || recovered.Replay.LeaseOwner != "worker-2" {
+		t.Fatalf("recovered replay = %+v", recovered.Replay)
+	}
+}
+
+func TestReplayRecordsAuditTrail(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:             "hrq_replay_audit",
+		WorkspaceID:    "workspace",
+		WorkspaceKey:   "ws_replay_audit",
+		RunID:          "run-replay-audit",
+		AgentID:        "agent-1",
+		SessionID:      "session-1",
+		Kind:           RequestApproval,
+		Question:       "Replay?",
+		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
+	})
+	if _, err := store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_replay_audit",
+		RequestID:    req.ID,
+		Kind:         ResponseApprove,
+		Actor:        "human-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{
+		WorkspaceKey:  "ws_replay_audit",
+		RequestID:     req.ID,
+		Owner:         "worker-1",
+		LeaseDuration: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := store.CompleteReplay(context.Background(), CompleteReplayRequest{
+		WorkspaceKey:    "ws_replay_audit",
+		RequestID:       req.ID,
+		Owner:           "worker-1",
+		ResultDigest:    "sha256:result",
+		ResultReference: "runs/run-replay-audit/tool_calls.jsonl",
+		IdempotencyKey:  "audit-idem",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := map[string]bool{}
+	for _, record := range completed.Audit {
+		actions[record.Action] = true
+	}
+	for _, action := range []string{"human_request.created", "human_request.resolved", "human_request.replay_started", "human_request.replay_completed"} {
+		if !actions[action] {
+			t.Fatalf("audit missing %s: %+v", action, completed.Audit)
+		}
+	}
+}
+
+func TestStoreLoadCorruptFileReportsErrorButDoesNotPanic(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStore(t, root)
+	dir := filepath.Join(root, "workspaces", "ws_corrupt", "human-requests")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte(":\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.List(context.Background(), ListQuery{WorkspaceKey: "ws_corrupt"})
+	if err == nil || !strings.Contains(err.Error(), "bad.yaml") {
+		t.Fatalf("corrupt list error = %v, want file-specific error", err)
+	}
+}
+
+func TestStoreAtomicWriteDoesNotLeavePartialFile(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStore(t, root)
+	workspaceDir := filepath.Join(root, "workspaces", "ws_atomic")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "human-requests"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.Create(context.Background(), CreateRequest{
+		ID:           "hrq_atomic",
+		WorkspaceID:  "workspace",
+		WorkspaceKey: "ws_atomic",
+		RunID:        "run-atomic",
+		AgentID:      "agent-1",
+		SessionID:    "session-1",
+		Kind:         RequestFreeform,
+		Question:     "write?",
+	})
+	if err == nil {
+		t.Fatal("Create() succeeded despite request directory being a file")
+	}
+	if _, err := os.Stat(filepath.Join(workspaceDir, "human-requests", "hrq_atomic.yaml")); err == nil {
+		t.Fatal("partial request file exists")
+	}
+}
+
+func newTestStore(t *testing.T, root string) *Store {
+	t.Helper()
+	store, err := NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+func mustCreateHumanRequest(t *testing.T, store *Store, req CreateRequest) *HumanRequest {
+	t.Helper()
+	created, err := store.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	return created
+}

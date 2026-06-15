@@ -125,6 +125,26 @@ func (r *Registry) Definitions() []Definition {
 	return out
 }
 
+func (r *Registry) GetDefinition(name string) (Definition, bool) {
+	tool, ok := r.Get(name)
+	if !ok {
+		return Definition{}, false
+	}
+	parameters := tool.Parameters()
+	policy := ToolPolicy{}
+	if provider, ok := tool.(PolicyProvider); ok {
+		policy = provider.Policy()
+	}
+	return Definition{
+		Name:         tool.Name(),
+		Description:  tool.Description(),
+		Parameters:   parameters,
+		InputSchema:  schemaFromMap(parameters),
+		OutputSchema: &jsonschema.Schema{Type: "object"},
+		Policy:       policy,
+	}, true
+}
+
 func (r *Registry) Execute(ctx context.Context, name string, args map[string]any) (map[string]any, error) {
 	tool, ok := r.Get(name)
 	if !ok {
