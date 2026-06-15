@@ -64,6 +64,7 @@ type DelegationPolicy struct {
 	Allow                   []string `json:"allow,omitempty" yaml:"allow,omitempty"`
 	MaxDepth                int      `json:"max_depth,omitempty" yaml:"max_depth,omitempty"`
 	MaxParallel             int      `json:"max_parallel,omitempty" yaml:"max_parallel,omitempty"`
+	MaxOutstanding          int      `json:"max_outstanding,omitempty" yaml:"max_outstanding,omitempty"`
 	DefaultMaxDurationMS    int      `json:"default_max_duration_ms,omitempty" yaml:"default_max_duration_ms,omitempty"`
 	MaxDurationMS           int      `json:"max_duration_ms,omitempty" yaml:"max_duration_ms,omitempty"`
 	ExposeChildOutputToUser bool     `json:"expose_child_output_to_user,omitempty" yaml:"expose_child_output_to_user,omitempty"`
@@ -185,6 +186,9 @@ func NormalizeDelegationPolicy(policy DelegationPolicy) DelegationPolicy {
 	if normalized.MaxParallel == 0 {
 		normalized.MaxParallel = 1
 	}
+	if normalized.MaxOutstanding == 0 {
+		normalized.MaxOutstanding = normalized.MaxParallel * 4
+	}
 	if normalized.DefaultMaxDurationMS == 0 {
 		normalized.DefaultMaxDurationMS = 30000
 	}
@@ -255,6 +259,9 @@ func validateDelegationPolicy(policy DelegationPolicy) error {
 	}
 	if policy.MaxParallel < 1 {
 		errs = append(errs, "delegation.max_parallel must be >= 1")
+	}
+	if policy.MaxOutstanding < 1 {
+		errs = append(errs, "delegation.max_outstanding must be >= 1")
 	}
 	if policy.DefaultMaxDurationMS < 1 {
 		errs = append(errs, "delegation.default_max_duration_ms must be >= 1")

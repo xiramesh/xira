@@ -43,8 +43,8 @@ func TestDelegationPolicyDefaultsDisabled(t *testing.T) {
 	if len(policy.Allow) != 0 {
 		t.Fatalf("delegation allow = %+v, want empty", policy.Allow)
 	}
-	if policy.MaxDepth != 1 || policy.MaxParallel != 1 {
-		t.Fatalf("delegation limits = depth %d parallel %d", policy.MaxDepth, policy.MaxParallel)
+	if policy.MaxDepth != 1 || policy.MaxParallel != 1 || policy.MaxOutstanding != 4 {
+		t.Fatalf("delegation limits = depth %d parallel %d outstanding %d", policy.MaxDepth, policy.MaxParallel, policy.MaxOutstanding)
 	}
 	if policy.DefaultMaxDurationMS != 30000 || policy.MaxDurationMS != 120000 {
 		t.Fatalf("delegation duration defaults = %+v", policy)
@@ -108,5 +108,19 @@ func TestDelegationPolicyValidationRejectsInvalidValues(t *testing.T) {
 	}
 	if err := profile.Validate(); err == nil || !strings.Contains(err.Error(), "delegation.child_session_mode") {
 		t.Fatalf("Validate() error = %v, want delegation.child_session_mode", err)
+	}
+
+	profile = BuiltinXiraAssistant()
+	profile.Delegation = DelegationPolicy{
+		Enabled:          true,
+		Allow:            []string{ResearchAssistantAgentID},
+		MaxDepth:         1,
+		MaxParallel:      1,
+		MaxOutstanding:   -1,
+		ChildSessionMode: "ephemeral_worker",
+		ReturnTo:         "caller",
+	}
+	if err := profile.Validate(); err == nil || !strings.Contains(err.Error(), "delegation.max_outstanding") {
+		t.Fatalf("Validate() error = %v, want delegation.max_outstanding", err)
 	}
 }

@@ -3,6 +3,7 @@ package runtime
 import (
 	"time"
 
+	"github.com/xiramesh/xira/internal/humanrequest"
 	fsession "github.com/xiramesh/xira/internal/session"
 )
 
@@ -24,27 +25,55 @@ type TurnRequest struct {
 }
 
 type TurnResponse struct {
-	RunID              string                 `json:"run_id" yaml:"run_id"`
-	AgentID            string                 `json:"agent_id" yaml:"agent_id"`
-	EntrypointID       string                 `json:"entrypoint_id,omitempty" yaml:"entrypoint_id,omitempty"`
-	SessionID          string                 `json:"session_id" yaml:"session_id"`
-	SessionScope       *fsession.SessionScope `json:"session_scope,omitempty" yaml:"session_scope,omitempty"`
-	RouteMatchedBy     string                 `json:"route_matched_by,omitempty" yaml:"route_matched_by,omitempty"`
-	ModelPolicy        ModelPolicySnapshot    `json:"model_policy,omitempty" yaml:"model_policy,omitempty"`
-	Message            string                 `json:"message" yaml:"message"`
-	FinalResponse      string                 `json:"final_response" yaml:"final_response"`
-	Status             string                 `json:"status" yaml:"status"`
-	StartedAt          time.Time              `json:"started_at" yaml:"started_at"`
-	EndedAt            time.Time              `json:"ended_at" yaml:"ended_at"`
-	LLMCalls           []LLMCallRecord        `json:"llm_calls,omitempty" yaml:"llm_calls,omitempty"`
-	Usage              UsageSummary           `json:"usage,omitempty" yaml:"usage,omitempty"`
-	ToolCalls          []ToolCallRecord       `json:"tool_calls,omitempty" yaml:"tool_calls,omitempty"`
-	VerificationResult VerificationResult     `json:"verification" yaml:"verification"`
-	EvolutionCandidate *EvolutionCandidate    `json:"evolution_candidate,omitempty" yaml:"evolution_candidate,omitempty"`
-	Artifacts          []string               `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
-	Events             []RuntimeEvent         `json:"events,omitempty" yaml:"events,omitempty"`
-	AuditEvents        []AuditEvent           `json:"audit_events,omitempty" yaml:"audit_events,omitempty"`
-	Metadata           map[string]string      `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	RunID              string                      `json:"run_id" yaml:"run_id"`
+	AgentID            string                      `json:"agent_id" yaml:"agent_id"`
+	EntrypointID       string                      `json:"entrypoint_id,omitempty" yaml:"entrypoint_id,omitempty"`
+	SessionID          string                      `json:"session_id" yaml:"session_id"`
+	SessionScope       *fsession.SessionScope      `json:"session_scope,omitempty" yaml:"session_scope,omitempty"`
+	RouteMatchedBy     string                      `json:"route_matched_by,omitempty" yaml:"route_matched_by,omitempty"`
+	ModelPolicy        ModelPolicySnapshot         `json:"model_policy,omitempty" yaml:"model_policy,omitempty"`
+	Message            string                      `json:"message" yaml:"message"`
+	FinalResponse      string                      `json:"final_response" yaml:"final_response"`
+	Status             string                      `json:"status" yaml:"status"`
+	StartedAt          time.Time                   `json:"started_at" yaml:"started_at"`
+	EndedAt            time.Time                   `json:"ended_at" yaml:"ended_at"`
+	LLMCalls           []LLMCallRecord             `json:"llm_calls,omitempty" yaml:"llm_calls,omitempty"`
+	Usage              UsageSummary                `json:"usage,omitempty" yaml:"usage,omitempty"`
+	ToolCalls          []ToolCallRecord            `json:"tool_calls,omitempty" yaml:"tool_calls,omitempty"`
+	HumanRequests      []humanrequest.HumanRequest `json:"human_requests,omitempty" yaml:"human_requests,omitempty"`
+	Interrupt          *RunInterrupt               `json:"interrupt,omitempty" yaml:"interrupt,omitempty"`
+	VerificationResult VerificationResult          `json:"verification" yaml:"verification"`
+	EvolutionCandidate *EvolutionCandidate         `json:"evolution_candidate,omitempty" yaml:"evolution_candidate,omitempty"`
+	Artifacts          []string                    `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
+	Events             []RuntimeEvent              `json:"events,omitempty" yaml:"events,omitempty"`
+	AuditEvents        []AuditEvent                `json:"audit_events,omitempty" yaml:"audit_events,omitempty"`
+	Metadata           map[string]string           `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+}
+
+type RunInterrupt struct {
+	Status             string                      `json:"status" yaml:"status"`
+	Reason             string                      `json:"reason,omitempty" yaml:"reason,omitempty"`
+	HumanRequests      []humanrequest.HumanRequest `json:"human_requests,omitempty" yaml:"human_requests,omitempty"`
+	BlockedBy          []BlockedBy                 `json:"blocked_by,omitempty" yaml:"blocked_by,omitempty"`
+	SuspendedToolCalls []SuspendedToolCall         `json:"suspended_tool_calls,omitempty" yaml:"suspended_tool_calls,omitempty"`
+	DelegationJoinIDs  []string                    `json:"delegation_join_ids,omitempty" yaml:"delegation_join_ids,omitempty"`
+	Metadata           map[string]any              `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+}
+
+type BlockedBy struct {
+	Type           string `json:"type" yaml:"type"`
+	HumanRequestID string `json:"human_request_id,omitempty" yaml:"human_request_id,omitempty"`
+	RunID          string `json:"run_id,omitempty" yaml:"run_id,omitempty"`
+	ToolCallID     string `json:"tool_call_id,omitempty" yaml:"tool_call_id,omitempty"`
+	Reason         string `json:"reason,omitempty" yaml:"reason,omitempty"`
+}
+
+type SuspendedToolCall struct {
+	ID     string         `json:"id" yaml:"id"`
+	RunID  string         `json:"run_id,omitempty" yaml:"run_id,omitempty"`
+	Name   string         `json:"name" yaml:"name"`
+	Input  map[string]any `json:"input,omitempty" yaml:"input,omitempty"`
+	Status string         `json:"status" yaml:"status"`
 }
 
 type RuntimeEvent struct {

@@ -19,6 +19,7 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 
 	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	rtools "github.com/xiramesh/xira/internal/tools"
 )
 
@@ -151,6 +152,67 @@ func (s *Service) runtimeADKTools(
 	recordTool func(ToolCallRecord),
 ) ([]adktool.Tool, error) {
 	var out []adktool.Tool
+	humanRequestTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
+		Name:         "human.request",
+		Description:  "Pause the current agent run and ask a human for freeform input or approval.",
+		InputSchema:  humanRequestToolInputSchema(),
+		OutputSchema: objectSchema(),
+	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
+		callID := strings.TrimSpace(toolCtx.FunctionCallID())
+		req, err := s.createAgentHumanRequest(ctx, callID, args)
+		if err != nil {
+			return map[string]any{"status": "rejected", "error": err.Error()}, nil
+		}
+		recordEvent("human.request.created", "runtime", "human request created", map[string]any{
+			"human_request_id": req.ID,
+			"kind":             req.Kind,
+			"source":           req.Source,
+			"tool_call_id":     callID,
+		})
+		recordAudit("human.request", req.ID, true, "agent requested human input", map[string]any{
+			"kind":         req.Kind,
+			"tool_call_id": callID,
+		})
+		return map[string]any{
+			"status":           StatusWaitingHuman,
+			"human_request_id": req.ID,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, humanRequestTool)
+
+	humanRespondTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
+		Name:         "human.respond",
+		Description:  "Resolve a HumanRequest only from a trusted runtime resume context. Ordinary model calls are rejected.",
+		InputSchema:  humanRespondToolInputSchema(),
+		OutputSchema: objectSchema(),
+	}, func(_ adktool.Context, args map[string]any) (map[string]any, error) {
+		requestID := strings.TrimSpace(fmt.Sprint(args["request_id"]))
+		if !trustedHumanResponseFromContext(ctx) {
+			recordEvent("human.respond.rejected", "runtime", "untrusted human.respond call rejected", map[string]any{
+				"human_request_id": requestID,
+				"reason":           "untrusted_runtime_context",
+			})
+			recordAudit("human.respond", requestID, false, "untrusted runtime context", nil)
+			return map[string]any{"status": "rejected", "error": "human.respond requires trusted runtime context"}, nil
+		}
+		resolved, err := s.ResolveHumanRequest(ctx, requestID, humanrequest.ResolveRequest{
+			Kind:    humanrequest.ResponseKind(strings.TrimSpace(fmt.Sprint(args["kind"]))),
+			Message: strings.TrimSpace(fmt.Sprint(args["message"])),
+			Actor:   strings.TrimSpace(fmt.Sprint(args["actor"])),
+		})
+		if err != nil {
+			return map[string]any{"status": "rejected", "error": err.Error()}, nil
+		}
+		return map[string]any{"status": "resolved", "human_request_id": resolved.ID}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, humanRespondTool)
+
 	statusTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
 		Name:         statusToolName,
 		Description:  "Emit a user-readable progress status event. The message is an event only and is not final answer content.",
@@ -223,6 +285,44 @@ func statusToolInputSchema() *jsonschema.Schema {
 			"message": {Type: "string"},
 		},
 		Required:             []string{"message"},
+		AdditionalProperties: rejectAllSchema(),
+	}
+}
+
+func humanRequestToolInputSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"kind":     {Type: "string", Enum: []any{string(humanrequest.RequestFreeform), string(humanrequest.RequestApproval)}},
+			"question": {Type: "string"},
+			"options": {
+				Type: "array",
+				Items: &jsonschema.Schema{
+					Type: "object",
+					Properties: map[string]*jsonschema.Schema{
+						"id":    {Type: "string"},
+						"label": {Type: "string"},
+					},
+					Required:             []string{"id", "label"},
+					AdditionalProperties: rejectAllSchema(),
+				},
+			},
+		},
+		Required:             []string{"question"},
+		AdditionalProperties: rejectAllSchema(),
+	}
+}
+
+func humanRespondToolInputSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"request_id": {Type: "string"},
+			"kind":       {Type: "string", Enum: []any{string(humanrequest.ResponseApprove), string(humanrequest.ResponseDeny), string(humanrequest.ResponseCancel), string(humanrequest.ResponseAnswer)}},
+			"actor":      {Type: "string"},
+			"message":    {Type: "string"},
+		},
+		Required:             []string{"request_id", "kind"},
 		AdditionalProperties: rejectAllSchema(),
 	}
 }
@@ -417,6 +517,21 @@ func (s *Service) executeDelegateAgentTool(
 		recordAudit("agent.delegate", target.ID, false, err.Error(), nil)
 		return delegateErrorOutput(target.ID, childRunID, "rejected", err), err
 	}
+	outstandingBefore, err := s.outstandingChildCount(exec.Base.RunID)
+	if err != nil {
+		recordEvent("agent.delegate.failed", "runtime", err.Error(), mergeAnyMaps(correlationPayload, map[string]any{"error": err.Error()}))
+		return delegateErrorOutput(target.ID, childRunID, "failed", err), err
+	}
+	if outstandingBefore >= policy.MaxOutstanding {
+		err := fmt.Errorf("outstanding child count %d exceeds max_outstanding %d", outstandingBefore, policy.MaxOutstanding)
+		recordEvent("agent.delegate.rejected", "runtime", err.Error(), mergeAnyMaps(correlationPayload, map[string]any{
+			"reason":                         err.Error(),
+			"outstanding_child_count_before": outstandingBefore,
+			"max_outstanding":                policy.MaxOutstanding,
+		}))
+		recordAudit("agent.delegate", target.ID, false, err.Error(), nil)
+		return delegateErrorOutput(target.ID, childRunID, "rejected", err), err
+	}
 	effectiveMaxDurationMS := policy.DefaultMaxDurationMS
 	if input.MaxDurationMS > 0 {
 		effectiveMaxDurationMS = input.MaxDurationMS
@@ -492,6 +607,35 @@ func (s *Service) executeDelegateAgentTool(
 			"error":  childErr.Error(),
 		}))
 		return delegateErrorOutput(target.ID, childRunID, status, childErr), childErr
+	}
+	if childResp.Status == StatusWaitingHuman {
+		join, err := s.createWaitingDelegationJoinState(exec.Base.RunID, caller.ID, toolCallID, childRunID, target.ID, childResp.HumanRequests)
+		if err != nil {
+			recordEvent("agent.delegate.failed", "runtime", err.Error(), mergeAnyMaps(correlationPayload, map[string]any{
+				"status": "failed",
+				"error":  err.Error(),
+				"reason": "delegation_join_persist_failed",
+			}))
+			return delegateErrorOutput(target.ID, childRunID, "failed", err), err
+		}
+		if collector := runtimeSuspendCollectorFromContext(ctx); collector != nil {
+			collector.AddDelegationJoin(join.ID)
+			for _, req := range childResp.HumanRequests {
+				collector.AddChildHumanRequest(req, exec.Base.RunID, toolCallID)
+			}
+		}
+		recordEvent("agent.delegate.waiting_human", "runtime", "child agent run waiting for human input", mergeAnyMaps(correlationPayload, map[string]any{
+			"status":               StatusWaitingHuman,
+			"child_human_requests": len(childResp.HumanRequests),
+			"delegation_join_id":   join.ID,
+		}))
+		return map[string]any{
+			"agent_id":           target.ID,
+			"run_id":             childRunID,
+			"status":             StatusWaitingHuman,
+			"human_requests":     len(childResp.HumanRequests),
+			"delegation_join_id": join.ID,
+		}, nil
 	}
 	allowedEvidenceRefs := s.allowedDelegateEvidenceRefs(childRunID, workerTarget, packetRefs, childResp)
 	result, err := validateDelegateAgentResult(childResp.FinalResponse, target.ID, childRunID, packetRefs, allowedEvidenceRefs)
@@ -933,6 +1077,8 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 	}
 	childCtx := contextWithToolFailureGuard(ctx)
 	childCtx = contextWithToolTrace(childCtx, req.ChildRunID)
+	childSuspendCollector := newRuntimeSuspendCollector()
+	childCtx = contextWithRuntimeSuspendCollector(childCtx, childSuspendCollector)
 	childCtx = contextWithRunExecution(childCtx, runExecutionContext{
 		Base:        childBase,
 		Profile:     req.Target,
@@ -964,11 +1110,23 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 	}
 	resp.FinalResponse = final
 	resp.ToolCalls = toolCalls
-	resp.VerificationResult = s.verifier.Verify(final, req.Target.Verification.DefaultChecks)
+	if interrupt := childSuspendCollector.Interrupt(); interrupt != nil {
+		resp.Interrupt = interrupt
+		resp.HumanRequests = append([]humanrequest.HumanRequest(nil), interrupt.HumanRequests...)
+		resp.VerificationResult = VerificationResult{Status: StatusWaitingHuman, Checks: []string{"runtime_interrupt"}}
+		recordChildEvent("run.waiting_human", "runtime", "child agent run waiting for human input", map[string]any{
+			"human_requests": len(interrupt.HumanRequests),
+			"blocked_by":     interrupt.Reason,
+		})
+	} else {
+		resp.VerificationResult = s.verifier.Verify(final, req.Target.Verification.DefaultChecks)
+	}
 	resp.EndedAt = time.Now()
 	resp.Usage = summarizeUsage(resp)
 	resp.Status = "completed"
-	if runErr != nil || resp.VerificationResult.Status != "passed" {
+	if resp.Interrupt != nil {
+		resp.Status = StatusWaitingHuman
+	} else if runErr != nil || resp.VerificationResult.Status != "passed" {
 		resp.Status = "failed"
 	}
 	if len(resp.LLMCalls) > 0 {
@@ -1008,6 +1166,9 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 	}
 	if saveErr != nil {
 		return resp, saveErr
+	}
+	if resp.Status == StatusWaitingHuman {
+		return resp, nil
 	}
 	if resp.Status != "completed" {
 		return resp, fmt.Errorf("child run failed verification: %s", resp.VerificationResult.Status)
@@ -1237,6 +1398,12 @@ func (s *Service) reserveChildSlot(parentRunID string, maxParallel int) (int, bo
 	}
 	s.activeChildren[parentRunID] = active + 1
 	return active, true
+}
+
+func (s *Service) activeChildCount(parentRunID string) int {
+	s.delegationMu.Lock()
+	defer s.delegationMu.Unlock()
+	return s.activeChildren[strings.TrimSpace(parentRunID)]
 }
 
 func (s *Service) releaseChildSlot(parentRunID string) {

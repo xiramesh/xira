@@ -1,23 +1,30 @@
 # Xira Agent HITL v0 设计 Review
 
 > 对象文档：`docs/architecture/xira-agent-hitl-v0.zh.md`
-> 评审基准：分支 `feature/agent-hitl-v0` 当前代码（`apps/xira/internal/runtime/{types.go,service.go,service_adk.go,config.go}`、`apps/xira/internal/tools/registry.go`）
+> 评审基准：分支 `feature/agent-hitl-v0` 当前代码（`apps/xira/internal/runtime/{types.go,service.go,service_adk.go,config.go,delegation.go}`、`apps/xira/internal/tools/registry.go`）
 > 评审历史：
 > - **R1**（首轮）：基于原始草案，提出 P0/P1/P2 共 10 项问题。
-> - **R2**（第二轮）：文档采纳 R1 全部意见，R1 闭环；针对修订版提出 N1–N5。
-> - **R3**（本轮）：文档采纳 R2 全部意见并主动引入 `workspace_id`，R2 闭环；针对修订版提出 M1–M5。主线架构已收敛，剩余均为实现层工程洞。
+> - **R2**（第二轮）：文档采纳 R1 全部意见，R1 闭环；提出 N1–N5。
+> - **R3**（第三轮）：文档采纳 R2 全部意见并引入 `workspace_id`，R2 闭环；提出 M1–M5。
+> - **R4**（第四轮）：文档采纳 R3 全部意见并引入 AgentDelegation，R3 闭环；delegation 章节核实为真实已有代码的契约化。但 delegation 与 HITL 的交互（child waiting_human）暴露出文档严重低估的实现冲突 D1。
+> - **R5**（第五轮）：文档选择保留 child waiting_human 进入 v0，并补齐 `RunInterrupt`、`RuntimeSuspendCollector`、最小 response API、`canceled` 边界和 `max_outstanding`，R4 主问题闭环；剩余 1 个文档一致性问题 E1。
+> - **R6**（本轮）：文档同步 `第一版实现边界` 与正式 `落地顺序`，E1 闭环；当前无剩余 blocking review 项。
 
 ## 总体评价
 
-文档经过三轮修订，**主线架构已收敛得很干净**：
+文档经过六轮修订，HITL 主线已高度收敛：
 
-- 协作型 / 强制型 HITL 双层，`request_source` / `trust_level` 分流。
-- `runtime_tool_gate` approval 走 snapshot + 同步 replay，`agent_request` approval 走 agent 继续。
-- native / ADK 共享同一份 HITL store + hydration。
-- 强制型 approval 的信任默认值收敛到 transport_authenticated。
-- 主动引入 `workspace_id` 分离"运行中断点"与"资源/权限归属"。
+- 协作型 / 强制型双层，`request_source` / `trust_level` 分流。
+- `runtime_tool_gate` snapshot + 同步 replay + CAS 状态机（R3 补全 running 态）。
+- native / ADK 共享 HITL store + hydration。
+- `workspace` 用 canonical `WorkspaceRoot`，内部 `workspace_key` 分片（R3 修正弱身份）。
+- 主动引入 AgentDelegation，把已有 `delegation.go`（1291 行）的行为收敛为四语义契约。
+- 明确选择 child `waiting_human` 进入 v0，并承认这是最大的 runtime 改造点。
+- 用 `RunInterrupt` / `RuntimeSuspendCollector` 统一表达 run 级中断，避免各路径用普通 tool output、FinalResponse 或 ad-hoc metadata 表达 suspend。
 
-R3 剩余问题（M1–M5）**全部是实现层工程洞，不是架构洞**。但其中 M1（replay 并发状态机）和 M3（workspace_id 载体）是两个会卡住整个 replay 链路的硬依赖，建议先拍板再进落地顺序第 1 步。
+R4 里最重的判断仍然成立：现有 `delegation.go` 是同步阻塞等待 child `FinalResponse` 的模型，而目标语义要求 suspendable delegation。区别是 R5 文档不再低估这个冲突，而是选择正面承接它：把 `delegate_agent` 升级为可持久化 continuation 的 runtime control tool。
+
+当前没有新的 P0/P1/P2 blocking review 项。主文档可以作为 v0 实现依据进入拆分执行。
 
 严重度分级沿用：
 
@@ -29,149 +36,86 @@ P2 边界与文档完整性,可在落地顺序里补
 
 ---
 
-## R1 闭环确认
+## 历史闭环
 
-R1 提出的 10 项问题已在文档第二轮修订中处理（详见下表），R3 不再重复展开。
+### R1（10 项）— 全部闭环
 
-| R1 问题 | 结论 |
-| --- | --- |
-| P0-1 native 非 loop / session 回灌前提 | ✅ |
-| P0-2 v0 是"绅士协议"，安全增益≈0 | ✅ |
-| P1-1 `RequireConfirmation` 已存在却不接 | ✅ |
-| P1-2 "不自动重放"可能选反 | ✅ |
-| P1-3 approval 语义塌缩 | ✅ |
-| P1-4 `human.signal` 来源可信度矛盾 | ✅ |
-| P2-1 status 边界 | ✅ |
-| P2-2 allowlist 冲突 | ✅ |
-| P2-3 无限追问 | ✅ |
-| P2-4 跨 turn 状态恢复 | ✅ |
+P0-1 native 非 loop / P0-2 绅士协议 / P1-1 RequireConfirmation 接通 / P1-2 重放策略 / P1-3 approval 塌缩 / P1-4 signal 可信度 / P2-1 status 边界 / P2-2 allowlist / P2-3 去重限流 / P2-4 跨 turn 恢复。均已处理，不再展开。
 
----
+### R2（N1–N5）— 全部闭环
 
-## R2 闭环确认
+N1 replay 死循环（`executeReplay` + `replay=true` bypass）/ N2 approve 悬空（responses API 同步 replay + 补偿路径）/ N3 channel 默认值（默认 deny）/ N4 ADK hydration（AgentHistory 共享 store）/ N5 compaction（滑动窗口 K=20）。均已处理。
 
-R2 提出的 N1–N5 已在文档第三轮修订中处理：
+### R3（M1–M5）— 全部闭环
 
-| R2 问题 | 修订位置 | 结论 |
+| R3 问题 | 修订 | 结论 |
 | --- | --- | --- |
-| N1 replay 死循环 | 新增"replay execution mode"（643–667）：`executeReplay` + `replay=true` bypass RequireConfirmation，**保留** allowlist/path/timeout/audit | ✅ 精准——只跳 gate，不跳其他校验 |
-| N2 approve 后悬空 | "responses API 契约"（764–808）同步触发 replay；跨 turn 中的 replay **降级为补偿路径**（1157），只处理崩溃 | ✅ 主路径同步 + 补偿路径异步，拆法正确 |
-| N3 channel 默认值 | 信任表（96）改为"v0 默认不可以，需 per-channel 开启"；已定决策 928 | ✅ 默认值方向正确 |
-| N4 ADK hydration | 新增"ADK Hydration"（961–990），通过 AgentHistory + session message kind 共享同一份 HITL store | ✅ 未另起一套状态 |
-| N5 compaction | 滑动窗口 K=20 / max_history_chars=24000（581–602），明确不做语义 compaction | ✅ 截断边界清晰 |
+| M1 replay 并发状态机 | `replay_status` pending→running→completed/failed + CAS 抢占 + `replay_attempt_id`/`replay_started_at`/`replay_lease_expires_at`（975–1004）；重试幂等返回 `running` | ✅ 专业级状态机 |
+| M2 input_hash 装饰性 | 改名 `env_hash` + `env_snapshot`(workspace_root/cwd/git_head)，明确不做防篡改签名（1006–1012） | ✅ 改名 + 定义计算口径 |
+| M3 workspace_id 载体 | 否决弱身份 `local`，改用 canonical `WorkspaceRoot`；内部 `workspace_key` 仅用于 file store 分片（317–349） | ✅ 比建议更彻底 |
+| M4 ToolCallRecord 闭合 | 闭合章节 + sidecar `tool_replay_links.jsonl` + API materialize（1016–1051） | ✅ |
+| M5 盲问代价 | "去重与限流"标注 v0 单 tool turn 边界（1666–1671） | ✅ |
 
-另：文档主动引入 `workspace_id`（把运行中断点与资源归属分离），方向正确。
+### R4（D1–D3）— 主文档已闭环
 
-R2 全部闭环。以下为 R3 新增问题。
+R4 的建议是“强烈倾向 v0 砍掉 child waiting_human”。R5 主文档选择了另一条路线：**保留 child waiting_human，但把它明确为 v0 最大 runtime 改造点**。这个选择比 R4 建议更重，但现在文档已经补齐了主要语义面。
 
----
+| R4 问题 | R5 修订 | 结论 |
+| --- | --- | --- |
+| D1 delegation 同步模型 vs HITL 异步模型 | 增加 `RunInterrupt`、`RuntimeSuspendCollector`、suspended delegate tool call、DelegationJoinState、parent/child continuation、native/ADK 短路规则 | ✅ 闭环，但实现量很大 |
+| D2 join=all 下单个 child waiting 可无限阻塞 | 明确 `max_duration_ms` 只计 active execution；deny/cancel materialize `status=canceled`；新增 `max_outstanding` 和 `resume_pending` | ✅ 闭环 |
+| D3 parent 信任 child result 边界 | 明确 runtime 只校验 schema/ref/runtime-owned fields，不校验 summary 真伪；`confidence` / `followup_needed` 仅为提示 | ✅ 闭环 |
 
-## R3 新增问题
+### R5（E1）— 主文档已闭环
 
-### M1（P0）：同步 replay 引入新的并发安全洞——`replay_status` 缺 `running` 中间态
+E1 原问题：`第一版实现边界` 与正式 `落地顺序` 不一致。
 
-N2 的解法是"responses API 同步触发 replay"。这带来一个文档未处理的新问题。
+R6 修订后，主文档的 `第一版实现边界` 已同步为 11 个边界：
 
-`replay_status` 当前只有 `pending / completed / failed`（189、662 行），**没有 `running`**。考虑以下序列：
+- 第 3 步是最小 response API。
+- 第 5 步包含 `waiting_human` run status、`RunInterrupt`、`RuntimeSuspendCollector`。
+- 第 9 步是 child waiting_human propagation。
+- 第 10 步是 native `RequireConfirmation` gate + snapshot replay。
+- 文档明确第 3 步是第 9 / 第 10 步的前置条件，不能后置到完整 CLI/API 展示阶段。
 
-```text
-POST /responses approve
-  -> runtime 看到 replay_status=pending，开始执行 replay（git push，耗时 40s）
-  -> HTTP 客户端 30s 超时，连接断开
-  -> 客户端重试 POST /responses approve（或用户再点一次）
-  -> runtime 仍看到 replay_status=pending（第一次还没写完）
-  -> 第二次也执行 replay
-  -> 违反"replay 必须最多执行一次"（1162）
-```
+结论：E1 已闭环。
 
-这是 N2 解法自己制造的并发洞：同步执行可能很慢的 tool + 可重试的 HTTP + 无中间态的状态机 = 并发重放。
+## R6 新问题
 
-更隐蔽的是，它**重新制造了 N2 想消灭的悬空**，只是从"approve-signal 悬空"变成"replay-result 悬空"——HTTP 超时后客户端拿到 connection error，但 replay 仍在后台跑，用户不知执行了没有。补偿路径（RunAgent start 检查 `replay_status=pending` 重试，1152–1157）只覆盖"进程崩溃"，**不覆盖"还在跑"**——进程没崩、只是 HTTP 超时，后台那次的 status 仍是 pending，又触发一次。
-
-必须修：
-
-```text
-replay_status: pending -> running -> completed/failed
-POST /responses 抢占式 CAS 把 pending 置 running（失败说明已有别人在跑）
-running 期间的重试请求直接返回 replay 进行中状态，不重复执行
-```
-
-至少补 `running` 中间态 + 原子抢占。否则"最多一次"在同步 HTTP 下保证不了。
-
-### M2（P1）：`input_hash` 是装饰性字段，威胁模型不成立
-
-`replay execution mode` 要求 "snapshot input_hash matches persisted input"（656 行）。但 persisted input 就是 snapshot 自己——`input_hash` 必然匹配它对应的 `input`。在本地 file store 下，能改 input 的人就能改 hash，这个检查不防任何实际威胁。
-
-真正有价值的漂移检测是"批准时的环境" vs "replay 时的环境"（workspace revision / git HEAD），而那个恰被放进"待确认问题 3"。也就是说：**该有的环境漂移检测没定，不该有的 input 自洽检查占了字段。**
-
-建议二选一：
-
-1. 删掉 `input_hash` 的校验语义（保留可无）；或
-2. 改名为 `env_hash`，明确它检测的是 cwd/git HEAD 等环境漂移，并给出计算口径。
-
-留着现在的 `input_hash` 会误导实现者以为 replay 有防篡改能力——实际没有。
-
-### M3（P1）：`workspace_id` 引入了身份概念，但 runtime 没有对应载体
-
-核对代码后发现的真实落地缺口。文档新增 `workspace_id` 顶层必填（31、135、258–274 行），示例为 `workspace_id: local`。但代码现状：
-
-- runtime 里的 `workspace` 是 **`WorkspaceRoot` 文件路径**（`service.go:52` `s.workspace`、`config.go:67`），不是身份标识符。
-- `TurnRequest` **没有** `workspace_id` 字段（`types.go:16–24` 已核实为空）。
-- 那么 HumanRequest 创建时（`executeToolCall` / `human.request` tool）从哪个上下文拿到 `workspace_id`？
-
-示例的 `local` 暗示 v0 单 workspace 硬编码。这属于"概念引入了、载体未定义"。必须现在回答三件事，否则该字段在 v0 是空壳：
-
-1. v0 是否假设单 workspace（固定值 `local`）？
-2. `workspace_id` 从哪解析——`TurnRequest` 要不要加字段？还是从 `entrypoint_id` / `channel` 推导？
-3. 未来多 workspace 时谁分配 id、与 `WorkspaceRoot` 的关系？
-
-别让它变成"必填但永远填 `local`"的僵尸字段。M3 还会反向影响 file store：human-requests 要不要按 `workspace_id` 分目录？这关系到落地顺序第 1 步。
-
-### M4（P2）：被拦截的 ToolCallRecord 与 replay result 如何闭合
-
-正常 `command.run` 走 `executeToolCall` 产生 `ToolCallRecord`，output=`waiting_human`。replay 走 `executeReplay`，结果进独立 replay artifact（800 行 `replay.artifact`）。**原 ToolCallRecord 要不要回填 replay ref？** 审计时若看到"command.run → waiting_human"还要另去 replay artifact 找结果，两套记录容易对不上。
-
-建议明确闭合关系：原 ToolCallRecord 在 replay 完成后回填 `replay_ref`（指向 replay artifact），保持单条 run log 可完整复盘，而非让审计者在两个文件间跳。
-
-### M5（P2，次要）：native 2-call + "一个 run 一个 pending" 的交互代价
-
-"一个 run 内最多一个 pending，创建后短路"（1131）+ native 固定 2 次 model call，意味着：第一次 call 若同时返回 `read_file` + `human.request`，collector 短路时 `read_file` 已执行，但其结果**没机会参与 agent 决定"怎么问"**——agent 实际是盲问。
-
-这是 native 架构的固有局限，文档未点明 UX 代价。建议至少在落地顺序里标注："v0 agent_request 以单 tool turn 为主，多 tool + ask 的组合需等 hydration/多轮增强"，避免实现者发现后回头改设计。
+未发现新的 blocking review 项。
 
 ---
 
 ## 框架外提醒
 
-到 R3，文档主线设计已收敛。剩余问题（M1–M5）全是实现层工程洞。这其实是设计文档进入"危险安全区"的信号：架构看着都对，容易误判为"可以开工了"。
+R6 关键认知：主文档已经拍板“child waiting_human 进入 v0”，并且实现边界、落地顺序、RunInterrupt、response API 前置关系已经对齐。后续不再是文档设计问题，而是按 suspendable runtime control tool 的标准实现。
 
-建议**先别急着进落地顺序第 1 步**。M1（replay 并发状态机）和 M3（workspace_id 载体）是两个会卡住整个 replay 链路的硬依赖：
+因此，后续实现时要把最小边界锁死：
 
-- M1 不定，snapshot replay 写不出来（"最多一次"无法保证）。
-- M3 不定，连 HumanRequest 的 file store 路径都落不了（按 `workspace_id` 分目录还是不分？）。
-
-把这两个拍板，再开工，能省掉返工。
+- `waiting_human` 只能通过 `RunInterrupt` 表达。
+- `delegate_agent` 一旦 child waiting，必须持久化 suspended tool call 和 DelegationJoinState。
+- parent resume 不能靠自然语言总结拼接，必须把 materialized delegate output 注入 parent tool history / AgentHistory 摘要。
+- response API 必须早于 child resume 和 snapshot replay 主路径。
 
 ---
 
-## 一句话总结
+## Review 结论
 
 ```text
-R1（10 项）、R2（5 项）全部闭环，主线架构收敛干净。
-R3 剩余 5 项均为实现层工程洞：
-  - M1（P0）replay 并发状态机缺 running 中间态 —— 同步 replay 的"最多一次"无法保证
-  - M3（P1）workspace_id 概念引入但 runtime 无载体 —— file store 路径都落不了
-  - M2（P1）input_hash 是装饰性字段，威胁模型不成立
-  - M4（P2）被拦截 ToolCallRecord 与 replay result 闭合关系未定义
-  - M5（P2）native 2-call + 单 pending 的盲问代价未点明
-建议先拍 M1、M3 再落地。
+结论：主文档的 runtime boundary 方向可以接受。
+
+R1（10）、R2（5）、R3（5）、R4（3）、R5（1）均已闭环。
+当前无 P0/P1/P2 blocking review 项。
+
+主文档可以作为 v0 实现依据进入拆分执行。
+
+child waiting_human 进入 v0 是一个可接受但很重的选择。
+实现必须先落 `RunInterrupt` / `RuntimeSuspendCollector`，
+再改 delegation continuation；不能在现有同步 child FinalResponse 模型上硬补。
 ```
 
-## R3 优先级建议
+## R6 优先级建议
 
-1. **M1** 给 replay_status 补 `running` 中间态 + CAS 抢占，定清"最多一次"的并发保证。
-2. **M3** 定 workspace_id 的载体（TurnRequest 字段 / 推导方式 / 是否单 workspace），并决定 file store 是否按 workspace_id 分目录。
-3. **M2** `input_hash` 删除或改名为 `env_hash` 并定义环境漂移检测口径。
-4. **M4** 定 ToolCallRecord 与 replay artifact 的闭合 ref 关系。
-5. **M5** 在落地顺序标注 v0 agent_request 的单 tool turn 边界。
-6. 视交付压力，重新评估落地顺序——M1/M3 未定前，第 4、5 步（RequireConfirmation gate + snapshot replay）无法真正完成。
+1. 进入实现前，以 `RunInterrupt` / `RuntimeSuspendCollector` 为第一批代码契约，不要先改 delegation 同步路径。
+2. 实现验证优先覆盖：agent request interrupt、runtime_tool_gate interrupt、child waiting_human interrupt 三条路径。
+3. delegation continuation 开工前，先把 response API 的原子 resolve / AgentHistory 摘要写入跑通。

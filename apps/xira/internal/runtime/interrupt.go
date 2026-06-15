@@ -1,0 +1,138 @@
+package runtime
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+
+	"github.com/xiramesh/xira/internal/humanrequest"
+)
+
+const StatusWaitingHuman = "waiting_human"
+
+type runtimeSuspendCollector struct {
+	mu                 sync.Mutex
+	humanRequests      []humanrequest.HumanRequest
+	blockedBy          []BlockedBy
+	suspendedToolCalls []SuspendedToolCall
+	delegationJoinIDs  []string
+}
+
+type runtimeSuspendCollectorKey struct{}
+
+func contextWithRuntimeSuspendCollector(ctx context.Context, collector *runtimeSuspendCollector) context.Context {
+	return context.WithValue(ctx, runtimeSuspendCollectorKey{}, collector)
+}
+
+func runtimeSuspendCollectorFromContext(ctx context.Context) *runtimeSuspendCollector {
+	collector, _ := ctx.Value(runtimeSuspendCollectorKey{}).(*runtimeSuspendCollector)
+	return collector
+}
+
+func newRuntimeSuspendCollector() *runtimeSuspendCollector {
+	return &runtimeSuspendCollector{}
+}
+
+func (c *runtimeSuspendCollector) AddHumanRequest(req humanrequest.HumanRequest, reason string) {
+	c.addHumanRequest(req, "human_request", reason)
+}
+
+func (c *runtimeSuspendCollector) AddChildHumanRequest(req humanrequest.HumanRequest, parentRunID, delegateToolCallID string) {
+	c.addHumanRequest(req, "child_human_request", "child_human_request")
+	c.SuspendToolCall(SuspendedToolCall{
+		ID:     delegateToolCallID,
+		RunID:  req.RunID,
+		Name:   delegateAgentToolName,
+		Status: StatusWaitingHuman,
+	})
+}
+
+func (c *runtimeSuspendCollector) addHumanRequest(req humanrequest.HumanRequest, blockedType, reason string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.humanRequests = append(c.humanRequests, req)
+	c.blockedBy = append(c.blockedBy, BlockedBy{
+		Type:           blockedType,
+		HumanRequestID: req.ID,
+		RunID:          req.RunID,
+		ToolCallID:     req.ToolCallID,
+		Reason:         reason,
+	})
+}
+
+func (c *runtimeSuspendCollector) SuspendToolCall(call SuspendedToolCall) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.suspendedToolCalls = append(c.suspendedToolCalls, call)
+}
+
+func (c *runtimeSuspendCollector) AddDelegationJoin(id string) {
+	if c == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, existing := range c.delegationJoinIDs {
+		if existing == id {
+			return
+		}
+	}
+	c.delegationJoinIDs = append(c.delegationJoinIDs, id)
+}
+
+func (c *runtimeSuspendCollector) HasInterrupt() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.humanRequests) > 0 || len(c.blockedBy) > 0 || len(c.suspendedToolCalls) > 0 || len(c.delegationJoinIDs) > 0
+}
+
+func (c *runtimeSuspendCollector) Interrupt() *RunInterrupt {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.humanRequests) == 0 && len(c.blockedBy) == 0 && len(c.suspendedToolCalls) == 0 && len(c.delegationJoinIDs) == 0 {
+		return nil
+	}
+	return &RunInterrupt{
+		Status:             StatusWaitingHuman,
+		Reason:             interruptReason(c.blockedBy),
+		HumanRequests:      append([]humanrequest.HumanRequest(nil), c.humanRequests...),
+		BlockedBy:          append([]BlockedBy(nil), c.blockedBy...),
+		SuspendedToolCalls: append([]SuspendedToolCall(nil), c.suspendedToolCalls...),
+		DelegationJoinIDs:  append([]string(nil), c.delegationJoinIDs...),
+	}
+}
+
+func interruptReason(blocked []BlockedBy) string {
+	if len(blocked) == 0 {
+		return ""
+	}
+	return blocked[0].Type
+}
+
+func requestKindFromString(value string) (humanrequest.RequestKind, error) {
+	switch humanrequest.RequestKind(value) {
+	case humanrequest.RequestFreeform:
+		return humanrequest.RequestFreeform, nil
+	case humanrequest.RequestApproval:
+		return humanrequest.RequestApproval, nil
+	default:
+		return "", fmt.Errorf("unsupported human request kind %q", value)
+	}
+}
