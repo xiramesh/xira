@@ -3,8 +3,46 @@ package flow
 import (
 	"context"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
+
+type blockingResumeResolver struct {
+	request       ResolvedHumanRequest
+	firstEntered  chan struct{}
+	secondEntered chan struct{}
+	secondOnce    sync.Once
+	calls         int32
+}
+
+func newBlockingResumeResolver(request ResolvedHumanRequest) *blockingResumeResolver {
+	return &blockingResumeResolver{
+		request:       request,
+		firstEntered:  make(chan struct{}),
+		secondEntered: make(chan struct{}),
+	}
+}
+
+func (r *blockingResumeResolver) GetHumanRequest(ctx context.Context, id string) (ResolvedHumanRequest, error) {
+	call := atomic.AddInt32(&r.calls, 1)
+	if call == 1 {
+		close(r.firstEntered)
+		select {
+		case <-ctx.Done():
+			return ResolvedHumanRequest{}, ctx.Err()
+		case <-r.secondEntered:
+		case <-time.After(100 * time.Millisecond):
+		}
+	} else if call == 2 {
+		r.secondOnce.Do(func() { close(r.secondEntered) })
+	}
+	if id != r.request.ID {
+		return ResolvedHumanRequest{}, &notFoundErr{id: id}
+	}
+	return r.request, nil
+}
 
 // TestFlowResumeSameHumanRequestTwiceAdvancesOnce — WATCH-FLOW-001 guard.
 func TestFlowResumeSameHumanRequestTwiceAdvancesOnce(t *testing.T) {
@@ -47,6 +85,78 @@ func TestFlowResumeSameHumanRequestTwiceAdvancesOnce(t *testing.T) {
 	}
 	if run2.CurrentStepID != "implement" {
 		t.Errorf("second resume moved current to %q, want implement (unchanged)", run2.CurrentStepID)
+	}
+}
+
+func TestKernelConcurrentResumeDoesNotDoubleAdvance(t *testing.T) {
+	def := newApprovalFlowForResume()
+	runner := &countingRunner{}
+	hr := newFakeHumanCreator()
+	exec := &AgentExecutor{Agent: runner, Human: hr}
+	k := &Kernel{
+		Store:       newTestStore(t),
+		Definitions: staticDefinitions{defs: map[string]*Definition{"test": def}},
+		Executor:    exec,
+		Policy:      policyMap{values: nil},
+		Resolver:    &fakeResolver{requests: map[string]ResolvedHumanRequest{}},
+	}
+	run, _ := k.Start(context.Background(), StartRequest{FlowID: "test", EntrypointID: "ad_hoc", Input: map[string]string{"request": "x"}})
+	run, _ = k.Advance(context.Background(), run.ID)
+	if run.Status != RunWaitingHuman {
+		t.Fatalf("expected waiting_human, got %q", run.Status)
+	}
+	hrID := run.PendingHumanRequests[0]
+	resolver := newBlockingResumeResolver(ResolvedHumanRequest{
+		ID: hrID, Source: SourceFlowHumanApproval, Kind: "approval", Status: "resolved", ResponseKind: "approve",
+	})
+	k.Resolver = resolver
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	resume := func() {
+		defer wg.Done()
+		_, err := k.Resume(context.Background(), run.ID, hrID)
+		errs <- err
+	}
+
+	wg.Add(1)
+	go resume()
+	select {
+	case <-resolver.firstEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first resume did not reach resolver")
+	}
+	wg.Add(1)
+	go resume()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Resume: %v", err)
+		}
+	}
+	if got := atomic.LoadInt32(&resolver.calls); got != 1 {
+		t.Fatalf("resolver calls = %d, want 1", got)
+	}
+	got, err := k.Store.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CurrentStepID != "implement" {
+		t.Fatalf("current_step_id = %q, want implement", got.CurrentStepID)
+	}
+	events, err := k.Store.ReadEvents(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduledImplement := 0
+	for _, event := range events {
+		if event.Kind == "flow.step.scheduled" && event.StepID == "implement" {
+			scheduledImplement++
+		}
+	}
+	if scheduledImplement != 1 {
+		t.Fatalf("scheduled implement events = %d, want 1", scheduledImplement)
 	}
 }
 

@@ -50,6 +50,11 @@ func (k *Kernel) resume(ctx context.Context, flowRunID, humanRequestID string) (
 	if strings.TrimSpace(humanRequestID) == "" {
 		return nil, fmt.Errorf("human request id is required")
 	}
+	if err := validateFlowRunID(flowRunID); err != nil {
+		return nil, err
+	}
+	unlock := k.lockRun(flowRunID)
+	defer unlock()
 
 	run, err := k.Store.GetRun(ctx, flowRunID)
 	if err != nil {
