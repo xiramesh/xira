@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 	adktool "google.golang.org/adk/tool"
 
 	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 	fsession "github.com/xiramesh/xira/internal/session"
 	rtools "github.com/xiramesh/xira/internal/tools"
@@ -265,7 +267,7 @@ func TestRunAgentCanUseCommandRunTool(t *testing.T) {
 func TestRuntimeToolDefinitionsDoNotExposeExec(t *testing.T) {
 	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	profile := agents.BuiltinResearchAssistant()
-	for _, tool := range rt.toolDefinitions(profile) {
+	for _, tool := range rt.toolDefinitions(context.Background(), profile) {
 		if tool.Function.Name == "exec" {
 			t.Fatalf("native tool definitions exposed exec: %+v", tool)
 		}
@@ -510,6 +512,161 @@ func TestRuntimeOwnedToolsAreInjectedByPolicyOnly(t *testing.T) {
 	}
 	if !adkToolNames(adkTools)["emit_status"] {
 		t.Fatalf("emit_status should be available as status producer: %+v", adkToolNames(adkTools))
+	}
+}
+
+func TestRuntimeToolAllowlistFiltersProfileTools(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	profile := agents.BuiltinXiraAssistant()
+	ctx := contextWithRuntimeToolAllowlist(context.Background(), []string{"write_file"})
+	defs := rt.toolDefinitions(ctx, profile)
+	var names []string
+	for _, def := range defs {
+		names = append(names, def.Function.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "write_file" {
+		t.Fatalf("native tool definitions = %v, want write_file only", names)
+	}
+	adkTools, err := rt.adkTools(ctx, profile, func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {}, func(ToolCallRecord) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names = nil
+	for _, tool := range adkTools {
+		names = append(names, tool.Name())
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "write_file" {
+		t.Fatalf("ADK tools = %v, want write_file only", names)
+	}
+}
+
+func TestRuntimeToolAllowlistCanDisableAllTools(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	profile := agents.BuiltinXiraAssistant()
+	ctx := contextWithRuntimeToolAllowlist(context.Background(), nil)
+	if defs := rt.toolDefinitions(ctx, profile); len(defs) != 0 {
+		t.Fatalf("tool definitions = %+v, want none", defs)
+	}
+	adkTools, err := rt.adkTools(ctx, profile, func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {}, func(ToolCallRecord) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(adkTools) != 0 {
+		t.Fatalf("ADK tools = %+v, want none", adkToolNames(adkTools))
+	}
+	ctx = contextWithRuntimeToolAllowlist(context.Background(), []string{" "})
+	if defs := rt.toolDefinitions(ctx, profile); len(defs) != 0 {
+		t.Fatalf("blank-only tool definitions = %+v, want none", defs)
+	}
+}
+
+func TestRuntimeToolAllowlistCanExplicitlyIncludeNativeTools(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	profile := agents.BuiltinXiraAssistant()
+	ctx := contextWithRuntimeToolAllowlist(context.Background(), []string{"write_file", "human.request", "emit_status", "delegate_agent"})
+	defs := rt.toolDefinitions(ctx, profile)
+	var names []string
+	for _, def := range defs {
+		names = append(names, def.Function.Name)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "human_request,write_file" {
+		t.Fatalf("native tool definitions = %v, want human_request plus write_file", names)
+	}
+	adkTools, err := rt.adkTools(ctx, profile, func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {}, func(ToolCallRecord) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names = nil
+	for _, tool := range adkTools {
+		names = append(names, tool.Name())
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "delegate_agent,emit_status,human.request,write_file" {
+		t.Fatalf("ADK tools = %v, want explicit native tools plus write_file", names)
+	}
+}
+
+func TestRuntimeToolAllowlistRejectsUndeclaredNativeHumanRequestCall(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		for _, tool := range req.Tools {
+			if tool.Function.Name == "human_request" {
+				t.Fatalf("flow step allowlist exposed undeclared native tool: %+v", req.Tools)
+			}
+		}
+		body := deepSeekToolCallResponseWithArgs("native-human-not-allowed", "human_request", map[string]any{
+			"kind":     "freeform",
+			"question": "Can I bypass the step tool allowlist?",
+		})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot: filepath.Join(t.TempDir(), "runs"),
+		DeepSeekClient: deepseek.New(
+			deepseek.WithBaseURLForTest("http://deepseek.test"),
+			deepseek.WithAPIKey("test-key"),
+			deepseek.WithHTTPClient(client),
+		),
+	})
+	runID := "native-human-allowlist-run"
+	if err := rt.RunStore().InitRun(runID); err != nil {
+		t.Fatal(err)
+	}
+	profile := agents.BuiltinXiraAssistant()
+	collector := newRuntimeSuspendCollector()
+	ctx := contextWithRuntimeToolAllowlist(context.Background(), []string{"write_file"})
+	ctx = contextWithRuntimeSuspendCollector(ctx, collector)
+	ctx = contextWithToolTrace(ctx, runID)
+	ctx = rtools.WithRunDir(ctx, rt.RunStore().RunDir(runID))
+	ctx = contextWithRunExecution(ctx, runExecutionContext{
+		Base: runtimeEventBase{
+			RunID:                 runID,
+			AgentID:               profile.ID,
+			ConversationSessionID: "session-native-allowlist",
+			TraceID:               runID,
+		},
+		Profile: profile,
+		Request: TurnRequest{Message: "try a native tool that is not in the flow step allowlist", SessionID: "session-native-allowlist"},
+	})
+	ctx = rt.withLLMInstrumentation(ctx, llmInstrumentationInput{
+		RunID:   runID,
+		AgentID: profile.ID,
+		Pricing: rt.pricing,
+	}, func(string, string, string, map[string]any) {}, func(LLMCallRecord) {})
+
+	final, toolCalls, err := rt.generateNativeDeepSeek(ctx, profile, "native instruction", TurnRequest{
+		Message:      "try a native tool that is not in the flow step allowlist",
+		SessionID:    "session-native-allowlist",
+		AllowedTools: []string{"write_file"},
+	}, func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(final) != "" {
+		t.Fatalf("final = %q, want empty after rejected undeclared native tool", final)
+	}
+	if len(toolCalls) != 1 || toolCalls[0].Name != "human_request" || !strings.Contains(toolCalls[0].Error, "not allowed") {
+		t.Fatalf("native human_request should be rejected as undeclared tool call: %+v", toolCalls)
+	}
+	if collector.HasInterrupt() {
+		t.Fatalf("undeclared native human_request created interrupt: %+v", collector.Interrupt())
+	}
+	pending, err := rt.ListHumanRequests(context.Background(), humanrequest.StatusPending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("undeclared native human_request created pending requests: %+v", pending)
 	}
 }
 

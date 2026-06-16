@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gopkg.in/yaml.v3"
 
 	"github.com/xiramesh/xira/internal/humanrequest"
 )
@@ -108,7 +109,7 @@ func (s *Service) createAgentHumanRequest(ctx context.Context, callID string, ar
 	if callID == "" {
 		callID = uuid.NewString()
 	}
-	kind := strings.TrimSpace(fmt.Sprint(args["kind"]))
+	kind := stringArg(args, "kind")
 	if kind == "" {
 		kind = string(humanrequest.RequestFreeform)
 	}
@@ -116,7 +117,7 @@ func (s *Service) createAgentHumanRequest(ctx context.Context, callID string, ar
 	if err != nil {
 		return nil, err
 	}
-	question := strings.TrimSpace(fmt.Sprint(args["question"]))
+	question := stringArg(args, "question")
 	options := humanOptionsFromAny(args["options"])
 	req, err := s.CreateHumanRequest(ctx, humanrequest.CreateRequest{
 		WorkspaceID:  s.workspace,
@@ -151,7 +152,11 @@ func (s *Service) createRuntimeToolGateHumanRequest(ctx context.Context, toolCal
 	if toolCallID == "" {
 		toolCallID = uuid.NewString()
 	}
-	contextHash, err := digestAny(args)
+	snapshotArgs, err := canonicalActionSnapshotArguments(args)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize action snapshot arguments: %w", err)
+	}
+	contextHash, err := digestAny(snapshotArgs)
 	if err != nil {
 		return nil, fmt.Errorf("marshal action snapshot arguments: %w", err)
 	}
@@ -168,7 +173,7 @@ func (s *Service) createRuntimeToolGateHumanRequest(ctx context.Context, toolCal
 		DedupeKey:    "runtime_tool_gate:" + exec.Base.RunID + ":" + toolCallID + ":" + strings.TrimSpace(toolName),
 		ActionSnapshot: &humanrequest.ActionSnapshot{
 			ToolName:    strings.TrimSpace(toolName),
-			Arguments:   cloneAnyMap(args),
+			Arguments:   snapshotArgs,
 			RunID:       exec.Base.RunID,
 			AgentID:     exec.Profile.ID,
 			SessionID:   exec.Base.ConversationSessionID,
@@ -184,7 +189,7 @@ func (s *Service) createRuntimeToolGateHumanRequest(ctx context.Context, toolCal
 		ID:     toolCallID,
 		RunID:  exec.Base.RunID,
 		Name:   strings.TrimSpace(toolName),
-		Input:  cloneAnyMap(args),
+		Input:  cloneAnyMap(snapshotArgs),
 		Status: StatusWaitingHuman,
 	})
 	return req, nil
@@ -334,6 +339,21 @@ func cloneAnyMap(in map[string]any) map[string]any {
 	return out
 }
 
+func cloneAnyMapDeep(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(in)
+	if err != nil {
+		return cloneAnyMap(in)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return cloneAnyMap(in)
+	}
+	return out
+}
+
 func digestAny(value any) (string, error) {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -341,6 +361,21 @@ func digestAny(value any) (string, error) {
 	}
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func canonicalActionSnapshotArguments(args map[string]any) (map[string]any, error) {
+	if args == nil {
+		return nil, nil
+	}
+	data, err := yaml.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := yaml.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func validateActionSnapshotDigest(snapshot *humanrequest.ActionSnapshot) error {

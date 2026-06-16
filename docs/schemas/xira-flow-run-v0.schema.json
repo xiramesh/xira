@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xira.local/schemas/xira-flow-run-v0.schema.json",
+  "title": "Xira Flow Run State v0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "flow_run_id",
+    "flow_id",
+    "flow_version",
+    "status",
+    "current_step_id",
+    "input",
+    "steps",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "xira.flow_run.v0"
+    },
+    "flow_run_id": {
+      "type": "string",
+      "pattern": "^fr_[A-Za-z0-9_-]+$"
+    },
+    "flow_id": {
+      "$ref": "#/$defs/id"
+    },
+    "flow_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "running",
+        "waiting_human",
+        "waiting_signal",
+        "recoverable",
+        "failed",
+        "canceled",
+        "completed"
+      ]
+    },
+    "current_step_id": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "entrypoint_id": {
+      "$ref": "#/$defs/id"
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "steps": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/stepState"
+      }
+    },
+    "pending_signals": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "pending_human_requests": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/path"
+      }
+    },
+    "events_ref": {
+      "$ref": "#/$defs/path"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stepState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "completed",
+            "waiting_human",
+            "waiting",
+            "skipped",
+            "failed",
+            "recoverable"
+          ]
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "ended_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent_run_id": {
+          "type": "string"
+        },
+        "child_run_id": {
+          "type": "string"
+        },
+        "approval_id": {
+          "type": "string"
+        },
+        "human_request_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "interrupt": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "signal": {
+          "type": "string"
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/outputValue"
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/path"
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      }
+    },
+    "outputValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/path"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/path"
+          }
+        },
+        "value": true,
+        "summary": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

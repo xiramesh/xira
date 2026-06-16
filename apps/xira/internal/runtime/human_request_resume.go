@@ -69,10 +69,13 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 	if !ok {
 		return nil
 	}
+	resumeProfile := profile
+	resumeProfile.Permissions.Tools = nil
+	resumeProfile.Skills = nil
 	outputJSON, _ := json.Marshal(output)
-	resumeMessage := run.Message + "\n\napproved tool output for " + req.ActionSnapshot.ToolName + ": " + string(outputJSON) + "\n\nThe approved tool call has already executed. Do not call the same tool again; produce the final answer from this approved tool output."
+	resumeMessage := run.Message + "\n\napproved tool output for " + req.ActionSnapshot.ToolName + ": " + string(outputJSON) + "\n\nThe approved tool call has already executed. No tools are available during this resume turn; produce the final answer from this approved tool output."
 	resumeReq := TurnRequest{
-		AgentID:   profile.ID,
+		AgentID:   resumeProfile.ID,
 		Message:   resumeMessage,
 		UserID:    responseActor(req.Response),
 		SessionID: adkSessionID(run.SessionID, run.RunID+":tool-replay:"+uuid.NewString()),
@@ -115,11 +118,12 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 	}
 	resumeCtx := contextWithToolFailureGuard(ctx)
 	resumeCtx = contextWithToolTrace(resumeCtx, run.RunID)
+	resumeCtx = contextWithRuntimeNativeToolsDisabled(resumeCtx)
 	suspendCollector := newRuntimeSuspendCollector()
 	resumeCtx = contextWithRuntimeSuspendCollector(resumeCtx, suspendCollector)
 	resumeCtx = contextWithRunExecution(resumeCtx, runExecutionContext{
 		Base:        base,
-		Profile:     profile,
+		Profile:     resumeProfile,
 		Request:     resumeReq,
 		UserMessage: resumeMessage,
 	})
@@ -137,11 +141,11 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 	}, recordEvent, func(call LLMCallRecord) {
 		llmCalls = append(llmCalls, call)
 	})
-	instruction, _, err := s.instructionTextForRun(profile)
+	instruction, _, err := s.instructionTextForRun(resumeProfile)
 	if err != nil {
 		return err
 	}
-	final, toolCalls, err := s.generate(resumeCtx, profile, instruction, resumeReq, recordEvent, recordAudit)
+	final, toolCalls, err := s.generate(resumeCtx, resumeProfile, instruction, resumeReq, recordEvent, recordAudit)
 	if err != nil {
 		return err
 	}

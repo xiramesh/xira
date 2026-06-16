@@ -1,0 +1,25 @@
+schema_version: xira.flow_golden_tasks.v0
+flow_id: devrun
+tasks:
+  - id: typo_fix
+    entrypoint: ad_hoc
+    request: Fix a typo in README and open a PR.
+    expected_path:
+      - intake
+      - design
+      - prepare_branch
+      - implement
+      - verify
+      - create_pr
+      - review
+      - fix_or_approve
+      - approve_merge
+      - report
+
+  - id: autonomous_issue_pickup
+    entrypoint: issue_pickup
+    request: Select a suitable issue from the repo and fix it.
+    expected_path_prefix:
+      - select_issue
+      - intake
+      - design

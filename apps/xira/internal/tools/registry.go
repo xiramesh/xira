@@ -170,3 +170,7 @@ func schemaFromMap(value map[string]any) *jsonschema.Schema {
 	}
 	return &schema
 }
+
+func SchemaFromMap(value map[string]any) *jsonschema.Schema {
+	return schemaFromMap(value)
+}

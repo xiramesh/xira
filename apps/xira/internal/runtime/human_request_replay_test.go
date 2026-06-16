@@ -204,6 +204,161 @@ func TestApproveReplaysSnapshotExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestApproveReplaysSnapshotWithLeadingNewlineContent(t *testing.T) {
+	workspace := t.TempDir()
+	rt := newConfirmationTestService(t, workspace, map[string]any{
+		"path":    "leading-newline.txt",
+		"content": "\nstarts after blank line",
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Channel: "test", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := resp.HumanRequests[0].ID
+	if _, err := rt.ResolveHumanRequest(context.Background(), requestID, humanrequest.ResolveRequest{
+		Kind:    humanrequest.ResponseApprove,
+		Actor:   "tester",
+		Message: "approved",
+	}); err != nil {
+		t.Fatalf("ResolveHumanRequest approve leading newline: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(workspace, "leading-newline.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "starts after blank line" {
+		t.Fatalf("canonical approved file = %q", data)
+	}
+}
+
+func TestApprovedToolReplayDisablesRuntimeNativeTools(t *testing.T) {
+	workspace := t.TempDir()
+	var sawApprovedReplay bool
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		if strings.Contains(lastUserMessage(req.Messages), "approved tool output") {
+			sawApprovedReplay = true
+			if len(req.Tools) != 0 {
+				t.Fatalf("approved-tool replay exposed tools: %+v", req.Tools)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(deepSeekTextResponse("approved tool output final"))),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(deepSeekToolCallResponseWithArgs("write-confirm-call", "write_file", map[string]any{
+				"path":    "approved.txt",
+				"content": "write once",
+			}))),
+		}, nil
+	})}
+	rt := newConfirmationRuntimeWithClient(t, workspace, client)
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Channel: "test", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := resp.HumanRequests[0].ID
+
+	_, err = rt.ResolveHumanRequest(context.Background(), requestID, humanrequest.ResolveRequest{
+		Kind:    humanrequest.ResponseApprove,
+		Actor:   "tester",
+		Message: "approved",
+	})
+	if err != nil {
+		t.Fatalf("ResolveHumanRequest approve: %v", err)
+	}
+	if !sawApprovedReplay {
+		t.Fatal("fake model did not receive approved-tool replay turn")
+	}
+	pending, err := rt.ListHumanRequests(context.Background(), humanrequest.StatusPending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("approved-tool replay created new pending human requests: %+v", pending)
+	}
+}
+
+func TestNativeApprovedToolReplayRejectsHumanRequestToolCall(t *testing.T) {
+	workspace := t.TempDir()
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		if len(req.Tools) != 0 {
+			t.Fatalf("disabled native replay exposed tools: %+v", req.Tools)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(deepSeekToolCallResponseWithArgs("native-replay-human-call", "human_request", map[string]any{
+				"kind":     "approval",
+				"question": "should not create a new pending request",
+			}))),
+		}, nil
+	})}
+	rt := newConfirmationRuntimeWithClient(t, workspace, client)
+	runID := "native-replay-disabled"
+	if err := rt.RunStore().InitRun(runID); err != nil {
+		t.Fatal(err)
+	}
+	profile := agents.BuiltinXiraAssistant()
+	profile.Permissions.Tools = nil
+	profile.Skills = nil
+	collector := newRuntimeSuspendCollector()
+	ctx := contextWithRuntimeNativeToolsDisabled(context.Background())
+	ctx = contextWithRuntimeSuspendCollector(ctx, collector)
+	ctx = contextWithToolTrace(ctx, runID)
+	ctx = rtools.WithRunDir(ctx, rt.RunStore().RunDir(runID))
+	ctx = contextWithRunExecution(ctx, runExecutionContext{
+		Base: runtimeEventBase{
+			RunID:                 runID,
+			AgentID:               profile.ID,
+			ConversationSessionID: "session-native-replay-disabled",
+			TraceID:               runID,
+		},
+		Profile: profile,
+		Request: TurnRequest{Message: "approved tool output", SessionID: "session-native-replay-disabled"},
+	})
+	ctx = rt.withLLMInstrumentation(ctx, llmInstrumentationInput{
+		RunID:   runID,
+		AgentID: profile.ID,
+		Pricing: rt.pricing,
+	}, func(string, string, string, map[string]any) {}, func(LLMCallRecord) {})
+
+	final, toolCalls, err := rt.generateNativeDeepSeek(ctx, profile, "native instruction", TurnRequest{
+		Message:   "approved tool output",
+		SessionID: "session-native-replay-disabled",
+	}, func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {})
+	if err != nil {
+		t.Fatalf("generateNativeDeepSeek() error = %v", err)
+	}
+	if strings.TrimSpace(final) != "" {
+		t.Fatalf("final = %q, want empty after rejected undeclared tool", final)
+	}
+	if len(toolCalls) != 1 || toolCalls[0].Name != "human_request" || !strings.Contains(toolCalls[0].Error, "not allowed") {
+		t.Fatalf("native replay human.request should be rejected tool call: %+v", toolCalls)
+	}
+	if collector.HasInterrupt() {
+		t.Fatalf("disabled native replay created interrupt: %+v", collector.Interrupt())
+	}
+	pending, err := rt.ListHumanRequests(context.Background(), humanrequest.StatusPending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("disabled native replay created pending human requests: %+v", pending)
+	}
+}
+
 func TestDenyDoesNotReplaySnapshot(t *testing.T) {
 	workspace := t.TempDir()
 	targetPath := filepath.Join(workspace, "denied.txt")

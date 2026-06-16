@@ -21,6 +21,7 @@ import (
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 	fsession "github.com/xiramesh/xira/internal/session"
+	rtools "github.com/xiramesh/xira/internal/tools"
 )
 
 func (s *Service) generateADK(
@@ -35,9 +36,9 @@ func (s *Service) generateADK(
 	if err != nil {
 		return "", nil, err
 	}
-	var toolRecords []ToolCallRecord
+	toolRecords := &toolCallRecorder{}
 	tools, err := s.adkTools(ctx, profile, recordEvent, recordAudit, func(rec ToolCallRecord) {
-		toolRecords = append(toolRecords, rec)
+		toolRecords.append(rec)
 	})
 	if err != nil {
 		return "", nil, err
@@ -87,7 +88,7 @@ func (s *Service) generateADK(
 	var latestText string
 	for evt, err := range run.Run(ctx, req.UserID, req.SessionID, genai.NewContentFromText(req.Message, genai.RoleUser), adkRunConfig(profile)) {
 		if err != nil {
-			return final, toolRecords, err
+			return final, toolRecords.snapshot(), err
 		}
 		if evt == nil {
 			continue
@@ -128,17 +129,17 @@ func (s *Service) generateADK(
 			recordEvent("adk.suspended", "adk.runner", "ADK runner suspended by runtime interrupt", map[string]any{
 				"agent_id": profile.ID,
 			})
-			return final, toolRecords, nil
+			return final, toolRecords.snapshot(), nil
 		}
 	}
 	if strings.TrimSpace(final) == "" {
 		recordEvent("adk.empty_final", "adk.runner", "final ADK event contained no response text", map[string]any{
 			"agent_id": profile.ID,
 		})
-		return final, toolRecords, fmt.Errorf("ADK runner produced empty final response")
+		return final, toolRecords.snapshot(), fmt.Errorf("ADK runner produced empty final response")
 	}
 	recordAudit("adk.runner", profile.ID, true, "ADK runner completed", nil)
-	return final, toolRecords, nil
+	return final, toolRecords.snapshot(), nil
 }
 
 func generateContentConfig(profile agents.Profile) *genai.GenerateContentConfig {
@@ -264,11 +265,18 @@ func (s *Service) adkTools(
 	recordTool func(ToolCallRecord),
 ) ([]adktool.Tool, error) {
 	var out []adktool.Tool
-	runtimeTools, err := s.runtimeADKTools(ctx, profile, recordEvent, recordAudit, recordTool)
-	if err != nil {
-		return nil, err
+	if !runtimeNativeToolsDisabledFromContext(ctx) {
+		runtimeTools, err := s.runtimeADKTools(ctx, profile, recordEvent, recordAudit, recordTool)
+		if err != nil {
+			return nil, err
+		}
+		for _, tool := range runtimeTools {
+			if !runtimeToolAllowedFromContext(ctx, tool.Name()) {
+				continue
+			}
+			out = append(out, tool)
+		}
 	}
-	out = append(out, runtimeTools...)
 	registry := s.toolRegistry(profile)
 	run := func(toolCtx adktool.Context, name string, input map[string]any) (map[string]any, error) {
 		if input == nil {
@@ -280,7 +288,6 @@ func (s *Service) adkTools(
 			if callID == "" {
 				callID = uuid.NewString()
 			}
-			req, err := s.createRuntimeToolGateHumanRequest(ctx, callID, name, input)
 			rec := ToolCallRecord{
 				ID:        callID,
 				Name:      name,
@@ -292,6 +299,12 @@ func (s *Service) adkTools(
 					"human_request_id": "",
 				},
 			}
+			if err := validateRuntimeToolInputAllowlist(ctx, name, input); err != nil {
+				rec.Error = err.Error()
+				recordTool(rec)
+				return toolOutputForModel(rec), nil
+			}
+			req, err := s.createRuntimeToolGateHumanRequest(ctx, callID, name, input)
 			if err != nil {
 				rec.Error = err.Error()
 				recordTool(rec)
@@ -326,10 +339,14 @@ func (s *Service) adkTools(
 	}
 	for _, def := range registry.Definitions() {
 		def := def
+		if !runtimeToolAllowedFromContext(ctx, def.Name) {
+			continue
+		}
+		parameters := constrainedToolParameters(ctx, def.Name, def.Parameters)
 		t, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
 			Name:         def.Name,
 			Description:  def.Description,
-			InputSchema:  def.InputSchema,
+			InputSchema:  rtools.SchemaFromMap(parameters),
 			OutputSchema: def.OutputSchema,
 			RequireConfirmationProvider: func(_ map[string]any) bool {
 				return false

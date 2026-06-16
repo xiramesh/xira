@@ -16,13 +16,33 @@ import (
 
 func TestHumanRequestToolIsAvailableToNativeProfiles(t *testing.T) {
 	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
-	defs := rt.toolDefinitions(agents.BuiltinXiraAssistant())
+	defs := rt.toolDefinitions(context.Background(), agents.BuiltinXiraAssistant())
 	for _, def := range defs {
 		if def.Function.Name == "human_request" {
 			return
 		}
 	}
 	t.Fatalf("native tool definitions missing human_request: %+v", defs)
+}
+
+func TestHumanRequestToolCanBeDisabledForApprovedToolReplay(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	ctx := contextWithRuntimeNativeToolsDisabled(context.Background())
+	defs := rt.toolDefinitions(ctx, agents.BuiltinXiraAssistant())
+	for _, def := range defs {
+		if def.Function.Name == "human_request" {
+			t.Fatalf("native tool definitions exposed human_request in replay-disabled context: %+v", defs)
+		}
+	}
+	adkTools, err := rt.adkTools(ctx, agents.BuiltinXiraAssistant(), func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {}, func(ToolCallRecord) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range adkTools {
+		if tool.Name() == "human.request" {
+			t.Fatalf("ADK tools exposed human.request in replay-disabled context: %+v", adkToolNames(adkTools))
+		}
+	}
 }
 
 func TestHumanRequestToolIsAvailableToADKProfiles(t *testing.T) {
@@ -97,6 +117,39 @@ func TestHumanRequestToolCreatesPendingRequestAndInterrupt(t *testing.T) {
 	}
 	if stored.ID != request.ID || stored.Status != humanrequest.StatusPending {
 		t.Fatalf("stored human request = %+v", stored)
+	}
+}
+
+func TestHumanRequestToolDefaultsMissingKindToFreeform(t *testing.T) {
+	var modelCalls int
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		modelCalls++
+		if modelCalls > 1 {
+			t.Fatalf("model called after human.request interrupt")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(deepSeekToolCallResponseWithArgs("human-call-missing-kind", "human_request", map[string]any{
+				"question": "Which deployment window should I use?",
+			}))),
+		}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask a human without explicit kind", Channel: "test", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != StatusWaitingHuman || len(resp.HumanRequests) != 1 {
+		t.Fatalf("human_requests = %+v status=%q final=%q", resp.HumanRequests, resp.Status, resp.FinalResponse)
+	}
+	if resp.HumanRequests[0].Kind != humanrequest.RequestFreeform {
+		t.Fatalf("missing kind should default to freeform: %+v", resp.HumanRequests[0])
 	}
 }
 

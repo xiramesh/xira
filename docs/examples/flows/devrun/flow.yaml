@@ -1,0 +1,610 @@
+schema_version: xira.flow.v0
+id: devrun
+name: DevRun
+version: 0.1.0
+description: Remote or local development flow for turning an idea, bug report, or selected issue into a verified code change.
+objective: Progress one development case from intake or issue selection to a verified, reviewable, and optionally mergeable code change with durable artifacts and human gates.
+
+invocation:
+  aliases:
+    - /devrun
+    - /dev-flow
+  description: Start or resume a development flow run from chat, CLI, or XiraGarden.
+
+inputs:
+  required:
+    - repo
+  optional:
+    - request
+    - bug_report
+    - issue_source
+    - base_branch
+    - remote_channel
+    - user_id
+
+entrypoints:
+  - id: ad_hoc
+    description: The user has a temporary idea and wants Xira to turn it into a code change.
+    start_step: intake
+    required_inputs:
+      - repo
+      - request
+    aliases:
+      - /devrun
+
+  - id: bugfix
+    description: The user has noticed a bug and wants Xira to reproduce, diagnose, and fix it.
+    start_step: reproduce
+    required_inputs:
+      - repo
+      - bug_report
+
+  - id: issue_pickup
+    description: Automation wakes Xira up and asks it to choose a suitable issue to fix.
+    start_step: select_issue
+    required_inputs:
+      - repo
+      - issue_source
+    aliases:
+      - /dev-flow
+
+context:
+  required:
+    - task_spec.md
+    - context/required.md
+  forbidden:
+    - context/forbidden.md
+
+agents:
+  - id: issue-scout
+    role: select suitable issues for autonomous development
+  - id: dev-intake
+    role: clarify request and produce task spec
+  - id: dev-debugger
+    role: reproduce and diagnose bugs
+  - id: dev-architect
+    role: produce design and implementation plan
+  - id: dev-implementer
+    role: implement scoped code changes
+  - id: dev-verifier
+    role: run verification and summarize evidence
+  - id: dev-reviewer
+    role: review changes and decide whether fixes are required
+  - id: dev-git-operator
+    role: manage branches, pull requests, and approved merge operations
+  - id: dev-reporter
+    role: summarize final result and residual risk
+
+permissions:
+  permission_mode: ask
+  tools:
+    - command.run
+    - shell.run
+    - tool_output.read
+    - read_file
+    - search_file
+    - write_file
+    - edit_file
+    - list_dir
+  secrets: []
+
+artifacts:
+  output_dir: artifacts
+  retention: local
+
+verification:
+  default_checks:
+    - final_response_non_empty
+  acceptance_cases:
+    - verification/acceptance.yaml
+  golden_tasks:
+    - verification/golden_tasks.yaml
+
+evolution:
+  enabled: true
+  candidate_only: true
+  candidate_dir: evolution/candidates
+
+steps:
+  - id: select_issue
+    objective: Select one suitable issue from the configured issue source, preferring low-risk, high-value work that can be completed in the current repository.
+    inputs:
+      repo: "${input.repo}"
+      issue_source: "${input.issue_source}"
+    executor:
+      agent: issue-scout
+    instructions:
+      - Use `/skill issue-selection` if available.
+      - Inspect only the configured issue source and local repository evidence.
+      - Select no issue when candidates are unclear, too risky, or underspecified.
+    constraints:
+      - Do not modify files in this step.
+      - Do not create branches or pull requests in this step.
+    required_skills:
+      - issue-selection
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: selected_issue
+          description: The chosen issue or an explicit no-candidate result.
+          formats: ["yaml", "markdown"]
+        - id: selection_reason
+          description: Why this issue is suitable.
+          formats: ["markdown"]
+        - id: risk_level
+          description: Estimated risk level.
+          formats: ["yaml"]
+      completion_criteria:
+        - The selected issue is actionable in the current repo, or the step explicitly reports no suitable candidate.
+    transitions:
+      branches:
+        - when: "${outputs.select_issue.selected_issue.status == 'selected'}"
+          next: intake
+        - when: "${outputs.select_issue.selected_issue.status == 'none'}"
+          next: report
+
+  - id: intake
+    objective: Clarify the development request and produce an executable task spec with scope, non-goals, acceptance criteria, and validation hints.
+    inputs:
+      request: "${input.request || outputs.select_issue.selected_issue}"
+      repo: "${input.repo}"
+    executor:
+      agent: dev-intake
+    instructions:
+      - Use `/skill task-spec`.
+      - Keep implementation out of this step.
+      - Convert ambiguous requests into explicit scope, non-goals, and acceptance criteria.
+    constraints:
+      - Do not modify repository files.
+    required_skills:
+      - task-spec
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: task_spec
+          description: Executable task specification.
+          formats: ["yaml", "markdown"]
+        - id: acceptance_criteria
+          description: How the change will be judged complete.
+          formats: ["markdown"]
+      optional_slots:
+        - id: open_questions
+          description: Questions that may need user clarification.
+          formats: ["markdown"]
+      completion_criteria:
+        - Scope and non-goals are explicit.
+        - The task has concrete acceptance criteria.
+    transitions:
+      on_success: design
+
+  - id: reproduce
+    objective: Reproduce or confirm the reported bug, collect minimal evidence, and identify the suspected code area.
+    inputs:
+      bug_report: "${input.bug_report}"
+      repo: "${input.repo}"
+    executor:
+      agent: dev-debugger
+    instructions:
+      - Use `/skill systematic-debugging`.
+      - Use local evidence before guessing.
+      - Do not implement the fix in this step.
+    constraints:
+      - Do not edit source files.
+      - Do not create a pull request.
+    required_skills:
+      - systematic-debugging
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: reproduction_status
+          description: reproduced, not_reproduced, or insufficient_info.
+          formats: ["yaml"]
+        - id: evidence
+          description: Logs, command output references, screenshots, or file references.
+          formats: ["markdown", "yaml"]
+        - id: suspected_area
+          description: Likely code area or failing behavior.
+          formats: ["markdown"]
+      completion_criteria:
+        - The result clearly says whether the bug was reproduced.
+        - Evidence is recorded as artifacts or child run references.
+    transitions:
+      branches:
+        - when: "${outputs.reproduce.reproduction_status == 'reproduced'}"
+          next: diagnose
+        - when: "${outputs.reproduce.reproduction_status == 'not_reproduced'}"
+          next: report
+        - when: "${outputs.reproduce.reproduction_status == 'insufficient_info'}"
+          next: wait_for_more_info
+
+  - id: wait_for_more_info
+    objective: Pause until the user or remote channel provides enough information to continue the bugfix.
+    executor:
+      type: wait_signal
+      signal: user.more_info
+      timeout_seconds: 604800
+    output_contract:
+      artifact_policy: none
+      required_slots:
+        - id: signal_payload
+          description: The user-provided clarification payload.
+          formats: ["yaml", "json"]
+    transitions:
+      on_success: reproduce
+
+  - id: diagnose
+    objective: Turn reproduction evidence into a short diagnosis and recommended implementation approach.
+    inputs:
+      evidence: "${outputs.reproduce.evidence}"
+      suspected_area: "${outputs.reproduce.suspected_area}"
+      repo: "${input.repo}"
+    executor:
+      agent: dev-debugger
+    instructions:
+      - Use `/skill systematic-debugging`.
+      - Explain the root cause hypothesis and evidence.
+      - Keep the implementation strategy scoped.
+    required_skills:
+      - systematic-debugging
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: diagnosis
+          description: Root cause hypothesis and supporting evidence.
+          formats: ["markdown"]
+        - id: fix_strategy
+          description: Recommended implementation strategy.
+          formats: ["markdown"]
+    transitions:
+      on_success: design
+
+  - id: design
+    objective: Produce the implementation design and plan that can be reviewed before code is changed.
+    inputs:
+      task_spec: "${outputs.intake.task_spec || outputs.diagnose.fix_strategy}"
+      repo: "${input.repo}"
+    executor:
+      agent: dev-architect
+    instructions:
+      - Use `/skill architecture-design` or `/skill implementation-planning` if available.
+      - Include files likely to change, verification plan, risks, and rollback notes.
+      - Keep the plan actionable for an implementation agent.
+    constraints:
+      - Do not modify repository files.
+    required_skills:
+      - implementation-planning
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: design_doc
+          description: Design and tradeoffs.
+          formats: ["markdown"]
+        - id: implementation_plan
+          description: Ordered implementation plan.
+          formats: ["markdown"]
+        - id: verification_plan
+          description: Commands or checks to verify the work.
+          formats: ["yaml", "markdown"]
+      completion_criteria:
+        - The plan is actionable by an implementation executor.
+        - Verification commands or checks are explicit.
+    transitions:
+      branches:
+        - when: "${runtime.policy.require_design_approval == true}"
+          next: approve_design
+        - when: "${runtime.policy.require_design_approval != true}"
+          next: prepare_branch
+
+  - id: approve_design
+    objective: Give the user a chance to approve, revise, or cancel before code is modified.
+    executor:
+      type: human_approval
+      prompt: "Review the design and implementation plan before coding."
+      options:
+        - approve
+        - revise
+        - cancel
+      artifacts:
+        - "${outputs.design.design_doc}"
+        - "${outputs.design.implementation_plan}"
+    output_contract:
+      artifact_policy: none
+      required_slots:
+        - id: approval_signal
+          description: approve, revise, or cancel.
+          formats: ["yaml"]
+    transitions:
+      branches:
+        - when: "${outputs.approve_design.approval_signal == 'approve'}"
+          next: prepare_branch
+        - when: "${outputs.approve_design.approval_signal == 'revise'}"
+          next: design
+        - when: "${outputs.approve_design.approval_signal == 'cancel'}"
+          next: report
+
+  - id: prepare_branch
+    objective: Create or switch to an isolated branch for this development case.
+    inputs:
+      repo: "${input.repo}"
+      base_branch: "${input.base_branch}"
+    executor:
+      agent: dev-git-operator
+    instructions:
+      - Use `/skill git-branch-management` if available.
+      - Use the repository's normal git CLI through allowed tools.
+      - Create an isolated branch named from the flow run id unless one already exists.
+    constraints:
+      - Do not push.
+      - Do not merge.
+      - Ask for approval before destructive git operations.
+    required_skills:
+      - git-branch-management
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: branch
+          description: Branch name and git command evidence.
+          formats: ["json", "yaml", "markdown"]
+    retry:
+      max_attempts: 1
+      on_exhausted: report
+    transitions:
+      on_success: implement
+
+  - id: implement
+    objective: Apply the implementation plan to the repository and record changed files, summary, and known risks.
+    inputs:
+      implementation_plan: "${outputs.design.implementation_plan}"
+      repo: "${input.repo}"
+    executor:
+      agent: dev-implementer
+    instructions:
+      - Use `/skill code-implementation`.
+      - Prefer Codex for code edits when available.
+      - Keep changes scoped to files implied by the implementation plan.
+      - Record any tool, CLI, or command evidence as artifacts or child run references.
+    constraints:
+      - Do not merge.
+      - Do not push.
+      - Do not change unrelated files.
+      - Ask for approval before destructive git operations.
+    required_skills:
+      - code-implementation
+    preferred_methods:
+      - Codex for code edits
+      - Local test runner for quick feedback when safe
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: change_summary
+          description: What changed.
+          formats: ["markdown"]
+        - id: changed_files
+          description: Files changed by the implementation.
+          formats: ["yaml", "json"]
+        - id: risk_notes
+          description: Known risks or limitations.
+          formats: ["markdown"]
+    transitions:
+      on_success: verify
+
+  - id: verify
+    objective: Run the verification plan and record pass/fail result with command evidence.
+    inputs:
+      verification_plan: "${outputs.design.verification_plan}"
+      repo: "${input.repo}"
+    executor:
+      agent: dev-verifier
+    instructions:
+      - Use `/skill test-runner`.
+      - Follow the verification plan unless it is unsafe or impossible.
+      - Capture command output references instead of embedding large logs.
+    constraints:
+      - Do not modify source files except generated test artifacts explicitly allowed by the project.
+      - Do not push or merge.
+    required_skills:
+      - test-runner
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: verification_result
+          description: Pass/fail result with command output references.
+          formats: ["json", "yaml", "markdown"]
+    transitions:
+      branches:
+        - when: "${outputs.verify.verification_result.status == 'passed'}"
+          next: create_pr
+        - when: "${outputs.verify.verification_result.status != 'passed'}"
+          next: fix
+
+  - id: create_pr
+    objective: Create or update a pull request for the verified change.
+    inputs:
+      repo: "${input.repo}"
+      change_summary: "${outputs.implement.change_summary}"
+    executor:
+      agent: dev-git-operator
+    instructions:
+      - Use `/skill github-pr`.
+      - Use the repository's normal GitHub CLI or configured GitHub integration.
+      - Include change summary, verification result, and risk notes in the PR body.
+    constraints:
+      - Do not merge.
+      - Do not force push.
+    required_skills:
+      - github-pr
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: pr
+          description: Pull request URL and metadata.
+          formats: ["json", "yaml", "markdown"]
+    transitions:
+      on_success: review
+
+  - id: review
+    objective: Review the current change or PR and decide whether it has blocking findings.
+    inputs:
+      repo: "${input.repo}"
+      pr: "${outputs.create_pr.pr}"
+      change_summary: "${outputs.implement.change_summary}"
+    executor:
+      agent: dev-reviewer
+    instructions:
+      - Use `/skill code-review`.
+      - Prefer Claude reviewer when available.
+      - Review the current diff or PR only.
+      - Return findings ordered by severity and grounded in file references.
+    constraints:
+      - Do not modify files.
+      - Do not run implementation tools.
+      - Do not merge.
+    required_skills:
+      - code-review
+    preferred_methods:
+      - Claude for review reasoning when available
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: review_report
+          description: Blocking findings, non-blocking risks, and test gaps.
+          formats: ["markdown"]
+        - id: blocking_findings_count
+          description: Number of blocking findings.
+          formats: ["yaml", "json"]
+        - id: merge_recommendation
+          description: approve, fix_required, or reject.
+          formats: ["yaml"]
+    transitions:
+      on_success: fix_or_approve
+
+  - id: fix_or_approve
+    objective: Decide whether to fix review findings or request merge approval.
+    inputs:
+      review_report: "${outputs.review.review_report}"
+      blocking_findings_count: "${outputs.review.blocking_findings_count}"
+    executor:
+      type: decision
+    output_contract:
+      artifact_policy: none
+      required_slots:
+        - id: decision
+          description: fix or approve_merge.
+          formats: ["yaml"]
+    transitions:
+      branches:
+        - when: "${outputs.review.blocking_findings_count > 0}"
+          next: fix
+        - when: "${outputs.review.blocking_findings_count == 0}"
+          next: approve_merge
+
+  - id: fix
+    objective: Fix blocking review or verification findings while preserving the original scope.
+    inputs:
+      repo: "${input.repo}"
+      review_report: "${outputs.review.review_report}"
+      verification_result: "${outputs.verify.verification_result}"
+    executor:
+      agent: dev-implementer
+    instructions:
+      - Use `/skill code-implementation`.
+      - Fix only the blocking review or verification findings.
+      - Keep changes scoped and update the change summary.
+    constraints:
+      - Do not merge.
+      - Do not push.
+      - Do not expand scope beyond blocking findings without approval.
+    required_skills:
+      - code-implementation
+    preferred_methods:
+      - Codex for code edits when available
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: fix_summary
+          description: What was fixed.
+          formats: ["markdown"]
+        - id: changed_files
+          description: Files changed during the fix.
+          formats: ["yaml", "json"]
+    transitions:
+      on_success: verify
+
+  - id: approve_merge
+    objective: Pause before merge so the user can approve, reject, or request revision with full PR and review evidence.
+    executor:
+      type: human_approval
+      prompt: "Review final PR, verification, and review report before merge."
+      options:
+        - approve
+        - revise
+        - reject
+      artifacts:
+        - "${outputs.create_pr.pr}"
+        - "${outputs.review.review_report}"
+        - "${outputs.verify.verification_result}"
+    output_contract:
+      artifact_policy: none
+      required_slots:
+        - id: approval_signal
+          description: approve, revise, or reject.
+          formats: ["yaml"]
+    transitions:
+      branches:
+        - when: "${outputs.approve_merge.approval_signal == 'approve'}"
+          next: merge
+        - when: "${outputs.approve_merge.approval_signal == 'revise'}"
+          next: fix
+        - when: "${outputs.approve_merge.approval_signal == 'reject'}"
+          next: report
+
+  - id: merge
+    objective: Merge the approved pull request using the repository policy.
+    inputs:
+      repo: "${input.repo}"
+      pr: "${outputs.create_pr.pr}"
+    executor:
+      agent: dev-git-operator
+    instructions:
+      - Use `/skill github-pr`.
+      - Merge only after the approval signal is present.
+      - Use the repository's configured merge method.
+    constraints:
+      - Do not merge if approval is missing.
+      - Do not force push.
+    required_skills:
+      - github-pr
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: merge_result
+          description: Merge result and commit metadata.
+          formats: ["json", "yaml", "markdown"]
+    transitions:
+      on_success: report
+
+  - id: report
+    objective: Summarize the flow outcome, artifacts, verification, PR or merge status, and remaining risks.
+    inputs:
+      repo: "${input.repo}"
+      task_spec: "${outputs.intake.task_spec}"
+      pr: "${outputs.create_pr.pr}"
+      verification_result: "${outputs.verify.verification_result}"
+      merge_result: "${outputs.merge.merge_result || 'not_merged'}"
+    executor:
+      agent: dev-reporter
+    instructions:
+      - Use `/skill delivery-report`.
+      - Mention whether work completed, paused, was rejected, or needs follow-up.
+      - Cite artifact slots instead of copying large logs.
+    required_skills:
+      - delivery-report
+    output_contract:
+      artifact_policy: agent_defined
+      required_slots:
+        - id: final_report
+          description: Human-readable final report.
+          formats: ["markdown"]
+        - id: residual_risks
+          description: Remaining risks or follow-up work.
+          formats: ["markdown"]
