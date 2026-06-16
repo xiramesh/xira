@@ -21,20 +21,31 @@ func (e *AgentExecutor) doHumanApproval(ctx context.Context, run *Run, def *Defi
 	if len(options) == 0 {
 		options = []string{"approve", "deny", "cancel"}
 	}
-	question := strings.TrimSpace(step.Executor.Prompt)
+	question := strings.TrimSpace(step.Executor.Question)
+	if question == "" {
+		question = strings.TrimSpace(step.Executor.Prompt)
+	}
 	if question == "" {
 		question = "Approve step " + step.ID + "?"
 	}
 	metadata := buildFlowScopeMetadata(run, step)
+	agentID := strings.TrimSpace(step.Executor.Agent)
+	if agentID == "" {
+		agentID = "flow:" + run.FlowID
+	}
+	sessionID := "flow:" + run.ID
+	toolCallID := fmt.Sprintf("flow_human_approval:%s:%s", run.ID, step.ID)
 	created, err := e.Human.CreateHumanRequest(ctx, CreateHumanRequestInput{
 		WorkspaceID: e.Workspace,
 		RunID:       run.ID,
-		AgentID:     step.Executor.Agent,
+		AgentID:     agentID,
+		SessionID:   sessionID,
+		ToolCallID:  toolCallID,
 		Source:      SourceFlowHumanApproval,
 		Kind:        "approval",
 		Question:    question,
 		Options:     options,
-		DedupeKey:   fmt.Sprintf("flow_human_approval:%s:%s", run.ID, step.ID),
+		DedupeKey:   toolCallID,
 		Metadata:    metadata,
 	})
 	if err != nil {

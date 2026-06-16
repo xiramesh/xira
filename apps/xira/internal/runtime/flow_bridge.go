@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/xiramesh/xira/internal/flow"
 	"github.com/xiramesh/xira/internal/humanrequest"
@@ -26,18 +28,35 @@ func (b *flowBridge) RunAgent(ctx context.Context, req flow.AgentTurnRequest) (f
 		return flow.AgentTurnResponse{}, fmt.Errorf("runtime service is not available")
 	}
 	resp, err := b.service.RunAgent(ctx, TurnRequest{
-		AgentID:      req.AgentID,
-		EntrypointID: req.EntrypointID,
-		Message:      req.Message,
-		UserID:       req.UserID,
-		SessionID:    req.SessionID,
-		Channel:      req.Channel,
-		Metadata:     req.Metadata,
+		AgentID:            req.AgentID,
+		EntrypointID:       req.EntrypointID,
+		Message:            req.Message,
+		AllowedToolsSet:    req.AllowedToolsSet,
+		AllowedTools:       append([]string(nil), req.AllowedTools...),
+		ToolInputAllowlist: cloneFlowToolInputAllowlist(req.ToolInputAllowlist),
+		UserID:             req.UserID,
+		SessionID:          req.SessionID,
+		Channel:            req.Channel,
+		Metadata:           req.Metadata,
 	})
 	if err != nil {
 		return flow.AgentTurnResponse{}, err
 	}
 	return mapTurnResponseToFlow(resp), nil
+}
+
+func cloneFlowToolInputAllowlist(in map[string]map[string][]string) map[string]map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string][]string, len(in))
+	for tool, fields := range in {
+		out[tool] = make(map[string][]string, len(fields))
+		for field, values := range fields {
+			out[tool][field] = append([]string(nil), values...)
+		}
+	}
+	return out
 }
 
 func mapTurnResponseToFlow(resp TurnResponse) flow.AgentTurnResponse {
@@ -90,6 +109,7 @@ func (b *flowBridge) CreateHumanRequest(ctx context.Context, input flow.CreateHu
 		RunID:       input.RunID,
 		AgentID:     input.AgentID,
 		SessionID:   input.SessionID,
+		ToolCallID:  input.ToolCallID,
 		Source:      input.Source,
 		Kind:        kind,
 		Question:    input.Question,
@@ -147,6 +167,24 @@ func (b *flowBridge) AgentStepStatus(ctx context.Context, run *flow.Run, step fl
 	return agentRun.Status, nil
 }
 
+// PolicyValue satisfies flow.PolicyResolver. v0 exposes simple boolean policy
+// toggles from flow input so CLI/API callers can drive branches such as
+// require_design_approval without a broad policy DSL.
+func (b *flowBridge) PolicyValue(_ context.Context, run *flow.Run, key string) (any, bool) {
+	if run == nil || run.Input == nil {
+		return false, false
+	}
+	raw, ok := run.Input[strings.TrimSpace(key)]
+	if !ok {
+		return false, false
+	}
+	parsed, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return raw, true
+	}
+	return parsed, true
+}
+
 // flowStateRoot returns the directory used for flow run persistence. The
 // flow.Store itself appends "flow-runs/<id>" under this root, so this returns
 // the state root only (avoiding a doubled "flow-runs/flow-runs" segment).
@@ -175,6 +213,7 @@ func (s *Service) FlowKernel() *flow.Kernel {
 	s.flowKernel = &flow.Kernel{
 		Store:       store,
 		Executor:    executor,
+		Policy:      bridge,
 		Resolver:    bridge,
 		AgentStatus: bridge,
 	}

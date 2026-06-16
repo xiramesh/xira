@@ -44,6 +44,31 @@ steps:
 	return path
 }
 
+func writeRequiredInputFlowTestFile(t *testing.T, instance, agentID string) string {
+	t.Helper()
+	path := filepath.Join(instance, "flow-required.yaml")
+	writeCLIFile(t, path, `schema_version: xira.flow.v0
+id: cli-required-test
+name: CLI Required Input Test
+version: 0.1.0
+objective: reject missing required input
+entrypoints:
+  - id: ad_hoc
+    start_step: only
+    required_inputs:
+      - request
+steps:
+  - id: only
+    objective: Produce a one-line task spec.
+    executor:
+      agent: `+agentID+`
+    output_contract:
+      required_slots:
+        - id: task_spec
+`)
+	return path
+}
+
 func TestFlowRunCommandStartsRun(t *testing.T) {
 	instance := writeCLIFixture(t, "xira-assistant")
 	flowPath := writeFlowTestFile(t, instance, "xira-assistant")
@@ -60,6 +85,19 @@ func TestFlowRunCommandStartsRun(t *testing.T) {
 	}
 	if run.CurrentStepID != "only" {
 		t.Errorf("current_step_id = %q, want only", run.CurrentStepID)
+	}
+}
+
+func TestFlowRunCommandRejectsMissingRequiredInput(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	flowPath := writeRequiredInputFlowTestFile(t, instance, "xira-assistant")
+	out, err := executeCommandError("--config", filepath.Join(instance, "xira.yaml"), "flow", "run", flowPath, "--entrypoint", "ad_hoc")
+	if err == nil {
+		t.Fatalf("flow run without required input succeeded:\n%s", out)
+	}
+	errText := out + "\n" + err.Error()
+	if !strings.Contains(errText, "missing required") || !strings.Contains(errText, "request") {
+		t.Fatalf("unexpected error = %v output=%s", err, out)
 	}
 }
 

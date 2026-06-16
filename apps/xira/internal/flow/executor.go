@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // AgentRunner is the runtime surface the agent executor calls. It is satisfied
@@ -27,16 +29,17 @@ type HumanRequestCreator interface {
 // CreateHumanRequestInput is the flow-side projection of a HumanRequest
 // create request.
 type CreateHumanRequestInput struct {
-	WorkspaceID  string
-	RunID        string
-	AgentID      string
-	SessionID    string
-	Source       string
-	Kind         string // "approval" or "freeform"
-	Question     string
-	Options      []string
-	DedupeKey    string
-	Metadata     map[string]string
+	WorkspaceID string
+	RunID       string
+	AgentID     string
+	SessionID   string
+	ToolCallID  string
+	Source      string
+	Kind        string // "approval" or "freeform"
+	Question    string
+	Options     []string
+	DedupeKey   string
+	Metadata    map[string]string
 }
 
 // HumanRequestView is the flow-side projection of a created HumanRequest.
@@ -51,13 +54,16 @@ type HumanRequestView struct {
 // AgentTurnRequest is the flow-side projection of runtime.TurnRequest that
 // the agent executor builds from a step.
 type AgentTurnRequest struct {
-	AgentID      string            `json:"agent_id"`
-	EntrypointID string            `json:"entrypoint_id,omitempty"`
-	Message      string            `json:"message"`
-	UserID       string            `json:"user_id,omitempty"`
-	SessionID    string            `json:"session_id,omitempty"`
-	Channel      string            `json:"channel,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
+	AgentID            string                         `json:"agent_id"`
+	EntrypointID       string                         `json:"entrypoint_id,omitempty"`
+	Message            string                         `json:"message"`
+	AllowedToolsSet    bool                           `json:"allowed_tools_set,omitempty"`
+	AllowedTools       []string                       `json:"allowed_tools,omitempty"`
+	ToolInputAllowlist map[string]map[string][]string `json:"tool_input_allowlist,omitempty"`
+	UserID             string                         `json:"user_id,omitempty"`
+	SessionID          string                         `json:"session_id,omitempty"`
+	Channel            string                         `json:"channel,omitempty"`
+	Metadata           map[string]string              `json:"metadata,omitempty"`
 }
 
 // AgentTurnResponse is the flow-side projection of runtime.TurnResponse. Only
@@ -163,9 +169,12 @@ func (e *AgentExecutor) buildTurnRequest(run *Run, step Step) (AgentTurnRequest,
 	}
 	message := buildAgentMessage(step, run.Input, resolved)
 	req := AgentTurnRequest{
-		AgentID: step.Executor.Agent,
-		Message: message,
-		Channel: "flow",
+		AgentID:            step.Executor.Agent,
+		Message:            message,
+		AllowedToolsSet:    step.Executor.toolsConfigured,
+		AllowedTools:       append([]string(nil), step.Executor.Tools...),
+		ToolInputAllowlist: cloneToolInputAllowlist(step.Executor.ToolInputAllowlist),
+		Channel:            "flow",
 		Metadata: map[string]string{
 			"flow_run_id":  run.ID,
 			"flow_id":      run.FlowID,
@@ -173,6 +182,24 @@ func (e *AgentExecutor) buildTurnRequest(run *Run, step Step) (AgentTurnRequest,
 		},
 	}
 	return req, nil
+}
+
+func cloneToolInputAllowlist(in map[string]map[string][]string) map[string]map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string][]string, len(in))
+	for tool, fields := range in {
+		if len(fields) == 0 {
+			out[tool] = nil
+			continue
+		}
+		out[tool] = make(map[string][]string, len(fields))
+		for field, values := range fields {
+			out[tool][field] = append([]string(nil), values...)
+		}
+	}
+	return out
 }
 
 // buildAgentMessage composes the user-visible message handed to the agent from
@@ -356,6 +383,12 @@ func extractStructuredBlock(finalResponse string) map[string]any {
 			return out
 		}
 	}
+	if m := fencedYAMLRe.FindStringSubmatch(finalResponse); len(m) >= 2 {
+		var out map[string]any
+		if err := yaml.Unmarshal([]byte(m[1]), &out); err == nil {
+			return out
+		}
+	}
 	// Look for a leading bare JSON object (no fence).
 	if strings.HasPrefix(finalResponse, "{") {
 		var out map[string]any
@@ -446,6 +479,8 @@ func resolveInputExpression(run *Run, expr string) (string, error) {
 func resolveSingleInner(run *Run, inner string) (string, error) {
 	inner = strings.TrimSpace(inner)
 	switch {
+	case isQuotedLiteral(inner):
+		return strings.Trim(inner, `'"`), nil
 	case strings.HasPrefix(inner, "input."):
 		key := strings.TrimPrefix(inner, "input.")
 		val, ok := run.Input[key]
@@ -462,6 +497,11 @@ func resolveSingleInner(run *Run, inner string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported input expression %q", inner)
 	}
+}
+
+func isQuotedLiteral(value string) bool {
+	value = strings.TrimSpace(value)
+	return len(value) >= 2 && ((strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'")) || (strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"")))
 }
 
 func stringifyAny(v any) string {

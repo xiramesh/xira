@@ -25,12 +25,12 @@ type Store struct {
 	mu   sync.Mutex
 }
 
-// NewStore returns a store rooted at root. If root is empty, defaults to
-// .xira/flow-runs under the current directory.
+// NewStore returns a store rooted at root. If root is empty, defaults to .xira
+// under the current directory.
 func NewStore(root string) *Store {
 	root = strings.TrimSpace(root)
 	if root == "" {
-		root = ".xira/flow-runs"
+		root = ".xira"
 	}
 	return &Store{root: root}
 }
@@ -477,9 +477,14 @@ func markStepRunning(run *Run, stepID string, allowRetry bool) error {
 		step.Attempts++
 		step.CompletedAt = nil
 		step.Outputs = nil
+		step.StartedAt = nil
 		step.Error = ""
 	} else if step.StartedAt == nil {
-		step.Attempts = 1
+		if step.Attempts == 0 {
+			step.Attempts = 1
+		} else {
+			step.Attempts++
+		}
 	}
 	step.Status = StepRunning
 	step.StartedAt = &now

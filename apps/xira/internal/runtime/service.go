@@ -317,13 +317,14 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		ReplyToSenderID:       inbound.Context.ReplyToSenderID,
 		TraceID:               runID,
 	}
+	recorder := newRunRecorder(&resp)
 	recordEvent := func(kind, source, message string, payload map[string]any) {
 		evt := newRuntimeEvent(eventBase, kind, source, message, payload, nil)
-		resp.Events = append(resp.Events, evt)
+		recorder.appendEvent(evt)
 		s.events.Publish(evt)
 	}
 	recordAudit := func(action, target string, allowed bool, reason string, meta map[string]any) {
-		resp.AuditEvents = append(resp.AuditEvents, AuditEvent{
+		recorder.appendAudit(AuditEvent{
 			ID:      uuid.NewString(),
 			RunID:   runID,
 			Time:    time.Now(),
@@ -375,6 +376,10 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	}
 	ctx = contextWithToolFailureGuard(ctx)
 	ctx = contextWithToolTrace(ctx, runID)
+	if req.AllowedToolsSet || len(req.AllowedTools) > 0 {
+		ctx = contextWithRuntimeToolAllowlist(ctx, req.AllowedTools)
+	}
+	ctx = contextWithRuntimeToolInputAllowlist(ctx, req.ToolInputAllowlist)
 	suspendCollector := newRuntimeSuspendCollector()
 	ctx = contextWithRuntimeSuspendCollector(ctx, suspendCollector)
 	ctx = contextWithRunExecution(ctx, runExecutionContext{
@@ -395,7 +400,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		UserID:         req.UserID,
 		Pricing:        s.pricing,
 	}, recordEvent, func(call LLMCallRecord) {
-		resp.LLMCalls = append(resp.LLMCalls, call)
+		recorder.appendLLMCall(call)
 	})
 	final, toolCalls, runErr := s.generate(ctx, profile, runInstruction, agentReq, recordEvent, recordAudit)
 	resp.FinalResponse = final
@@ -542,6 +547,9 @@ func adkSessionID(agentSessionID, runID string) string {
 
 type toolFailureGuardContextKey struct{}
 type toolTraceContextKey struct{}
+type runtimeNativeToolsDisabledContextKey struct{}
+type runtimeToolAllowlistContextKey struct{}
+type runtimeToolInputAllowlistContextKey struct{}
 
 type toolFailureGuard struct {
 	mu       sync.Mutex
@@ -561,6 +569,54 @@ func contextWithToolTrace(ctx context.Context, runID string) context.Context {
 	return context.WithValue(ctx, toolTraceContextKey{}, toolTraceContext{runID: strings.TrimSpace(runID)})
 }
 
+func contextWithRuntimeNativeToolsDisabled(ctx context.Context) context.Context {
+	return context.WithValue(ctx, runtimeNativeToolsDisabledContextKey{}, true)
+}
+
+func contextWithRuntimeToolAllowlist(ctx context.Context, tools []string) context.Context {
+	allowed := map[string]struct{}{}
+	for _, tool := range tools {
+		tool = strings.TrimSpace(tool)
+		if tool == "" {
+			continue
+		}
+		allowed[tool] = struct{}{}
+		allowed[deepseek.DeepSeekToolName(tool)] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		allowed["__xira_no_runtime_tools__"] = struct{}{}
+	}
+	return context.WithValue(ctx, runtimeToolAllowlistContextKey{}, allowed)
+}
+
+func contextWithRuntimeToolInputAllowlist(ctx context.Context, allowlist map[string]map[string][]string) context.Context {
+	if len(allowlist) == 0 {
+		return ctx
+	}
+	copied := map[string]map[string]map[string]struct{}{}
+	for tool, fields := range allowlist {
+		tool = strings.TrimSpace(tool)
+		if tool == "" || len(fields) == 0 {
+			continue
+		}
+		copied[tool] = map[string]map[string]struct{}{}
+		for field, values := range fields {
+			field = strings.TrimSpace(field)
+			if field == "" || len(values) == 0 {
+				continue
+			}
+			copied[tool][field] = map[string]struct{}{}
+			for _, value := range values {
+				value = strings.TrimSpace(value)
+				if value != "" {
+					copied[tool][field][value] = struct{}{}
+				}
+			}
+		}
+	}
+	return context.WithValue(ctx, runtimeToolInputAllowlistContextKey{}, copied)
+}
+
 func toolFailureGuardFromContext(ctx context.Context) *toolFailureGuard {
 	guard, _ := ctx.Value(toolFailureGuardContextKey{}).(*toolFailureGuard)
 	return guard
@@ -569,6 +625,65 @@ func toolFailureGuardFromContext(ctx context.Context) *toolFailureGuard {
 func toolTraceFromContext(ctx context.Context) toolTraceContext {
 	trace, _ := ctx.Value(toolTraceContextKey{}).(toolTraceContext)
 	return trace
+}
+
+func runtimeNativeToolsDisabledFromContext(ctx context.Context) bool {
+	disabled, _ := ctx.Value(runtimeNativeToolsDisabledContextKey{}).(bool)
+	return disabled
+}
+
+func runtimeToolAllowedFromContext(ctx context.Context, name string) bool {
+	allowed, _ := ctx.Value(runtimeToolAllowlistContextKey{}).(map[string]struct{})
+	if len(allowed) == 0 {
+		return true
+	}
+	name = strings.TrimSpace(name)
+	if _, ok := allowed[name]; ok {
+		return true
+	}
+	_, ok := allowed[deepseek.DeepSeekToolName(name)]
+	return ok
+}
+
+func validateRuntimeToolInputAllowlist(ctx context.Context, tool string, input map[string]any) error {
+	allowlist, _ := ctx.Value(runtimeToolInputAllowlistContextKey{}).(map[string]map[string]map[string]struct{})
+	fields := allowlist[strings.TrimSpace(tool)]
+	if len(fields) == 0 {
+		return nil
+	}
+	for field, allowed := range fields {
+		value := strings.TrimSpace(fmt.Sprint(input[field]))
+		if value == "" {
+			return fmt.Errorf("tool input %s.%s is required by flow step", tool, field)
+		}
+		if _, ok := allowed[value]; !ok {
+			return fmt.Errorf("tool input %s.%s=%q is not allowed by flow step", tool, field, value)
+		}
+	}
+	return nil
+}
+
+func constrainedToolParameters(ctx context.Context, tool string, parameters map[string]any) map[string]any {
+	allowlist, _ := ctx.Value(runtimeToolInputAllowlistContextKey{}).(map[string]map[string]map[string]struct{})
+	fields := allowlist[strings.TrimSpace(tool)]
+	if len(fields) == 0 {
+		return parameters
+	}
+	out := cloneAnyMapDeep(parameters)
+	props, _ := out["properties"].(map[string]any)
+	for field, allowed := range fields {
+		prop, _ := props[field].(map[string]any)
+		if prop == nil {
+			continue
+		}
+		values := make([]string, 0, len(allowed))
+		for value := range allowed {
+			values = append(values, value)
+		}
+		sort.Strings(values)
+		prop["enum"] = values
+	}
+	return out
 }
 
 func (g *toolFailureGuard) shouldBlock(name string, input map[string]any) bool {
@@ -667,7 +782,7 @@ func (s *Service) generateNativeDeepSeek(
 		{Role: "system", Content: instructionText},
 		{Role: "user", Content: req.Message},
 	}
-	tools := s.toolDefinitions(profile)
+	tools := s.toolDefinitions(ctx, profile)
 	recordEvent("model.request", "deepseek", "sending chat completion", map[string]any{"model": modelID})
 	first, err := s.deepseek.Chat(ctx, deepseek.ChatRequest{
 		Model:       modelID,
@@ -691,7 +806,7 @@ func (s *Service) generateNativeDeepSeek(
 	var toolRecords []ToolCallRecord
 	messages = append(messages, msg)
 	for _, call := range msg.ToolCalls {
-		if isHumanRequestToolWireName(call.Function.Name) {
+		if isHumanRequestToolWireName(call.Function.Name) && !runtimeNativeToolsDisabledFromContext(ctx) && runtimeToolAllowedFromContext(ctx, "human.request") {
 			args := map[string]any{}
 			_ = json.Unmarshal([]byte(call.Function.Arguments), &args)
 			req, err := s.createAgentHumanRequest(ctx, call.ID, args)
@@ -767,6 +882,32 @@ func (s *Service) executeToolCall(
 		rec.ID = uuid.NewString()
 	}
 	_ = json.Unmarshal([]byte(call.Function.Arguments), &rec.Input)
+	if !runtimeToolAllowedFromContext(ctx, rec.Name) {
+		rec.Error = "tool is not allowed by flow step"
+		rec.EndedAt = time.Now()
+		slog.Warn("tool call rejected",
+			"agent_id", profile.ID,
+			"tool", rec.Name,
+			"call_id", rec.ID,
+			"input", toolInputSummary(rec.Input),
+			"error", rec.Error,
+		)
+		recordAudit("tool.call", rec.Name, false, rec.Error, rec.Input)
+		return rec
+	}
+	if err := validateRuntimeToolInputAllowlist(ctx, rec.Name, rec.Input); err != nil {
+		rec.Error = err.Error()
+		rec.EndedAt = time.Now()
+		slog.Warn("tool call rejected",
+			"agent_id", profile.ID,
+			"tool", rec.Name,
+			"call_id", rec.ID,
+			"input", toolInputSummary(rec.Input),
+			"error", rec.Error,
+		)
+		recordAudit("tool.call", rec.Name, false, rec.Error, rec.Input)
+		return rec
+	}
 	if !registry.Has(rec.Name) {
 		rec.Error = "tool is not allowed by agent profile"
 		rec.EndedAt = time.Now()
@@ -1129,17 +1270,28 @@ func intFromAny(value any) (int, bool) {
 	}
 }
 
-func (s *Service) toolDefinitions(profile agents.Profile) []deepseek.Tool {
+func (s *Service) toolDefinitions(ctx context.Context, profile agents.Profile) []deepseek.Tool {
 	defs := s.toolRegistry(profile).Definitions()
 	tools := make([]deepseek.Tool, 0, len(defs))
-	tools = append(tools, runtimeNativeToolDefinitions(profile)...)
+	if !runtimeNativeToolsDisabledFromContext(ctx) {
+		for _, def := range runtimeNativeToolDefinitions(profile) {
+			if !runtimeToolAllowedFromContext(ctx, def.Function.Name) {
+				continue
+			}
+			tools = append(tools, def)
+		}
+	}
 	for _, def := range defs {
+		if !runtimeToolAllowedFromContext(ctx, def.Name) {
+			continue
+		}
+		parameters := constrainedToolParameters(ctx, def.Name, def.Parameters)
 		tools = append(tools, deepseek.Tool{
 			Type: "function",
 			Function: deepseek.ToolFunction{
 				Name:        deepseek.DeepSeekToolName(def.Name),
 				Description: def.Description,
-				Parameters:  def.Parameters,
+				Parameters:  parameters,
 			},
 		})
 	}

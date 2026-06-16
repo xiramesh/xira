@@ -26,14 +26,14 @@ const ReservedTransitionTerminal = ""
 type RunStatus string
 
 const (
-	RunPending      RunStatus = "pending"
-	RunRunning      RunStatus = "running"
-	RunWaitingHuman RunStatus = "waiting_human"
+	RunPending       RunStatus = "pending"
+	RunRunning       RunStatus = "running"
+	RunWaitingHuman  RunStatus = "waiting_human"
 	RunWaitingSignal RunStatus = "waiting_signal"
-	RunRecoverable  RunStatus = "recoverable"
-	RunFailed       RunStatus = "failed"
-	RunCanceled     RunStatus = "canceled"
-	RunCompleted    RunStatus = "completed"
+	RunRecoverable   RunStatus = "recoverable"
+	RunFailed        RunStatus = "failed"
+	RunCanceled      RunStatus = "canceled"
+	RunCompleted     RunStatus = "completed"
 )
 
 // StepStatus is the persisted status of a single flow step.
@@ -71,22 +71,22 @@ const MetadataScopeTypeValue = "flow_run"
 
 // Definition is a static flow definition loaded from YAML.
 type Definition struct {
-	SchemaVersion string       `yaml:"schema_version" json:"schema_version"`
-	ID            string       `yaml:"id" json:"id"`
-	Version       string       `yaml:"version" json:"version"`
-	Name          string       `yaml:"name" json:"name"`
-	Description   string       `yaml:"description,omitempty" json:"description,omitempty"`
-	Objective     string       `yaml:"objective,omitempty" json:"objective,omitempty"`
-	Invocation    *Invocation  `yaml:"invocation,omitempty" json:"invocation,omitempty"`
-	Inputs        *InputSpec   `yaml:"inputs,omitempty" json:"inputs,omitempty"`
-	Entrypoints   []Entrypoint `yaml:"entrypoints,omitempty" json:"entrypoints,omitempty"`
-	Context       *ContextSpec `yaml:"context,omitempty" json:"context,omitempty"`
-	Agents        []AgentRef   `yaml:"agents,omitempty" json:"agents,omitempty"`
-	Permissions   *Permissions `yaml:"permissions,omitempty" json:"permissions,omitempty"`
+	SchemaVersion string          `yaml:"schema_version" json:"schema_version"`
+	ID            string          `yaml:"id" json:"id"`
+	Version       string          `yaml:"version" json:"version"`
+	Name          string          `yaml:"name" json:"name"`
+	Description   string          `yaml:"description,omitempty" json:"description,omitempty"`
+	Objective     string          `yaml:"objective,omitempty" json:"objective,omitempty"`
+	Invocation    *Invocation     `yaml:"invocation,omitempty" json:"invocation,omitempty"`
+	Inputs        *InputSpec      `yaml:"inputs,omitempty" json:"inputs,omitempty"`
+	Entrypoints   []Entrypoint    `yaml:"entrypoints,omitempty" json:"entrypoints,omitempty"`
+	Context       *ContextSpec    `yaml:"context,omitempty" json:"context,omitempty"`
+	Agents        []AgentRef      `yaml:"agents,omitempty" json:"agents,omitempty"`
+	Permissions   *Permissions    `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 	Artifacts     *ArtifactPolicy `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
 	Verification  *Verification   `yaml:"verification,omitempty" json:"verification,omitempty"`
 	Evolution     *Evolution      `yaml:"evolution,omitempty" json:"evolution,omitempty"`
-	Steps         []Step       `yaml:"steps" json:"steps"`
+	Steps         []Step          `yaml:"steps" json:"steps"`
 }
 
 // Invocation captures slash aliases and a short description for the flow.
@@ -147,43 +147,70 @@ type Verification struct {
 
 // Evolution configures candidate evolution capture.
 type Evolution struct {
-	Enabled      bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	CandidateOnly bool  `yaml:"candidate_only,omitempty" json:"candidate_only,omitempty"`
-	CandidateDir string `yaml:"candidate_dir,omitempty" json:"candidate_dir,omitempty"`
+	Enabled       bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	CandidateOnly bool   `yaml:"candidate_only,omitempty" json:"candidate_only,omitempty"`
+	CandidateDir  string `yaml:"candidate_dir,omitempty" json:"candidate_dir,omitempty"`
 }
 
 // Step is one goal contract inside a flow definition.
 type Step struct {
-	ID             string            `yaml:"id" json:"id"`
-	Description    string            `yaml:"description,omitempty" json:"description,omitempty"`
-	Objective      string            `yaml:"objective" json:"objective"`
-	Inputs         map[string]string `yaml:"inputs,omitempty" json:"inputs,omitempty"`
-	Instructions   []string          `yaml:"instructions,omitempty" json:"instructions,omitempty"`
-	Constraints    []string          `yaml:"constraints,omitempty" json:"constraints,omitempty"`
-	RequiredSkills []string          `yaml:"required_skills,omitempty" json:"required_skills,omitempty"`
-	PreferredMethods []string        `yaml:"preferred_methods,omitempty" json:"preferred_methods,omitempty"`
-	Prompt         *PromptSpec       `yaml:"prompt,omitempty" json:"prompt,omitempty"`
-	Executor       Executor          `yaml:"executor" json:"executor"`
-	OutputContract OutputContract    `yaml:"output_contract,omitempty" json:"output_contract,omitempty"`
-	Transitions    Transitions       `yaml:"transitions,omitempty" json:"transitions,omitempty"`
-	Retry          *RetryPolicy      `yaml:"retry,omitempty" json:"retry,omitempty"`
+	ID               string            `yaml:"id" json:"id"`
+	Description      string            `yaml:"description,omitempty" json:"description,omitempty"`
+	Objective        string            `yaml:"objective" json:"objective"`
+	Inputs           map[string]string `yaml:"inputs,omitempty" json:"inputs,omitempty"`
+	Instructions     []string          `yaml:"instructions,omitempty" json:"instructions,omitempty"`
+	Constraints      []string          `yaml:"constraints,omitempty" json:"constraints,omitempty"`
+	RequiredSkills   []string          `yaml:"required_skills,omitempty" json:"required_skills,omitempty"`
+	PreferredMethods []string          `yaml:"preferred_methods,omitempty" json:"preferred_methods,omitempty"`
+	Prompt           *PromptSpec       `yaml:"prompt,omitempty" json:"prompt,omitempty"`
+	Executor         Executor          `yaml:"executor" json:"executor"`
+	OutputContract   OutputContract    `yaml:"output_contract,omitempty" json:"output_contract,omitempty"`
+	Transitions      Transitions       `yaml:"transitions,omitempty" json:"transitions,omitempty"`
+	Retry            *RetryPolicy      `yaml:"retry,omitempty" json:"retry,omitempty"`
 }
 
 // Executor declares how a step is performed. Work steps use Agent; control
 // steps use Type (one of human_approval, decision, wait_signal, subflow).
 type Executor struct {
-	Agent      string         `yaml:"agent,omitempty" json:"agent,omitempty"`
-	Type       string         `yaml:"type,omitempty" json:"type,omitempty"`
-	EngineHint string         `yaml:"engine_hint,omitempty" json:"engine_hint,omitempty"`
+	Agent              string                         `yaml:"agent,omitempty" json:"agent,omitempty"`
+	Type               string                         `yaml:"type,omitempty" json:"type,omitempty"`
+	EngineHint         string                         `yaml:"engine_hint,omitempty" json:"engine_hint,omitempty"`
+	Tools              []string                       `yaml:"tools,omitempty" json:"tools,omitempty"`
+	ToolInputAllowlist map[string]map[string][]string `yaml:"tool_input_allowlist,omitempty" json:"tool_input_allowlist,omitempty"`
+	toolsConfigured    bool
 	// Control-step fields. Populated only for human_approval / wait_signal /
 	// subflow executors.
-	Prompt           string   `yaml:"prompt,omitempty" json:"prompt,omitempty"`
-	Options          []string `yaml:"options,omitempty" json:"options,omitempty"`
-	Artifacts        []string `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
-	Signal           string   `yaml:"signal,omitempty" json:"signal,omitempty"`
-	TimeoutSeconds   int      `yaml:"timeout_seconds,omitempty" json:"timeout_seconds,omitempty"`
-	SubflowFlow      string   `yaml:"flow,omitempty" json:"flow,omitempty"`
-	SubflowEntrypoint string  `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty"`
+	Prompt            string   `yaml:"prompt,omitempty" json:"prompt,omitempty"`
+	Question          string   `yaml:"question,omitempty" json:"question,omitempty"`
+	Options           []string `yaml:"options,omitempty" json:"options,omitempty"`
+	Artifacts         []string `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
+	Signal            string   `yaml:"signal,omitempty" json:"signal,omitempty"`
+	TimeoutSeconds    int      `yaml:"timeout_seconds,omitempty" json:"timeout_seconds,omitempty"`
+	SubflowFlow       string   `yaml:"flow,omitempty" json:"flow,omitempty"`
+	SubflowEntrypoint string   `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty"`
+}
+
+func (e *Executor) UnmarshalYAML(node *yaml.Node) error {
+	type executor Executor
+	var decoded executor
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	*e = Executor(decoded)
+	e.toolsConfigured = yamlMappingHasKey(node, "tools")
+	return nil
+}
+
+func yamlMappingHasKey(node *yaml.Node, key string) bool {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
 }
 
 // PromptSpec is a step-local prompt template (inline or path-backed).
@@ -195,10 +222,10 @@ type PromptSpec struct {
 
 // OutputContract declares the slots a step must/should produce.
 type OutputContract struct {
-	ArtifactPolicy      string         `yaml:"artifact_policy,omitempty" json:"artifact_policy,omitempty"`
-	RequiredSlots       []OutputSlot   `yaml:"required_slots" json:"required_slots"`
-	OptionalSlots       []OutputSlot   `yaml:"optional_slots,omitempty" json:"optional_slots,omitempty"`
-	CompletionCriteria  []string       `yaml:"completion_criteria,omitempty" json:"completion_criteria,omitempty"`
+	ArtifactPolicy     string       `yaml:"artifact_policy,omitempty" json:"artifact_policy,omitempty"`
+	RequiredSlots      []OutputSlot `yaml:"required_slots" json:"required_slots"`
+	OptionalSlots      []OutputSlot `yaml:"optional_slots,omitempty" json:"optional_slots,omitempty"`
+	CompletionCriteria []string     `yaml:"completion_criteria,omitempty" json:"completion_criteria,omitempty"`
 }
 
 // OutputSlot is either a bare id or a richer object; the ID is the canonical
@@ -248,42 +275,42 @@ type Branch struct {
 
 // RetryPolicy bounds retry attempts for a step.
 type RetryPolicy struct {
-	MaxAttempts  int    `yaml:"max_attempts,omitempty" json:"max_attempts,omitempty"`
-	OnExhausted  string `yaml:"on_exhausted,omitempty" json:"on_exhausted,omitempty"`
+	MaxAttempts int    `yaml:"max_attempts,omitempty" json:"max_attempts,omitempty"`
+	OnExhausted string `yaml:"on_exhausted,omitempty" json:"on_exhausted,omitempty"`
 }
 
 // Run is one durable instance of a Definition.
 type Run struct {
-	SchemaVersion string               `yaml:"schema_version" json:"schema_version"`
-	ID            string               `yaml:"flow_run_id" json:"flow_run_id"`
-	FlowID        string               `yaml:"flow_id" json:"flow_id"`
-	FlowVersion   string               `yaml:"flow_version" json:"flow_version"`
-	Status        RunStatus            `yaml:"status" json:"status"`
-	CurrentStepID string               `yaml:"current_step_id,omitempty" json:"current_step_id,omitempty"`
-	EntrypointID  string               `yaml:"entrypoint_id,omitempty" json:"entrypoint_id,omitempty"`
-	Input         map[string]string    `yaml:"input,omitempty" json:"input,omitempty"`
-	Steps         map[string]StepState `yaml:"steps,omitempty" json:"steps,omitempty"`
-	PendingSignals []string            `yaml:"pending_signals,omitempty" json:"pending_signals,omitempty"`
-	PendingHumanRequests []string      `yaml:"pending_human_requests,omitempty" json:"pending_human_requests,omitempty"`
-	Artifacts     []ArtifactRef        `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
-	EventsRef     string               `yaml:"events_ref,omitempty" json:"events_ref,omitempty"`
-	CreatedAt     time.Time            `yaml:"created_at" json:"created_at"`
-	UpdatedAt     time.Time            `yaml:"updated_at" json:"updated_at"`
+	SchemaVersion        string               `yaml:"schema_version" json:"schema_version"`
+	ID                   string               `yaml:"flow_run_id" json:"flow_run_id"`
+	FlowID               string               `yaml:"flow_id" json:"flow_id"`
+	FlowVersion          string               `yaml:"flow_version" json:"flow_version"`
+	Status               RunStatus            `yaml:"status" json:"status"`
+	CurrentStepID        string               `yaml:"current_step_id,omitempty" json:"current_step_id,omitempty"`
+	EntrypointID         string               `yaml:"entrypoint_id,omitempty" json:"entrypoint_id,omitempty"`
+	Input                map[string]string    `yaml:"input,omitempty" json:"input,omitempty"`
+	Steps                map[string]StepState `yaml:"steps,omitempty" json:"steps,omitempty"`
+	PendingSignals       []string             `yaml:"pending_signals,omitempty" json:"pending_signals,omitempty"`
+	PendingHumanRequests []string             `yaml:"pending_human_requests,omitempty" json:"pending_human_requests,omitempty"`
+	Artifacts            []ArtifactRef        `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
+	EventsRef            string               `yaml:"events_ref,omitempty" json:"events_ref,omitempty"`
+	CreatedAt            time.Time            `yaml:"created_at" json:"created_at"`
+	UpdatedAt            time.Time            `yaml:"updated_at" json:"updated_at"`
 }
 
 // StepState is the persisted state of one step inside a Run.
 type StepState struct {
-	Status          StepStatus             `yaml:"status" json:"status"`
-	StartedAt       *time.Time             `yaml:"started_at,omitempty" json:"started_at,omitempty"`
-	CompletedAt     *time.Time             `yaml:"completed_at,omitempty" json:"completed_at,omitempty"`
-	Attempts        int                    `yaml:"attempts,omitempty" json:"attempts,omitempty"`
-	AgentRunID      string                 `yaml:"agent_run_id,omitempty" json:"agent_run_id,omitempty"`
-	HumanRequestIDs []string               `yaml:"human_request_ids,omitempty" json:"human_request_ids,omitempty"`
-	Interrupt       map[string]any         `yaml:"interrupt,omitempty" json:"interrupt,omitempty"`
-	Signal          string                 `yaml:"signal,omitempty" json:"signal,omitempty"`
-	Outputs         map[string]OutputRef   `yaml:"outputs,omitempty" json:"outputs,omitempty"`
-	Artifacts       []ArtifactRef          `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
-	Error           string                 `yaml:"error,omitempty" json:"error,omitempty"`
+	Status          StepStatus           `yaml:"status" json:"status"`
+	StartedAt       *time.Time           `yaml:"started_at,omitempty" json:"started_at,omitempty"`
+	CompletedAt     *time.Time           `yaml:"completed_at,omitempty" json:"completed_at,omitempty"`
+	Attempts        int                  `yaml:"attempts,omitempty" json:"attempts,omitempty"`
+	AgentRunID      string               `yaml:"agent_run_id,omitempty" json:"agent_run_id,omitempty"`
+	HumanRequestIDs []string             `yaml:"human_request_ids,omitempty" json:"human_request_ids,omitempty"`
+	Interrupt       map[string]any       `yaml:"interrupt,omitempty" json:"interrupt,omitempty"`
+	Signal          string               `yaml:"signal,omitempty" json:"signal,omitempty"`
+	Outputs         map[string]OutputRef `yaml:"outputs,omitempty" json:"outputs,omitempty"`
+	Artifacts       []ArtifactRef        `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
+	Error           string               `yaml:"error,omitempty" json:"error,omitempty"`
 }
 
 // OutputRef is one declared output slot's resolved value/reference.
@@ -303,12 +330,12 @@ type ArtifactRef struct {
 
 // Event is one durable flow event appended to events.jsonl.
 type Event struct {
-	ID        string         `yaml:"-" json:"id"`
-	Time      time.Time      `yaml:"time" json:"time"`
-	Kind      string         `yaml:"kind" json:"kind"`
-	FlowRunID string         `yaml:"flow_run_id,omitempty" json:"flow_run_id,omitempty"`
-	StepID    string         `yaml:"step_id,omitempty" json:"step_id,omitempty"`
-	AgentRunID string        `yaml:"agent_run_id,omitempty" json:"agent_run_id,omitempty"`
-	HumanRequestID string    `yaml:"human_request_id,omitempty" json:"human_request_id,omitempty"`
-	Payload   map[string]any `yaml:"payload,omitempty" json:"payload,omitempty"`
+	ID             string         `yaml:"-" json:"id"`
+	Time           time.Time      `yaml:"time" json:"time"`
+	Kind           string         `yaml:"kind" json:"kind"`
+	FlowRunID      string         `yaml:"flow_run_id,omitempty" json:"flow_run_id,omitempty"`
+	StepID         string         `yaml:"step_id,omitempty" json:"step_id,omitempty"`
+	AgentRunID     string         `yaml:"agent_run_id,omitempty" json:"agent_run_id,omitempty"`
+	HumanRequestID string         `yaml:"human_request_id,omitempty" json:"human_request_id,omitempty"`
+	Payload        map[string]any `yaml:"payload,omitempty" json:"payload,omitempty"`
 }

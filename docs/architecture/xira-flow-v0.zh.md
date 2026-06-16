@@ -1,6 +1,6 @@
 # Xira Flow v0 Schema 设计说明
 
-> 状态：草案，供人和 AI review。  
+> 状态：草案，供人和 AI review。<br>
 > 目标：先定义 Flow 的概念边界、文件形态和完整 DevRun 示例，再实现 Flow Run Kernel。
 
 ## 结论

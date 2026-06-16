@@ -505,7 +505,7 @@ func (s *Server) flowRuns(w http.ResponseWriter, r *http.Request) {
 		Input:        body.Input,
 	})
 	if err != nil {
-		writeJSON(w, map[string]any{"error": err.Error()})
+		writeFlowError(w, err)
 		return
 	}
 	writeJSON(w, run)
@@ -537,7 +537,7 @@ func (s *Server) flowRunByID(w http.ResponseWriter, r *http.Request) {
 		}
 		run, err := s.runtime.AdvanceFlow(r.Context(), flowRunID)
 		if err != nil {
-			writeJSON(w, map[string]any{"error": err.Error()})
+			writeFlowError(w, err)
 			return
 		}
 		writeJSON(w, run)
@@ -559,7 +559,7 @@ func (s *Server) flowRunByID(w http.ResponseWriter, r *http.Request) {
 		}
 		run, err := s.runtime.ResumeFlow(r.Context(), flowRunID, body.HumanRequestID)
 		if err != nil {
-			writeJSON(w, map[string]any{"error": err.Error()})
+			writeFlowError(w, err)
 			return
 		}
 		writeJSON(w, run)
@@ -577,6 +577,22 @@ func parseFlowRunPath(path string) (flowRunID, resource string, ok bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+func writeFlowError(w http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "flow run not found"), strings.Contains(msg, "not found: human request"), strings.Contains(msg, "human request ") && strings.Contains(msg, "not found"):
+		status = http.StatusNotFound
+	case strings.Contains(msg, "still pending"), strings.Contains(msg, "already resolved"), strings.Contains(msg, "already completed"):
+		status = http.StatusConflict
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if encErr := json.NewEncoder(w).Encode(map[string]any{"error": msg}); encErr != nil {
+		http.Error(w, fmt.Sprintf("encode json: %v", encErr), http.StatusInternalServerError)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

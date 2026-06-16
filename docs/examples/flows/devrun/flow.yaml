@@ -590,7 +590,7 @@ steps:
       task_spec: "${outputs.intake.task_spec}"
       pr: "${outputs.create_pr.pr}"
       verification_result: "${outputs.verify.verification_result}"
-      merge_result: "${outputs.merge.merge_result}"
+      merge_result: "${outputs.merge.merge_result || 'not_merged'}"
     executor:
       agent: dev-reporter
     instructions:

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -117,6 +118,20 @@ func TestKernelRejectsUnknownEntrypoint(t *testing.T) {
 	}
 }
 
+func TestKernelStartRejectsMissingRequiredEntrypointInput(t *testing.T) {
+	def := linearFlow()
+	def.Inputs = &InputSpec{Required: []string{"repo"}}
+	def.Entrypoints[0].RequiredInputs = []string{"repo", "request"}
+	k, _ := newTestKernel(t, map[string]*Definition{"test": def}, nil)
+	_, err := k.Start(context.Background(), StartRequest{FlowID: "test", EntrypointID: "ad_hoc", Input: map[string]string{"request": "x"}})
+	if err == nil {
+		t.Fatal("expected missing repo input to be rejected")
+	}
+	if !strings.Contains(err.Error(), "repo") {
+		t.Fatalf("error = %v, want repo mentioned", err)
+	}
+}
+
 func TestKernelCompletesFlowWhenNoNextStep(t *testing.T) {
 	k, fake := newTestKernel(t, map[string]*Definition{"test": linearFlow()}, nil)
 	fake.results["a"] = StepExecutionResult{Status: StepCompleted, Outputs: map[string]OutputRef{"out": {Value: "a"}}}
@@ -181,7 +196,7 @@ func decisionFlow() *Definition {
 		Steps: []Step{
 			{
 				ID: "decide", Objective: "decide",
-				Executor: Executor{Type: "decision"},
+				Executor:       Executor{Type: "decision"},
 				OutputContract: OutputContract{RequiredSlots: []OutputSlot{{ID: "approval_signal"}}},
 				Transitions: Transitions{Branches: []Branch{
 					{When: "${outputs.decide.approval_signal == 'approve'}", Next: "merge"},
@@ -250,6 +265,105 @@ func TestKernelRejectsUnresolvableTransition(t *testing.T) {
 	}
 	if run.Steps["decide"].Status != StepFailed {
 		t.Errorf("decide status = %q, want failed", run.Steps["decide"].Status)
+	}
+}
+
+func TestKernelRoutesRetryExhaustedToConfiguredStep(t *testing.T) {
+	def := &Definition{
+		SchemaVersion: SchemaVersionDefinition,
+		ID:            "test",
+		Name:          "Test",
+		Version:       "0.1.0",
+		Objective:     "test",
+		Entrypoints:   []Entrypoint{{ID: "ad_hoc", StartStep: "prepare_branch"}},
+		Steps: []Step{
+			{
+				ID:             "prepare_branch",
+				Objective:      "prepare branch",
+				Executor:       Executor{Agent: "git-op"},
+				OutputContract: OutputContract{RequiredSlots: []OutputSlot{{ID: "branch"}}},
+				Retry:          &RetryPolicy{MaxAttempts: 1, OnExhausted: "report"},
+				Transitions:    Transitions{OnSuccess: "implement"},
+			},
+			{ID: "implement", Objective: "implement", Executor: Executor{Agent: "impl"}, OutputContract: OutputContract{RequiredSlots: []OutputSlot{{ID: "change"}}}},
+			{ID: "report", Objective: "report", Executor: Executor{Agent: "reporter"}, OutputContract: OutputContract{RequiredSlots: []OutputSlot{{ID: "final_report"}}}},
+		},
+	}
+	k, fake := newTestKernel(t, map[string]*Definition{"test": def}, nil)
+	fake.results["prepare_branch"] = StepExecutionResult{Status: StepFailed, Error: "branch exists"}
+	run, _ := k.Start(context.Background(), testStartRequest("ad_hoc"))
+	run, err := k.Advance(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	if run.Status != RunRunning {
+		t.Fatalf("status = %q, want running after on_exhausted route", run.Status)
+	}
+	if run.CurrentStepID != "report" {
+		t.Fatalf("current_step_id = %q, want report", run.CurrentStepID)
+	}
+	if run.Steps["prepare_branch"].Status != StepFailed {
+		t.Fatalf("prepare_branch status = %q, want failed", run.Steps["prepare_branch"].Status)
+	}
+	if run.Steps["report"].Status != StepPending {
+		t.Fatalf("report status = %q, want pending", run.Steps["report"].Status)
+	}
+}
+
+func TestKernelRetriesFailedStepUntilMaxAttemptsThenRoutes(t *testing.T) {
+	def := &Definition{
+		SchemaVersion: SchemaVersionDefinition,
+		ID:            "test",
+		Name:          "Test",
+		Version:       "0.1.0",
+		Objective:     "test",
+		Entrypoints:   []Entrypoint{{ID: "ad_hoc", StartStep: "prepare_branch"}},
+		Steps: []Step{
+			{
+				ID:             "prepare_branch",
+				Objective:      "prepare branch",
+				Executor:       Executor{Agent: "git-op"},
+				OutputContract: OutputContract{RequiredSlots: []OutputSlot{{ID: "branch"}}},
+				Retry:          &RetryPolicy{MaxAttempts: 2, OnExhausted: "report"},
+				Transitions:    Transitions{OnSuccess: "implement"},
+			},
+			{ID: "implement", Objective: "implement", Executor: Executor{Agent: "impl"}, OutputContract: OutputContract{RequiredSlots: []OutputSlot{{ID: "change"}}}},
+			{ID: "report", Objective: "report", Executor: Executor{Agent: "reporter"}, OutputContract: OutputContract{RequiredSlots: []OutputSlot{{ID: "final_report"}}}},
+		},
+	}
+	k, fake := newTestKernel(t, map[string]*Definition{"test": def}, nil)
+	fake.results["prepare_branch"] = StepExecutionResult{Status: StepFailed, Error: "branch exists"}
+	run, _ := k.Start(context.Background(), testStartRequest("ad_hoc"))
+
+	run, err := k.Advance(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("Advance first failure: %v", err)
+	}
+	if run.Status != RunRunning || run.CurrentStepID != "prepare_branch" {
+		t.Fatalf("after first failure status=%q current=%q, want running prepare_branch", run.Status, run.CurrentStepID)
+	}
+	if got := run.Steps["prepare_branch"].Status; got != StepPending {
+		t.Fatalf("after first failure prepare_branch status=%q, want pending", got)
+	}
+	if got := run.Steps["prepare_branch"].Attempts; got != 1 {
+		t.Fatalf("after first failure attempts=%d, want 1", got)
+	}
+
+	run, err = k.Advance(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("Advance second failure: %v", err)
+	}
+	if fake.execCount["prepare_branch"] != 2 {
+		t.Fatalf("prepare_branch executed %d times, want 2", fake.execCount["prepare_branch"])
+	}
+	if run.CurrentStepID != "report" {
+		t.Fatalf("current_step_id = %q, want report after exhausted retry", run.CurrentStepID)
+	}
+	if got := run.Steps["prepare_branch"].Attempts; got != 2 {
+		t.Fatalf("after exhausted attempts=%d, want 2", got)
+	}
+	if run.Steps["report"].Status != StepPending {
+		t.Fatalf("report status = %q, want pending", run.Steps["report"].Status)
 	}
 }
 

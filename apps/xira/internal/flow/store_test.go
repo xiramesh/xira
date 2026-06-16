@@ -15,14 +15,52 @@ func newTestStore(t *testing.T) *Store {
 	return NewStore(t.TempDir())
 }
 
+func TestStoreDefaultRootDoesNotDoubleFlowRuns(t *testing.T) {
+	wd := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(wd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(old); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	})
+
+	store := NewStore("")
+	run, err := store.CreateRun(context.Background(), CreateRunRequest{
+		FlowID:        "devrun",
+		FlowVersion:   "0.1.0",
+		EntrypointID:  "ad_hoc",
+		CurrentStepID: "intake",
+		Input:         map[string]string{"request": "x"},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	want := filepath.Join(".xira", "flow-runs", run.ID)
+	if got := store.RunDir(run.ID); got != want {
+		t.Fatalf("RunDir() = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(wd, want, "flow_run.yaml")); err != nil {
+		t.Fatalf("default flow run file missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wd, ".xira", "flow-runs", "flow-runs", run.ID)); !os.IsNotExist(err) {
+		t.Fatalf("unexpected doubled flow-runs directory err=%v", err)
+	}
+}
+
 func TestStoreCreateAndGetFlowRun(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	created, err := store.CreateRun(ctx, CreateRunRequest{
-		FlowID:       "devrun",
-		FlowVersion:  "0.1.0",
-		EntrypointID: "ad_hoc",
-		Input:        map[string]string{"repo": "/repo", "request": "fix bug"},
+		FlowID:        "devrun",
+		FlowVersion:   "0.1.0",
+		EntrypointID:  "ad_hoc",
+		Input:         map[string]string{"repo": "/repo", "request": "fix bug"},
 		CurrentStepID: "intake",
 	})
 	if err != nil {
@@ -268,10 +306,10 @@ func TestStoreConcurrentUpdateDoesNotCorruptRun(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	run, err := store.CreateRun(ctx, CreateRunRequest{
-		FlowID:      "devrun",
-		FlowVersion: "0.1.0",
+		FlowID:        "devrun",
+		FlowVersion:   "0.1.0",
 		CurrentStepID: "intake",
-		Input:       map[string]string{"request": "x"},
+		Input:         map[string]string{"request": "x"},
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
@@ -306,10 +344,10 @@ func TestStoreRejectsCompletedStepOverwriteWithoutRetry(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	run, err := store.CreateRun(ctx, CreateRunRequest{
-		FlowID:      "devrun",
-		FlowVersion: "0.1.0",
+		FlowID:        "devrun",
+		FlowVersion:   "0.1.0",
 		CurrentStepID: "intake",
-		Input:       map[string]string{"request": "x"},
+		Input:         map[string]string{"request": "x"},
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
@@ -362,10 +400,10 @@ func TestStoreRoundTripsThroughRestart(t *testing.T) {
 	store := NewStore(root)
 	ctx := context.Background()
 	run, err := store.CreateRun(ctx, CreateRunRequest{
-		FlowID:      "devrun",
-		FlowVersion: "0.1.0",
+		FlowID:        "devrun",
+		FlowVersion:   "0.1.0",
 		CurrentStepID: "intake",
-		Input:       map[string]string{"request": "x"},
+		Input:         map[string]string{"request": "x"},
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)

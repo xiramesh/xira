@@ -234,11 +234,6 @@ func TestDevRunDesignApprovalPausesAndResumes(t *testing.T) {
 }
 
 func TestDevRunMergeApprovalDenyDoesNotMerge(t *testing.T) {
-	// approve_merge reject routes to report. In v0 report references
-	// ${outputs.merge.merge_result}, which is absent when merge was skipped, so
-	// report's input resolution fails and the flow fails — the critical v0
-	// invariant is that merge never executes. (A later DevRun revision should
-	// make report's inputs tolerant of an absent merge.)
 	k, _, resolver := newDevRunKernel(t, map[string]any{
 		"require_design_approval": false,
 	}, nil)
@@ -267,10 +262,11 @@ func TestDevRunMergeApprovalDenyDoesNotMerge(t *testing.T) {
 	if s, ok := run.Steps["merge"]; ok && s.Status == StepCompleted {
 		t.Errorf("merge executed despite reject: %+v", s)
 	}
-	// Flow did not complete with a merge; it ends failed at report (missing
-	// merge input) per the documented v0 strict-input contract.
-	if run.Status != RunFailed {
-		t.Errorf("status = %q, want failed (report cannot resolve merge input)", run.Status)
+	if run.Status != RunCompleted {
+		t.Errorf("status = %q, want completed-with-report after rejected merge", run.Status)
+	}
+	if run.Steps["report"].Status != StepCompleted {
+		t.Errorf("report status = %q, want completed", run.Steps["report"].Status)
 	}
 }
 

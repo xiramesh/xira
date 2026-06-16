@@ -15,13 +15,16 @@ const (
 )
 
 type TurnRequest struct {
-	AgentID      string            `json:"agent_id" yaml:"agent_id"`
-	EntrypointID string            `json:"entrypoint_id,omitempty" yaml:"entrypoint_id,omitempty"`
-	Message      string            `json:"message" yaml:"message"`
-	UserID       string            `json:"user_id,omitempty" yaml:"user_id,omitempty"`
-	SessionID    string            `json:"session_id,omitempty" yaml:"session_id,omitempty"`
-	Channel      string            `json:"channel,omitempty" yaml:"channel,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	AgentID            string                         `json:"agent_id" yaml:"agent_id"`
+	EntrypointID       string                         `json:"entrypoint_id,omitempty" yaml:"entrypoint_id,omitempty"`
+	Message            string                         `json:"message" yaml:"message"`
+	AllowedToolsSet    bool                           `json:"allowed_tools_set,omitempty" yaml:"allowed_tools_set,omitempty"`
+	AllowedTools       []string                       `json:"allowed_tools,omitempty" yaml:"allowed_tools,omitempty"`
+	ToolInputAllowlist map[string]map[string][]string `json:"tool_input_allowlist,omitempty" yaml:"tool_input_allowlist,omitempty"`
+	UserID             string                         `json:"user_id,omitempty" yaml:"user_id,omitempty"`
+	SessionID          string                         `json:"session_id,omitempty" yaml:"session_id,omitempty"`
+	Channel            string                         `json:"channel,omitempty" yaml:"channel,omitempty"`
+	Metadata           map[string]string              `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 type TurnResponse struct {

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // fakeAgentRunner is a controllable AgentRunner for executor/kernel tests.
@@ -47,18 +49,18 @@ func TestAgentExecutorBuildsTurnRequestFromStep(t *testing.T) {
 	runner := &fakeAgentRunner{resp: AgentTurnResponse{Status: "completed", RunID: "r1", FinalResponse: "done"}}
 	exec := &AgentExecutor{Agent: runner}
 	run := &Run{
-		ID:        "fr_1",
-		FlowID:    "test",
-		Input:     map[string]string{"repo": "/repo"},
-		Steps:     map[string]StepState{},
+		ID:     "fr_1",
+		FlowID: "test",
+		Input:  map[string]string{"repo": "/repo"},
+		Steps:  map[string]StepState{},
 	}
 	step := Step{
 		ID: "intake", Objective: "Produce a task spec.",
-		Executor: Executor{Agent: "dev-intake"},
-		Instructions: []string{"Use /skill task-spec.", "Keep implementation out."},
-		Constraints:  []string{"Do not modify files."},
+		Executor:       Executor{Agent: "dev-intake"},
+		Instructions:   []string{"Use /skill task-spec.", "Keep implementation out."},
+		Constraints:    []string{"Do not modify files."},
 		RequiredSkills: []string{"task-spec"},
-		Inputs: map[string]string{"request": "${input.request}", "repo": "${input.repo}"},
+		Inputs:         map[string]string{"request": "${input.request}", "repo": "${input.repo}"},
 		OutputContract: OutputContract{RequiredSlots: []OutputSlot{{ID: "task_spec"}}},
 	}
 	run.Input["request"] = "fix the bug"
@@ -83,6 +85,64 @@ func TestAgentExecutorBuildsTurnRequestFromStep(t *testing.T) {
 	}
 	if runner.last.Metadata["flow_run_id"] != "fr_1" || runner.last.Metadata["flow_step_id"] != "intake" {
 		t.Errorf("metadata = %+v", runner.last.Metadata)
+	}
+}
+
+func TestAgentExecutorPassesStepAllowedTools(t *testing.T) {
+	runner := &fakeAgentRunner{resp: AgentTurnResponse{Status: "completed", RunID: "r1", FinalResponse: "done"}}
+	exec := &AgentExecutor{Agent: runner}
+	run := &Run{ID: "fr_1", FlowID: "test", Input: map[string]string{}, Steps: map[string]StepState{}}
+	step := Step{
+		ID:        "write",
+		Objective: "Write one file.",
+		Executor:  Executor{Agent: "writer", Tools: []string{"read_file", "write_file"}, toolsConfigured: true},
+	}
+	if _, err := exec.ExecuteStep(context.Background(), run, &Definition{ID: "test"}, step); err != nil {
+		t.Fatalf("ExecuteStep: %v", err)
+	}
+	if got := strings.Join(runner.last.AllowedTools, ","); got != "read_file,write_file" {
+		t.Fatalf("allowed tools = %q", got)
+	}
+	if !runner.last.AllowedToolsSet {
+		t.Fatal("allowed tools set = false, want true")
+	}
+}
+
+func TestAgentExecutorPassesExplicitEmptyStepAllowedTools(t *testing.T) {
+	runner := &fakeAgentRunner{resp: AgentTurnResponse{Status: "completed", RunID: "r1", FinalResponse: "done"}}
+	exec := &AgentExecutor{Agent: runner}
+	run := &Run{ID: "fr_1", FlowID: "test", Input: map[string]string{}, Steps: map[string]StepState{}}
+	step := Step{
+		ID:        "think",
+		Objective: "Think without tools.",
+		Executor:  Executor{Agent: "planner", Tools: []string{}, toolsConfigured: true},
+	}
+	if _, err := exec.ExecuteStep(context.Background(), run, &Definition{ID: "test"}, step); err != nil {
+		t.Fatalf("ExecuteStep: %v", err)
+	}
+	if len(runner.last.AllowedTools) != 0 {
+		t.Fatalf("allowed tools = %+v, want empty", runner.last.AllowedTools)
+	}
+	if !runner.last.AllowedToolsSet {
+		t.Fatal("allowed tools set = false, want true")
+	}
+}
+
+func TestExecutorYAMLTracksExplicitEmptyTools(t *testing.T) {
+	var step Step
+	if err := yaml.Unmarshal([]byte(`id: think
+objective: Think without tools.
+executor:
+  agent: planner
+  tools: []
+`), &step); err != nil {
+		t.Fatal(err)
+	}
+	if !step.Executor.toolsConfigured {
+		t.Fatal("toolsConfigured = false, want true for explicit tools: []")
+	}
+	if len(step.Executor.Tools) != 0 {
+		t.Fatalf("tools = %+v, want empty", step.Executor.Tools)
 	}
 }
 
@@ -113,6 +173,30 @@ func TestAgentExecutorMapsCompletedResponse(t *testing.T) {
 	}
 	if len(result.Artifacts) != 1 || result.Artifacts[0].Path != "artifacts/intake/task_spec.yaml" {
 		t.Errorf("artifacts = %+v", result.Artifacts)
+	}
+}
+
+func TestAgentExecutorMapsCompletedYAMLFencedResponse(t *testing.T) {
+	runner := &fakeAgentRunner{resp: AgentTurnResponse{
+		Status:        "completed",
+		RunID:         "r1",
+		FinalResponse: "```yaml\ntask_spec: yaml spec\nacceptance_criteria:\n  - works\n```",
+	}}
+	exec := &AgentExecutor{Agent: runner}
+	run := &Run{ID: "fr_1", FlowID: "test", Input: map[string]string{}, Steps: map[string]StepState{}}
+	step := Step{ID: "intake", Objective: "intake", Executor: Executor{Agent: "dev-intake"}, OutputContract: OutputContract{RequiredSlots: []OutputSlot{{ID: "task_spec"}, {ID: "acceptance_criteria"}}}}
+	result, err := exec.ExecuteStep(context.Background(), run, &Definition{ID: "test"}, step)
+	if err != nil {
+		t.Fatalf("ExecuteStep: %v", err)
+	}
+	if result.Status != StepCompleted {
+		t.Fatalf("status = %q error=%q, want completed", result.Status, result.Error)
+	}
+	if result.Outputs["task_spec"].Value != "yaml spec" {
+		t.Errorf("task_spec = %#v", result.Outputs["task_spec"].Value)
+	}
+	if result.Outputs["acceptance_criteria"].Value == nil {
+		t.Errorf("acceptance_criteria missing from YAML output: %+v", result.Outputs)
 	}
 }
 
@@ -238,6 +322,7 @@ func TestResolveStepInputsFromPreviousStepOutput(t *testing.T) {
 				"implementation_plan": {Artifact: "artifacts/design/plan.md"},
 				"count":               {Value: 3},
 				"status":              {Value: "selected"},
+				"summary":             {Summary: "summary output"},
 			}},
 		},
 	}
@@ -246,6 +331,7 @@ func TestResolveStepInputsFromPreviousStepOutput(t *testing.T) {
 			"plan":   "${outputs.design.implementation_plan}",
 			"count":  "${outputs.design.count}",
 			"status": "${outputs.design.status}",
+			"brief":  "${outputs.design.summary}",
 		}}
 	got, err := ResolveStepInputs(run, step)
 	if err != nil {
@@ -259,6 +345,9 @@ func TestResolveStepInputsFromPreviousStepOutput(t *testing.T) {
 	}
 	if got["status"] != "selected" {
 		t.Errorf("status = %q", got["status"])
+	}
+	if got["brief"] != "summary output" {
+		t.Errorf("brief = %q, want summary output", got["brief"])
 	}
 }
 

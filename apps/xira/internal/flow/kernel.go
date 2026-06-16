@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,6 +90,9 @@ func (k *Kernel) Start(ctx context.Context, req StartRequest) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateStartInputs(def, ep, req.Input); err != nil {
+		return nil, err
+	}
 	run, err := k.Store.CreateRun(ctx, CreateRunRequest{
 		FlowID:        def.ID,
 		FlowVersion:   def.Version,
@@ -121,7 +125,7 @@ func (k *Kernel) Start(ctx context.Context, req StartRequest) (*Run, error) {
 		FlowRunID: run.ID,
 		StepID:    startStep.ID,
 		Payload: map[string]any{
-			"flow_id":      def.ID,
+			"flow_id":       def.ID,
 			"entrypoint_id": ep.ID,
 		},
 	}})
@@ -250,12 +254,43 @@ func (k *Kernel) Advance(ctx context.Context, flowRunID string) (*Run, error) {
 	case StepWaitingHuman:
 		return k.markWaitingHuman(ctx, run, updated, step)
 	case StepFailed:
-		return k.markFailed(ctx, run, updated, step)
+		return k.handleStepFailure(ctx, run, def, updated, step)
 	case StepCompleted:
 		return k.advanceTransition(ctx, run, def, step, updated)
 	default:
 		return run, nil
 	}
+}
+
+func validateStartInputs(def *Definition, ep *Entrypoint, input map[string]string) error {
+	required := map[string]struct{}{}
+	if def != nil && def.Inputs != nil {
+		for _, key := range def.Inputs.Required {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				required[key] = struct{}{}
+			}
+		}
+	}
+	if ep != nil {
+		for _, key := range ep.RequiredInputs {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				required[key] = struct{}{}
+			}
+		}
+	}
+	var missing []string
+	for key := range required {
+		if strings.TrimSpace(input[key]) == "" {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("missing required flow input(s): %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func applyStepResult(run *Run, stepID string, result StepExecutionResult, now time.Time) error {
@@ -324,6 +359,59 @@ func (k *Kernel) markFailed(ctx context.Context, run *Run, step StepState, defSt
 	}
 	_ = k.Store.AppendEvents(ctx, run.ID, []Event{{
 		Time: k.now(), Kind: "flow.step.failed", FlowRunID: run.ID, StepID: defStep.ID, Payload: map[string]any{"error": step.Error},
+	}})
+	return run, nil
+}
+
+func (k *Kernel) handleStepFailure(ctx context.Context, run *Run, def *Definition, state StepState, step Step) (*Run, error) {
+	if step.Retry != nil {
+		maxAttempts := step.Retry.MaxAttempts
+		if maxAttempts <= 0 {
+			maxAttempts = 1
+		}
+		if state.Attempts < maxAttempts {
+			run, err := k.Store.UpdateRun(ctx, run.ID, func(r *Run) error {
+				s := r.Steps[step.ID]
+				s.Status = StepPending
+				s.Error = ""
+				s.StartedAt = nil
+				s.CompletedAt = nil
+				r.Status = RunRunning
+				r.Steps[step.ID] = s
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
+			_ = k.Store.AppendEvents(ctx, run.ID, []Event{{Time: k.now(), Kind: "flow.step.retry_scheduled", FlowRunID: run.ID, StepID: step.ID}})
+			return run, nil
+		}
+		if step.Retry.OnExhausted != "" {
+			return k.routeAfterFailure(ctx, run, step, step.Retry.OnExhausted, "flow.step.retry_exhausted")
+		}
+	}
+	if step.Transitions.OnFailure != "" {
+		return k.routeAfterFailure(ctx, run, step, step.Transitions.OnFailure, "flow.step.failed_routed")
+	}
+	return k.markFailed(ctx, run, state, step)
+}
+
+func (k *Kernel) routeAfterFailure(ctx context.Context, run *Run, step Step, next, eventKind string) (*Run, error) {
+	run, err := k.Store.UpdateRun(ctx, run.ID, func(r *Run) error {
+		r.Status = RunRunning
+		r.CurrentStepID = next
+		if _, ok := r.Steps[next]; !ok {
+			r.Steps[next] = StepState{Status: StepPending}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	_ = k.Store.AppendEvents(ctx, run.ID, []Event{{
+		Time: k.now(), Kind: eventKind, FlowRunID: run.ID, StepID: step.ID, Payload: map[string]any{"next": next},
+	}, {
+		Time: k.now(), Kind: "flow.step.scheduled", FlowRunID: run.ID, StepID: next,
 	}})
 	return run, nil
 }
@@ -541,8 +629,13 @@ func resolveOutputPath(run *Run, path string) (any, error) {
 		}
 		value = current
 	} else if value == nil {
-		// Fall back to artifact path string for comparisons like == 'path'.
-		value = slot.Artifact
+		// Fall back to summary, then artifact path string for comparisons like
+		// == 'path'. Agent steps with one required slot often store plain text
+		// in Summary.
+		value = slot.Summary
+		if value == "" {
+			value = slot.Artifact
+		}
 	}
 	return value, nil
 }

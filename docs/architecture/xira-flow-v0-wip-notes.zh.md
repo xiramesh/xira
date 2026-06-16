@@ -1,7 +1,7 @@
 # Xira Flow v0 WIP 暂存说明
 
-> 分支：`feature/flow-schema-v0`  
-> 用途：切换到 Agent HITL 工作前，记录当前 Flow schema 草案状态。  
+> 分支：`feature/flow-schema-v0`<br>
+> 用途：切换到 Agent HITL 工作前，记录当前 Flow schema 草案状态。<br>
 > 状态：未提交，随当前工作区一起 stash。
 
 ## 当前结论
