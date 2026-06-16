@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // fakeExecutor returns canned results per step id.
@@ -35,6 +38,31 @@ func (f *fakeExecutor) ExecuteStep(ctx context.Context, run *Run, def *Definitio
 	}
 	// Default to completed with no outputs.
 	return StepExecutionResult{Status: StepCompleted}, nil
+}
+
+type blockingExecutor struct {
+	started chan struct{}
+	release chan struct{}
+	count   int32
+}
+
+func newBlockingExecutor() *blockingExecutor {
+	return &blockingExecutor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (b *blockingExecutor) ExecuteStep(ctx context.Context, run *Run, def *Definition, step Step) (StepExecutionResult, error) {
+	if atomic.AddInt32(&b.count, 1) == 1 {
+		close(b.started)
+	}
+	select {
+	case <-ctx.Done():
+		return StepExecutionResult{}, ctx.Err()
+	case <-b.release:
+		return StepExecutionResult{Status: StepCompleted}, nil
+	}
 }
 
 // staticDefinitions implements DefinitionSource for tests.
@@ -107,6 +135,68 @@ func TestKernelStartFlowFromAdHocEntrypoint(t *testing.T) {
 	}
 	if run.Steps["a"].Status != StepPending {
 		t.Errorf("step a status = %q, want pending", run.Steps["a"].Status)
+	}
+}
+
+func TestKernelConcurrentAdvanceDoesNotExecuteSameStepTwice(t *testing.T) {
+	def := &Definition{
+		SchemaVersion: SchemaVersionDefinition,
+		ID:            "test",
+		Name:          "Test",
+		Version:       "0.1.0",
+		Objective:     "test",
+		Entrypoints:   []Entrypoint{{ID: "ad_hoc", StartStep: "a"}},
+		Steps: []Step{
+			{ID: "a", Objective: "a", Executor: Executor{Agent: "dev-intake"}},
+		},
+	}
+	exec := newBlockingExecutor()
+	k := &Kernel{
+		Store:       newTestStore(t),
+		Definitions: staticDefinitions{defs: map[string]*Definition{"test": def}},
+		Executor:    exec,
+	}
+	run, err := k.Start(context.Background(), testStartRequest("ad_hoc"))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	advance := func() {
+		defer wg.Done()
+		_, err := k.Advance(context.Background(), run.ID)
+		errs <- err
+	}
+
+	wg.Add(1)
+	go advance()
+	select {
+	case <-exec.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first advance did not start executing")
+	}
+
+	wg.Add(1)
+	go advance()
+	time.Sleep(50 * time.Millisecond)
+	close(exec.release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Advance: %v", err)
+		}
+	}
+	if got := atomic.LoadInt32(&exec.count); got != 1 {
+		t.Fatalf("executor count = %d, want 1", got)
+	}
+	got, err := k.Store.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != RunCompleted {
+		t.Fatalf("run status = %q, want completed", got.Status)
 	}
 }
 

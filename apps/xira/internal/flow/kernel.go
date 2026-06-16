@@ -65,6 +65,9 @@ type Kernel struct {
 	// re-passing the path. Guarded by registryMu.
 	registryMu sync.RWMutex
 	registry   map[string]*Definition
+
+	runLocksMu sync.Mutex
+	runLocks   map[string]*sync.Mutex
 }
 
 func (k *Kernel) now() time.Time {
@@ -72,6 +75,22 @@ func (k *Kernel) now() time.Time {
 		return k.Clock()
 	}
 	return time.Now().UTC()
+}
+
+func (k *Kernel) lockRun(flowRunID string) func() {
+	k.runLocksMu.Lock()
+	if k.runLocks == nil {
+		k.runLocks = map[string]*sync.Mutex{}
+	}
+	mu := k.runLocks[flowRunID]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		k.runLocks[flowRunID] = mu
+	}
+	k.runLocksMu.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
 }
 
 // Start loads the definition, resolves the entrypoint, creates a run, and
@@ -184,6 +203,12 @@ func (k *Kernel) Advance(ctx context.Context, flowRunID string) (*Run, error) {
 	if k.Executor == nil {
 		return nil, fmt.Errorf("kernel executor is required")
 	}
+	if err := validateFlowRunID(flowRunID); err != nil {
+		return nil, err
+	}
+	unlock := k.lockRun(flowRunID)
+	defer unlock()
+
 	run, err := k.Store.GetRun(ctx, flowRunID)
 	if err != nil {
 		return nil, err

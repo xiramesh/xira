@@ -132,7 +132,7 @@ func (e *AgentExecutor) ExecuteStep(ctx context.Context, run *Run, def *Definiti
 	case step.Executor.Type == "human_approval":
 		return e.executeHumanApprovalStep(ctx, run, def, step)
 	case step.Executor.Type == "wait_signal":
-		return StepExecutionResult{Status: StepWaitingHuman, Interrupt: map[string]any{"reason": "wait_signal", "signal": step.Executor.Signal}}, nil
+		return StepExecutionResult{Status: StepFailed, Error: "wait_signal executor is not implemented in flow v0"}, nil
 	case step.Executor.Type == "subflow":
 		return StepExecutionResult{Status: StepFailed, Error: "subflow executor is deferred in flow v0"}, nil
 	default:

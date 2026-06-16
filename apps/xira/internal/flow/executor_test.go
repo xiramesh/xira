@@ -146,6 +146,24 @@ executor:
 	}
 }
 
+func TestAgentExecutorWaitSignalFailsExplicitlyInV0(t *testing.T) {
+	exec := &AgentExecutor{}
+	result, err := exec.ExecuteStep(context.Background(), &Run{ID: "fr_1"}, &Definition{ID: "test"}, Step{
+		ID:        "wait_more_info",
+		Objective: "wait for more info",
+		Executor:  Executor{Type: "wait_signal", Signal: "user.more_info"},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStep: %v", err)
+	}
+	if result.Status != StepFailed {
+		t.Fatalf("status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(result.Error, "wait_signal") || !strings.Contains(result.Error, "not implemented") {
+		t.Fatalf("error = %q, want explicit wait_signal not implemented", result.Error)
+	}
+}
+
 func TestAgentExecutorMapsCompletedResponse(t *testing.T) {
 	// Agent returns a fenced json block with declared slot.
 	runner := &fakeAgentRunner{resp: AgentTurnResponse{
