@@ -11,11 +11,11 @@ import (
 // ResolvedHumanRequest is the flow-side view of a HumanRequest after the user
 // has (or has not yet) responded.
 type ResolvedHumanRequest struct {
-	ID         string
-	Source     string
-	Kind       string // "approval" or "freeform"
-	Status     string // "pending" or "resolved"
-	ResponseKind   string // approve / deny / cancel / answer / revise / reject
+	ID              string
+	Source          string
+	Kind            string // "approval" or "freeform"
+	Status          string // "pending" or "resolved"
+	ResponseKind    string // approve / deny / cancel / answer / revise / reject
 	ResponseMessage string
 }
 
@@ -176,6 +176,7 @@ func (k *Kernel) resumeAgentGenerated(ctx context.Context, run *Run, def *Defini
 			s.CompletedAt = &completed
 			r.PendingHumanRequests = removeStrings(r.PendingHumanRequests, s.HumanRequestIDs...)
 			s.HumanRequestIDs = nil
+			s.Interrupt = nil
 			r.Status = RunRunning
 			r.Steps[step.ID] = s
 			return nil
@@ -208,6 +209,7 @@ func (k *Kernel) resumeAgentGenerated(ctx context.Context, run *Run, def *Defini
 			s.CompletedAt = &completed
 			r.PendingHumanRequests = removeStrings(r.PendingHumanRequests, s.HumanRequestIDs...)
 			s.HumanRequestIDs = nil
+			s.Interrupt = nil
 			r.Status = RunRunning
 			r.Steps[step.ID] = s
 			return nil
@@ -226,6 +228,7 @@ func (k *Kernel) resumeAgentGenerated(ctx context.Context, run *Run, def *Defini
 			s.CompletedAt = &completed
 			r.PendingHumanRequests = removeStrings(r.PendingHumanRequests, s.HumanRequestIDs...)
 			s.HumanRequestIDs = nil
+			s.Interrupt = nil
 			r.Status = RunRunning
 			r.Steps[step.ID] = s
 			return nil

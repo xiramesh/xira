@@ -13,7 +13,7 @@
 ```bash
 DEEPSEEK_API_KEY="$(tr -d "\r\n" < DEEPSEEK_API_KEY)" \
 XIRA_DEEPSEEK_LIVE=1 \
-XIRA_LIVE_ARTIFACT_ROOT=/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633 \
+XIRA_LIVE_ARTIFACT_ROOT=/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804 \
 GOCACHE=$(pwd)/.cache/go-build \
 go test -count=1 ./apps/xira/internal/runtime -run "TestRealDeepSeek" -v
 ```
@@ -22,13 +22,13 @@ go test -count=1 ./apps/xira/internal/runtime -run "TestRealDeepSeek" -v
 
 ```text
 PASS
-ok  	github.com/xiramesh/xira/internal/runtime	191.638s
+ok  	github.com/xiramesh/xira/internal/runtime	201.297s
 ```
 
 主证据目录：
 
 ```text
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804
 ```
 
 目录结构说明：本轮修复后，`XIRA_LIVE_ARTIFACT_ROOT` 是总证据目录，每个 live test 会落到自己的子目录，避免多个真实 DeepSeek case 共用同一个 workspace/state/runs 而互相污染。
@@ -36,16 +36,16 @@ ok  	github.com/xiramesh/xira/internal/runtime	191.638s
 本轮完整 live suite 共有 10 个 preserved 子目录：
 
 ```text
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekhitlhumanrequesttool
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekhitlrequireconfirmationsnapshot
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekhitlrespondsafterapprovedtooloutput
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekhitldelegatecompleted
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekhitldelegatechildwaiting
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekflowagentstepcompletes
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekflowroutestohumanapproval
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseeklongflowfouragentswithhitl
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseeklongflowfouragentswithtoolsandhitl
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekflowfileartifactsskipreadwithskill
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekhitlhumanrequesttool
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekhitlrequireconfirmationsnapshot
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekhitlrespondsafterapprovedtooloutput
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekhitldelegatecompleted
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekhitldelegatechildwaiting
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowagentstepcompletes
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowroutestohumanapproval
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseeklongflowfouragentswithhitl
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseeklongflowfouragentswithtoolsandhitl
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowfileartifactsskipreadwithskill
 ```
 
 这次不是只跑 fake model，也不是只测最终文本。完整 suite 真实调用 DeepSeek，并验证了 Flow、HITL、delegate、多 agent、workspace tools、skill、文件落盘、跳步读取、tool contract 和 replay 证据链。
@@ -80,7 +80,7 @@ state/workspaces/*/human-requests/*.yaml
 主证据目录：
 
 ```text
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804
 ```
 
 这个目录证明本轮不是临时内存态，而是保留了：
@@ -98,7 +98,7 @@ state/workspaces/*/human-requests/*.yaml
 file-backed Flow 的 Flow run state 在：
 
 ```text
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekflowfileartifactsskipreadwithskill/state/flow-runs/
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowfileartifactsskipreadwithskill/state/flow-runs/
 ```
 
 Reviewer 应检查其中的：
@@ -120,7 +120,7 @@ flow_run.yaml
 每个 step 的 `agent_run_id` 对应：
 
 ```text
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekflowfileartifactsskipreadwithskill/runs/<agent_run_id>/
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowfileartifactsskipreadwithskill/runs/<agent_run_id>/
 ```
 
 每个 run 目录下至少要看：
@@ -152,7 +152,7 @@ verification.json
 human request state 在：
 
 ```text
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekflowfileartifactsskipreadwithskill/state/workspaces/*/human-requests/
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowfileartifactsskipreadwithskill/state/workspaces/*/human-requests/
 ```
 
 Reviewer 应确认：
@@ -168,7 +168,7 @@ Reviewer 应确认：
 最终 artifacts 在：
 
 ```text
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekflowfileartifactsskipreadwithskill/workspace/artifacts/flow-files/
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowfileartifactsskipreadwithskill/workspace/artifacts/flow-files/
 ```
 
 应存在：
@@ -204,7 +204,7 @@ Reviewer 应确认：
 最终 file-backed step 的 agent run：
 
 ```text
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekflowfileartifactsskipreadwithskill/runs/20260616-202929-flow-research/
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowfileartifactsskipreadwithskill/runs/20260616-210111-flow-research/
 ```
 
 必须看到：
@@ -271,7 +271,7 @@ write_file artifacts/flow-files/09-final-report.md
 最终 full run 里，第 10 步证据如下：
 
 ```text
-agent run: 20260616-202929-flow-research
+agent run: 20260616-210111-flow-research
 tool_calls: 5
 tool sequence: list_dir, read_file(08-release.md), read_file(01-brief.md), read_file(04-plan.md), write_file(09-final-report.md)
 ```
@@ -279,7 +279,7 @@ tool sequence: list_dir, read_file(08-release.md), read_file(01-brief.md), read_
 最终产物：
 
 ```text
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekflowfileartifactsskipreadwithskill/workspace/artifacts/flow-files/09-final-report.md
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowfileartifactsskipreadwithskill/workspace/artifacts/flow-files/09-final-report.md
 ```
 
 这证明它不是“模型自己说读了”，而是 runtime 里真实有工具调用记录和落盘文件。
@@ -404,16 +404,16 @@ executor:
 - 最终 full suite 的证据目录因此分成 10 个 preserved 子目录：
 
 ```text
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekhitlhumanrequesttool
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekhitlrequireconfirmationsnapshot
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekhitlrespondsafterapprovedtooloutput
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekhitldelegatecompleted
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekhitldelegatechildwaiting
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekflowagentstepcompletes
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekflowroutestohumanapproval
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseeklongflowfouragentswithhitl
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseeklongflowfouragentswithtoolsandhitl
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633/testrealdeepseekflowfileartifactsskipreadwithskill
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekhitlhumanrequesttool
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekhitlrequireconfirmationsnapshot
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekhitlrespondsafterapprovedtooloutput
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekhitldelegatecompleted
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekhitldelegatechildwaiting
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowagentstepcompletes
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowroutestohumanapproval
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseeklongflowfouragentswithhitl
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseeklongflowfouragentswithtoolsandhitl
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowfileartifactsskipreadwithskill
 ```
 
 ### 7. 只读工具的重复调用与并发调用要按业务语义处理
@@ -441,11 +441,42 @@ write_constraints: no dependency on 01-brief.md or 02-research.md (skip-step rea
 - `claimsPositiveReadSearchOrList` 增加 `no dependency` / `no dependencies` 识别。
 - `TestClaimsPositiveReadSearchOrListAllowsNegatedDeepSeekPlanWording` 增加该真实 DeepSeek 输出形态的回归。
 
+### 9. agent-generated HITL resume 后不能残留 waiting interrupt
+
+reviewer 在上一轮 preserved evidence 中发现：agent step 已经是 `status: completed`，但同一个 step 的 `interrupt.status` 仍然是 `waiting_human`。这会让 `flow_run.yaml` 同时表达“已完成”和“仍等待人工”，对 replay/review 工具是不一致的持久化状态。
+
+处理方式：
+
+- `resumeAgentGenerated` 在 terminal 分支同步清理 `s.Interrupt`。
+- 覆盖三类 terminal 路径：approved 后 agent completed、approved 后 agent failed、deny/cancel 直接失败。
+- 增加非 live 回归：
+  - `TestKernelResumeAgentGeneratedCompletedClearsInterrupt`
+  - `TestKernelResumeAgentGeneratedFailedClearsInterrupt`
+  - `TestKernelResumeAgentGeneratedDeniedClearsInterrupt`
+- 本轮真实 DeepSeek full suite 重新跑过，新的 file-backed Flow evidence 中，所有 agent step 都是 `status: completed` 且不再持久化 `interrupt`；唯一剩余的 `interrupt` 属于显式 Flow approval step `approve_plan`，用于保留人工审批问题文本。
+
+新证据：
+
+```text
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowfileartifactsskipreadwithskill/state/flow-runs/*/flow_run.yaml
+```
+
+核对命令：
+
+```bash
+rg -n "status: completed|interrupt:|waiting_human|human_request_ids" \
+  /Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804/testrealdeepseekflowfileartifactsskipreadwithskill/state/flow-runs/*/flow_run.yaml
+```
+
+本轮结果：没有 `waiting_human` 字符串；agent step 没有 `interrupt` 字段。
+
 ## 重要代码位置
 
 本轮与 review 最相关的代码：
 
 ```text
+/Users/yinwm/work/flowdeck/apps/xira/internal/flow/kernel_resume.go
+/Users/yinwm/work/flowdeck/apps/xira/internal/flow/human_request_test.go
 /Users/yinwm/work/flowdeck/apps/xira/internal/runtime/service_adk.go
 /Users/yinwm/work/flowdeck/apps/xira/internal/runtime/service.go
 /Users/yinwm/work/flowdeck/apps/xira/internal/runtime/recorders.go
@@ -462,6 +493,8 @@ write_constraints: no dependency on 01-brief.md or 02-research.md (skip-step rea
 
 建议 reviewer 重点看：
 
+- `kernel_resume.go`：agent-generated HITL resume 后是否清理 terminal step 的 `Interrupt`。
+- `human_request_test.go`：completed / failed / denied 三种 resume terminal 路径是否都有回归。
 - `service_adk.go`：ADK tool callback 是否仍有并发写共享状态的风险。
 - `service.go`：event/audit/LLM call 记录是否线程安全。
 - `human_requests.go`：`human.request` 参数缺省处理和 action snapshot 是否合理。
@@ -480,7 +513,7 @@ write_constraints: no dependency on 01-brief.md or 02-research.md (skip-step rea
 /Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-164742
 /Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-165700
 /Users/yinwm/work/flowdeck/.xira/live-tests/file-flow-skill-20260616-170311
-/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633
+/Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804
 /Users/yinwm/work/flowdeck/.xira/live-tests/targeted-deepseek-20260616-191602
 /Users/yinwm/work/flowdeck/.xira/live-tests/fileflow-deepseek-20260616-192523
 ```
@@ -491,7 +524,7 @@ write_constraints: no dependency on 01-brief.md or 02-research.md (skip-step rea
 - `file-flow-skill-20260616-170311`：修复并发记录问题后的 targeted file-backed Flow 通过现场。
 - `targeted-deepseek-20260616-191602`：暴露 live workspace 未隔离和否定依赖语句 false positive。
 - `fileflow-deepseek-20260616-192523`：隔离与 checker 修复后的 targeted file-backed Flow 通过现场。
-- `full-deepseek-20260616-202633`：最终完整 live suite 通过现场，是主证据。
+- `full-deepseek-20260616-205804`：最终完整 live suite 通过现场，是主证据。
 
 ## 复现命令
 
@@ -527,10 +560,10 @@ GOCACHE=$(pwd)/.cache/go-build go test -race -count=1 ./apps/xira/internal/runti
 
 ```text
 git diff --check: passed
-ok  	github.com/xiramesh/xira/internal/runtime	7.235s
-ok  	github.com/xiramesh/xira/internal/flow	5.287s
-ok  	github.com/xiramesh/xira/internal/runtime	1.244s  # targeted non-live regression
-ok  	github.com/xiramesh/xira/internal/runtime	2.442s  # targeted -race recorder regression
+ok  	github.com/xiramesh/xira/internal/runtime	4.356s
+ok  	github.com/xiramesh/xira/internal/flow	3.148s
+ok  	github.com/xiramesh/xira/internal/flow	1.165s  # targeted resume interrupt regression
+ok  	github.com/xiramesh/xira/internal/runtime	1.779s  # targeted -race recorder regression
 ```
 
 说明：本轮收尾没有重跑 `./apps/xira/...` 全量包；重点验证范围是 runtime + flow 以及 recorder race 回归。此前在 managed sandbox 下，API 包全量会因为 `127.0.0.1:0` / `httptest` bind 权限受限失败，需要允许本地 bind 后再跑。
@@ -542,7 +575,7 @@ Reviewer 建议按下面顺序看：
 1. 打开最终主证据目录：
 
    ```text
-   /Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-202633
+   /Users/yinwm/work/flowdeck/.xira/live-tests/full-deepseek-20260616-205804
    ```
 
 2. 检查 file-backed Flow 的最终 workspace artifacts：
@@ -562,10 +595,10 @@ Reviewer 建议按下面顺序看：
 3. 检查最终 step run：
 
    ```text
-   testrealdeepseekflowfileartifactsskipreadwithskill/runs/20260616-202929-flow-research/tool_calls.jsonl
-   testrealdeepseekflowfileartifactsskipreadwithskill/runs/20260616-202929-flow-research/run.yaml
-   testrealdeepseekflowfileartifactsskipreadwithskill/runs/20260616-202929-flow-research/events.jsonl
-   testrealdeepseekflowfileartifactsskipreadwithskill/runs/20260616-202929-flow-research/audit.jsonl
+   testrealdeepseekflowfileartifactsskipreadwithskill/runs/20260616-210111-flow-research/tool_calls.jsonl
+   testrealdeepseekflowfileartifactsskipreadwithskill/runs/20260616-210111-flow-research/run.yaml
+   testrealdeepseekflowfileartifactsskipreadwithskill/runs/20260616-210111-flow-research/events.jsonl
+   testrealdeepseekflowfileartifactsskipreadwithskill/runs/20260616-210111-flow-research/audit.jsonl
    ```
 
 4. 确认最终 step 有 5 个工具调用：

@@ -188,6 +188,113 @@ func TestKernelPausesFlowOnAgentGeneratedHumanRequest(t *testing.T) {
 	}
 }
 
+func TestKernelResumeAgentGeneratedCompletedClearsInterrupt(t *testing.T) {
+	k, run, hrID := startPausedAtAgentGeneratedRequest(t)
+	k.AgentStatus = staticAgentStatusResolver{status: "completed"}
+	k.Resolver.(*fakeResolver).requests[hrID] = ResolvedHumanRequest{
+		ID: hrID, Source: SourceAgentRequest, Status: "resolved", ResponseKind: "approve",
+	}
+
+	run, err := k.Resume(context.Background(), run.ID, hrID)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	step := run.Steps["a"]
+	if step.Status != StepCompleted {
+		t.Fatalf("step status = %q, want completed", step.Status)
+	}
+	if step.Interrupt != nil {
+		t.Fatalf("completed step kept stale interrupt: %+v", step.Interrupt)
+	}
+	if len(step.HumanRequestIDs) != 0 || containsString(run.PendingHumanRequests, hrID) {
+		t.Fatalf("human request ids not cleared: step=%v pending=%v", step.HumanRequestIDs, run.PendingHumanRequests)
+	}
+	if run.CurrentStepID != "b" {
+		t.Fatalf("current_step_id = %q, want b", run.CurrentStepID)
+	}
+}
+
+func TestKernelResumeAgentGeneratedFailedClearsInterrupt(t *testing.T) {
+	k, run, hrID := startPausedAtAgentGeneratedRequest(t)
+	k.AgentStatus = staticAgentStatusResolver{status: "failed"}
+	k.Resolver.(*fakeResolver).requests[hrID] = ResolvedHumanRequest{
+		ID: hrID, Source: SourceAgentRequest, Status: "resolved", ResponseKind: "approve",
+	}
+
+	run, err := k.Resume(context.Background(), run.ID, hrID)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	step := run.Steps["a"]
+	if run.Status != RunFailed || step.Status != StepFailed {
+		t.Fatalf("status run/step = %q/%q, want failed/failed", run.Status, step.Status)
+	}
+	if step.Interrupt != nil {
+		t.Fatalf("failed step kept stale interrupt: %+v", step.Interrupt)
+	}
+	if len(step.HumanRequestIDs) != 0 || containsString(run.PendingHumanRequests, hrID) {
+		t.Fatalf("human request ids not cleared: step=%v pending=%v", step.HumanRequestIDs, run.PendingHumanRequests)
+	}
+}
+
+func TestKernelResumeAgentGeneratedDeniedClearsInterrupt(t *testing.T) {
+	k, run, hrID := startPausedAtAgentGeneratedRequest(t)
+	k.Resolver.(*fakeResolver).requests[hrID] = ResolvedHumanRequest{
+		ID: hrID, Source: SourceAgentRequest, Status: "resolved", ResponseKind: "deny",
+	}
+
+	run, err := k.Resume(context.Background(), run.ID, hrID)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	step := run.Steps["a"]
+	if run.Status != RunFailed || step.Status != StepFailed {
+		t.Fatalf("status run/step = %q/%q, want failed/failed", run.Status, step.Status)
+	}
+	if step.Interrupt != nil {
+		t.Fatalf("denied step kept stale interrupt: %+v", step.Interrupt)
+	}
+	if len(step.HumanRequestIDs) != 0 || containsString(run.PendingHumanRequests, hrID) {
+		t.Fatalf("human request ids not cleared: step=%v pending=%v", step.HumanRequestIDs, run.PendingHumanRequests)
+	}
+}
+
+func startPausedAtAgentGeneratedRequest(t *testing.T) (*Kernel, *Run, string) {
+	t.Helper()
+	def := linearFlow()
+	k, fake := newTestKernel(t, map[string]*Definition{"test": def}, nil)
+	k.Resolver = &fakeResolver{requests: map[string]ResolvedHumanRequest{}}
+	fake.results["a"] = StepExecutionResult{
+		Status:          StepWaitingHuman,
+		AgentRunID:      "parent-run-1",
+		HumanRequestIDs: []string{"hrq_agent_1"},
+		Interrupt:       map[string]any{"status": "waiting_human", "reason": "agent_request"},
+	}
+	run, err := k.Start(context.Background(), StartRequest{FlowID: "test", EntrypointID: "ad_hoc", Input: map[string]string{"request": "x"}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run, err = k.Advance(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	if run.Status != RunWaitingHuman {
+		t.Fatalf("status = %q, want waiting_human", run.Status)
+	}
+	if run.Steps["a"].Interrupt == nil {
+		t.Fatalf("test setup missing interrupt")
+	}
+	return k, run, "hrq_agent_1"
+}
+
+type staticAgentStatusResolver struct {
+	status string
+}
+
+func (s staticAgentStatusResolver) AgentStepStatus(ctx context.Context, run *Run, step Step) (string, error) {
+	return s.status, nil
+}
+
 func TestKernelDoesNotAdvancePastWaitingHumanStep(t *testing.T) {
 	def := linearFlow()
 	k, fake := newTestKernel(t, map[string]*Definition{"test": def}, nil)
