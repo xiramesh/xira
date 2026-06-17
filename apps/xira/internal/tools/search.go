@@ -18,8 +18,8 @@ const (
 
 type SearchFileTool struct{ fileTool }
 
-func NewSearchFileTool(workspaceRoot string) *SearchFileTool {
-	return &SearchFileTool{fileTool{workspaceRoot: cleanWorkspace(workspaceRoot)}}
+func NewSearchFileTool(workspaceRoot string, readRoots, writeRoots []string) *SearchFileTool {
+	return &SearchFileTool{newFileTool(workspaceRoot, readRoots, writeRoots)}
 }
 
 func (t *SearchFileTool) Name() string { return "search_file" }
@@ -161,18 +161,9 @@ func (t *SearchFileTool) searchOneFile(path, query string) ([]map[string]any, bo
 }
 
 func (t *SearchFileTool) resolveSearchRoot(rawRoot string) (string, error) {
-	path, err := t.resolvePath(rawRoot)
-	if err != nil {
-		return "", err
-	}
-	rel, err := filepath.Rel(t.workspaceRoot, path)
-	if err != nil {
-		return "", err
-	}
-	if rel == ".." || strings.HasPrefix(rel, "../") {
-		return "", fmt.Errorf("root must stay within workspace")
-	}
-	return path, nil
+	// resolveReadPath already enforces the path stays within the readable
+	// roots (workspace ∪ allow ∪ readonly), so no extra workspace-only check.
+	return t.resolveReadPath(rawRoot)
 }
 
 func (t *SearchFileTool) searchOutput(rootPath, query string, matches []map[string]any, totalMatches, searchedFiles, skippedFiles, maxResults int) map[string]any {

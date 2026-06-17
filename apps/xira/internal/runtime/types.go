@@ -203,6 +203,8 @@ type ModelPolicySnapshot struct {
 	ThinkingType    string   `json:"thinking_type,omitempty" yaml:"thinking_type,omitempty"`
 	Tools           []string `json:"tools,omitempty" yaml:"tools,omitempty"`
 	Skills          []string `json:"skills,omitempty" yaml:"skills,omitempty"`
+	AllowRoots      []string `json:"allow_roots,omitempty" yaml:"allow_roots,omitempty"`
+	ReadonlyRoots   []string `json:"readonly_roots,omitempty" yaml:"readonly_roots,omitempty"`
 	ProfileSource   string   `json:"profile_source,omitempty" yaml:"profile_source,omitempty"`
 	InstructionHash string   `json:"instruction_hash,omitempty" yaml:"instruction_hash,omitempty"`
 }

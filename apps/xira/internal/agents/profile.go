@@ -57,6 +57,12 @@ type SessionPolicy struct {
 type Permissions struct {
 	Tools   []string `json:"tools" yaml:"tools"`
 	Secrets []string `json:"secrets,omitempty" yaml:"secrets,omitempty"`
+	// AllowRoots are absolute (or ~-prefixed) roots the agent may read AND
+	// write, in addition to the workspace. Used for repos, scratch dirs, etc.
+	AllowRoots []string `json:"allow_roots,omitempty" yaml:"allow_roots,omitempty"`
+	// ReadonlyRoots are roots the agent may only read (read_file/list_dir/
+	// search_file). write_file/edit_file and command cwd cannot enter them.
+	ReadonlyRoots []string `json:"readonly_roots,omitempty" yaml:"readonly_roots,omitempty"`
 }
 
 type DelegationPolicy struct {

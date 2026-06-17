@@ -18,24 +18,28 @@ const defaultShellTimeout = 30 * time.Second
 
 type CommandRunTool struct {
 	workspaceRoot  string
+	writeRoots     []string
 	defaultTimeout time.Duration
 }
 
 type ShellRunTool struct {
 	workspaceRoot  string
+	writeRoots     []string
 	defaultTimeout time.Duration
 }
 
-func NewCommandRunTool(workspaceRoot string) *CommandRunTool {
+func NewCommandRunTool(workspaceRoot string, writeRoots []string) *CommandRunTool {
 	return &CommandRunTool{
 		workspaceRoot:  cleanWorkspace(workspaceRoot),
+		writeRoots:     writeRoots,
 		defaultTimeout: defaultCommandTimeout,
 	}
 }
 
-func NewShellRunTool(workspaceRoot string) *ShellRunTool {
+func NewShellRunTool(workspaceRoot string, writeRoots []string) *ShellRunTool {
 	return &ShellRunTool{
 		workspaceRoot:  cleanWorkspace(workspaceRoot),
+		writeRoots:     writeRoots,
 		defaultTimeout: defaultShellTimeout,
 	}
 }
@@ -75,7 +79,7 @@ func (t *CommandRunTool) Execute(ctx context.Context, args map[string]any) (map[
 	if err != nil {
 		return nil, err
 	}
-	cwd, err := resolveToolCWD(t.workspaceRoot, mapStringArg(args, "cwd"))
+	cwd, err := resolveToolCWD(t.workspaceRoot, t.writeRoots, mapStringArg(args, "cwd"))
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +125,7 @@ func (t *ShellRunTool) Execute(ctx context.Context, args map[string]any) (map[st
 	if command == "" {
 		return nil, fmt.Errorf("command is required")
 	}
-	cwd, err := resolveToolCWD(t.workspaceRoot, mapStringArg(args, "cwd"))
+	cwd, err := resolveToolCWD(t.workspaceRoot, t.writeRoots, mapStringArg(args, "cwd"))
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +171,7 @@ func runProcess(runCtx context.Context, cmd *exec.Cmd, out map[string]any) (map[
 	return out, err
 }
 
-func resolveToolCWD(workspaceRoot, rawCWD string) (string, error) {
+func resolveToolCWD(workspaceRoot string, writeRoots []string, rawCWD string) (string, error) {
 	rawCWD = strings.TrimSpace(rawCWD)
 	if rawCWD == "" {
 		return workspaceRoot, nil
@@ -178,11 +182,15 @@ func resolveToolCWD(workspaceRoot, rawCWD string) (string, error) {
 	} else {
 		cwd = filepath.Clean(filepath.Join(workspaceRoot, rawCWD))
 	}
-	rel, err := filepath.Rel(workspaceRoot, cwd)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("cwd must be within workspace")
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", err
 	}
-	return cwd, nil
+	abs = filepath.Clean(abs)
+	if !pathWithinRoots(abs, writeRoots) {
+		return "", fmt.Errorf("cwd must be within allowed roots")
+	}
+	return abs, nil
 }
 
 func shellCommand(command string) (string, []string) {

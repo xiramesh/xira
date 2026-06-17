@@ -10,6 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/xiramesh/xira/internal/fileutil"
+	"github.com/xiramesh/xira/internal/tools"
 )
 
 const (
@@ -26,8 +27,10 @@ type profileFrontmatter struct {
 	Context      ContextPolicy      `yaml:"context"`
 	Skills       []string           `yaml:"skills"`
 	MCPServers   []string           `yaml:"mcp_servers"`
-	Tools        []string           `yaml:"tools"`
-	Session      SessionPolicy      `yaml:"session"`
+	Tools         []string           `yaml:"tools"`
+	AllowRoots    []string           `yaml:"allow_roots,omitempty"`
+	ReadonlyRoots []string           `yaml:"readonly_roots,omitempty"`
+	Session       SessionPolicy      `yaml:"session"`
 	Permissions  Permissions        `yaml:"permissions"`
 	Delegation   DelegationPolicy   `yaml:"delegation"`
 	Verification VerificationPolicy `yaml:"verification"`
@@ -117,6 +120,12 @@ func LoadProfileDir(agentDir string) (Profile, error) {
 	if len(frontmatter.Tools) > 0 {
 		permissions.Tools = frontmatter.Tools
 	}
+	if len(frontmatter.AllowRoots) > 0 {
+		permissions.AllowRoots = frontmatter.AllowRoots
+	}
+	if len(frontmatter.ReadonlyRoots) > 0 {
+		permissions.ReadonlyRoots = frontmatter.ReadonlyRoots
+	}
 
 	profile := Profile{
 		ID:           frontmatter.ID,
@@ -138,6 +147,16 @@ func LoadProfileDir(agentDir string) (Profile, error) {
 	if err := profile.Validate(); err != nil {
 		return Profile{}, fmt.Errorf("invalid profile %q: %w", profile.ID, err)
 	}
+	allowRoots, err := tools.ExpandRoots(profile.Permissions.AllowRoots)
+	if err != nil {
+		return Profile{}, fmt.Errorf("invalid profile %q allow_roots: %w", profile.ID, err)
+	}
+	readonlyRoots, err := tools.ExpandRoots(profile.Permissions.ReadonlyRoots)
+	if err != nil {
+		return Profile{}, fmt.Errorf("invalid profile %q readonly_roots: %w", profile.ID, err)
+	}
+	profile.Permissions.AllowRoots = allowRoots
+	profile.Permissions.ReadonlyRoots = readonlyRoots
 	return profile, nil
 }
 

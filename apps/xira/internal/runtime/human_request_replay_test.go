@@ -458,7 +458,7 @@ func TestReplayBypassesOnlyConfirmationGate(t *testing.T) {
 		Actor:   "tester",
 		Message: "approved",
 	})
-	if err == nil || !strings.Contains(err.Error(), "within workspace") {
+	if err == nil || !strings.Contains(err.Error(), "within allowed roots") {
 		t.Fatalf("ResolveHumanRequest outside replay error = %v, want workspace policy failure", err)
 	}
 	if _, err := os.Stat(outsidePath); !os.IsNotExist(err) {
@@ -471,7 +471,7 @@ func TestReplayBypassesOnlyConfirmationGate(t *testing.T) {
 	if stored.Replay == nil || stored.Replay.Status != humanrequest.ReplayFailed {
 		t.Fatalf("stored replay = %+v, want failed", stored.Replay)
 	}
-	if stored.Replay.Error == "" || !strings.Contains(stored.Replay.Error, "within workspace") {
+	if stored.Replay.Error == "" || !strings.Contains(stored.Replay.Error, "within allowed roots") {
 		t.Fatalf("stored replay error = %q", stored.Replay.Error)
 	}
 }
