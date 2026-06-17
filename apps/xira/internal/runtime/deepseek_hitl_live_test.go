@@ -169,6 +169,45 @@ steps:
 	if out := step.Outputs["summary"]; strings.TrimSpace(out.Summary) == "" && out.Value == nil {
 		t.Fatalf("missing summary output in completed live flow step: %+v", step.Outputs)
 	}
+
+	// Session history must persist to a messages.jsonl under the trigger
+	// channel tree (cli, since this flow run omitted Context), NOT under a
+	// forged "flow" channel tree. Live proof that flow propagates trigger
+	// identity end to end.
+	agentRun, err := rt.RunStore().Load(step.AgentRunID)
+	if err != nil {
+		t.Fatalf("load agent run for live flow step: %v", err)
+	}
+	if agentRun.SessionScope == nil {
+		t.Fatal("live flow agent run session scope is nil")
+	}
+	if agentRun.SessionScope.Channel == "flow" {
+		t.Fatalf("live flow agent run forged channel \"flow\"; session scope = %+v", agentRun.SessionScope)
+	}
+	if agentRun.SessionScope.Channel == "" {
+		t.Fatalf("live flow agent run session channel empty; session scope = %+v", agentRun.SessionScope)
+	}
+	// Find the persisted messages.jsonl under the session root and assert it
+	// lives under the trigger channel, not a forged flow tree.
+	sessionRoot := filepath.Join(rt.StateRoot(), "sessions")
+	wantChannel := agentRun.SessionScope.Channel
+	var msgPath string
+	_ = filepath.Walk(sessionRoot, func(path string, _ os.FileInfo, _ error) error {
+		if strings.HasSuffix(path, "messages.jsonl") && strings.Contains(path, agentRun.AgentID) {
+			msgPath = path
+		}
+		return nil
+	})
+	if msgPath == "" {
+		t.Fatalf("no messages.jsonl persisted under %s for agent %s", sessionRoot, agentRun.AgentID)
+	}
+	rel := strings.TrimPrefix(filepath.ToSlash(msgPath), filepath.ToSlash(sessionRoot)+"/")
+	if !strings.HasPrefix(rel, wantChannel+"/") {
+		t.Fatalf("live flow session persisted under %q, want channel %q: %s", rel, wantChannel, msgPath)
+	}
+	if strings.HasPrefix(rel, "flow/") {
+		t.Fatalf("live flow session persisted under forged sessions/flow/ tree: %s", msgPath)
+	}
 }
 
 func TestRealDeepSeekFlowRoutesToHumanApproval(t *testing.T) {
