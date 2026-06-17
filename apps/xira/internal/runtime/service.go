@@ -40,6 +40,7 @@ type Config struct {
 
 type Service struct {
 	agents         *agents.Manager
+	flows          *flow.FlowRegistry
 	skills         *skills.Manager
 	events         *EventBus
 	runs           *RunStore
@@ -77,6 +78,10 @@ func NewService(cfg Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	flowRegistry, err := flow.LoadFromWorkspace(resolved.WorkspaceRoot)
+	if err != nil {
+		return nil, err
+	}
 	if _, ok := manager.Get(resolved.DefaultAgentID); !ok {
 		return nil, fmt.Errorf("default agent %q not found", resolved.DefaultAgentID)
 	}
@@ -93,6 +98,7 @@ func NewService(cfg Config) (*Service, error) {
 	}
 	return &Service{
 		agents:         manager,
+		flows:          flowRegistry,
 		skills:         skillManager,
 		events:         NewEventBus(),
 		runs:           NewRunStore(resolved.RunRoot),

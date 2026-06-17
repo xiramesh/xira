@@ -91,6 +91,136 @@ func newFlowAPIServer(t *testing.T) (*Server, *frt.Service, string) {
 	return server, rt, flowPath
 }
 
+// newFlowRegistryAPIServer constructs a server whose runtime workspace contains
+// flows/<id>/flow.yaml so the registry discovers them. It writes a minimal
+// xira-assistant PROFILE.md so NewService loads agents from that workspace.
+func newFlowRegistryAPIServer(t *testing.T, ids ...string) (*Server, *frt.Service) {
+	t.Helper()
+	workspace := t.TempDir()
+	writeAPIAgentProfile(t, filepath.Join(workspace, "agents", "xira-assistant"))
+	for _, id := range ids {
+		writeAPIRegisteredFlowFile(t, workspace, id)
+	}
+	cfg := frt.Config{
+		WorkspaceRoot: workspace,
+		RunRoot:       filepath.Join(t.TempDir(), "runs"),
+		StateRoot:     filepath.Join(t.TempDir(), "state"),
+	}
+	rt := newAPITestService(t, cfg)
+	return NewServer(rt, "127.0.0.1:0"), rt
+}
+
+func writeAPIAgentProfile(t *testing.T, dir string) {
+	t.Helper()
+	content := `---
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.0
+description: Default assistant.
+model_policy:
+  provider: deepseek
+  model: test-model
+  stream: false
+---
+# Instructions
+Answer.
+`
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "PROFILE.md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write agent profile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SOUL.md"), []byte("# Soul\n\nDirect.\n"), 0o644); err != nil {
+		t.Fatalf("write agent soul: %v", err)
+	}
+}
+
+func writeAPIRegisteredFlowFile(t *testing.T, workspace, id string) {
+	t.Helper()
+	path := filepath.Join(workspace, "flows", id, "flow.yaml")
+	content := `schema_version: xira.flow.v0
+id: ` + id + `
+name: ` + id + `
+version: 0.1.0
+entrypoints:
+  - id: ad_hoc
+    start_step: answer
+    required_inputs:
+      - request
+steps:
+  - id: answer
+    objective: Answer ${input.request}.
+    executor:
+      agent: xira-assistant
+`
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir flow dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write flow file: %v", err)
+	}
+}
+
+func TestGetFlowsListsRegisteredFlows(t *testing.T) {
+	server, _ := newFlowRegistryAPIServer(t, "hello", "world")
+
+	resp := serveJSON(t, server, http.MethodGet, "/api/v1/flows", nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Flows []frt.FlowRef `json:"flows"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v\n%s", err, resp.Body.String())
+	}
+	if len(body.Flows) != 2 {
+		t.Fatalf("flows len = %d, want 2: %s", len(body.Flows), resp.Body.String())
+	}
+	if body.Flows[0].ID != "hello" || body.Flows[1].ID != "world" {
+		t.Fatalf("flows order = %+v, want [hello world]", body.Flows)
+	}
+}
+
+func TestGetFlowsEmptyWhenNoFlows(t *testing.T) {
+	server, _ := newFlowRegistryAPIServer(t)
+
+	resp := serveJSON(t, server, http.MethodGet, "/api/v1/flows", nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Flows []frt.FlowRef `json:"flows"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Flows) != 0 {
+		t.Fatalf("flows len = %d, want 0", len(body.Flows))
+	}
+}
+
+func TestPostFlowRunAcceptsFlowID(t *testing.T) {
+	server, _ := newFlowRegistryAPIServer(t, "hello")
+
+	resp := serveJSON(t, server, http.MethodPost, "/api/v1/flows/runs", map[string]any{
+		"flow_id":       "hello",
+		"entrypoint_id": "ad_hoc",
+		"input":         map[string]string{"request": "hi"},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	var run frt.FlowRunView
+	if err := json.Unmarshal(resp.Body.Bytes(), &run); err != nil {
+		t.Fatalf("decode: %v\n%s", err, resp.Body.String())
+	}
+	if run.FlowID != "hello" {
+		t.Fatalf("flow_id = %q, want hello", run.FlowID)
+	}
+}
+
 func TestPostFlowRunStartsRun(t *testing.T) {
 	server, rt, flowPath := newFlowAPIServer(t)
 	_ = rt

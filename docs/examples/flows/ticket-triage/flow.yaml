@@ -1,0 +1,31 @@
+schema_version: xira.flow.v0
+id: ticket-triage
+name: Ticket Triage
+version: 0.1.0
+description: Customer-support flow using ticket_id as its business input (not repo). Demonstrates that flow inputs are business-defined; 'repo' is just one possible input, not a runtime concept.
+objective: Triage a support ticket and propose a response.
+
+inputs:
+  required:
+    - ticket_id
+
+entrypoints:
+  - id: ad_hoc
+    description: A support ticket needs triage.
+    start_step: triage
+    required_inputs:
+      - ticket_id
+
+steps:
+  - id: triage
+    objective: Read ticket ${input.ticket_id} and classify its severity and category.
+    executor:
+      agent: xira-assistant
+    transitions:
+      on_success: respond
+
+  - id: respond
+    objective: Draft a response for the classified ticket.
+    executor:
+      agent: xira-assistant
+    # No transitions: completes the flow.

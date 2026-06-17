@@ -225,6 +225,7 @@ func (s *Service) FlowKernel() *flow.Kernel {
 	}
 	s.flowKernel = &flow.Kernel{
 		Store:       store,
+		Definitions: s.flows,
 		Executor:    executor,
 		Policy:      bridge,
 		Resolver:    bridge,
@@ -253,6 +254,23 @@ func (s *Service) GetFlowRun(ctx context.Context, flowRunID string) (*flow.Run, 
 	return s.FlowKernel().Store.GetRun(ctx, flowRunID)
 }
 
+// FlowRegistry returns the registry of flows discovered from the workspace, or
+// nil. It powers flow_id-based starts (via the kernel) and flow list/inspect.
+func (s *Service) FlowRegistry() *flow.FlowRegistry {
+	if s == nil {
+		return nil
+	}
+	return s.flows
+}
+
+// FlowRefs returns the list of discovered flow references for CLI/API listing.
+func (s *Service) FlowRefs() []flow.FlowRef {
+	if s == nil || s.flows == nil {
+		return nil
+	}
+	return s.flows.List()
+}
+
 // FlowStartRequest is an alias for flow.StartRequest exposed on the runtime
 // package so callers (CLI, API) can construct start requests without importing
 // the flow package directly.
@@ -265,3 +283,7 @@ type FlowRun = flow.Run
 // FlowRunView is a serializable projection of flow.Run for CLI/API consumers
 // that want stable field names without depending on internal struct tags.
 type FlowRunView = flow.Run
+
+// FlowRef is an alias for flow.FlowRef exposed so CLI/API callers can decode
+// registry listing output without importing the flow package directly.
+type FlowRef = flow.FlowRef

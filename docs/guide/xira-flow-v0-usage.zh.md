@@ -100,21 +100,60 @@ steps:
 | `executor.agent` | 哪个 agent 执行这个 step |
 | `output_contract.required_slots` | step 必须产出的结果槽 |
 
-## 4. 启动和推进 Flow
+## 3.1 Flow 放在哪里（不用登记）
 
-CLI 支持四个命令：
+Flow 和 agent 一样，**不需要在 `xira.yaml` 里登记**。把每个 Flow 放进 `workspace/flows/<id>/flow.yaml`，runtime 启动时自动发现：
+
+```text
+workspace/
+  agents/<id>/PROFILE.md      # 自动发现，目录名即 id
+  flows/<id>/flow.yaml        # 同样自动发现，目录名即 id
+```
+
+发现规则（和 agent 完全一致）：
+
+- **目录名必须等于 flow.yaml 里的 `id`**，否则启动报错。比如 `workspace/flows/hello-world/flow.yaml` 里必须写 `id: hello-world`。
+- **文件名 `flow.yaml` 不区分大小写**（`Flow.yaml` 也能发现），和 `PROFILE.md` 一样；但同名大小写变体并存（`flow.yaml` + `Flow.YAML`）会报 ambiguous 错误。
+- **`workspace/flows/` 不存在或为空时不报错**，只是没有可用的 Flow——不是所有 workspace 都需要 Flow。
+
+查看已发现的 Flow：
 
 ```bash
-xira flow run <flow-file> --entrypoint <entrypoint-id> --input key=value
+xira flow list                 # 列出 workspace/flows 下所有 Flow
+xira flow inspect hello-world  # 查看单个 Flow
+```
+
+仓库里 `docs/examples/flows/` 下有几个可读示例：`hello-world`（最小单步）、`release-review`（双人工门）、`incident-debug`（条件分支）、`ticket-triage`（客服场景）。把它们复制进 `workspace/flows/` 即可被发现。
+
+### `repo` 是什么
+
+`repo` 不是 Flow runtime 的固定字段。它只是某些开发类 Flow（比如 `devrun`）声明的业务输入，意思是"这次要操作哪个代码仓库/工作目录"。其他 Flow 完全可以不用 `repo`——客服 Flow 用 `ticket_id`，周报 Flow 用 `week`，发布 Flow 用 `release_id`。每个 Flow 自己在 `inputs.required` 里声明它需要什么。
+
+## 4. 启动和推进 Flow
+
+CLI 支持这些命令：
+
+```bash
+xira flow run [<flow-id>] [--path <flow-file>] --entrypoint <entrypoint-id> --input key=value
+xira flow list
+xira flow inspect <flow-id>
 xira flow status <flow-run-id>
 xira flow advance <flow-run-id>
 xira flow resume <flow-run-id> --human-request <human-request-id>
 ```
 
-启动最小 Flow：
+启动一个已注册的 Flow（推荐，按 id）：
 
 ```bash
-./apps/xira/xira flow run docs/examples/flows/hello/flow.yaml \
+./apps/xira/xira flow run hello-world \
+  --entrypoint ad_hoc \
+  --input request="summarize this task"
+```
+
+启动一个未注册的 Flow 文件（按路径，临时/调试用）：
+
+```bash
+./apps/xira/xira flow run --path docs/examples/flows/hello-world/flow.yaml \
   --entrypoint ad_hoc \
   --input request="summarize this task"
 ```

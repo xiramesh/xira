@@ -1,0 +1,47 @@
+schema_version: xira.flow.v0
+id: incident-debug
+name: Incident Debug
+version: 0.1.0
+description: Branching flow. Reproduce an incident, then route to diagnosis or straight to a report depending on the reproduction outcome. Demonstrates branch transitions.
+objective: Reproduce an incident, then route to diagnosis or reporting based on the result.
+
+inputs:
+  required:
+    - bug_report
+
+entrypoints:
+  - id: ad_hoc
+    description: The user reported an incident to debug.
+    start_step: reproduce
+    required_inputs:
+      - bug_report
+
+steps:
+  - id: reproduce
+    objective: Reproduce the reported incident from ${input.bug_report}.
+    executor:
+      agent: xira-assistant
+    output_contract:
+      required_slots:
+        - id: reproduction_status
+          description: reproduced or not_reproduced.
+          formats: ["yaml"]
+    transitions:
+      branches:
+        - when: "${outputs.reproduce.reproduction_status == 'reproduced'}"
+          next: diagnose
+        - when: "${outputs.reproduce.reproduction_status == 'not_reproduced'}"
+          next: report
+
+  - id: diagnose
+    objective: Diagnose the root cause of the reproduced incident.
+    executor:
+      agent: xira-assistant
+    transitions:
+      on_success: report
+
+  - id: report
+    objective: Summarize the incident outcome and residual risk.
+    executor:
+      agent: xira-assistant
+    # No transitions: completes the flow.

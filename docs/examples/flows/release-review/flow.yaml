@@ -1,0 +1,61 @@
+schema_version: xira.flow.v0
+id: release-review
+name: Release Review
+version: 0.1.0
+description: Two human approval gates around a single drafting step. Demonstrates pure HITL (human-in-the-loop) flow control with revise loops.
+objective: Produce a release note draft behind two human approval gates.
+
+inputs:
+  required:
+    - request
+
+entrypoints:
+  - id: ad_hoc
+    description: The user wants a release note drafted and approved.
+    start_step: draft
+    required_inputs:
+      - request
+
+steps:
+  - id: draft
+    objective: Draft a release note for ${input.request}.
+    executor:
+      agent: xira-assistant
+    transitions:
+      on_success: approve_design
+
+  - id: approve_design
+    objective: Human approves the draft before release.
+    executor:
+      type: human_approval
+      prompt: "Approve this release note draft?"
+      options:
+        - approve
+        - revise
+    transitions:
+      branches:
+        - when: "${outputs.approve_design.approval_signal == 'approve'}"
+          next: approve_release
+        - when: "${outputs.approve_design.approval_signal == 'revise'}"
+          next: draft
+
+  - id: approve_release
+    objective: Final human gate before publishing.
+    executor:
+      type: human_approval
+      prompt: "Publish this release note?"
+      options:
+        - approve
+        - reject
+    transitions:
+      branches:
+        - when: "${outputs.approve_release.approval_signal == 'approve'}"
+          next: publish
+        - when: "${outputs.approve_release.approval_signal == 'reject'}"
+          next: draft
+
+  - id: publish
+    objective: Publish the approved release note.
+    executor:
+      agent: xira-assistant
+    # No transitions: completes the flow.
