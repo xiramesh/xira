@@ -234,6 +234,16 @@ fallback: "${outputs.merge.merge_result || 'not_merged'}"
     command: go test ./...
 ```
 
+### 6.1 Flow 调 agent 的会话落在哪
+
+Flow 里 agent step 产生的会话历史（`messages.jsonl`）**跟触发渠道走，而不是落在一个独立的 `flow` channel 下**。这是为了避免同一个用户"直接对话"和"经 Flow 间接调 agent"的会话历史被劈成两半。
+
+- **CLI 触发**（`xira flow run`）：Flow 没有外部触发上下文，默认走 `cli` channel，落 `sessions/cli/cli-default/chat_...__sender_.../agents/<agent>/messages.jsonl`，和 `xira agent` 一致。
+- **API/IM 触发**：调用方在 `StartRequest.Context`（或 HTTP body 的 `context` 字段）里传入真实触发身份（channel/chat/sender/space），Flow 会把它一路透传到每个 agent step，会话落在对应 channel 目录，含真实的 chat/sender。
+- **跨进程 Advance/Resume**：触发上下文持久化进 `flow_run.yaml`，后续步骤（可能是另一个进程发起的 Advance）仍能读到，会话归属不变。
+
+也就是说：Flow 只是 agent 的**编排层**，不会改写对话的来源身份。回查某个 Flow run 的会话证据时，去触发渠道的 session 树下找，不在 `sessions/flow/` 下。
+
 Flow step 应该描述目标、输入、产出和约束。真正用 shell、Codex、MCP、GitHub API 等，是 agent profile / skill / runtime tool 的职责。
 
 ## 7. Human-in-the-loop 怎么写
@@ -505,9 +515,19 @@ Content-Type: application/json
   "input": {
     "repo": "/Users/me/work/repo",
     "request": "fix the failing test"
+  },
+  "context": {
+    "channel": "feishu",
+    "entrypoint_id": "feishu-devrun-bot",
+    "chat_id": "oc_xxx",
+    "chat_type": "group",
+    "sender_id": "u_yyy",
+    "space_id": "ti_demo"
   }
 }
 ```
+
+`context` 可选。省略时 Flow 默认走 `cli` channel（落 `sessions/cli/...`）。代表 IM 用户启动 Flow 时传入真实触发身份，这样 Flow 内的 agent step 会话会落在该用户所在 channel 的会话树下，而不是独立的 `flow` 目录。
 
 推进 Flow：
 

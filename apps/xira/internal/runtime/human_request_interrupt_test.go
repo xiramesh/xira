@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+		"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
@@ -85,7 +86,7 @@ func TestHumanRequestToolCreatesPendingRequestAndInterrupt(t *testing.T) {
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask a human", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask a human", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -141,7 +142,7 @@ func TestHumanRequestToolDefaultsMissingKindToFreeform(t *testing.T) {
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask a human without explicit kind", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask a human without explicit kind", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +303,7 @@ func TestADKPathStopsBeforeSecondModelCallOnInterrupt(t *testing.T) {
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask via adk", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask via adk", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -331,7 +332,7 @@ func TestRunInterruptDoesNotValidateFinalResponseOrCreateEvolutionCandidate(t *t
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask human", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask human", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -371,7 +372,7 @@ func runHumanRequestInterrupt(t *testing.T, callID, question string) (*Service, 
 		StateRoot:      filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask a human", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask a human", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}

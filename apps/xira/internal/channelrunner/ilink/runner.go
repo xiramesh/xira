@@ -17,6 +17,7 @@ import (
 	openilink "github.com/openilink/openilink-sdk-go"
 
 	"github.com/xiramesh/xira/internal/channelcontrol"
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
@@ -612,10 +613,10 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 	)
 	resp, err := r.runtime.RunAgent(ctx, frt.TurnRequest{
 		EntrypointID: r.definition.ID,
-		Channel:      "ilink",
-		UserID:       senderID,
 		Message:      content,
-		Metadata:     metadata,
+		// Trigger identity as a first-class InboundContext so the session lands
+		// under sessions/ilink/<entrypoint>/chat_<id>__sender_<id>/.
+		Context:      channel.NewInboundContextWithEntrypoint("ilink", r.definition.ID, senderID, metadata),
 	})
 	if err != nil {
 		slog.Error("ilink runtime run failed",

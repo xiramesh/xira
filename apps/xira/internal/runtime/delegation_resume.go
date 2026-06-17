@@ -63,14 +63,15 @@ func (s *Service) resumeChildDelegationAfterAnswer(ctx context.Context, join *De
 	childReq := TurnRequest{
 		AgentID:   target.ID,
 		Message:   resumeMessage,
-		UserID:    responseActor(req.Response),
 		SessionID: adkSessionID(childRun.SessionID, childRun.RunID+":resume:"+uuid.NewString()),
-		Channel:   "resume",
-		Metadata: map[string]string{
+		// Resume inherits the child's original trigger identity from its
+		// persisted session scope — not a forged "resume" channel — so the
+		// resumed turn stays in the same conversation tree.
+		Context: inboundContextFromScope(childRun.SessionScope, map[string]string{
 			"conversation_session_id": childRun.SessionID,
 			"agent_session_id":        childRun.SessionID,
 			"human_request_id":        req.ID,
-		},
+		}),
 	}
 	base := runtimeEventBase{
 		RunID:                 childRun.RunID,
@@ -120,7 +121,7 @@ func (s *Service) resumeChildDelegationAfterAnswer(ctx context.Context, join *De
 		SessionID:      childRun.SessionID,
 		AgentSessionID: childRun.SessionID,
 		ADKSessionID:   childReq.SessionID,
-		UserID:         childReq.UserID,
+		UserID:         childReq.Context.SenderID,
 		Pricing:        s.pricing,
 	}, recordEvent, func(call LLMCallRecord) {
 		llmCalls = append(llmCalls, call)
@@ -147,6 +148,7 @@ func (s *Service) resumeChildDelegationAfterAnswer(ctx context.Context, join *De
 	childRun.EndedAt = time.Now()
 	childRun.Status = "completed"
 	childRun.Usage = summarizeUsage(childRun)
+	s.persistResumeSessionMessages(childRun, req, resumeMessage)
 	if err := s.runs.SaveRun(childRun); err != nil {
 		return err
 	}
@@ -208,6 +210,7 @@ func (s *Service) materializeDeniedDelegation(ctx context.Context, join *Delegat
 		}
 		childRun.EndedAt = now
 		childRun.VerificationResult = VerificationResult{Status: "failed", Checks: []string{"human_response_" + string(req.Response.Kind)}}
+		s.persistResumeSessionMessages(childRun, req, "")
 		if err := s.runs.SaveRun(childRun); err != nil {
 			return err
 		}
@@ -278,23 +281,23 @@ func (s *Service) resumeParentAfterDelegationOutput(ctx context.Context, join *D
 	resumeReq := TurnRequest{
 		AgentID:   profile.ID,
 		Message:   resumeMessage,
-		UserID:    strings.TrimSpace(actor),
 		SessionID: adkSessionID(parent.SessionID, parent.RunID+":delegate-resume:"+uuid.NewString()),
-		Channel:   "resume",
-		Metadata: map[string]string{
+		// Parent resume inherits the parent's original trigger identity from its
+		// persisted session scope, not a forged "resume" channel.
+		Context: inboundContextFromScope(parent.SessionScope, map[string]string{
 			"conversation_session_id": parent.SessionID,
 			"agent_session_id":        parent.SessionID,
 			"delegation_join_id":      join.ID,
-		},
+		}),
 	}
-	if resumeReq.UserID == "" {
-		resumeReq.UserID = "human"
+	if resumeReq.Context.SenderID == "" {
+		resumeReq.Context.SenderID = "human"
 	}
 	base := runtimeEventBase{
 		RunID:                 parent.RunID,
 		AgentID:               parent.AgentID,
 		EntrypointID:          parent.EntrypointID,
-		Channel:               "resume",
+		Channel:               resumeReq.Context.Channel,
 		ConversationSessionID: parent.SessionID,
 		AgentSessionID:        parent.SessionID,
 		TraceID:               parent.RunID,
@@ -313,7 +316,7 @@ func (s *Service) resumeParentAfterDelegationOutput(ctx context.Context, join *D
 			RunID:   parent.RunID,
 			Time:    time.Now(),
 			Action:  action,
-			Actor:   resumeReq.UserID,
+			Actor:   resumeReq.Context.SenderID,
 			Target:  target,
 			Allowed: allowed,
 			Reason:  reason,
@@ -339,7 +342,7 @@ func (s *Service) resumeParentAfterDelegationOutput(ctx context.Context, join *D
 		SessionID:      parent.SessionID,
 		AgentSessionID: parent.SessionID,
 		ADKSessionID:   resumeReq.SessionID,
-		UserID:         resumeReq.UserID,
+		UserID:         resumeReq.Context.SenderID,
 		Pricing:        s.pricing,
 	}, recordEvent, func(call LLMCallRecord) {
 		llmCalls = append(llmCalls, call)
@@ -373,6 +376,7 @@ func (s *Service) resumeParentAfterDelegationOutput(ctx context.Context, join *D
 	}
 	parent.EndedAt = time.Now()
 	parent.Usage = summarizeUsage(parent)
+	s.persistResumeSessionMessages(parent, nil, resumeMessage)
 	return s.runs.SaveRun(parent)
 }
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+		"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
@@ -50,7 +51,7 @@ func TestDelegateChildWaitingHumanSuspendsParent(t *testing.T) {
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and wait", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and wait", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -84,7 +85,7 @@ func TestDelegateChildWaitingHumanSuspendsParent(t *testing.T) {
 
 func TestDelegateChildWaitingHumanPersistsJoinState(t *testing.T) {
 	rt := newDelegationWaitingTestService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and persist join", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and persist join", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -118,7 +119,7 @@ func TestDelegateChildWaitingHumanPersistsJoinState(t *testing.T) {
 
 func TestDelegateChildWaitingHumanReleasesActiveSlot(t *testing.T) {
 	rt := newDelegationWaitingTestService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and count slots", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and count slots", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -173,7 +174,7 @@ func TestDelegateChildWaitingHumanCountsAgainstMaxOutstanding(t *testing.T) {
 
 func TestDelegateResumeAfterChildAnswerMaterializesOutput(t *testing.T) {
 	rt := newDelegationResumeTestService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and resume", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and resume", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -222,7 +223,7 @@ func TestDelegateResumeAfterChildAnswerMaterializesOutput(t *testing.T) {
 
 func TestDelegateResumeAfterChildApprovedMaterializesOutput(t *testing.T) {
 	rt := newDelegationResumeTestService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and approve", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and approve", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -244,7 +245,7 @@ func TestDelegateResumeAfterChildApprovedMaterializesOutput(t *testing.T) {
 
 func TestDelegateResumeAfterChildAnswerInjectsOnlyChildOutput(t *testing.T) {
 	rt := newDelegationResumeTestService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and answer boundary", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and answer boundary", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -278,7 +279,7 @@ func TestDelegateResumeAfterChildAnswerInjectsOnlyChildOutput(t *testing.T) {
 
 func TestDelegateResumeIsIdempotent(t *testing.T) {
 	rt := newDelegationResumeTestService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and replay resume event", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and replay resume event", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -310,7 +311,7 @@ func TestDelegateResumeIsIdempotent(t *testing.T) {
 
 func TestDelegateResumeDenyMaterializesFailedOutput(t *testing.T) {
 	rt := newDelegationResumeTestService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and deny", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and deny", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -347,7 +348,7 @@ func TestDelegateResumeDenyMaterializesFailedOutput(t *testing.T) {
 
 func TestDelegateResumeCancelMaterializesCanceledOutput(t *testing.T) {
 	rt := newDelegationResumeTestService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and cancel", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and cancel", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -386,7 +387,7 @@ func TestDelegateResumeAfterProcessRestart(t *testing.T) {
 	runRoot := filepath.Join(t.TempDir(), "runs")
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	rt := newDelegationResumeTestServiceWithRoots(t, runRoot, stateRoot)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and restart", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and restart", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}

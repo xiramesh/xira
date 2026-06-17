@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/xiramesh/xira/internal/channel"
 )
 
 // fakeAgentRunner is a controllable AgentRunner for executor/kernel tests.
@@ -400,4 +402,107 @@ func TestResolveStepInputsOrFallback(t *testing.T) {
 	if got["request"] != "issue-42" {
 		t.Errorf("request = %q, want issue-42 (fallback)", got["request"])
 	}
+}
+
+// TestStartRequestCarriesAndPersistsTriggerContext asserts that a flow run
+// remembers who triggered it: StartRequest.Context must survive into the
+// persisted flow.Run so cross-process Advance/Resume can read the trigger
+// identity. Without this, every flow agent step forges its channel.
+func TestStartRequestCarriesAndPersistsTriggerContext(t *testing.T) {
+	defs := map[string]*Definition{"test": linearFlow()}
+	k, _ := newTestKernel(t, defs, nil)
+
+	want := channel.InboundContext{Channel: "feishu", ChatID: "oc_x", SenderID: "u_y", ChatType: "group"}
+	run, err := k.Start(context.Background(), StartRequest{
+		FlowID:       "test",
+		EntrypointID: "ad_hoc",
+		Input:        map[string]string{"request": "x"},
+		Context:      want,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if run.Context == nil {
+		t.Fatal("run.Context is nil; trigger context not persisted")
+	}
+	if run.Context.Channel != "feishu" || run.Context.ChatID != "oc_x" || run.Context.SenderID != "u_y" {
+		t.Fatalf("run.Context = %+v, want feishu/oc_x/u_y", run.Context)
+	}
+
+	// Cross-process simulation: reload the run from the store and verify the
+	// context survived persistence (flow_run.yaml).
+	reloaded, err := k.Store.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("GetRun after reload: %v", err)
+	}
+	if reloaded.Context == nil || reloaded.Context.Channel != "feishu" || reloaded.Context.ChatID != "oc_x" {
+		t.Fatalf("reloaded run.Context = %+v, context did not survive persistence", reloaded.Context)
+	}
+}
+
+// TestStartRequestDefaultsToCLIContextWhenOmitted: when no trigger context is
+// passed, the flow run falls back to the "cli" channel — aligned with the
+// `xira agent` CLI behavior — never to a forged "flow" channel.
+func TestStartRequestDefaultsToCLIContextWhenOmitted(t *testing.T) {
+	defs := map[string]*Definition{"test": linearFlow()}
+	k, _ := newTestKernel(t, defs, nil)
+	run, err := k.Start(context.Background(), testStartRequest("ad_hoc"))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if run.Context == nil || run.Context.Channel != "cli" {
+		t.Fatalf("run.Context = %+v, want cli fallback", run.Context)
+	}
+}
+
+// TestBuildTurnRequestUsesRunContextNotForgedChannel is the core regression
+// guard: the agent executor must hand the trigger identity to the agent runner,
+// not a hardcoded "flow" channel. This is what makes a flow-invoked agent turn
+// land under sessions/<trigger-channel>/... instead of sessions/flow/...
+func TestBuildTurnRequestUsesRunContextNotForgedChannel(t *testing.T) {
+	// Wire a real AgentExecutor (which calls buildTurnRequest) with a fake
+	// agent runner that captures the request.
+	runner := &fakeAgentRunner{resp: AgentTurnResponse{
+		RunID: "agent-run-1", AgentID: "dev-intake", Status: "completed",
+	}}
+	defs := map[string]*Definition{"test": linearFlow()}
+	k := &Kernel{
+		Store:       newTestStore(t),
+		Definitions: staticDefinitions{defs: defs},
+		Executor: &AgentExecutor{
+			Agent: runner,
+			Human: nopHumanRequestCreator{},
+		},
+	}
+
+	run, err := k.Start(context.Background(), StartRequest{
+		FlowID:       "test",
+		EntrypointID: "ad_hoc",
+		Input:        map[string]string{"request": "x"},
+		Context:      channel.InboundContext{Channel: "feishu", ChatID: "oc_x", SenderID: "u_y"},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := k.Advance(context.Background(), run.ID); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	req := runner.last
+	if req.Context.Channel != "feishu" {
+		t.Fatalf("AgentTurnRequest.Context.Channel = %q, want feishu (trigger channel)", req.Context.Channel)
+	}
+	if req.Context.Channel == "flow" {
+		t.Fatal("AgentTurnRequest forged channel \"flow\" — trigger context not propagated")
+	}
+	if req.Context.ChatID != "oc_x" || req.Context.SenderID != "u_y" {
+		t.Fatalf("AgentTurnRequest.Context = %+v, want oc_x/u_y", req.Context)
+	}
+}
+
+// nopHumanRequestCreator is a no-op HumanRequestCreator for executor tests that
+// don't exercise control steps.
+type nopHumanRequestCreator struct{}
+
+func (nopHumanRequestCreator) CreateHumanRequest(context.Context, CreateHumanRequestInput) (HumanRequestView, error) {
+	return HumanRequestView{}, errors.New("human requests not supported in this executor test")
 }

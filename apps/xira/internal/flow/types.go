@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/xiramesh/xira/internal/channel"
 )
 
 // SchemaVersionDefinition is the schema version string for flow definitions.
@@ -289,6 +291,11 @@ type Run struct {
 	CurrentStepID        string               `yaml:"current_step_id,omitempty" json:"current_step_id,omitempty"`
 	EntrypointID         string               `yaml:"entrypoint_id,omitempty" json:"entrypoint_id,omitempty"`
 	Input                map[string]string    `yaml:"input,omitempty" json:"input,omitempty"`
+	// Context is the trigger identity (channel/chat/sender/space) of whoever
+	// started this flow run. It persists into flow_run.yaml so cross-process
+	// Advance/Resume can propagate it to agent steps — keeping flow-invoked
+	// agent sessions under the same conversation tree as the direct trigger.
+	Context              *channel.InboundContext `yaml:"context,omitempty" json:"context,omitempty"`
 	Steps                map[string]StepState `yaml:"steps,omitempty" json:"steps,omitempty"`
 	PendingSignals       []string             `yaml:"pending_signals,omitempty" json:"pending_signals,omitempty"`
 	PendingHumanRequests []string             `yaml:"pending_human_requests,omitempty" json:"pending_human_requests,omitempty"`

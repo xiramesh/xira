@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/flow"
 	"github.com/xiramesh/xira/internal/humanrequest"
+	fsession "github.com/xiramesh/xira/internal/session"
 )
 
 func TestFlowHumanApprovalUsesRuntimeHumanRequestStore(t *testing.T) {
@@ -134,4 +137,164 @@ func (s flowStaticDefinitions) Definition(id string) (*flow.Definition, error) {
 		return def, nil
 	}
 	return nil, fmt.Errorf("flow %q not found", id)
+}
+
+// TestFlowAgentStepPersistsSessionInTriggerChannel is the end-to-end (non-live)
+// proof that a flow-invoked agent turn lands under the trigger channel's
+// session tree, not a forged "flow" channel. Uses the fake DeepSeek client —
+// session placement is determined by InboundContext, independent of the LLM.
+func TestFlowAgentStepPersistsSessionInTriggerChannel(t *testing.T) {
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	rt := newTestService(t, Config{
+		RunRoot:   filepath.Join(t.TempDir(), "runs"),
+		StateRoot: stateRoot,
+	})
+	def := &flow.Definition{
+		SchemaVersion: flow.SchemaVersionDefinition,
+		ID:            "session-channel-flow",
+		Name:          "Session Channel Flow",
+		Version:       "0.1.0",
+		Objective:     "verify flow agent step session channel",
+		Entrypoints:   []flow.Entrypoint{{ID: "ad_hoc", StartStep: "work"}},
+		Steps: []flow.Step{
+			{
+				ID:             "work",
+				Objective:      "produce the smoke summary",
+				Executor:       flow.Executor{Agent: "xira-assistant"},
+				OutputContract: flow.OutputContract{RequiredSlots: []flow.OutputSlot{{ID: "summary"}}},
+			},
+		},
+	}
+	k := rt.FlowKernel()
+	k.Definitions = flowStaticDefinitions{defs: map[string]*flow.Definition{"session-channel-flow": def}}
+
+	// Start the flow carrying a real feishu trigger identity.
+	started, err := rt.StartFlow(context.Background(), flow.StartRequest{
+		FlowID:       "session-channel-flow",
+		EntrypointID: "ad_hoc",
+		Input:        map[string]string{"request": "smoke"},
+		Context: channel.InboundContext{
+			Channel:  "feishu",
+			ChatID:   "oc_flow_smoke",
+			SenderID: "u_flow_smoke",
+			ChatType: "group",
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartFlow: %v", err)
+	}
+	advanced, err := rt.AdvanceFlow(context.Background(), started.ID)
+	if err != nil {
+		t.Fatalf("AdvanceFlow: %v", err)
+	}
+	step := advanced.Steps["work"]
+	if step.Status != flow.StepCompleted || strings.TrimSpace(step.AgentRunID) == "" {
+		t.Fatalf("work step not completed: status=%q agent_run_id=%q error=%q", step.Status, step.AgentRunID, step.Error)
+	}
+
+	// The agent run's session must reflect the feishu trigger channel.
+	agentRun, err := rt.RunStore().Load(step.AgentRunID)
+	if err != nil {
+		t.Fatalf("load agent run: %v", err)
+	}
+	if agentRun.SessionScope == nil {
+		t.Fatal("agent run session scope is nil")
+	}
+	if agentRun.SessionScope.Channel != "feishu" {
+		t.Fatalf("agent run session channel = %q, want feishu (flow must not forge its own channel)", agentRun.SessionScope.Channel)
+	}
+	if got := agentRun.SessionScope.Values["chat"]; !strings.Contains(got, "oc_flow_smoke") {
+		t.Fatalf("agent run session chat = %q, want it to contain the real chat oc_flow_smoke", got)
+	}
+	if got := agentRun.SessionScope.Values["sender"]; !strings.Contains(got, "u_flow_smoke") {
+		t.Fatalf("agent run session sender = %q, want it to contain the real sender u_flow_smoke", got)
+	}
+
+	// And the messages.jsonl must physically live under sessions/feishu/...
+	// (not sessions/flow/...).
+	scope := agentRun.SessionScope
+	msgPath := rt.SessionManager().AgentMessagesPath(fsession.AgentTurnInput{
+		SessionID:   agentRun.SessionID,
+		AgentID:     agentRun.AgentID,
+		Context:     channel.InboundContext{Channel: scope.Channel, EntrypointID: agentRun.EntrypointID, ChatID: scopeChatID(scope.Values["chat"]), SenderID: scope.Values["sender"]},
+		Scope:       scope,
+	})
+	rel := strings.TrimPrefix(filepath.ToSlash(msgPath), filepath.ToSlash(stateRoot)+"/")
+	if !strings.HasPrefix(rel, "sessions/feishu/") {
+		t.Fatalf("messages path = %q, want it under sessions/feishu/ (was sessions/flow/ before the fix)", rel)
+	}
+}
+
+func scopeChatID(scopeChat string) string {
+	if idx := strings.Index(scopeChat, ":"); idx >= 0 {
+		return scopeChat[idx+1:]
+	}
+	return scopeChat
+}
+
+
+// TestFlowBridgeMergesMetadataIntoContextRaw asserts that flow-internal
+// traceability keys (flow_run_id/flow_id/flow_step_id) from
+// AgentTurnRequest.Metadata survive into the TurnRequest.Context.Raw, so they
+// reach the session and run records. Without this merge, flow step provenance
+// is silently dropped at the bridge.
+func TestFlowBridgeMergesMetadataIntoContextRaw(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	def := &flow.Definition{
+		SchemaVersion: flow.SchemaVersionDefinition,
+		ID:            "trace-flow",
+		Name:          "Trace Flow",
+		Version:       "0.1.0",
+		Objective:     "verify metadata merge",
+		Entrypoints:   []flow.Entrypoint{{ID: "ad_hoc", StartStep: "work"}},
+		Steps: []flow.Step{
+			{
+				ID:             "work",
+				Objective:      "produce output",
+				Executor:       flow.Executor{Agent: "xira-assistant"},
+				OutputContract: flow.OutputContract{RequiredSlots: []flow.OutputSlot{{ID: "out"}}},
+			},
+		},
+	}
+	k := rt.FlowKernel()
+	k.Definitions = flowStaticDefinitions{defs: map[string]*flow.Definition{"trace-flow": def}}
+
+	run, err := rt.StartFlow(context.Background(), flow.StartRequest{
+		FlowID:       "trace-flow",
+		EntrypointID: "ad_hoc",
+		Input:        map[string]string{"request": "x"},
+		Context:      channel.InboundContext{Channel: "test", SenderID: "u_trace"},
+	})
+	if err != nil {
+		t.Fatalf("StartFlow: %v", err)
+	}
+	advanced, err := rt.AdvanceFlow(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("AdvanceFlow: %v", err)
+	}
+	step := advanced.Steps["work"]
+	if step.Status != flow.StepCompleted || strings.TrimSpace(step.AgentRunID) == "" {
+		t.Fatalf("work step not completed: %+v", step)
+	}
+
+	// The agent run's metadata must carry the flow traceability keys — proving
+	// they survived the bridge merge into Context.Raw.
+	agentRun, err := rt.RunStore().Load(step.AgentRunID)
+	if err != nil {
+		t.Fatalf("load agent run: %v", err)
+	}
+	if agentRun.Metadata == nil {
+		t.Fatal("agent run metadata is nil; flow traceability keys dropped at bridge")
+	}
+	for _, key := range []string{"flow_run_id", "flow_id", "flow_step_id"} {
+		if v := strings.TrimSpace(agentRun.Metadata[key]); v == "" {
+			t.Fatalf("agent run metadata missing %q (dropped at bridge); metadata=%+v", key, agentRun.Metadata)
+		}
+	}
+	if agentRun.Metadata["flow_run_id"] != run.ID {
+		t.Fatalf("flow_run_id = %q, want %q", agentRun.Metadata["flow_run_id"], run.ID)
+	}
+	if agentRun.Metadata["flow_step_id"] != "work" {
+		t.Fatalf("flow_step_id = %q, want work", agentRun.Metadata["flow_step_id"])
+	}
 }

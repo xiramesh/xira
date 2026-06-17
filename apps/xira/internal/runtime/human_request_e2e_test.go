@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+		"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
@@ -44,7 +45,7 @@ func TestE2EDirectHumanRequestAnswerResumesRun(t *testing.T) {
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask a human directly", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask a human directly", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -88,7 +89,7 @@ func TestE2EDirectHumanRequestApproveAndResume(t *testing.T) {
 		StateRoot:      filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask direct approval", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask direct approval", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -128,7 +129,7 @@ func TestE2EDirectHumanRequestDeny(t *testing.T) {
 		StateRoot:      filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask direct deny", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask direct deny", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -157,7 +158,7 @@ func TestE2ERuntimeToolConfirmationApproveReplay(t *testing.T) {
 		"path":    "e2e-approved.txt",
 		"content": "approved through e2e",
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +199,7 @@ func TestE2ERuntimeToolConfirmationApproveReplayCompletesRun(t *testing.T) {
 		})), nil
 	})}
 	rt := newConfirmationRuntimeWithClient(t, workspace, client)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file then finish", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file then finish", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +228,7 @@ func TestE2ERuntimeToolConfirmationDeny(t *testing.T) {
 		"path":    "e2e-denied.txt",
 		"content": "denied through e2e",
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +257,7 @@ func TestE2ERuntimeToolConfirmationCancel(t *testing.T) {
 		"path":    "e2e-canceled.txt",
 		"content": "canceled through e2e",
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +310,7 @@ func TestE2EDelegateCompleted(t *testing.T) {
 		StateRoot:      filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and complete", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and complete", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -323,7 +324,7 @@ func TestE2EDelegateCompleted(t *testing.T) {
 
 func TestE2EDelegateChildWaitingApproveResumeParent(t *testing.T) {
 	rt := newDelegationResumeTestService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate child approve e2e", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate child approve e2e", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -350,7 +351,7 @@ func TestE2EDelegateChildWaitingApproveResumeParent(t *testing.T) {
 
 func TestE2EDelegateChildWaitingCancel(t *testing.T) {
 	rt := newDelegationResumeTestService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate child cancel e2e", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate child cancel e2e", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -406,7 +407,7 @@ func TestE2EProcessRestartBeforeHumanResponse(t *testing.T) {
 		})
 	}
 	rt := newService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask then restart", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask then restart", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}

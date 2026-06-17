@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+		"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 )
@@ -20,8 +21,7 @@ func TestRealDeepSeekHITLHumanRequestTool(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, false)
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "Live HITL smoke: call human.request exactly once and ask `Approve shipping HITL v0 smoke test?`. Do not answer normally.",
-		Channel: "test",
-		UserID:  "live-user",
+		Context: channel.NewInboundContext("test", "live-user", nil),
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
@@ -38,8 +38,7 @@ func TestRealDeepSeekHITLRequireConfirmationSnapshot(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, true)
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "Live HITL smoke: call write_file exactly once with path `hitl-live-smoke.txt` and content `hitl-live-smoke`. Do not answer normally.",
-		Channel: "test",
-		UserID:  "live-user",
+		Context: channel.NewInboundContext("test", "live-user", nil),
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
@@ -63,8 +62,7 @@ func TestRealDeepSeekHITLRespondsAfterApprovedToolOutput(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, true)
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "Live HITL smoke: call write_file exactly once with path `hitl-live-final.txt` and content `hitl-live-final`, then wait for approval.",
-		Channel: "test",
-		UserID:  "live-user",
+		Context: channel.NewInboundContext("test", "live-user", nil),
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
@@ -88,8 +86,7 @@ func TestRealDeepSeekHITLDelegateCompleted(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, false)
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "Live HITL smoke: delegate once to research-assistant. Child task: return a valid delegate_result_v1 JSON summary saying `delegate completed smoke`, with empty evidence_refs and confidence high. Do not ask a human.",
-		Channel: "test",
-		UserID:  "live-user",
+		Context: channel.NewInboundContext("test", "live-user", nil),
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
@@ -112,8 +109,7 @@ func TestRealDeepSeekHITLDelegateChildWaiting(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, false)
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "Live HITL smoke: delegate once to research-assistant. The child must call human.request exactly once asking `Approve child HITL smoke?`.",
-		Channel: "test",
-		UserID:  "live-user",
+		Context: channel.NewInboundContext("test", "live-user", nil),
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
@@ -172,6 +168,45 @@ steps:
 	}
 	if out := step.Outputs["summary"]; strings.TrimSpace(out.Summary) == "" && out.Value == nil {
 		t.Fatalf("missing summary output in completed live flow step: %+v", step.Outputs)
+	}
+
+	// Session history must persist to a messages.jsonl under the trigger
+	// channel tree (cli, since this flow run omitted Context), NOT under a
+	// forged "flow" channel tree. Live proof that flow propagates trigger
+	// identity end to end.
+	agentRun, err := rt.RunStore().Load(step.AgentRunID)
+	if err != nil {
+		t.Fatalf("load agent run for live flow step: %v", err)
+	}
+	if agentRun.SessionScope == nil {
+		t.Fatal("live flow agent run session scope is nil")
+	}
+	if agentRun.SessionScope.Channel == "flow" {
+		t.Fatalf("live flow agent run forged channel \"flow\"; session scope = %+v", agentRun.SessionScope)
+	}
+	if agentRun.SessionScope.Channel == "" {
+		t.Fatalf("live flow agent run session channel empty; session scope = %+v", agentRun.SessionScope)
+	}
+	// Find the persisted messages.jsonl under the session root and assert it
+	// lives under the trigger channel, not a forged flow tree.
+	sessionRoot := filepath.Join(rt.StateRoot(), "sessions")
+	wantChannel := agentRun.SessionScope.Channel
+	var msgPath string
+	_ = filepath.Walk(sessionRoot, func(path string, _ os.FileInfo, _ error) error {
+		if strings.HasSuffix(path, "messages.jsonl") && strings.Contains(path, agentRun.AgentID) {
+			msgPath = path
+		}
+		return nil
+	})
+	if msgPath == "" {
+		t.Fatalf("no messages.jsonl persisted under %s for agent %s", sessionRoot, agentRun.AgentID)
+	}
+	rel := strings.TrimPrefix(filepath.ToSlash(msgPath), filepath.ToSlash(sessionRoot)+"/")
+	if !strings.HasPrefix(rel, wantChannel+"/") {
+		t.Fatalf("live flow session persisted under %q, want channel %q: %s", rel, wantChannel, msgPath)
+	}
+	if strings.HasPrefix(rel, "flow/") {
+		t.Fatalf("live flow session persisted under forged sessions/flow/ tree: %s", msgPath)
 	}
 }
 

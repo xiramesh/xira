@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xiramesh/xira/internal/channel"
 )
 
 // StepExecutor executes a single step and returns its result. The kernel
@@ -48,6 +50,11 @@ type StartRequest struct {
 	FlowID       string
 	EntrypointID string
 	Input        map[string]string
+	// Context is the trigger identity of whoever started this run (which
+	// channel/chat/sender). It propagates to every agent step so flow-invoked
+	// agent sessions land under the trigger's conversation tree. When empty,
+	// Start defaults to a "cli" context (aligned with `xira agent`).
+	Context channel.InboundContext
 }
 
 // Kernel is the flow state machine: Start -> Advance -> Resume.
@@ -112,12 +119,23 @@ func (k *Kernel) Start(ctx context.Context, req StartRequest) (*Run, error) {
 	if err := validateStartInputs(def, ep, req.Input); err != nil {
 		return nil, err
 	}
+	// Trigger context: default to the cli channel when the caller omits it, so
+	// flow-invoked agent sessions align with `xira agent` CLI runs rather than
+	// a forged "flow" channel. Normalize so downstream never sees an empty
+	// channel/chat/sender.
+	triggerCtx := req.Context
+	if triggerCtx.Channel == "" {
+		triggerCtx = channel.NewInboundContext("cli", "", nil)
+	} else {
+		triggerCtx = channel.NormalizeInboundContext(triggerCtx)
+	}
 	run, err := k.Store.CreateRun(ctx, CreateRunRequest{
 		FlowID:        def.ID,
 		FlowVersion:   def.Version,
 		EntrypointID:  ep.ID,
 		CurrentStepID: startStep.ID,
 		Input:         req.Input,
+		Context:       &triggerCtx,
 	})
 	if err != nil {
 		return nil, err

@@ -3,6 +3,7 @@ package runtime
 import (
 	"time"
 
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	fsession "github.com/xiramesh/xira/internal/session"
 )
@@ -21,10 +22,14 @@ type TurnRequest struct {
 	AllowedToolsSet    bool                           `json:"allowed_tools_set,omitempty" yaml:"allowed_tools_set,omitempty"`
 	AllowedTools       []string                       `json:"allowed_tools,omitempty" yaml:"allowed_tools,omitempty"`
 	ToolInputAllowlist map[string]map[string][]string `json:"tool_input_allowlist,omitempty" yaml:"tool_input_allowlist,omitempty"`
-	UserID             string                         `json:"user_id,omitempty" yaml:"user_id,omitempty"`
 	SessionID          string                         `json:"session_id,omitempty" yaml:"session_id,omitempty"`
-	Channel            string                         `json:"channel,omitempty" yaml:"channel,omitempty"`
-	Metadata           map[string]string              `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	// Context is the single source of truth for "where this conversation came
+	// from". It carries channel/chat/sender/space as a first-class
+	// channel.InboundContext, replacing the former flattened Channel/UserID/
+	// Metadata fields. Callers (CLI/API/IM runners) and internal derivation
+	// points (flow/HITL-resume/delegation) all populate this struct directly,
+	// so no orchestration mechanism can disguise itself as a trigger source.
+	Context channel.InboundContext `json:"context" yaml:"context"`
 }
 
 type TurnResponse struct {

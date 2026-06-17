@@ -18,6 +18,7 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
@@ -216,10 +217,11 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 	)
 	resp, err := r.runtime.RunAgent(ctx, frt.TurnRequest{
 		EntrypointID: r.definition.ID,
-		Channel:      "feishu",
-		UserID:       senderID,
 		Message:      content,
-		Metadata:     metadata,
+		// Trigger identity travels as a first-class InboundContext: channel +
+		// chat/sender/space are extracted from the metadata map so the session
+		// lands under sessions/feishu/<entrypoint>/chat_<id>__sender_<id>/.
+		Context:      channel.NewInboundContextWithEntrypoint("feishu", r.definition.ID, senderID, metadata),
 	})
 	if err != nil {
 		slog.Error("feishu runtime run failed",

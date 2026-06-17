@@ -215,12 +215,16 @@ func (s *Service) Status() map[string]any {
 
 func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, error) {
 	now := time.Now()
+	// req.Context is the single source of truth for session identity. We enrich
+	// it from the resolved entrypoint (channel/account/app/bot defaults) and use
+	// it directly — no flattened Channel/UserID/Metadata reassembly.
+	req.Context = channel.NormalizeInboundContext(req.Context)
 	inbound := channel.InboundEnvelope{
-		Context:            channel.NewInboundContextWithEntrypoint(req.Channel, req.EntrypointID, req.UserID, req.Metadata),
+		Context:            req.Context,
 		Content:            req.Message,
 		RequestedAgentID:   req.AgentID,
 		SessionIDOverride:  req.SessionID,
-		Metadata:           req.Metadata,
+		Metadata:           req.Context.Raw,
 		OriginalEntrypoint: "agent",
 	}
 	entrypointDecision, err := s.entrypoints.Resolve(entrypoints.ResolveInput{
@@ -231,21 +235,22 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	if err != nil {
 		return TurnResponse{}, err
 	}
-	if channelConflict(req.Channel, entrypointDecision.Definition.Channel) {
-		return TurnResponse{}, fmt.Errorf("entrypoint %q uses channel %q, got request channel %q", entrypointDecision.Definition.ID, entrypointDecision.Definition.Channel, req.Channel)
+	if channelConflict(req.Context.Channel, entrypointDecision.Definition.Channel) {
+		return TurnResponse{}, fmt.Errorf("entrypoint %q uses channel %q, got request channel %q", entrypointDecision.Definition.ID, entrypointDecision.Definition.Channel, req.Context.Channel)
 	}
-	inbound.Context.Channel = entrypointDecision.Definition.Channel
-	inbound.Context.EntrypointID = entrypointDecision.Definition.ID
-	if inbound.Context.Account == "" {
-		inbound.Context.Account = entrypointDecision.Definition.Account
+	req.Context.Channel = entrypointDecision.Definition.Channel
+	req.Context.EntrypointID = entrypointDecision.Definition.ID
+	if req.Context.Account == "" {
+		req.Context.Account = entrypointDecision.Definition.Account
 	}
-	if inbound.Context.ChannelAppID == "" {
-		inbound.Context.ChannelAppID = entrypointDecision.Definition.AppID
+	if req.Context.ChannelAppID == "" {
+		req.Context.ChannelAppID = entrypointDecision.Definition.AppID
 	}
-	if inbound.Context.BotID == "" {
-		inbound.Context.BotID = entrypointDecision.Definition.BotID
+	if req.Context.BotID == "" {
+		req.Context.BotID = entrypointDecision.Definition.BotID
 	}
-	inbound.Context = channel.NormalizeInboundContext(inbound.Context)
+	req.Context = channel.NormalizeInboundContext(req.Context)
+	inbound.Context = req.Context
 	profile, ok := s.agents.Get(entrypointDecision.AgentID)
 	if !ok {
 		return TurnResponse{}, fmt.Errorf("agent profile %q not found", entrypointDecision.AgentID)
@@ -256,14 +261,12 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	}
 	sessionPolicy := sessionPolicyForProfile(profile, entrypointDecision.SessionPolicy)
 	allocation := s.sessions.Allocate(fsession.AllocationInput{
-		Context:           inbound.Context,
+		Context:           req.Context,
 		SessionPolicy:     sessionPolicy,
 		SessionIDOverride: inbound.SessionIDOverride,
 	})
 	req.AgentID = profile.ID
-	req.EntrypointID = inbound.Context.EntrypointID
-	req.Channel = inbound.Context.Channel
-	req.UserID = inbound.Context.SenderID
+	req.EntrypointID = req.Context.EntrypointID
 	req.SessionID = allocation.SessionID
 	agentSessionID := fsession.BuildAgentSessionID(req.SessionID, profile.ID)
 	runID := NewRunID(profile.ID, now)
@@ -276,7 +279,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"channel", inbound.Context.Channel,
 		"channel_app_id", inbound.Context.ChannelAppID,
 		"bot_id", inbound.Context.BotID,
-		"user_id", req.UserID,
+		"user_id", req.Context.SenderID,
 		"session_id", req.SessionID,
 		"agent_session_id", agentSessionID,
 		"matched_by", entrypointDecision.MatchedBy,
@@ -294,7 +297,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		Message:        req.Message,
 		Status:         "running",
 		StartedAt:      now,
-		Metadata:       req.Metadata,
+		Metadata:       req.Context.Raw,
 	}
 	eventBase := runtimeEventBase{
 		RunID:                 runID,
@@ -329,7 +332,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 			RunID:   runID,
 			Time:    time.Now(),
 			Action:  action,
-			Actor:   req.UserID,
+			Actor:   req.Context.SenderID,
 			Target:  target,
 			Allowed: allowed,
 			Reason:  reason,
@@ -364,12 +367,15 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	})
 
 	agentReq := req
-	agentReq.Metadata = copyTurnMetadata(req.Metadata)
-	if agentReq.Metadata == nil {
-		agentReq.Metadata = map[string]string{}
+	// Runtime-internal correlation keys live on Context.Raw (the InboundContext
+	// equivalent of the former Metadata map). They let delegation/HITL tool
+	// scopes correlate child runs back to this conversation session.
+	agentReq.Context.Raw = copyTurnMetadata(req.Context.Raw)
+	if agentReq.Context.Raw == nil {
+		agentReq.Context.Raw = map[string]string{}
 	}
-	agentReq.Metadata["conversation_session_id"] = req.SessionID
-	agentReq.Metadata["agent_session_id"] = agentSessionID
+	agentReq.Context.Raw["conversation_session_id"] = req.SessionID
+	agentReq.Context.Raw["agent_session_id"] = agentSessionID
 	agentReq.SessionID = adkRuntimeSessionID
 	if err := s.runs.InitRun(runID); err != nil {
 		return TurnResponse{}, err
@@ -397,7 +403,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		SessionID:      req.SessionID,
 		AgentSessionID: agentSessionID,
 		ADKSessionID:   adkRuntimeSessionID,
-		UserID:         req.UserID,
+		UserID:         req.Context.SenderID,
 		Pricing:        s.pricing,
 	}, recordEvent, func(call LLMCallRecord) {
 		recorder.appendLLMCall(call)
@@ -429,7 +435,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"run_id", resp.RunID,
 		"agent_id", resp.AgentID,
 		"entrypoint_id", resp.EntrypointID,
-		"channel", req.Channel,
+		"channel", req.Context.Channel,
 		"session_id", resp.SessionID,
 		"status", resp.Status,
 		"verification_status", resp.VerificationResult.Status,
@@ -452,48 +458,50 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	} else {
 		slog.Info("agent run finished", logAttrs...)
 	}
-	if runErr == nil && resp.VerificationResult.Status == "passed" {
-		recordEvent("assistant.final", "runtime", "assistant final response", map[string]any{
-			"response_chars": utf8.RuneCountInString(final),
+	// Session history must persist for EVERY run, not only passing ones. A run
+	// that pauses for human input (waiting_human) still had a user message, tool
+	// calls, and a reason to ask a human — all audit evidence that must not wait
+	// for a (possibly never-coming) human reply. Likewise failed runs. See
+	// docs/guide/xira-flow-v0-usage.zh.md §6.1.
+	sessionTurn := fsession.AgentTurnInput{
+		SessionID:      req.SessionID,
+		AgentID:        profile.ID,
+		AgentSessionID: agentSessionID,
+		RunID:          runID,
+		Context:        inbound.Context,
+		Scope:          &scope,
+		UserMessage:    req.Message,
+		AssistantReply: final,
+	}
+	if err := s.sessions.AppendAgentMessages(sessionTurn, sessionMessagesForRun(req.Message, final, profile.ID, runID, toolCalls, resp.HumanRequests, resp.Status)); err != nil {
+		slog.Warn("session history persistence failed",
+			"run_id", runID,
+			"agent_id", profile.ID,
+			"session_id", req.SessionID,
+			"agent_session_id", agentSessionID,
+			"error", err,
+		)
+		recordEvent("session.persist_failed", "runtime", "session history persistence failed", map[string]any{
+			"session_id":       req.SessionID,
+			"agent_session_id": agentSessionID,
+			"error":            err.Error(),
 		})
-		sessionTurn := fsession.AgentTurnInput{
-			SessionID:      req.SessionID,
-			AgentID:        profile.ID,
-			AgentSessionID: agentSessionID,
-			RunID:          runID,
-			Context:        inbound.Context,
-			Scope:          &scope,
-			UserMessage:    req.Message,
-			AssistantReply: final,
-		}
-		if err := s.sessions.AppendAgentMessages(sessionTurn, sessionMessagesForRun(req.Message, final, profile.ID, runID, toolCalls)); err != nil {
-			slog.Warn("session history persistence failed",
-				"run_id", runID,
-				"agent_id", profile.ID,
-				"session_id", req.SessionID,
-				"agent_session_id", agentSessionID,
-				"error", err,
-			)
-			recordEvent("session.persist_failed", "runtime", "session history persistence failed", map[string]any{
-				"session_id":       req.SessionID,
-				"agent_session_id": agentSessionID,
-				"error":            err.Error(),
-			})
-		} else {
-			messagesPath := s.sessions.AgentMessagesPath(sessionTurn)
-			slog.Info("session history persisted",
-				"run_id", runID,
-				"agent_id", profile.ID,
-				"session_id", req.SessionID,
-				"agent_session_id", agentSessionID,
-				"messages_path", messagesPath,
-			)
-			recordEvent("session.persisted", "runtime", "session history persisted", map[string]any{
-				"session_id":       req.SessionID,
-				"agent_session_id": agentSessionID,
-				"messages_path":    messagesPath,
-			})
-		}
+	} else {
+		messagesPath := s.sessions.AgentMessagesPath(sessionTurn)
+		slog.Info("session history persisted",
+			"run_id", runID,
+			"agent_id", profile.ID,
+			"session_id", req.SessionID,
+			"agent_session_id", agentSessionID,
+			"messages_path", messagesPath,
+			"run_status", resp.Status,
+		)
+		recordEvent("session.persisted", "runtime", "session history persisted", map[string]any{
+			"session_id":       req.SessionID,
+			"agent_session_id": agentSessionID,
+			"messages_path":    messagesPath,
+			"run_status":       resp.Status,
+		})
 	}
 	if len(resp.LLMCalls) > 0 {
 		payload := map[string]any{
@@ -1152,7 +1160,13 @@ func mapString(input map[string]any, key string) string {
 	return strings.TrimSpace(fmt.Sprint(value))
 }
 
-func sessionMessagesForRun(userMessage, finalResponse, agentID, runID string, toolCalls []ToolCallRecord) []fsession.Message {
+// sessionMessagesForRun builds the session message list for one agent turn. It
+// records the user message, every tool call + result (including the one that
+// triggered a HITL pause), any human requests the agent raised (the question/
+// options), and the assistant reply. The reply may be empty when the run pauses
+// for human input — that is intentional, the human-request messages are the
+// audit record of why it paused.
+func sessionMessagesForRun(userMessage, finalResponse, agentID, runID string, toolCalls []ToolCallRecord, humanRequests []humanrequest.HumanRequest, runStatus string) []fsession.Message {
 	messages := []fsession.Message{
 		{
 			Role:    "user",
@@ -1182,6 +1196,35 @@ func sessionMessagesForRun(userMessage, finalResponse, agentID, runID string, to
 			RunID:      runID,
 		})
 	}
+	// Record every human request the agent raised — the question, options, and
+	// (if already resolved) the human's response. This is the highest-value
+	// audit evidence: it shows exactly what the agent asked and how a human
+	// answered, even if the run never reaches "completed".
+	for _, hr := range humanRequests {
+		messages = append(messages, fsession.Message{
+			Role:       "assistant",
+			Kind:       fsession.MessageKindHumanRequest,
+			Content:    strings.TrimSpace(hr.Question),
+			ToolCallID: hr.ToolCallID,
+			AgentID:    agentID,
+			RunID:      runID,
+			Metadata:   humanRequestMetadata(hr),
+		})
+		if hr.Response != nil {
+			messages = append(messages, fsession.Message{
+				Role:    "user",
+				Kind:    fsession.MessageKindHumanResponse,
+				Content: humanResponseText(hr.Response),
+				AgentID: agentID,
+				RunID:   runID,
+				Metadata: map[string]any{
+					"kind":            string(hr.Response.Kind),
+					"actor":           hr.Response.Actor,
+					"human_request_id": hr.ID,
+				},
+			})
+		}
+	}
 	messages = append(messages, fsession.Message{
 		Role:    "assistant",
 		Kind:    fsession.MessageKindMessage,
@@ -1189,7 +1232,114 @@ func sessionMessagesForRun(userMessage, finalResponse, agentID, runID string, to
 		AgentID: agentID,
 		RunID:   runID,
 	})
+	// Stamp run_status onto every message so ADK session hydration can skip
+	// messages from failed runs (audit keeps them all, but failed tool events
+	// must not leak into the next run's model context).
+	for i := range messages {
+		if messages[i].Metadata == nil {
+			messages[i].Metadata = map[string]any{}
+		}
+		messages[i].Metadata["run_status"] = runStatus
+	}
 	return messages
+}
+
+// humanRequestMetadata renders a human request's options/kind into message
+// metadata for audit readability.
+func humanRequestMetadata(hr humanrequest.HumanRequest) map[string]any {
+	meta := map[string]any{
+		"kind":              string(hr.Kind),
+		"human_request_id":  hr.ID,
+		"request_kind":      string(hr.Kind),
+	}
+	if hr.Source != "" {
+		meta["source"] = hr.Source
+	}
+	if len(hr.Options) > 0 {
+		opts := make([]string, 0, len(hr.Options))
+		for _, o := range hr.Options {
+			opts = append(opts, o.Label)
+		}
+		meta["options"] = opts
+	}
+	return meta
+}
+
+// humanResponseText renders a human response (approve/deny/cancel/answer) into a
+// readable content string for the session message.
+func humanResponseText(resp *humanrequest.HumanResponse) string {
+	if resp == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(string(resp.Kind))
+	if resp.Actor != "" {
+		b.WriteString(" by ")
+		b.WriteString(resp.Actor)
+	}
+	if resp.Message != "" {
+		b.WriteString(": ")
+		b.WriteString(resp.Message)
+	}
+	return b.String()
+}
+
+// persistResumeSessionMessages appends the human response + resume turn's final
+// response to the agent's session history. Called from HITL/delegation resume
+// paths so the human's answer and the agent's post-approval reply are recorded
+// for audit — not lost when the run is reloaded from the store.
+func (s *Service) persistResumeSessionMessages(run TurnResponse, humanReq *humanrequest.HumanRequest, resumeMessage string) {
+	if s == nil || s.sessions == nil || run.SessionScope == nil {
+		return
+	}
+	ctx := inboundContextFromScope(run.SessionScope, nil)
+	scope := run.SessionScope
+	sessionTurn := fsession.AgentTurnInput{
+		SessionID:      run.SessionID,
+		AgentID:        run.AgentID,
+		AgentSessionID: run.SessionID,
+		RunID:          run.RunID,
+		Context:        ctx,
+		Scope:          scope,
+		UserMessage:    resumeMessage,
+	}
+	var msgs []fsession.Message
+	// Record the human's response as a session message.
+	if humanReq != nil && humanReq.Response != nil {
+		msgs = append(msgs, fsession.Message{
+			Role:    "user",
+			Kind:    fsession.MessageKindHumanResponse,
+			Content: humanResponseText(humanReq.Response),
+			AgentID: run.AgentID,
+			RunID:   run.RunID,
+			Metadata: map[string]any{
+				"kind":             string(humanReq.Response.Kind),
+				"actor":            humanReq.Response.Actor,
+				"human_request_id": humanReq.ID,
+			},
+		})
+	}
+	// Record the resume turn's final response.
+	if final := strings.TrimSpace(run.FinalResponse); final != "" {
+		msgs = append(msgs, fsession.Message{
+			Role:    "assistant",
+			Kind:    fsession.MessageKindMessage,
+			Content: final,
+			AgentID: run.AgentID,
+			RunID:   run.RunID,
+		})
+	}
+	if len(msgs) == 0 {
+		return
+	}
+	if err := s.sessions.AppendAgentMessages(sessionTurn, msgs); err != nil {
+		slog.Warn("resume session history persistence failed",
+			"run_id", run.RunID,
+			"agent_id", run.AgentID,
+			"session_id", run.SessionID,
+			"error", err,
+		)
+	}
 }
 
 func toolOutputForModel(rec ToolCallRecord) map[string]any {

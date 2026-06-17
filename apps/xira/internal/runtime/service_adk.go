@@ -63,9 +63,9 @@ func (s *Service) generateADK(
 	if err != nil {
 		return "", nil, err
 	}
-	conversationSessionID := strings.TrimSpace(req.Metadata["conversation_session_id"])
-	agentSessionID := strings.TrimSpace(req.Metadata["agent_session_id"])
-	historyMessages, historyChars, err := s.hydrateADKSession(ctx, req.UserID, req.SessionID, profile.ID, conversationSessionID)
+	conversationSessionID := strings.TrimSpace(req.Context.Raw["conversation_session_id"])
+	agentSessionID := strings.TrimSpace(req.Context.Raw["agent_session_id"])
+	historyMessages, historyChars, err := s.hydrateADKSession(ctx, req.Context.SenderID, req.SessionID, profile.ID, conversationSessionID)
 	if err != nil {
 		recordEvent("adk.session_hydrate_failed", "adk.session", "failed to restore session history", map[string]any{
 			"agent_id":                profile.ID,
@@ -86,7 +86,7 @@ func (s *Service) generateADK(
 	}
 	var final string
 	var latestText string
-	for evt, err := range run.Run(ctx, req.UserID, req.SessionID, genai.NewContentFromText(req.Message, genai.RoleUser), adkRunConfig(profile)) {
+	for evt, err := range run.Run(ctx, req.Context.SenderID, req.SessionID, genai.NewContentFromText(req.Message, genai.RoleUser), adkRunConfig(profile)) {
 		if err != nil {
 			return final, toolRecords.snapshot(), err
 		}
@@ -187,6 +187,13 @@ func (s *Service) hydrateADKSession(ctx context.Context, userID, adkSessionID, a
 	var restored int
 	var contentChars int
 	for _, msg := range s.sessions.AgentHistory(conversationSessionID, agentID) {
+		// Skip messages from failed runs: their tool events must not leak into
+		// the next run's model context. Audit still keeps them on disk.
+		if msg.Metadata != nil {
+			if rs, _ := msg.Metadata["run_status"].(string); rs == "failed" {
+				continue
+			}
+		}
 		event, chars, ok := adkEventFromSessionMessage(msg, agentID)
 		if !ok {
 			continue
