@@ -328,6 +328,8 @@ func optionalFloat32(value *float32) any {
 func flowCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 	cmd := &cobra.Command{Use: "flow", Short: "Run and inspect Xira flow runs"}
 	cmd.AddCommand(flowRunCommand(newRuntime))
+	cmd.AddCommand(flowListCommand(newRuntime))
+	cmd.AddCommand(flowInspectCommand(newRuntime))
 	cmd.AddCommand(flowStatusCommand(newRuntime))
 	cmd.AddCommand(flowAdvanceCommand(newRuntime))
 	cmd.AddCommand(flowResumeCommand(newRuntime))
@@ -336,11 +338,12 @@ func flowCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 
 func flowRunCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 	var entrypoint string
+	var flowPath string
 	var inputs []string
 	cmd := &cobra.Command{
-		Use:   "run <flow-file>",
-		Short: "Start a new flow run from a flow definition file",
-		Args:  cobra.ExactArgs(1),
+		Use:   "run [<flow-id>]",
+		Short: "Start a new flow run from a registered flow id or an explicit flow file",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rt, err := newRuntime()
 			if err != nil {
@@ -351,11 +354,22 @@ func flowRunCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command 
 			if err != nil {
 				return err
 			}
-			run, err := rt.StartFlow(cmd.Context(), runtime.FlowStartRequest{
-				FlowPath:     args[0],
+			req := runtime.FlowStartRequest{
 				EntrypointID: entrypoint,
 				Input:        inputMap,
-			})
+			}
+			// Explicit --path wins and is the escape hatch for unregistered or
+			// ad-hoc flow files. Otherwise the positional arg is treated as a
+			// registered flow id; an unknown id errors rather than falling
+			// back to a path, so mis-starts fail loudly.
+			if strings.TrimSpace(flowPath) != "" {
+				req.FlowPath = flowPath
+			} else if len(args) == 1 {
+				req.FlowID = args[0]
+			} else {
+				return fmt.Errorf("flow id or --path is required")
+			}
+			run, err := rt.StartFlow(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
@@ -363,9 +377,46 @@ func flowRunCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command 
 		},
 	}
 	cmd.Flags().StringVar(&entrypoint, "entrypoint", "", "Flow entrypoint id")
+	cmd.Flags().StringVar(&flowPath, "path", "", "Explicit flow definition file path")
 	cmd.Flags().StringArrayVar(&inputs, "input", nil, "Flow input as key=value (repeatable)")
 	_ = cmd.MarkFlagRequired("entrypoint")
 	return cmd
+}
+
+func flowListCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List flows discovered from workspace/flows",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := newRuntime()
+			if err != nil {
+				return err
+			}
+			defer rt.Close()
+			return printJSON(cmd, rt.FlowRefs())
+		},
+	}
+}
+
+func flowInspectCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
+	return &cobra.Command{
+		Use:   "inspect <flow-id>",
+		Short: "Show a flow discovered from workspace/flows",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := newRuntime()
+			if err != nil {
+				return err
+			}
+			defer rt.Close()
+			ref, ok := rt.FlowRegistry().Find(args[0])
+			if !ok {
+				return fmt.Errorf("flow %q not found", args[0])
+			}
+			return printJSON(cmd, ref)
+		},
+	}
 }
 
 func flowStatusCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {

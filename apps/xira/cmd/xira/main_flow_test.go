@@ -72,7 +72,7 @@ steps:
 func TestFlowRunCommandStartsRun(t *testing.T) {
 	instance := writeCLIFixture(t, "xira-assistant")
 	flowPath := writeFlowTestFile(t, instance, "xira-assistant")
-	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "flow", "run", flowPath, "--entrypoint", "ad_hoc", "--input", "request=x")
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "flow", "run", "--path", flowPath, "--entrypoint", "ad_hoc", "--input", "request=x")
 	var run runtime.FlowRunView
 	if err := json.Unmarshal([]byte(out), &run); err != nil {
 		t.Fatalf("decode flow run: %v\n%s", err, out)
@@ -91,7 +91,7 @@ func TestFlowRunCommandStartsRun(t *testing.T) {
 func TestFlowRunCommandRejectsMissingRequiredInput(t *testing.T) {
 	instance := writeCLIFixture(t, "xira-assistant")
 	flowPath := writeRequiredInputFlowTestFile(t, instance, "xira-assistant")
-	out, err := executeCommandError("--config", filepath.Join(instance, "xira.yaml"), "flow", "run", flowPath, "--entrypoint", "ad_hoc")
+	out, err := executeCommandError("--config", filepath.Join(instance, "xira.yaml"), "flow", "run", "--path", flowPath, "--entrypoint", "ad_hoc")
 	if err == nil {
 		t.Fatalf("flow run without required input succeeded:\n%s", out)
 	}
@@ -104,7 +104,7 @@ func TestFlowRunCommandRejectsMissingRequiredInput(t *testing.T) {
 func TestFlowStatusCommandShowsCurrentStep(t *testing.T) {
 	instance := writeCLIFixture(t, "xira-assistant")
 	flowPath := writeFlowTestFile(t, instance, "xira-assistant")
-	startOut := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "flow", "run", flowPath, "--entrypoint", "ad_hoc", "--input", "request=x")
+	startOut := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "flow", "run", "--path", flowPath, "--entrypoint", "ad_hoc", "--input", "request=x")
 	var started runtime.FlowRunView
 	if err := json.Unmarshal([]byte(startOut), &started); err != nil {
 		t.Fatalf("decode started: %v", err)
@@ -125,7 +125,7 @@ func TestFlowStatusCommandShowsCurrentStep(t *testing.T) {
 func TestFlowAdvanceCommandAdvancesStep(t *testing.T) {
 	instance := writeCLIFixture(t, "xira-assistant")
 	flowPath := writeFlowTestFile(t, instance, "xira-assistant")
-	startOut := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "flow", "run", flowPath, "--entrypoint", "ad_hoc", "--input", "request=x")
+	startOut := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "flow", "run", "--path", flowPath, "--entrypoint", "ad_hoc", "--input", "request=x")
 	var started runtime.FlowRunView
 	_ = json.Unmarshal([]byte(startOut), &started)
 
@@ -145,7 +145,7 @@ func TestFlowAdvanceCommandAdvancesStep(t *testing.T) {
 func TestFlowResumeCommandRequiresHumanRequestID(t *testing.T) {
 	instance := writeCLIFixture(t, "xira-assistant")
 	flowPath := writeFlowTestFile(t, instance, "xira-assistant")
-	startOut := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "flow", "run", flowPath, "--entrypoint", "ad_hoc", "--input", "request=x")
+	startOut := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "flow", "run", "--path", flowPath, "--entrypoint", "ad_hoc", "--input", "request=x")
 	var started runtime.FlowRunView
 	_ = json.Unmarshal([]byte(startOut), &started)
 
@@ -155,5 +155,100 @@ func TestFlowResumeCommandRequiresHumanRequestID(t *testing.T) {
 	}
 	if !strings.Contains(out, "required flag") && !strings.Contains(err.Error(), "required flag") {
 		t.Fatalf("unexpected error = %v output=%s", err, out)
+	}
+}
+
+// writeRegisteredFlowTestFile writes a flow into workspace/flows/<id>/flow.yaml
+// so that the registry discovers it by id. Returns the flow id.
+func writeRegisteredFlowTestFile(t *testing.T, instance, id, description string) string {
+	t.Helper()
+	content := `schema_version: xira.flow.v0
+id: ` + id + `
+name: ` + id + `
+version: 0.1.0
+`
+	if description != "" {
+		content += "description: " + description + "\n"
+	}
+	content += `entrypoints:
+  - id: ad_hoc
+    start_step: answer
+    required_inputs:
+      - request
+steps:
+  - id: answer
+    objective: Answer ${input.request}.
+    executor:
+      agent: xira-assistant
+`
+	writeCLIFile(t, filepath.Join(instance, "workspace", "flows", id, "flow.yaml"), content)
+	return id
+}
+
+func TestFlowRunAcceptsRegisteredFlowID(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	writeRegisteredFlowTestFile(t, instance, "hello", "")
+
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "flow", "run", "hello", "--entrypoint", "ad_hoc", "--input", "request=hi")
+	var run runtime.FlowRunView
+	if err := json.Unmarshal([]byte(out), &run); err != nil {
+		t.Fatalf("decode flow run: %v\n%s", err, out)
+	}
+	if run.FlowID != "hello" {
+		t.Fatalf("flow_id = %q, want hello", run.FlowID)
+	}
+}
+
+func TestFlowRunUnknownIDErrors(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	_, err := executeCommandError("--config", filepath.Join(instance, "xira.yaml"), "flow", "run", "does-not-exist", "--entrypoint", "ad_hoc", "--input", "request=hi")
+	if err == nil {
+		t.Fatal("expected error for unknown flow id, got nil")
+	}
+}
+
+func TestFlowListPrintsRegisteredFlows(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	writeRegisteredFlowTestFile(t, instance, "hello", "A hello flow")
+	writeRegisteredFlowTestFile(t, instance, "world", "")
+
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "flow", "list")
+	var refs []runtime.FlowRef
+	if err := json.Unmarshal([]byte(out), &refs); err != nil {
+		t.Fatalf("decode flow list: %v\n%s", err, out)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("refs len = %d, want 2: %s", len(refs), out)
+	}
+	if refs[0].ID != "hello" || refs[1].ID != "world" {
+		t.Fatalf("refs order = %+v, want [hello world]", refs)
+	}
+	if refs[0].Description != "A hello flow" {
+		t.Fatalf("hello description = %q", refs[0].Description)
+	}
+}
+
+func TestFlowInspectReturnsFlow(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	writeRegisteredFlowTestFile(t, instance, "hello", "A hello flow")
+
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "flow", "inspect", "hello")
+	var ref runtime.FlowRef
+	if err := json.Unmarshal([]byte(out), &ref); err != nil {
+		t.Fatalf("decode flow inspect: %v\n%s", err, out)
+	}
+	if ref.ID != "hello" {
+		t.Fatalf("id = %q, want hello", ref.ID)
+	}
+	if ref.Description != "A hello flow" {
+		t.Fatalf("description = %q", ref.Description)
+	}
+}
+
+func TestFlowInspectUnknownIDErrors(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	_, err := executeCommandError("--config", filepath.Join(instance, "xira.yaml"), "flow", "inspect", "nope")
+	if err == nil {
+		t.Fatal("expected error for unknown flow id, got nil")
 	}
 }

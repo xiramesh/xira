@@ -283,3 +283,7 @@ type FlowRun = flow.Run
 // FlowRunView is a serializable projection of flow.Run for CLI/API consumers
 // that want stable field names without depending on internal struct tags.
 type FlowRunView = flow.Run
+
+// FlowRef is an alias for flow.FlowRef exposed so CLI/API callers can decode
+// registry listing output without importing the flow package directly.
+type FlowRef = flow.FlowRef
