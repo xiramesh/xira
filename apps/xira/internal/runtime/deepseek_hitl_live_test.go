@@ -2088,3 +2088,165 @@ func humanrequestApprove(actor string) humanrequest.ResolveRequest {
 		Message: "approved",
 	}
 }
+
+// newLiveDeepSeekFlowRegistryService constructs a Service whose workspace
+// contains flows/hello/flow.yaml (the registry-discovered layout) and a single
+// xira-assistant agent. It is intentionally separate from
+// newLiveDeepSeekFlowFileSkillService: that helper writes a flow to an ad-hoc
+// path and materializes flow-* agents, whereas this one exercises the registry
+// (flow started by id, not by path) with the bootstrap agent only.
+func newLiveDeepSeekFlowRegistryService(t *testing.T) *Service {
+	t.Helper()
+	if os.Getenv("XIRA_DEEPSEEK_LIVE") != "1" {
+		t.Skip("set XIRA_DEEPSEEK_LIVE=1 to run live DeepSeek flow registry tests")
+	}
+	if strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")) == "" {
+		t.Skip("DEEPSEEK_API_KEY is required for live DeepSeek flow registry tests")
+	}
+	model := strings.TrimSpace(os.Getenv("XIRA_DEEPSEEK_MODEL"))
+	if model == "" {
+		model = deepseek.ModelPro
+	}
+	if !deepseek.SupportedModel(model) {
+		t.Fatalf("unsupported live DeepSeek model %q", model)
+	}
+
+	artifactRoot := strings.TrimSpace(os.Getenv("XIRA_LIVE_ARTIFACT_ROOT"))
+	workspace := t.TempDir()
+	runRoot := filepath.Join(t.TempDir(), "runs")
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	if artifactRoot != "" {
+		testRoot := liveDeepSeekTestRoot(t, artifactRoot)
+		workspace = filepath.Join(testRoot, "workspace")
+		runRoot = filepath.Join(testRoot, "runs")
+		stateRoot = filepath.Join(testRoot, "state")
+		t.Logf("preserving live flow registry artifacts under %s", testRoot)
+	}
+
+	// Bootstrap agent required by the runtime and used by the registry flow.
+	writeFile(t, filepath.Join(workspace, "agents", "xira-assistant", "PROFILE.md"), `---
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.1
+description: Live flow registry bootstrap assistant.
+model_policy:
+  provider: deepseek
+  model: `+model+`
+  stream: false
+verification:
+  default_checks:
+    - final_response_non_empty
+---
+# Working Contract
+
+Answer the user's request directly and concisely.
+`)
+	writeFile(t, filepath.Join(workspace, "agents", "xira-assistant", "SOUL.md"), "# Soul\n\nDirect.\n")
+
+	// Registry-discovered flow: workspace/flows/hello/flow.yaml, id: hello.
+	writeFile(t, filepath.Join(workspace, "flows", "hello", "flow.yaml"), `schema_version: xira.flow.v0
+id: hello
+name: Hello
+version: 0.1.0
+description: Live flow registry smoke flow.
+objective: Answer the request in one step.
+entrypoints:
+  - id: ad_hoc
+    start_step: answer
+    required_inputs:
+      - request
+steps:
+  - id: answer
+    objective: Answer ${input.request}. End the reply with the token REGISTRY-LIVE-OK.
+    executor:
+      agent: xira-assistant
+`)
+
+	return newTestService(t, Config{
+		WorkspaceRoot: workspace,
+		RunRoot:       runRoot,
+		StateRoot:     stateRoot,
+		DeepSeekClient: deepseek.New(
+			deepseek.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
+		),
+	})
+}
+
+// TestRealDeepSeekFlowRegistryStartsByID starts a flow by registered id (no
+// FlowPath) against the live DeepSeek model and asserts:
+//   - the registry resolved the id (run.FlowID == "hello");
+//   - the step completes with a non-empty response;
+//   - the agent session messages land in the real trigger channel (cli), NOT
+//     under a fabricated "flow" channel — this is the core contract that Plan A
+//     (PR #10) unified and that the registry must not regress.
+func TestRealDeepSeekFlowRegistryStartsByID(t *testing.T) {
+	rt := newLiveDeepSeekFlowRegistryService(t)
+
+	// Confirm the registry actually discovered the flow before starting.
+	if _, ok := rt.FlowRegistry().Find("hello"); !ok {
+		t.Fatalf("registry did not discover flow \"hello\"; refs=%+v", rt.FlowRefs())
+	}
+
+	run, err := rt.StartFlow(context.Background(), FlowStartRequest{
+		FlowID:       "hello", // registry resolution, no FlowPath
+		EntrypointID: "ad_hoc",
+		Input:        map[string]string{"request": "registry live smoke"},
+	})
+	if err != nil {
+		t.Fatalf("StartFlow by id: %v", err)
+	}
+	if run.FlowID != "hello" {
+		t.Fatalf("run.FlowID = %q, want hello", run.FlowID)
+	}
+
+	run, err = rt.AdvanceFlow(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("AdvanceFlow: %v", err)
+	}
+	if run.Status != "completed" {
+		t.Fatalf("run status = %q, want completed; steps=%+v", run.Status, run.Steps)
+	}
+
+	// Find the agent run produced by the step.
+	var agentRunID string
+	for _, step := range run.Steps {
+		if step.AgentRunID != "" {
+			agentRunID = step.AgentRunID
+			break
+		}
+	}
+	if agentRunID == "" {
+		t.Fatalf("no agent_run_id in flow steps: %+v", run.Steps)
+	}
+	agentRun, err := rt.RunStore().Load(agentRunID)
+	if err != nil {
+		t.Fatalf("load agent run %s: %v", agentRunID, err)
+	}
+	if strings.TrimSpace(agentRun.FinalResponse) == "" {
+		t.Fatalf("agent run %s has empty final response", agentRunID)
+	}
+
+	// Assert the session messages.jsonl exists and is NOT under a "flow"
+	// channel subtree. A CLI-triggered flow must land under sessions/cli/...
+	// (the unified identity contract from PR #10).
+	sessionRoot := rt.SessionManager().Root()
+	var messagesPath string
+	_ = filepath.Walk(sessionRoot, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return nil
+		}
+		if filepath.Base(path) == "messages.jsonl" {
+			messagesPath = path
+		}
+		return nil
+	})
+	if messagesPath == "" {
+		t.Fatalf("no messages.jsonl found under session root %s", sessionRoot)
+	}
+	// Normalize separators so the assertion is cross-platform.
+	normalized := filepath.ToSlash(messagesPath)
+	if strings.Contains(normalized, "/flow/") {
+		t.Fatalf("session messages landed under fabricated \"flow\" channel: %s\nwant the real trigger channel (e.g. cli)", messagesPath)
+	}
+	t.Logf("registry flow session messages persisted at %s", messagesPath)
+}
