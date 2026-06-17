@@ -251,3 +251,97 @@ func writeRegistryFlowFile(t *testing.T, path, id, description string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+// exampleFlowsSourceDir returns the absolute path to docs/examples/flows.
+func exampleFlowsSourceDir(t *testing.T) string {
+	t.Helper()
+	// test package dir is apps/xira/internal/flow
+	abs, err := filepath.Abs(filepath.Join("..", "..", "..", "..", "docs", "examples", "flows"))
+	if err != nil {
+		t.Fatalf("resolve examples path: %v", err)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		t.Fatalf("docs/examples/flows not found at %s: %v", abs, err)
+	}
+	return abs
+}
+
+// TestExampleFlowsLoadFromWorkspace is a schema regression for the committed
+// example flows under docs/examples/flows. It copies them into a temp workspace
+// and asserts that the registry discovers every one with directory name == id
+// and a valid definition. This catches example breakage from flow schema changes.
+func TestExampleFlowsLoadFromWorkspace(t *testing.T) {
+	src := exampleFlowsSourceDir(t)
+	workspace := t.TempDir()
+	flowsDest := filepath.Join(workspace, "flows")
+	if err := os.MkdirAll(flowsDest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read examples: %v", err)
+	}
+	var expected []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		id := entry.Name()
+		expected = append(expected, id)
+		// copy <src>/<id> -> <workspace>/flows/<id>
+		if err := copyDir(filepath.Join(src, id), filepath.Join(flowsDest, id)); err != nil {
+			t.Fatalf("copy example %s: %v", id, err)
+		}
+	}
+	if len(expected) == 0 {
+		t.Fatal("no example flow directories found under docs/examples/flows")
+	}
+	sort.Strings(expected)
+
+	reg, err := LoadFromWorkspace(workspace)
+	if err != nil {
+		t.Fatalf("LoadFromWorkspace over examples: %v", err)
+	}
+	refs := reg.List()
+	if len(refs) != len(expected) {
+		t.Fatalf("example flows discovered = %d, want %d: %+v", len(refs), len(expected), refs)
+	}
+	for i, want := range expected {
+		if refs[i].ID != want {
+			t.Errorf("refs[%d].ID = %q, want %q", i, refs[i].ID, want)
+		}
+		// Each definition must already have validated during LoadFromWorkspace;
+		// double-check it resolves and has the expected id.
+		def, err := reg.Definition(want)
+		if err != nil {
+			t.Errorf("Definition(%q): %v", want, err)
+			continue
+		}
+		if def.ID != want {
+			t.Errorf("Definition(%q).ID = %q", want, def.ID)
+		}
+	}
+}
+
+// copyDir recursively copies src into dst.
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
+}

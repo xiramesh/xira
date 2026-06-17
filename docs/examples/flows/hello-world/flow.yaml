@@ -1,0 +1,24 @@
+schema_version: xira.flow.v0
+id: hello-world
+name: Hello World
+version: 0.1.0
+description: "Minimal single-step flow. The smallest flow that can run: one entrypoint, one agent step, no transitions (it completes because the step has no outgoing transition)."
+objective: Reply to a one-shot request in a single agent step.
+
+inputs:
+  required:
+    - request
+
+entrypoints:
+  - id: ad_hoc
+    description: The user has a one-shot request.
+    start_step: answer
+    required_inputs:
+      - request
+
+steps:
+  - id: answer
+    objective: Answer ${input.request}.
+    executor:
+      agent: xira-assistant
+    # No transitions: a step with no outgoing transition completes the flow.
