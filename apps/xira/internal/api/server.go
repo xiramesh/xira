@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	frt "github.com/xiramesh/xira/internal/runtime"
@@ -481,10 +482,11 @@ func (s *Server) flowRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		FlowPath     string            `json:"flow_path"`
-		FlowID       string            `json:"flow_id"`
-		EntrypointID string            `json:"entrypoint_id"`
-		Input        map[string]string `json:"input"`
+		FlowPath     string                 `json:"flow_path"`
+		FlowID       string                 `json:"flow_id"`
+		EntrypointID string                 `json:"entrypoint_id"`
+		Input        map[string]string      `json:"input"`
+		Context      *channel.InboundContext `json:"context"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -498,12 +500,16 @@ func (s *Server) flowRuns(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "entrypoint_id is required", http.StatusBadRequest)
 		return
 	}
-	run, err := s.runtime.StartFlow(r.Context(), frt.FlowStartRequest{
+	startReq := frt.FlowStartRequest{
 		FlowPath:     body.FlowPath,
 		FlowID:       body.FlowID,
 		EntrypointID: body.EntrypointID,
 		Input:        body.Input,
-	})
+	}
+	if body.Context != nil {
+		startReq.Context = *body.Context
+	}
+	run, err := s.runtime.StartFlow(r.Context(), startReq)
 	if err != nil {
 		writeFlowError(w, err)
 		return
