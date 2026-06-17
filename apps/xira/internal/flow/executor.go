@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/xiramesh/xira/internal/channel"
 )
 
 // AgentRunner is the runtime surface the agent executor calls. It is satisfied
@@ -60,9 +62,13 @@ type AgentTurnRequest struct {
 	AllowedToolsSet    bool                           `json:"allowed_tools_set,omitempty"`
 	AllowedTools       []string                       `json:"allowed_tools,omitempty"`
 	ToolInputAllowlist map[string]map[string][]string `json:"tool_input_allowlist,omitempty"`
-	UserID             string                         `json:"user_id,omitempty"`
 	SessionID          string                         `json:"session_id,omitempty"`
-	Channel            string                         `json:"channel,omitempty"`
+	// Context is the trigger identity inherited from the flow run, so the
+	// agent session lands under the trigger's conversation tree (channel/chat/
+	// sender/space) instead of a forged orchestration channel.
+	Context            channel.InboundContext         `json:"context"`
+	// Metadata carries flow-internal correlation keys (flow_run_id/flow_id/
+	// flow_step_id) for traceability; it is distinct from session identity.
 	Metadata           map[string]string              `json:"metadata,omitempty"`
 }
 
@@ -168,13 +174,16 @@ func (e *AgentExecutor) buildTurnRequest(run *Run, step Step) (AgentTurnRequest,
 		return AgentTurnRequest{}, fmt.Errorf("resolve step %q inputs: %w", step.ID, err)
 	}
 	message := buildAgentMessage(step, run.Input, resolved)
+	// Trigger identity comes from the persisted run context, not a hardcoded
+	// channel — so flow-invoked agent turns land under the trigger's session
+	// tree. A run created before context propagation falls back to cli.
 	req := AgentTurnRequest{
 		AgentID:            step.Executor.Agent,
 		Message:            message,
 		AllowedToolsSet:    step.Executor.toolsConfigured,
 		AllowedTools:       append([]string(nil), step.Executor.Tools...),
 		ToolInputAllowlist: cloneToolInputAllowlist(step.Executor.ToolInputAllowlist),
-		Channel:            "flow",
+		Context:            runContext(run),
 		Metadata: map[string]string{
 			"flow_run_id":  run.ID,
 			"flow_id":      run.FlowID,
@@ -182,6 +191,16 @@ func (e *AgentExecutor) buildTurnRequest(run *Run, step Step) (AgentTurnRequest,
 		},
 	}
 	return req, nil
+}
+
+// runContext returns the trigger identity for an agent turn. It prefers the
+// run's persisted context; a nil/empty context (e.g. a run created before
+// context propagation) falls back to the cli channel, aligned with `xira agent`.
+func runContext(run *Run) channel.InboundContext {
+	if run != nil && run.Context != nil && run.Context.Channel != "" {
+		return channel.NormalizeInboundContext(*run.Context)
+	}
+	return channel.NewInboundContext("cli", "", nil)
 }
 
 func cloneToolInputAllowlist(in map[string]map[string][]string) map[string]map[string][]string {

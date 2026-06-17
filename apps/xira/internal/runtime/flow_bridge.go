@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/flow"
 	"github.com/xiramesh/xira/internal/humanrequest"
 )
@@ -28,11 +27,9 @@ func (b *flowBridge) RunAgent(ctx context.Context, req flow.AgentTurnRequest) (f
 	if b == nil || b.service == nil {
 		return flow.AgentTurnResponse{}, fmt.Errorf("runtime service is not available")
 	}
-	// Transitional mapping: flow.AgentTurnRequest still carries the old
-	// Channel/UserID/Metadata fields (Task 2 will replace them with a
-	// first-class Context). Until then, reassemble them into the unified
-	// InboundContext here. Once AgentTurnRequest.Context lands, this collapses
-	// to a single Context: req.Context assignment.
+	// The flow executor populates Context with the run's trigger identity, so
+	// the unified TurnRequest just carries it through — no flattening or
+	// reassembly. Metadata (flow_run_id/flow_step_id) flows via Context.Raw.
 	resp, err := b.service.RunAgent(ctx, TurnRequest{
 		AgentID:            req.AgentID,
 		EntrypointID:       req.EntrypointID,
@@ -41,7 +38,7 @@ func (b *flowBridge) RunAgent(ctx context.Context, req flow.AgentTurnRequest) (f
 		AllowedTools:       append([]string(nil), req.AllowedTools...),
 		ToolInputAllowlist: cloneFlowToolInputAllowlist(req.ToolInputAllowlist),
 		SessionID:          req.SessionID,
-		Context:            channel.NewInboundContextWithEntrypoint(req.Channel, req.EntrypointID, req.UserID, req.Metadata),
+		Context:            req.Context,
 	})
 	if err != nil {
 		return flow.AgentTurnResponse{}, err

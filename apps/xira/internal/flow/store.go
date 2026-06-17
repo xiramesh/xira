@@ -15,6 +15,8 @@ import (
 
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
+
+	"github.com/xiramesh/xira/internal/channel"
 )
 
 // Store is a file-backed store for flow runs. Each run lives at
@@ -50,6 +52,8 @@ type CreateRunRequest struct {
 	EntrypointID  string
 	CurrentStepID string
 	Input         map[string]string
+	// Context is the persisted trigger identity for this run (see Run.Context).
+	Context       *channel.InboundContext
 }
 
 // CreateRun persists a new flow run.
@@ -95,6 +99,7 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (*Run, erro
 		CurrentStepID: req.CurrentStepID,
 		EntrypointID:  req.EntrypointID,
 		Input:         cloneStringMap(req.Input),
+		Context:       cloneInboundContext(req.Context),
 		Steps:         map[string]StepState{},
 		CreatedAt:     now,
 		UpdatedAt:     now,
@@ -435,6 +440,20 @@ func cloneStringMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// cloneInboundContext returns a defensive copy of the trigger context, or nil if
+// the input is nil. Used when persisting a run so later mutations of the caller's
+// context cannot bleed into the stored run.
+func cloneInboundContext(in *channel.InboundContext) *channel.InboundContext {
+	if in == nil {
+		return nil
+	}
+	cp := *in
+	if in.Raw != nil {
+		cp.Raw = cloneStringMap(in.Raw)
+	}
+	return &cp
 }
 
 // Errors returned by the store.
