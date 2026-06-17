@@ -28,8 +28,20 @@ func (b *flowBridge) RunAgent(ctx context.Context, req flow.AgentTurnRequest) (f
 		return flow.AgentTurnResponse{}, fmt.Errorf("runtime service is not available")
 	}
 	// The flow executor populates Context with the run's trigger identity, so
-	// the unified TurnRequest just carries it through — no flattening or
-	// reassembly. Metadata (flow_run_id/flow_step_id) flows via Context.Raw.
+	// the unified TurnRequest just carries it through. Merge flow-internal
+	// traceability keys (flow_run_id/flow_id/flow_step_id) from Metadata into
+	// Context.Raw so they survive into the session and run records.
+	bridgeCtx := req.Context
+	if len(req.Metadata) > 0 {
+		raw := make(map[string]string, len(bridgeCtx.Raw)+len(req.Metadata))
+		for k, v := range bridgeCtx.Raw {
+			raw[k] = v
+		}
+		for k, v := range req.Metadata {
+			raw[k] = v
+		}
+		bridgeCtx.Raw = raw
+	}
 	resp, err := b.service.RunAgent(ctx, TurnRequest{
 		AgentID:            req.AgentID,
 		EntrypointID:       req.EntrypointID,
@@ -38,7 +50,7 @@ func (b *flowBridge) RunAgent(ctx context.Context, req flow.AgentTurnRequest) (f
 		AllowedTools:       append([]string(nil), req.AllowedTools...),
 		ToolInputAllowlist: cloneFlowToolInputAllowlist(req.ToolInputAllowlist),
 		SessionID:          req.SessionID,
-		Context:            req.Context,
+		Context:            bridgeCtx,
 	})
 	if err != nil {
 		return flow.AgentTurnResponse{}, err

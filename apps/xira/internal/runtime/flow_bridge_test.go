@@ -231,3 +231,70 @@ func scopeChatID(scopeChat string) string {
 	}
 	return scopeChat
 }
+
+
+// TestFlowBridgeMergesMetadataIntoContextRaw asserts that flow-internal
+// traceability keys (flow_run_id/flow_id/flow_step_id) from
+// AgentTurnRequest.Metadata survive into the TurnRequest.Context.Raw, so they
+// reach the session and run records. Without this merge, flow step provenance
+// is silently dropped at the bridge.
+func TestFlowBridgeMergesMetadataIntoContextRaw(t *testing.T) {
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	def := &flow.Definition{
+		SchemaVersion: flow.SchemaVersionDefinition,
+		ID:            "trace-flow",
+		Name:          "Trace Flow",
+		Version:       "0.1.0",
+		Objective:     "verify metadata merge",
+		Entrypoints:   []flow.Entrypoint{{ID: "ad_hoc", StartStep: "work"}},
+		Steps: []flow.Step{
+			{
+				ID:             "work",
+				Objective:      "produce output",
+				Executor:       flow.Executor{Agent: "xira-assistant"},
+				OutputContract: flow.OutputContract{RequiredSlots: []flow.OutputSlot{{ID: "out"}}},
+			},
+		},
+	}
+	k := rt.FlowKernel()
+	k.Definitions = flowStaticDefinitions{defs: map[string]*flow.Definition{"trace-flow": def}}
+
+	run, err := rt.StartFlow(context.Background(), flow.StartRequest{
+		FlowID:       "trace-flow",
+		EntrypointID: "ad_hoc",
+		Input:        map[string]string{"request": "x"},
+		Context:      channel.InboundContext{Channel: "test", SenderID: "u_trace"},
+	})
+	if err != nil {
+		t.Fatalf("StartFlow: %v", err)
+	}
+	advanced, err := rt.AdvanceFlow(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("AdvanceFlow: %v", err)
+	}
+	step := advanced.Steps["work"]
+	if step.Status != flow.StepCompleted || strings.TrimSpace(step.AgentRunID) == "" {
+		t.Fatalf("work step not completed: %+v", step)
+	}
+
+	// The agent run's metadata must carry the flow traceability keys — proving
+	// they survived the bridge merge into Context.Raw.
+	agentRun, err := rt.RunStore().Load(step.AgentRunID)
+	if err != nil {
+		t.Fatalf("load agent run: %v", err)
+	}
+	if agentRun.Metadata == nil {
+		t.Fatal("agent run metadata is nil; flow traceability keys dropped at bridge")
+	}
+	for _, key := range []string{"flow_run_id", "flow_id", "flow_step_id"} {
+		if v := strings.TrimSpace(agentRun.Metadata[key]); v == "" {
+			t.Fatalf("agent run metadata missing %q (dropped at bridge); metadata=%+v", key, agentRun.Metadata)
+		}
+	}
+	if agentRun.Metadata["flow_run_id"] != run.ID {
+		t.Fatalf("flow_run_id = %q, want %q", agentRun.Metadata["flow_run_id"], run.ID)
+	}
+	if agentRun.Metadata["flow_step_id"] != "work" {
+		t.Fatalf("flow_step_id = %q, want work", agentRun.Metadata["flow_step_id"])
+	}
+}
