@@ -55,6 +55,7 @@ func NewServer(rt *frt.Service, addr string, controls ...ChannelControls) *Serve
 	mux.HandleFunc("/api/v1/entrypoints/", s.entrypointControls)
 	mux.HandleFunc("/api/v1/runs", s.runs)
 	mux.HandleFunc("/api/v1/runs/", s.runByID)
+	mux.HandleFunc("/api/v1/flows", s.flows)
 	mux.HandleFunc("/api/v1/flows/runs", s.flowRuns)
 	mux.HandleFunc("/api/v1/flows/runs/", s.flowRunByID)
 	s.server = &http.Server{Addr: addr, Handler: withCORS(mux)}
@@ -474,6 +475,14 @@ func parseEntrypointControlPath(path string) (entrypointID, resource, resourceID
 		resourceID = parts[2]
 	}
 	return entrypointID, resource, resourceID, true
+}
+
+func (s *Server) flows(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, map[string]any{"flows": s.runtime.FlowRefs()})
 }
 
 func (s *Server) flowRuns(w http.ResponseWriter, r *http.Request) {
