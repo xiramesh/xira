@@ -1,8 +1,37 @@
 # Xira Flow Registry And Session History Implementation Plan
 
+> **⚠️ SUPERSEDED — this plan was revised during implementation.** Do not follow
+> it as-is. The shipped design ("方案 A", directory discovery, align with
+> agents) is the source of truth and lives in:
+> - **Code:** `apps/xira/internal/flow/registry.go`, `apps/xira/internal/runtime/flow_bridge.go` (`Service.flows`, `FlowKernel().Definitions`)
+> - **Guide:** `docs/guide/xira-flow-v0-usage.zh.md` §3.1 "Flow 放在哪里（不用登记）"
+>
+> Key changes from this original plan:
+> 1. **No `xira.yaml` registration.** Flows are discovered purely by scanning
+>    `workspace/flows/<id>/flow.yaml`, mirroring `agents.LoadFromWorkspace`. The
+>    `flows:` config list below was **dropped**.
+> 2. **Registry lives in the `flow` package** (`flow/registry.go`), not
+>    `runtime/flow_registry.go` as the File Structure section says.
+> 3. **Session history follows the trigger channel** (e.g. `sessions/cli/...`),
+>    NOT `sessions/flow/...`. This contract was unified by PR #10 (plan
+>    `2026-06-17-flow-session-history.md`). The "Durable evidence" path below
+>    that says `.xira/sessions/flow/...` is **wrong** for the shipped behavior.
+> 4. **CLI `flow run <path>` is breaking**: the positional arg is now a flow id;
+>    explicit paths require `--path`.
+>
+> The task-level sections below were left in their original (pre-revision) form
+> for the design-decision history. Inlined `⚠️ SUPERSEDED` markers flag the
+> specific spots that contradict the shipped contract.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Flow usable as a workspace-level feature with multiple named Flow configuration files, and make Flow chat/session history part of the durable evidence chain.
+
+> **⚠️ SUPERSEDED (Architecture):** the shipped design discovers flows by
+> scanning `workspace/flows/<id>/flow.yaml` — it does **not** read `xira.yaml`.
+> See the SUPERSEDED banner at the top of this file.
 
 **Architecture:** Keep v0's existing path-based Flow execution, but add a thin registry layer that discovers declared Flow files from `xira.yaml` / workspace defaults and resolves a `flow_id` to a concrete `flow.yaml`. Preserve explicit `flow_path` as the lowest-level escape hatch. For session history, do not invent a new transcript store; reuse the existing runtime session manager and make Flow tests/docs assert where `messages.jsonl` is written.
 
@@ -49,6 +78,10 @@ workspace/
 
 Runtime config:
 
+> **⚠️ SUPERSEDED:** the `flows:` list below was **dropped**. The shipped
+> implementation does not touch `xira.yaml` at all — discovery is purely
+> directory-based. This block is kept only to record the rejected design.
+
 ```yaml
 workspace: workspace
 state_root: .xira/state
@@ -85,12 +118,29 @@ API:
 
 Durable evidence should include both:
 
+> **⚠️ SUPERSEDED:** the `sessions/flow/...` path below is **wrong** for the
+> shipped behavior. Session history follows the real trigger channel (e.g.
+> `sessions/cli/...` for CLI-triggered flows), per the unified identity
+> contract from PR #10. There is no `flow` channel subtree. This block is kept
+> only to record the rejected assumption.
+
 ```text
 .xira/state/flow-runs/<flow-run-id>/flow_run.yaml
 .xira/sessions/flow/<entrypoint-id>/<conversation-dir>/agents/<agent-id>/messages.jsonl
 ```
 
 ## File Structure
+
+> **⚠️ SUPERSEDED:** the file layout below differs from the shipped
+> implementation in two ways:
+> 1. The registry was created at **`apps/xira/internal/flow/registry.go`**
+>    (not `runtime/flow_registry.go`), because it implements the `flow`
+>    package's `DefinitionSource` interface and mirrors `flow.LoadDefinition`.
+> 2. **`runtime/config.go` was NOT modified** — there is no `flows:` config
+>    parsing. Discovery happens inside `flow.LoadFromWorkspace`, called from
+>    `NewService` alongside `loadAgentManager`.
+>
+> The entries below are the original plan, kept for history.
 
 Modify:
 
