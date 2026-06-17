@@ -138,11 +138,3 @@ func TestRunAgentPersistsSessionInTriggerChannel(t *testing.T) {
 		t.Fatalf("messages path missing real chat id oc_smoke: %s", msgPath)
 	}
 }
-
-func scopeChatID(scopeChat string) string {
-	// scope value is "<type>:<id>"; strip the type prefix to recover the raw chat id.
-	if idx := strings.Index(scopeChat, ":"); idx >= 0 {
-		return scopeChat[idx+1:]
-	}
-	return scopeChat
-}
