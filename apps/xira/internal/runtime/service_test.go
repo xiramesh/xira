@@ -2866,6 +2866,128 @@ func cloneStringMap(values map[string]string) map[string]string {
 	return out
 }
 
+// TestServiceExposesFlowRegistry asserts that a Service constructed with a
+// workspace containing flows/<id>/flow.yaml exposes the discovered flows via
+// FlowRefs/FlowRegistry, mirroring how agents are exposed from agents/<id>/.
+func TestServiceExposesFlowRegistry(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	writeMinimalAssistantProfile(t, filepath.Join(workspace, "agents", "xira-assistant"))
+	writeFile(t, filepath.Join(workspace, "flows", "hello", "flow.yaml"),
+		"schema_version: xira.flow.v0\nid: hello\nname: Hello\nversion: 0.1.0\ndescription: A hello flow\nentrypoints:\n  - id: ad_hoc\n    start_step: answer\n    required_inputs:\n      - request\nsteps:\n  - id: answer\n    objective: Answer ${input.request}.\n    executor:\n      agent: xira-assistant\n")
+	writeFile(t, filepath.Join(workspace, "flows", "world", "flow.yaml"),
+		"schema_version: xira.flow.v0\nid: world\nname: World\nversion: 0.1.0\nentrypoints:\n  - id: ad_hoc\n    start_step: answer\nsteps:\n  - id: answer\n    objective: Answer.\n    executor:\n      agent: xira-assistant\n")
+
+	rt := newTestService(t, Config{WorkspaceRoot: workspace})
+
+	refs := rt.FlowRefs()
+	if len(refs) != 2 {
+		t.Fatalf("FlowRefs len = %d, want 2: %+v", len(refs), refs)
+	}
+	if refs[0].ID != "hello" || refs[1].ID != "world" {
+		t.Fatalf("FlowRefs order = %+v, want [hello world]", refs)
+	}
+	if refs[0].Description != "A hello flow" {
+		t.Fatalf("first ref description = %q", refs[0].Description)
+	}
+	reg := rt.FlowRegistry()
+	if reg == nil {
+		t.Fatal("FlowRegistry() returned nil")
+	}
+	def, err := reg.Definition("hello")
+	if err != nil {
+		t.Fatalf("Definition(hello): %v", err)
+	}
+	if def.ID != "hello" {
+		t.Fatalf("Definition(hello).ID = %q", def.ID)
+	}
+}
+
+// TestServiceFlowKernelResolvesByRegistryID asserts that FlowKernel is wired to
+// the registry: a FlowID-only StartRequest (no FlowPath) resolves through the
+// registry and starts a run. This is the core end-to-end of the registry being
+// the Kernel.Definitions source.
+func TestServiceFlowKernelResolvesByRegistryID(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	writeMinimalAssistantProfile(t, filepath.Join(workspace, "agents", "xira-assistant"))
+	writeFile(t, filepath.Join(workspace, "flows", "hello", "flow.yaml"),
+		"schema_version: xira.flow.v0\nid: hello\nname: Hello\nversion: 0.1.0\nentrypoints:\n  - id: ad_hoc\n    start_step: answer\n    required_inputs:\n      - request\nsteps:\n  - id: answer\n    objective: Answer ${input.request}.\n    executor:\n      agent: xira-assistant\n")
+
+	rt := newTestService(t, Config{WorkspaceRoot: workspace})
+
+	// FlowID only, no FlowPath — must resolve via the registry.
+	run, err := rt.StartFlow(context.Background(), FlowStartRequest{
+		FlowID:       "hello",
+		EntrypointID: "ad_hoc",
+		Input:        map[string]string{"request": "hi"},
+	})
+	if err != nil {
+		t.Fatalf("StartFlow by id: %v", err)
+	}
+	if run.FlowID != "hello" {
+		t.Fatalf("run.FlowID = %q, want hello", run.FlowID)
+	}
+}
+
+// TestServiceFlowKernelRejectsUnknownFlowID asserts that an unknown flow id
+// produces a clear error instead of silently starting nothing.
+func TestServiceFlowKernelRejectsUnknownFlowID(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	writeMinimalAssistantProfile(t, filepath.Join(workspace, "agents", "xira-assistant"))
+
+	rt := newTestService(t, Config{WorkspaceRoot: workspace})
+
+	_, err := rt.StartFlow(context.Background(), FlowStartRequest{
+		FlowID:       "does-not-exist",
+		EntrypointID: "ad_hoc",
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown flow id, got nil")
+	}
+}
+
+// TestServiceEmptyWorkspaceHasEmptyFlowRegistry asserts that a workspace
+// without a flows/ directory yields an empty (non-nil) registry and does not
+// break Service construction.
+func TestServiceEmptyWorkspaceHasEmptyFlowRegistry(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	writeMinimalAssistantProfile(t, filepath.Join(workspace, "agents", "xira-assistant"))
+
+	rt := newTestService(t, Config{WorkspaceRoot: workspace})
+
+	if refs := rt.FlowRefs(); len(refs) != 0 {
+		t.Fatalf("expected empty FlowRefs, got %+v", refs)
+	}
+	if rt.FlowRegistry() == nil {
+		t.Fatal("FlowRegistry() should not be nil even when empty")
+	}
+}
+
+// writeMinimalAssistantProfile writes a minimal valid PROFILE.md/SOUL.md pair
+// for the xira-assistant agent under dir, sufficient for NewService's
+// loadAgentManager to succeed without a live DeepSeek dependency.
+func writeMinimalAssistantProfile(t *testing.T, dir string) {
+	t.Helper()
+	writeFile(t, filepath.Join(dir, "PROFILE.md"), `---
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.0
+description: Minimal assistant for tests.
+model_policy:
+  provider: deepseek
+  model: test-model
+  stream: false
+---
+# Instructions
+
+Answer the user.
+`)
+	writeFile(t, filepath.Join(dir, "SOUL.md"), "# Soul\n\nDirect.\n")
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

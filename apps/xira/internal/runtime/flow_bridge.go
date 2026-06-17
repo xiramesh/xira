@@ -225,6 +225,7 @@ func (s *Service) FlowKernel() *flow.Kernel {
 	}
 	s.flowKernel = &flow.Kernel{
 		Store:       store,
+		Definitions: s.flows,
 		Executor:    executor,
 		Policy:      bridge,
 		Resolver:    bridge,
@@ -251,6 +252,23 @@ func (s *Service) ResumeFlow(ctx context.Context, flowRunID, humanRequestID stri
 // GetFlowRun loads a flow run by id.
 func (s *Service) GetFlowRun(ctx context.Context, flowRunID string) (*flow.Run, error) {
 	return s.FlowKernel().Store.GetRun(ctx, flowRunID)
+}
+
+// FlowRegistry returns the registry of flows discovered from the workspace, or
+// nil. It powers flow_id-based starts (via the kernel) and flow list/inspect.
+func (s *Service) FlowRegistry() *flow.FlowRegistry {
+	if s == nil {
+		return nil
+	}
+	return s.flows
+}
+
+// FlowRefs returns the list of discovered flow references for CLI/API listing.
+func (s *Service) FlowRefs() []flow.FlowRef {
+	if s == nil || s.flows == nil {
+		return nil
+	}
+	return s.flows.List()
 }
 
 // FlowStartRequest is an alias for flow.StartRequest exposed on the runtime
