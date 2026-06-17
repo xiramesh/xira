@@ -19,6 +19,7 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 
 	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	rtools "github.com/xiramesh/xira/internal/tools"
 )
@@ -1026,10 +1027,24 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 	childReq := TurnRequest{
 		AgentID:   req.Target.ID,
 		Message:   req.Message,
-		UserID:    req.ParentBase.SenderID,
 		SessionID: adkSessionID(childBase.AgentSessionID, req.ChildRunID+":"+uuid.NewString()),
-		Channel:   req.ParentBase.Channel,
-		Metadata:  map[string]string{},
+		// Child run inherits the parent's trigger identity (channel/chat/sender/
+		// space) so its session lands under the same conversation tree, not a
+		// forged orchestration channel. Built from the strong-typed event base.
+		Context: channel.NormalizeInboundContext(channel.InboundContext{
+			Channel:      childBase.Channel,
+			EntrypointID: childBase.EntrypointID,
+			Account:      childBase.Account,
+			ChannelAppID: childBase.ChannelAppID,
+			BotID:        childBase.BotID,
+			ChatID:       childBase.ChatID,
+			ChatType:     childBase.ChatType,
+			TopicID:      childBase.TopicID,
+			SpaceID:      childBase.SpaceID,
+			SpaceType:    childBase.SpaceType,
+			SenderID:     childBase.SenderID,
+			MessageID:    childBase.MessageID,
+		}),
 	}
 	childCtx := contextWithToolFailureGuard(ctx)
 	childCtx = contextWithToolTrace(childCtx, req.ChildRunID)
@@ -1050,7 +1065,7 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 		SessionID:      childBase.AgentSessionID,
 		AgentSessionID: childBase.AgentSessionID,
 		ADKSessionID:   childReq.SessionID,
-		UserID:         childReq.UserID,
+		UserID:         childReq.Context.SenderID,
 		Pricing:        s.pricing,
 	}, recordChildEvent, func(call LLMCallRecord) {
 		resp.LLMCalls = append(resp.LLMCalls, call)

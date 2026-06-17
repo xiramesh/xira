@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+		"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 )
@@ -20,8 +21,7 @@ func TestRealDeepSeekHITLHumanRequestTool(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, false)
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "Live HITL smoke: call human.request exactly once and ask `Approve shipping HITL v0 smoke test?`. Do not answer normally.",
-		Channel: "test",
-		UserID:  "live-user",
+		Context: channel.NewInboundContext("test", "live-user", nil),
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
@@ -38,8 +38,7 @@ func TestRealDeepSeekHITLRequireConfirmationSnapshot(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, true)
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "Live HITL smoke: call write_file exactly once with path `hitl-live-smoke.txt` and content `hitl-live-smoke`. Do not answer normally.",
-		Channel: "test",
-		UserID:  "live-user",
+		Context: channel.NewInboundContext("test", "live-user", nil),
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
@@ -63,8 +62,7 @@ func TestRealDeepSeekHITLRespondsAfterApprovedToolOutput(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, true)
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "Live HITL smoke: call write_file exactly once with path `hitl-live-final.txt` and content `hitl-live-final`, then wait for approval.",
-		Channel: "test",
-		UserID:  "live-user",
+		Context: channel.NewInboundContext("test", "live-user", nil),
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
@@ -88,8 +86,7 @@ func TestRealDeepSeekHITLDelegateCompleted(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, false)
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "Live HITL smoke: delegate once to research-assistant. Child task: return a valid delegate_result_v1 JSON summary saying `delegate completed smoke`, with empty evidence_refs and confidence high. Do not ask a human.",
-		Channel: "test",
-		UserID:  "live-user",
+		Context: channel.NewInboundContext("test", "live-user", nil),
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
@@ -112,8 +109,7 @@ func TestRealDeepSeekHITLDelegateChildWaiting(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, false)
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "Live HITL smoke: delegate once to research-assistant. The child must call human.request exactly once asking `Approve child HITL smoke?`.",
-		Channel: "test",
-		UserID:  "live-user",
+		Context: channel.NewInboundContext("test", "live-user", nil),
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)

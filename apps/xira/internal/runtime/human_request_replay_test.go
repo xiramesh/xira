@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+		"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
@@ -26,7 +27,7 @@ func TestRequireConfirmationCreatesActionSnapshot(t *testing.T) {
 		"content": "write after approval",
 	})
 
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -63,7 +64,7 @@ func TestRequireConfirmationReturnsWaitingHuman(t *testing.T) {
 		"content": "write after approval",
 	})
 
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
@@ -162,7 +163,7 @@ func TestApproveReplaysSnapshotExactlyOnce(t *testing.T) {
 		"path":    "approved.txt",
 		"content": "write once",
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +211,7 @@ func TestApproveReplaysSnapshotWithLeadingNewlineContent(t *testing.T) {
 		"path":    "leading-newline.txt",
 		"content": "\nstarts after blank line",
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +261,7 @@ func TestApprovedToolReplayDisablesRuntimeNativeTools(t *testing.T) {
 		}, nil
 	})}
 	rt := newConfirmationRuntimeWithClient(t, workspace, client)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +367,7 @@ func TestDenyDoesNotReplaySnapshot(t *testing.T) {
 		"path":    "denied.txt",
 		"content": "should not write",
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +401,7 @@ func TestCancelDoesNotReplayAndMaterializesCanceledOutput(t *testing.T) {
 		"path":    "canceled.txt",
 		"content": "should not write",
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write a file", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +447,7 @@ func TestReplayBypassesOnlyConfirmationGate(t *testing.T) {
 		"path":    outsidePath,
 		"content": "must not escape workspace",
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write outside", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write outside", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +482,7 @@ func TestReplayRejectsChangedToolArgs(t *testing.T) {
 		"path":    "original.txt",
 		"content": "original content",
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write original", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write original", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +530,7 @@ func TestReplayRunningLeasePreventsConcurrentExecution(t *testing.T) {
 		"path":    "approved.txt",
 		"content": "write once under concurrent replay",
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write concurrently", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "write concurrently", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}

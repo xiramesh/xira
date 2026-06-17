@@ -152,11 +152,11 @@ func (s *Server) channelMessages(w http.ResponseWriter, r *http.Request, channel
 		http.Error(w, "message is required", http.StatusBadRequest)
 		return
 	}
-	if req.Channel != "" && normalizeChannel(req.Channel) != channelName {
+	if req.Context.Channel != "" && normalizeChannel(req.Context.Channel) != channelName {
 		http.Error(w, fmt.Sprintf("request channel must be %q", channelName), http.StatusBadRequest)
 		return
 	}
-	req.Channel = channelName
+	req.Context.Channel = channelName
 	resp, err := s.runtime.RunAgent(r.Context(), req)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)

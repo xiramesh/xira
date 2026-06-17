@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/flow"
 	"github.com/xiramesh/xira/internal/humanrequest"
 )
@@ -27,6 +28,11 @@ func (b *flowBridge) RunAgent(ctx context.Context, req flow.AgentTurnRequest) (f
 	if b == nil || b.service == nil {
 		return flow.AgentTurnResponse{}, fmt.Errorf("runtime service is not available")
 	}
+	// Transitional mapping: flow.AgentTurnRequest still carries the old
+	// Channel/UserID/Metadata fields (Task 2 will replace them with a
+	// first-class Context). Until then, reassemble them into the unified
+	// InboundContext here. Once AgentTurnRequest.Context lands, this collapses
+	// to a single Context: req.Context assignment.
 	resp, err := b.service.RunAgent(ctx, TurnRequest{
 		AgentID:            req.AgentID,
 		EntrypointID:       req.EntrypointID,
@@ -34,10 +40,8 @@ func (b *flowBridge) RunAgent(ctx context.Context, req flow.AgentTurnRequest) (f
 		AllowedToolsSet:    req.AllowedToolsSet,
 		AllowedTools:       append([]string(nil), req.AllowedTools...),
 		ToolInputAllowlist: cloneFlowToolInputAllowlist(req.ToolInputAllowlist),
-		UserID:             req.UserID,
 		SessionID:          req.SessionID,
-		Channel:            req.Channel,
-		Metadata:           req.Metadata,
+		Context:            channel.NewInboundContextWithEntrypoint(req.Channel, req.EntrypointID, req.UserID, req.Metadata),
 	})
 	if err != nil {
 		return flow.AgentTurnResponse{}, err

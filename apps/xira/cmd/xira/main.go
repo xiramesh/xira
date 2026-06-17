@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/xiramesh/xira/internal/api"
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelrunner"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/runtime"
@@ -164,7 +165,7 @@ func agentCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 				return err
 			}
 			defer rt.Close()
-			resp, err := rt.RunAgent(cmd.Context(), runtime.TurnRequest{AgentID: agentID, Message: message, Channel: "cli"})
+			resp, err := rt.RunAgent(cmd.Context(), runtime.TurnRequest{AgentID: agentID, Message: message, Context: channel.NewInboundContext("cli", "", nil)})
 			if format == "json" {
 				if printErr := printJSON(cmd, resp); printErr != nil {
 					return printErr

@@ -16,7 +16,8 @@ import (
 	adksession "google.golang.org/adk/session"
 	adktool "google.golang.org/adk/tool"
 
-	"github.com/xiramesh/xira/internal/agents"
+		"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 	fsession "github.com/xiramesh/xira/internal/session"
@@ -27,12 +28,10 @@ func TestRunAgentWritesHarnessStore(t *testing.T) {
 	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "hello",
-		Channel: "test",
-		UserID:  "user-1",
-		Metadata: map[string]string{
+		Context: channel.NewInboundContext("test", "user-1", map[string]string{
 			"chat_id":   "chat-1",
 			"chat_type": "group",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
@@ -62,7 +61,7 @@ func TestRunAgentWritesHarnessStore(t *testing.T) {
 
 func TestDefaultAgentRespondsWithDeepSeekAdapter(t *testing.T) {
 	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hi", Channel: "test"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hi", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatalf("run default agent: %v", err)
 	}
@@ -102,12 +101,10 @@ func TestRunAgentPersistsSessionFilesAndReloadsHistory(t *testing.T) {
 	}
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "persist me",
-		Channel: "feishu",
-		UserID:  "sender-1",
-		Metadata: map[string]string{
+		Context: channel.NewInboundContext("feishu", "sender-1", map[string]string{
 			"chat_id":   "chat-1",
 			"chat_type": "group",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -147,8 +144,7 @@ func TestHydrateADKSessionRestoresPersistedAgentHistory(t *testing.T) {
 	rt := newTestService(t, Config{RunRoot: filepath.Join(stateRoot, "runs")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "remember this",
-		Channel: "test",
-		UserID:  "user-1",
+		Context: channel.NewInboundContext("test", "user-1", nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +250,7 @@ func TestRunAgentCanUseCommandRunTool(t *testing.T) {
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: agents.ResearchAssistantAgentID,
 		Message: "please call command",
-		Channel: "test",
+		Context: channel.NewInboundContext("test", "", nil),
 	})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
@@ -380,7 +376,7 @@ Use local evidence before summaries.
 		t.Fatalf("NewService() should not validate default skills at startup: %v", err)
 	}
 
-	_, err = rt.RunAgent(context.Background(), TurnRequest{Message: "use local research", Channel: "test", UserID: "user-1"})
+	_, err = rt.RunAgent(context.Background(), TurnRequest{Message: "use local research", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err == nil {
 		t.Fatal("expected skill activation permission error")
 	}
@@ -439,7 +435,7 @@ Use local evidence before summaries.
 		t.Fatalf("NewService() should not validate default skills at startup: %v", err)
 	}
 
-	_, err = rt.RunAgent(context.Background(), TurnRequest{Message: "use local research", Channel: "test", UserID: "user-1"})
+	_, err = rt.RunAgent(context.Background(), TurnRequest{Message: "use local research", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err == nil {
 		t.Fatal("expected skill activation secret permission error")
 	}
@@ -476,7 +472,7 @@ Use local evidence before summaries.
 	if err != nil {
 		t.Fatalf("NewService() with secret permission should succeed: %v", err)
 	}
-	_, err = rt.RunAgent(context.Background(), TurnRequest{Message: "use local research", Channel: "test", UserID: "user-1"})
+	_, err = rt.RunAgent(context.Background(), TurnRequest{Message: "use local research", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err == nil {
 		t.Fatal("expected skill activation MCP permission error")
 	}
@@ -674,8 +670,7 @@ func TestRuntimeEventsUseV1EnvelopeWithLegacyFields(t *testing.T) {
 	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "please call command",
-		Channel: "xiragarden",
-		UserID:  "user-1",
+		Context: channel.NewInboundContext("xiragarden", "user-1", nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -715,7 +710,7 @@ func TestToolStartedEventInputCannotSpoofRuntimeIdentity(t *testing.T) {
 		RunID:        runID,
 		AgentID:      agents.DefaultAgentID,
 		EntrypointID: "xiragarden-default",
-		Channel:      "xiragarden",
+		Channel: "xiragarden",
 		TraceID:      runID,
 	}
 	var events []RuntimeEvent
@@ -756,7 +751,7 @@ func TestToolOnlyTurnEmitsNoDelegationEvents(t *testing.T) {
 	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "please call command",
-		Channel: "test",
+		Context: channel.NewInboundContext("test", "", nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -786,7 +781,7 @@ func TestAssistantStatusToolEmitsStatusEventWithoutPersistingContent(t *testing.
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "emit status", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "emit status", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -847,7 +842,7 @@ func TestAuthorizedDelegationEmitsProgressAndUsesEphemeralChildRun(t *testing.T)
 		RunRoot:        runRoot,
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "please delegate", Channel: "xiragarden", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "please delegate", Context: channel.NewInboundContext("xiragarden", "user-1", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1151,7 +1146,7 @@ func TestDelegateRejectsUnauthorizedDepthAndParallelBeforeChildRun(t *testing.T)
 		RunID:        "parent-run",
 		AgentID:      agents.DefaultAgentID,
 		EntrypointID: "test-default",
-		Channel:      "test",
+		Channel: "test",
 		TraceID:      "parent-run",
 	}
 	recordEvent := func(string, string, string, map[string]any) {}
@@ -1231,7 +1226,7 @@ Do not create child runs.
 		RunID:        "parent-run",
 		AgentID:      agents.DefaultAgentID,
 		EntrypointID: "test-default",
-		Channel:      "test",
+		Channel: "test",
 		TraceID:      "parent-run",
 	}
 	ctx := contextWithRunExecution(context.Background(), runExecutionContext{Base: base, Profile: caller, UserMessage: "parent"})
@@ -1277,7 +1272,7 @@ func TestDelegationContextTruncationIsVisibleToParent(t *testing.T) {
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: strings.Repeat("x", 2500),
-		Channel: "test",
+		Context: channel.NewInboundContext("test", "", nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1320,7 +1315,7 @@ func TestDelegateTimeoutPreventsLateSuccessEvents(t *testing.T) {
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate slowly", Channel: "test"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate slowly", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1366,7 +1361,7 @@ func TestDelegateOversizedDurationClampsToPolicyMax(t *testing.T) {
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate oversized duration", Channel: "test"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate oversized duration", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1410,7 +1405,7 @@ func TestDelegateAgentRejectsEmptyChildResultAsInvalidChildResult(t *testing.T) 
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate empty result", Channel: "test"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate empty result", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1442,7 +1437,7 @@ func TestDelegateAgentRejectsSpoofedRuntimeFieldsBeforeChildRun(t *testing.T) {
 		RunID:        "parent-run",
 		AgentID:      agents.DefaultAgentID,
 		EntrypointID: "test-default",
-		Channel:      "test",
+		Channel: "test",
 		TraceID:      "parent-run",
 	}
 	var events []RuntimeEvent
@@ -1476,7 +1471,7 @@ func TestDelegateAgentRejectsUnknownInputFieldsBeforeChildRun(t *testing.T) {
 		RunID:        "parent-run",
 		AgentID:      agents.DefaultAgentID,
 		EntrypointID: "test-default",
-		Channel:      "test",
+		Channel: "test",
 		TraceID:      "parent-run",
 	}
 	var events []RuntimeEvent
@@ -1507,7 +1502,7 @@ func TestDelegateAgentRejectsUnsupportedExpectedOutputSchemaBeforeChildRun(t *te
 		RunID:        "parent-run",
 		AgentID:      agents.DefaultAgentID,
 		EntrypointID: "test-default",
-		Channel:      "test",
+		Channel: "test",
 		TraceID:      "parent-run",
 	}
 	var events []RuntimeEvent
@@ -1563,7 +1558,7 @@ func TestDelegateAgentRejectsForgedChildResultRefs(t *testing.T) {
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate forged result", Channel: "test"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate forged result", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1643,7 +1638,7 @@ func TestUnauthorizedDelegationRecordsCapabilityGap(t *testing.T) {
 		RunID:        "parent-run",
 		AgentID:      agents.DefaultAgentID,
 		EntrypointID: "test-default",
-		Channel:      "test",
+		Channel: "test",
 		TraceID:      "parent-run",
 	}
 	var events []RuntimeEvent
@@ -1723,7 +1718,7 @@ func TestRunAgentReturnsBoundedShellFailureToADKModel(t *testing.T) {
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: agents.ResearchAssistantAgentID,
 		Message: "please call shell",
-		Channel: "test",
+		Context: channel.NewInboundContext("test", "", nil),
 	})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
@@ -1826,7 +1821,7 @@ func TestRunAgentPersistsToolTranscriptMessages(t *testing.T) {
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: agents.ResearchAssistantAgentID,
 		Message: "please call command",
-		Channel: "test",
+		Context: channel.NewInboundContext("test", "", nil),
 	})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
@@ -1863,8 +1858,7 @@ func TestHydrateADKSessionRestoresPersistedToolHistory(t *testing.T) {
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: agents.ResearchAssistantAgentID,
 		Message: "please call command",
-		Channel: "test",
-		UserID:  "user-1",
+		Context: channel.NewInboundContext("test", "user-1", nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1931,11 +1925,11 @@ func TestADKSessionDoesNotReuseUnpersistedToolEventsAcrossRuns(t *testing.T) {
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	_, err := rt.RunAgent(context.Background(), TurnRequest{Message: "bad shell", Channel: "test", UserID: "user-1"})
+	_, err := rt.RunAgent(context.Background(), TurnRequest{Message: "bad shell", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err == nil {
 		t.Fatal("expected first run to fail with empty final response")
 	}
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hello", Channel: "test", UserID: "user-1"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hello", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("second run: %v", err)
 	}
@@ -1971,7 +1965,7 @@ func TestRepeatedFailedShellCommandIsBlockedOnThirdAttempt(t *testing.T) {
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: agents.ResearchAssistantAgentID,
 		Message: "repeat shell",
-		Channel: "test",
+		Context: channel.NewInboundContext("test", "", nil),
 	})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
@@ -2012,7 +2006,7 @@ func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hi", Channel: "test"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hi", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
 	}
@@ -2057,7 +2051,7 @@ func TestRunAgentTracesLLMRequestWhenEnabled(t *testing.T) {
 	t.Setenv(llmTraceEnv, "1")
 	runRoot := filepath.Join(t.TempDir(), "runs")
 	rt := newTestService(t, Config{RunRoot: runRoot})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "trace me", Channel: "test"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "trace me", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
 	}
@@ -2100,7 +2094,7 @@ func TestRunAgentStoresRawLLMRequestAndResponseWhenTraceEnabled(t *testing.T) {
 	t.Setenv(llmTraceEnv, "1")
 	runRoot := filepath.Join(t.TempDir(), "runs")
 	rt := newTestService(t, Config{RunRoot: runRoot})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "raw trace me", Channel: "test"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "raw trace me", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
 	}
@@ -2157,7 +2151,7 @@ func TestRunAgentRecordsUsageWithoutLLMTrace(t *testing.T) {
 		StateRoot:      stateRoot,
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "usage please", Channel: "test"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "usage please", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
 	}
@@ -2241,7 +2235,7 @@ func TestDelegatedChildRunAppendsLLMCallsToUsageLedger(t *testing.T) {
 		StateRoot:      stateRoot,
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and track usage", Channel: "test"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and track usage", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
 	}
@@ -2318,7 +2312,7 @@ Use Xira runtime context and keep responses operational.
 		ConfigPath:     filepath.Join(instance, "xira.yaml"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "policy", Channel: "test"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "policy", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
 	}
@@ -2360,7 +2354,7 @@ func TestNewServiceLoadsWorkspaceAgentsFromConfig(t *testing.T) {
 func TestConfigDefaultAgentHandlesImplicitEntrypoint(t *testing.T) {
 	instance := writeRuntimeFixture(t, "research-assistant", []string{"chat", "sender"})
 	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hi", Channel: "test"})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hi", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2378,7 +2372,7 @@ func TestExplicitAgentCanRunWorkspaceResearchAssistant(t *testing.T) {
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: "research-assistant",
 		Message: "please call command",
-		Channel: "test",
+		Context: channel.NewInboundContext("test", "", nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2400,9 +2394,7 @@ func TestExplicitAgentSharesConversationSessionWithDefaultAgent(t *testing.T) {
 	}
 	first, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message:  "hello",
-		Channel:  "feishu",
-		UserID:   "sender-1",
-		Metadata: metadata,
+		Context: channel.NewInboundContext("feishu", "sender-1", metadata),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2410,9 +2402,7 @@ func TestExplicitAgentSharesConversationSessionWithDefaultAgent(t *testing.T) {
 	second, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID:  agents.ResearchAssistantAgentID,
 		Message:  "research this",
-		Channel:  "feishu",
-		UserID:   "sender-1",
-		Metadata: metadata,
+		Context: channel.NewInboundContext("feishu", "sender-1", metadata),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2453,18 +2443,14 @@ func TestFeishuEntrypointsSplitConversationByBotInstance(t *testing.T) {
 
 	expense, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message:  "expense",
-		Channel:  "feishu",
-		UserID:   "sender-1",
-		Metadata: expenseMetadata,
+		Context: channel.NewInboundContext("feishu", "sender-1", expenseMetadata),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	leave, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message:  "leave",
-		Channel:  "feishu",
-		UserID:   "sender-1",
-		Metadata: leaveMetadata,
+		Context: channel.NewInboundContext("feishu", "sender-1", leaveMetadata),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2489,12 +2475,10 @@ func TestAgentProfileSessionDimensionsOverrideDefaultScope(t *testing.T) {
 	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "hello",
-		Channel: "xiragarden",
-		UserID:  "user-1",
-		Metadata: map[string]string{
+		Context: channel.NewInboundContext("xiragarden", "user-1", map[string]string{
 			"chat_id":   "chat-1",
 			"chat_type": "group",
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)

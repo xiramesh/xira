@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/channel"
+	fsession "github.com/xiramesh/xira/internal/session"
 )
 
 type runtimeEventBase struct {
@@ -57,6 +59,49 @@ func contextWithRunExecution(ctx context.Context, exec runExecutionContext) cont
 func runExecutionFromContext(ctx context.Context) (runExecutionContext, bool) {
 	exec, ok := ctx.Value(runExecutionContextKey{}).(runExecutionContext)
 	return exec, ok
+}
+
+// inboundContextFromScope reconstructs a channel.InboundContext from a
+// persisted session scope. Resume paths (HITL/delegation) no longer have the
+// original flattened Channel/UserID/Metadata, but the durable session scope
+// carries the trigger identity (channel/chat/sender/space). This rebuilds the
+// first-class context so resumed runs land under the same conversation tree
+// instead of a forged "resume" channel.
+func inboundContextFromScope(scope *fsession.SessionScope, raw map[string]string) channel.InboundContext {
+	if scope == nil {
+		return channel.NormalizeInboundContext(channel.InboundContext{Raw: raw})
+	}
+	ctx := channel.InboundContext{
+		Channel:      scope.Channel,
+		EntrypointID: scope.EntrypointID,
+		Account:      scope.Account,
+		Raw:          raw,
+	}
+	// SessionScope.Values encode dimensions as "<type>:<id>" (chat/space/topic)
+	// or canonical sender ids. Recover the raw ids.
+	ctx.ChatID = scopeValueID(scope.Values["chat"])
+	ctx.ChatType = scopeValueType(scope.Values["chat"])
+	ctx.SpaceID = scopeValueID(scope.Values["space"])
+	ctx.SpaceType = scopeValueType(scope.Values["space"])
+	ctx.TopicID = scopeValueID(scope.Values["topic"])
+	ctx.SenderID = scope.Values["sender"]
+	return channel.NormalizeInboundContext(ctx)
+}
+
+// scopeValueID extracts the id portion of a "<type>:<id>" scope value.
+func scopeValueID(scopeValue string) string {
+	if idx := strings.Index(scopeValue, ":"); idx >= 0 {
+		return scopeValue[idx+1:]
+	}
+	return scopeValue
+}
+
+// scopeValueType extracts the type portion of a "<type>:<id>" scope value.
+func scopeValueType(scopeValue string) string {
+	if idx := strings.Index(scopeValue, ":"); idx >= 0 {
+		return scopeValue[:idx]
+	}
+	return ""
 }
 
 func newRuntimeEvent(base runtimeEventBase, kind, source, message string, payload map[string]any, correlation *runtimeEventCorrelationInput) RuntimeEvent {

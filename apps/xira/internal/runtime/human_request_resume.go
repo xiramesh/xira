@@ -77,20 +77,20 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 	resumeReq := TurnRequest{
 		AgentID:   resumeProfile.ID,
 		Message:   resumeMessage,
-		UserID:    responseActor(req.Response),
 		SessionID: adkSessionID(run.SessionID, run.RunID+":tool-replay:"+uuid.NewString()),
-		Channel:   "resume",
-		Metadata: map[string]string{
+		// Resume inherits the run's original trigger identity from its persisted
+		// session scope, not a forged "resume" channel.
+		Context: inboundContextFromScope(run.SessionScope, map[string]string{
 			"conversation_session_id": run.SessionID,
 			"agent_session_id":        run.SessionID,
 			"human_request_id":        req.ID,
-		},
+		}),
 	}
 	base := runtimeEventBase{
 		RunID:                 run.RunID,
 		AgentID:               run.AgentID,
 		EntrypointID:          run.EntrypointID,
-		Channel:               "resume",
+		Channel:               resumeReq.Context.Channel,
 		ConversationSessionID: run.SessionID,
 		AgentSessionID:        run.SessionID,
 		TraceID:               run.RunID,
@@ -132,11 +132,11 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 		RunID:          run.RunID,
 		AgentID:        profile.ID,
 		EntrypointID:   run.EntrypointID,
-		Channel:        "resume",
+		Channel:        resumeReq.Context.Channel,
 		SessionID:      run.SessionID,
 		AgentSessionID: run.SessionID,
 		ADKSessionID:   resumeReq.SessionID,
-		UserID:         resumeReq.UserID,
+		UserID:         resumeReq.Context.SenderID,
 		Pricing:        s.pricing,
 	}, recordEvent, func(call LLMCallRecord) {
 		llmCalls = append(llmCalls, call)
@@ -206,20 +206,20 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 	resumeReq := TurnRequest{
 		AgentID:   profile.ID,
 		Message:   resumeMessage,
-		UserID:    responseActor(req.Response),
 		SessionID: adkSessionID(run.SessionID, run.RunID+":resume:"+uuid.NewString()),
-		Channel:   "resume",
-		Metadata: map[string]string{
+		// Resume inherits the run's original trigger identity from its persisted
+		// session scope, not a forged "resume" channel.
+		Context: inboundContextFromScope(run.SessionScope, map[string]string{
 			"conversation_session_id": run.SessionID,
 			"agent_session_id":        run.SessionID,
 			"human_request_id":        req.ID,
-		},
+		}),
 	}
 	base := runtimeEventBase{
 		RunID:                 run.RunID,
 		AgentID:               run.AgentID,
 		EntrypointID:          run.EntrypointID,
-		Channel:               "resume",
+		Channel:               resumeReq.Context.Channel,
 		ConversationSessionID: run.SessionID,
 		AgentSessionID:        run.SessionID,
 		TraceID:               run.RunID,
@@ -260,11 +260,11 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 		RunID:          run.RunID,
 		AgentID:        profile.ID,
 		EntrypointID:   run.EntrypointID,
-		Channel:        "resume",
+		Channel:        resumeReq.Context.Channel,
 		SessionID:      run.SessionID,
 		AgentSessionID: run.SessionID,
 		ADKSessionID:   resumeReq.SessionID,
-		UserID:         resumeReq.UserID,
+		UserID:         resumeReq.Context.SenderID,
 		Pricing:        s.pricing,
 	}, recordEvent, func(call LLMCallRecord) {
 		llmCalls = append(llmCalls, call)

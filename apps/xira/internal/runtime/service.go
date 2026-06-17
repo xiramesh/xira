@@ -215,12 +215,16 @@ func (s *Service) Status() map[string]any {
 
 func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, error) {
 	now := time.Now()
+	// req.Context is the single source of truth for session identity. We enrich
+	// it from the resolved entrypoint (channel/account/app/bot defaults) and use
+	// it directly — no flattened Channel/UserID/Metadata reassembly.
+	req.Context = channel.NormalizeInboundContext(req.Context)
 	inbound := channel.InboundEnvelope{
-		Context:            channel.NewInboundContextWithEntrypoint(req.Channel, req.EntrypointID, req.UserID, req.Metadata),
+		Context:            req.Context,
 		Content:            req.Message,
 		RequestedAgentID:   req.AgentID,
 		SessionIDOverride:  req.SessionID,
-		Metadata:           req.Metadata,
+		Metadata:           req.Context.Raw,
 		OriginalEntrypoint: "agent",
 	}
 	entrypointDecision, err := s.entrypoints.Resolve(entrypoints.ResolveInput{
@@ -231,21 +235,22 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	if err != nil {
 		return TurnResponse{}, err
 	}
-	if channelConflict(req.Channel, entrypointDecision.Definition.Channel) {
-		return TurnResponse{}, fmt.Errorf("entrypoint %q uses channel %q, got request channel %q", entrypointDecision.Definition.ID, entrypointDecision.Definition.Channel, req.Channel)
+	if channelConflict(req.Context.Channel, entrypointDecision.Definition.Channel) {
+		return TurnResponse{}, fmt.Errorf("entrypoint %q uses channel %q, got request channel %q", entrypointDecision.Definition.ID, entrypointDecision.Definition.Channel, req.Context.Channel)
 	}
-	inbound.Context.Channel = entrypointDecision.Definition.Channel
-	inbound.Context.EntrypointID = entrypointDecision.Definition.ID
-	if inbound.Context.Account == "" {
-		inbound.Context.Account = entrypointDecision.Definition.Account
+	req.Context.Channel = entrypointDecision.Definition.Channel
+	req.Context.EntrypointID = entrypointDecision.Definition.ID
+	if req.Context.Account == "" {
+		req.Context.Account = entrypointDecision.Definition.Account
 	}
-	if inbound.Context.ChannelAppID == "" {
-		inbound.Context.ChannelAppID = entrypointDecision.Definition.AppID
+	if req.Context.ChannelAppID == "" {
+		req.Context.ChannelAppID = entrypointDecision.Definition.AppID
 	}
-	if inbound.Context.BotID == "" {
-		inbound.Context.BotID = entrypointDecision.Definition.BotID
+	if req.Context.BotID == "" {
+		req.Context.BotID = entrypointDecision.Definition.BotID
 	}
-	inbound.Context = channel.NormalizeInboundContext(inbound.Context)
+	req.Context = channel.NormalizeInboundContext(req.Context)
+	inbound.Context = req.Context
 	profile, ok := s.agents.Get(entrypointDecision.AgentID)
 	if !ok {
 		return TurnResponse{}, fmt.Errorf("agent profile %q not found", entrypointDecision.AgentID)
@@ -256,14 +261,12 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	}
 	sessionPolicy := sessionPolicyForProfile(profile, entrypointDecision.SessionPolicy)
 	allocation := s.sessions.Allocate(fsession.AllocationInput{
-		Context:           inbound.Context,
+		Context:           req.Context,
 		SessionPolicy:     sessionPolicy,
 		SessionIDOverride: inbound.SessionIDOverride,
 	})
 	req.AgentID = profile.ID
-	req.EntrypointID = inbound.Context.EntrypointID
-	req.Channel = inbound.Context.Channel
-	req.UserID = inbound.Context.SenderID
+	req.EntrypointID = req.Context.EntrypointID
 	req.SessionID = allocation.SessionID
 	agentSessionID := fsession.BuildAgentSessionID(req.SessionID, profile.ID)
 	runID := NewRunID(profile.ID, now)
@@ -276,7 +279,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"channel", inbound.Context.Channel,
 		"channel_app_id", inbound.Context.ChannelAppID,
 		"bot_id", inbound.Context.BotID,
-		"user_id", req.UserID,
+		"user_id", req.Context.SenderID,
 		"session_id", req.SessionID,
 		"agent_session_id", agentSessionID,
 		"matched_by", entrypointDecision.MatchedBy,
@@ -294,7 +297,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		Message:        req.Message,
 		Status:         "running",
 		StartedAt:      now,
-		Metadata:       req.Metadata,
+		Metadata:       req.Context.Raw,
 	}
 	eventBase := runtimeEventBase{
 		RunID:                 runID,
@@ -329,7 +332,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 			RunID:   runID,
 			Time:    time.Now(),
 			Action:  action,
-			Actor:   req.UserID,
+			Actor:   req.Context.SenderID,
 			Target:  target,
 			Allowed: allowed,
 			Reason:  reason,
@@ -364,12 +367,15 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	})
 
 	agentReq := req
-	agentReq.Metadata = copyTurnMetadata(req.Metadata)
-	if agentReq.Metadata == nil {
-		agentReq.Metadata = map[string]string{}
+	// Runtime-internal correlation keys live on Context.Raw (the InboundContext
+	// equivalent of the former Metadata map). They let delegation/HITL tool
+	// scopes correlate child runs back to this conversation session.
+	agentReq.Context.Raw = copyTurnMetadata(req.Context.Raw)
+	if agentReq.Context.Raw == nil {
+		agentReq.Context.Raw = map[string]string{}
 	}
-	agentReq.Metadata["conversation_session_id"] = req.SessionID
-	agentReq.Metadata["agent_session_id"] = agentSessionID
+	agentReq.Context.Raw["conversation_session_id"] = req.SessionID
+	agentReq.Context.Raw["agent_session_id"] = agentSessionID
 	agentReq.SessionID = adkRuntimeSessionID
 	if err := s.runs.InitRun(runID); err != nil {
 		return TurnResponse{}, err
@@ -397,7 +403,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		SessionID:      req.SessionID,
 		AgentSessionID: agentSessionID,
 		ADKSessionID:   adkRuntimeSessionID,
-		UserID:         req.UserID,
+		UserID:         req.Context.SenderID,
 		Pricing:        s.pricing,
 	}, recordEvent, func(call LLMCallRecord) {
 		recorder.appendLLMCall(call)
@@ -429,7 +435,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"run_id", resp.RunID,
 		"agent_id", resp.AgentID,
 		"entrypoint_id", resp.EntrypointID,
-		"channel", req.Channel,
+		"channel", req.Context.Channel,
 		"session_id", resp.SessionID,
 		"status", resp.Status,
 		"verification_status", resp.VerificationResult.Status,

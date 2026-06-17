@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
@@ -30,7 +31,7 @@ func TestAgentRunAPI(t *testing.T) {
 	if err := server.StartAsync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	body, _ := json.Marshal(frt.TurnRequest{Message: "hello", Channel: "test"})
+	body, _ := json.Marshal(frt.TurnRequest{Message: "hello", Context: channel.NewInboundContext("test", "", nil)})
 	resp, err := http.Post(server.URL()+"/api/v1/agent-runs", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +89,7 @@ func TestXiraGardenMessageRejectsMismatchedChannel(t *testing.T) {
 	if err := server.StartAsync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	body, _ := json.Marshal(frt.TurnRequest{Message: "hello", Channel: "feishu"})
+	body, _ := json.Marshal(frt.TurnRequest{Message: "hello", Context: channel.NewInboundContext("feishu", "", nil)})
 	resp, err := http.Post(server.URL()+"/api/v1/channels/xiragarden/messages", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +108,7 @@ func TestShellTurnAPIIsNotAChannelEntrypoint(t *testing.T) {
 	if err := server.StartAsync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	body, _ := json.Marshal(frt.TurnRequest{Message: "hi", Channel: "test"})
+	body, _ := json.Marshal(frt.TurnRequest{Message: "hi", Context: channel.NewInboundContext("test", "", nil)})
 	resp, err := http.Post(server.URL()+"/api/v1/shell-turns", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -172,7 +173,7 @@ func TestEventsWebSocketReceivesRunEvents(t *testing.T) {
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 
-	body, _ := json.Marshal(frt.TurnRequest{Message: "hello", Channel: "test"})
+	body, _ := json.Marshal(frt.TurnRequest{Message: "hello", Context: channel.NewInboundContext("test", "", nil)})
 	resp, err := http.Post(server.URL()+"/api/v1/agent-runs", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
