@@ -148,6 +148,7 @@ func (s *Service) resumeChildDelegationAfterAnswer(ctx context.Context, join *De
 	childRun.EndedAt = time.Now()
 	childRun.Status = "completed"
 	childRun.Usage = summarizeUsage(childRun)
+	s.persistResumeSessionMessages(childRun, req, resumeMessage)
 	if err := s.runs.SaveRun(childRun); err != nil {
 		return err
 	}
@@ -209,6 +210,7 @@ func (s *Service) materializeDeniedDelegation(ctx context.Context, join *Delegat
 		}
 		childRun.EndedAt = now
 		childRun.VerificationResult = VerificationResult{Status: "failed", Checks: []string{"human_response_" + string(req.Response.Kind)}}
+		s.persistResumeSessionMessages(childRun, req, "")
 		if err := s.runs.SaveRun(childRun); err != nil {
 			return err
 		}
@@ -374,6 +376,7 @@ func (s *Service) resumeParentAfterDelegationOutput(ctx context.Context, join *D
 	}
 	parent.EndedAt = time.Now()
 	parent.Usage = summarizeUsage(parent)
+	s.persistResumeSessionMessages(parent, nil, resumeMessage)
 	return s.runs.SaveRun(parent)
 }
 

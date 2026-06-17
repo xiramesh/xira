@@ -171,6 +171,7 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 	}
 	run.EndedAt = time.Now()
 	run.Usage = summarizeUsage(run)
+	s.persistResumeSessionMessages(run, req, resumeMessage)
 	return s.runs.SaveRun(run)
 }
 
@@ -196,6 +197,7 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 		run.VerificationResult = VerificationResult{Status: "failed", Checks: []string{"human_response_" + string(req.Response.Kind)}}
 		run.EndedAt = time.Now()
 		replaceRunHumanRequest(&run, *req)
+		s.persistResumeSessionMessages(run, req, "")
 		return s.runs.SaveRun(run)
 	}
 	profile, ok := s.agents.Get(run.AgentID)
@@ -299,6 +301,7 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 	}
 	run.EndedAt = time.Now()
 	run.Usage = summarizeUsage(run)
+	s.persistResumeSessionMessages(run, req, resumeMessage)
 	return s.runs.SaveRun(run)
 }
 

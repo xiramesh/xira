@@ -187,6 +187,13 @@ func (s *Service) hydrateADKSession(ctx context.Context, userID, adkSessionID, a
 	var restored int
 	var contentChars int
 	for _, msg := range s.sessions.AgentHistory(conversationSessionID, agentID) {
+		// Skip messages from failed runs: their tool events must not leak into
+		// the next run's model context. Audit still keeps them on disk.
+		if msg.Metadata != nil {
+			if rs, _ := msg.Metadata["run_status"].(string); rs == "failed" {
+				continue
+			}
+		}
 		event, chars, ok := adkEventFromSessionMessage(msg, agentID)
 		if !ok {
 			continue

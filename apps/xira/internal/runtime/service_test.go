@@ -2886,3 +2886,131 @@ func yamlStringList(values []string, indent string) string {
 	}
 	return b.String()
 }
+
+
+// TestWaitingHumanRunPersistsSessionHistory asserts that a run which pauses for
+// human input (waiting_human) STILL persists its session history — the user
+// message, the tool call that triggered the HITL, and the human request
+// question. This is audit evidence that must not wait for a human reply.
+func TestWaitingHumanRunPersistsSessionHistory(t *testing.T) {
+	modelCalls := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		modelCalls++
+		if modelCalls > 1 {
+			t.Fatalf("model called after human.request interrupt")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(deepSeekToolCallResponseWithArgs("human-call-1", "human_request", map[string]any{
+				"kind":     "freeform",
+				"question": "Which deployment window should I use?",
+			}))),
+		}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask a human", Context: channel.NewInboundContext("test", "user-1", nil)})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if resp.Status != "waiting_human" {
+		t.Fatalf("status = %q, want waiting_human", resp.Status)
+	}
+
+	// The session history MUST be persisted even though the run paused.
+	history := rt.SessionManager().AgentHistory(resp.SessionID, resp.AgentID)
+	if len(history) == 0 {
+		t.Fatal("waiting_human run did not persist session history; agent history is empty")
+	}
+	// Must contain the user message.
+	if history[0].Role != "user" || !strings.Contains(history[0].Content, "ask a human") {
+		t.Fatalf("first history entry = %+v, want user message containing 'ask a human'", history[0])
+	}
+	// Must contain the human request (the question the agent asked).
+	var sawHumanRequest bool
+	for _, msg := range history {
+		if msg.Kind == "human_request" && strings.Contains(msg.Content, "Which deployment window") {
+			sawHumanRequest = true
+		}
+	}
+	if !sawHumanRequest {
+		t.Fatalf("session history missing human_request message; got %+v", history)
+	}
+}
+
+// TestResumeAfterHumanResponsePersistsAnswer asserts that after a human responds
+// to a HITL request, the human's answer AND the agent's resume final response
+// are appended to the session history — not lost when the run is reloaded.
+func TestResumeAfterHumanResponsePersistsAnswer(t *testing.T) {
+	modelCalls := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		modelCalls++
+		if modelCalls == 1 {
+			// First call: agent asks for confirmation (freeform HITL).
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(deepSeekToolCallResponseWithArgs("human-call-1", "human_request", map[string]any{
+					"kind":     "freeform",
+					"question": "Approve the deployment?",
+				}))),
+			}, nil
+		}
+		// Second call (resume): agent produces a final answer.
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(deepSeekTextResponse("Deployment approved and proceeding."))),
+		}, nil
+	})}
+	rt := newTestService(t, Config{
+		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "deploy please", Context: channel.NewInboundContext("test", "user-1", nil)})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if resp.Status != "waiting_human" || len(resp.HumanRequests) != 1 {
+		t.Fatalf("expected waiting_human with 1 request, got status=%q requests=%d", resp.Status, len(resp.HumanRequests))
+	}
+	hrID := resp.HumanRequests[0].ID
+
+	// Human answers.
+	if _, err := rt.ResolveHumanRequest(context.Background(), hrID, humanrequest.ResolveRequest{
+		Kind:    humanrequest.ResponseAnswer,
+		Actor:   "auditor-alice",
+		Message: "yes, looks good to deploy",
+	}); err != nil {
+		t.Fatalf("ResolveHumanRequest: %v", err)
+	}
+
+	// After resume, the session history must contain BOTH the human response
+	// and the agent's final answer.
+	history := rt.SessionManager().AgentHistory(resp.SessionID, resp.AgentID)
+	var sawHumanResponse, sawResumeFinal bool
+	for _, msg := range history {
+		if msg.Kind == "human_response" {
+			sawHumanResponse = true
+			if !strings.Contains(msg.Content, "auditor-alice") {
+				t.Fatalf("human_response message = %+v, want it to mention auditor-alice", msg)
+			}
+		}
+		if msg.Kind == "message" && msg.Role == "assistant" && strings.Contains(msg.Content, "Deployment approved") {
+			sawResumeFinal = true
+		}
+	}
+	if !sawHumanResponse {
+		t.Fatalf("session history missing human_response after resume; got %+v", history)
+	}
+	if !sawResumeFinal {
+		t.Fatalf("session history missing resume final response; got %+v", history)
+	}
+}
