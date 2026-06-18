@@ -18,14 +18,14 @@ const (
 
 type SearchFileTool struct{ fileTool }
 
-func NewSearchFileTool(workspaceRoot string) *SearchFileTool {
-	return &SearchFileTool{fileTool{workspaceRoot: cleanWorkspace(workspaceRoot)}}
+func NewSearchFileTool(workspaceRoot string, readRoots, writeRoots []string) *SearchFileTool {
+	return &SearchFileTool{newFileTool(workspaceRoot, readRoots, writeRoots)}
 }
 
 func (t *SearchFileTool) Name() string { return "search_file" }
 
 func (t *SearchFileTool) Description() string {
-	return "Search UTF-8 text files in the Xira workspace and return matching paths, line numbers, and short snippets."
+	return "Search UTF-8 text files in the Xira workspace or configured sandbox roots and return matching paths, line numbers, and short snippets."
 }
 
 func (t *SearchFileTool) Parameters() map[string]any {
@@ -33,7 +33,7 @@ func (t *SearchFileTool) Parameters() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"query":       map[string]any{"type": "string", "description": "Literal text to search for, case-insensitive."},
-			"root":        map[string]any{"type": "string", "description": "Directory or file path to search, relative to the workspace unless absolute. Defaults to workspace root."},
+			"root":        map[string]any{"type": "string", "description": "Directory or file path to search, within the workspace or configured sandbox roots. Defaults to workspace root."},
 			"max_results": map[string]any{"type": "integer", "description": "Maximum number of matches to return. Defaults to 20 and caps at 50."},
 		},
 		"required": []string{"query"},
@@ -161,18 +161,9 @@ func (t *SearchFileTool) searchOneFile(path, query string) ([]map[string]any, bo
 }
 
 func (t *SearchFileTool) resolveSearchRoot(rawRoot string) (string, error) {
-	path, err := t.resolvePath(rawRoot)
-	if err != nil {
-		return "", err
-	}
-	rel, err := filepath.Rel(t.workspaceRoot, path)
-	if err != nil {
-		return "", err
-	}
-	if rel == ".." || strings.HasPrefix(rel, "../") {
-		return "", fmt.Errorf("root must stay within workspace")
-	}
-	return path, nil
+	// resolveReadPath already enforces the path stays within the readable
+	// roots (workspace ∪ allow ∪ readonly), so no extra workspace-only check.
+	return t.resolveReadPath(rawRoot)
 }
 
 func (t *SearchFileTool) searchOutput(rootPath, query string, matches []map[string]any, totalMatches, searchedFiles, skippedFiles, maxResults int) map[string]any {

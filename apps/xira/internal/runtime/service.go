@@ -368,6 +368,8 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"thinking_type":    resp.ModelPolicy.ThinkingType,
 		"tools":            resp.ModelPolicy.Tools,
 		"skills":           resp.ModelPolicy.Skills,
+		"allow_roots":      resp.ModelPolicy.AllowRoots,
+		"readonly_roots":   resp.ModelPolicy.ReadonlyRoots,
 		"profile_source":   resp.ModelPolicy.ProfileSource,
 		"instruction_hash": resp.ModelPolicy.InstructionHash,
 	})
@@ -1489,7 +1491,10 @@ func runtimeNativeToolDefinitions(agents.Profile) []deepseek.Tool {
 }
 
 func (s *Service) toolRegistry(profile agents.Profile) *rtools.Registry {
-	return rtools.NewBuiltinRegistry(s.workspace, profile.Permissions.Tools)
+	return rtools.NewBuiltinRegistry(s.workspace, profile.Permissions.Tools, rtools.SandboxRoots{
+		AllowRoots:    profile.Permissions.AllowRoots,
+		ReadonlyRoots: profile.Permissions.ReadonlyRoots,
+	})
 }
 
 func (s *Service) instructionText(profile agents.Profile) string {
@@ -1545,7 +1550,7 @@ func (s *Service) activateSkills(profile agents.Profile, skillIDs []string) ([]s
 	if s == nil || s.skills == nil {
 		return nil, nil, fmt.Errorf("agent profile %q references skills but no skill registry is available", profile.ID)
 	}
-	knownTools := rtools.NewBuiltinRegistry(s.workspace, agents.BuiltinToolNames())
+	knownTools := rtools.NewBuiltinRegistry(s.workspace, agents.BuiltinToolNames(), rtools.SandboxRoots{})
 	seen := map[string]struct{}{}
 	active := make([]skills.Skill, 0, len(skillIDs))
 	activeIDs := make([]string, 0, len(skillIDs))
@@ -1598,6 +1603,8 @@ func (s *Service) skillInstructionText(profile agents.Profile) string {
 func (s *Service) modelPolicySnapshot(profile agents.Profile) ModelPolicySnapshot {
 	snapshot := modelPolicySnapshot(profile, s.profileSource)
 	snapshot.Skills = compactProfileSkills(profile.Skills)
+	snapshot.AllowRoots = profile.Permissions.AllowRoots
+	snapshot.ReadonlyRoots = profile.Permissions.ReadonlyRoots
 	snapshot.InstructionHash = instructionHash(s.instructionText(profile))
 	return snapshot
 }
@@ -1605,6 +1612,8 @@ func (s *Service) modelPolicySnapshot(profile agents.Profile) ModelPolicySnapsho
 func (s *Service) modelPolicySnapshotForRun(profile agents.Profile, instructionText string, activeSkillIDs []string) ModelPolicySnapshot {
 	snapshot := modelPolicySnapshot(profile, s.profileSource)
 	snapshot.Skills = append([]string{}, activeSkillIDs...)
+	snapshot.AllowRoots = profile.Permissions.AllowRoots
+	snapshot.ReadonlyRoots = profile.Permissions.ReadonlyRoots
 	snapshot.InstructionHash = instructionHash(instructionText)
 	return snapshot
 }

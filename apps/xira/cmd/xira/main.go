@@ -96,6 +96,8 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 					"temperature", optionalFloat32(summary.Temperature),
 					"thinking_type", summary.ThinkingType,
 					"tools", summary.Tools,
+					"allow_roots", summary.AllowRoots,
+					"readonly_roots", summary.ReadonlyRoots,
 					"profile_source", summary.ProfileSource,
 					"instruction_hash", summary.InstructionHash,
 				)

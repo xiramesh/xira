@@ -11,6 +11,12 @@ import (
 
 type fileTool struct {
 	workspaceRoot string
+	// readRoots is the set of absolute roots readable via read_file/list_dir/
+	// search_file: the workspace plus any allow_roots and readonly_roots.
+	readRoots []string
+	// writeRoots is the set writable via write_file/edit_file: the workspace
+	// plus any allow_roots. readonly_roots are intentionally excluded.
+	writeRoots []string
 }
 
 type ReadFileTool struct{ fileTool }
@@ -18,37 +24,45 @@ type WriteFileTool struct{ fileTool }
 type ListDirTool struct{ fileTool }
 type EditFileTool struct{ fileTool }
 
-func NewReadFileTool(workspaceRoot string) *ReadFileTool {
-	return &ReadFileTool{fileTool{workspaceRoot: cleanWorkspace(workspaceRoot)}}
+func newFileTool(workspaceRoot string, readRoots, writeRoots []string) fileTool {
+	return fileTool{
+		workspaceRoot: cleanWorkspace(workspaceRoot),
+		readRoots:     readRoots,
+		writeRoots:    writeRoots,
+	}
 }
 
-func NewWriteFileTool(workspaceRoot string) *WriteFileTool {
-	return &WriteFileTool{fileTool{workspaceRoot: cleanWorkspace(workspaceRoot)}}
+func NewReadFileTool(workspaceRoot string, readRoots, writeRoots []string) *ReadFileTool {
+	return &ReadFileTool{newFileTool(workspaceRoot, readRoots, writeRoots)}
 }
 
-func NewListDirTool(workspaceRoot string) *ListDirTool {
-	return &ListDirTool{fileTool{workspaceRoot: cleanWorkspace(workspaceRoot)}}
+func NewWriteFileTool(workspaceRoot string, readRoots, writeRoots []string) *WriteFileTool {
+	return &WriteFileTool{newFileTool(workspaceRoot, readRoots, writeRoots)}
 }
 
-func NewEditFileTool(workspaceRoot string) *EditFileTool {
-	return &EditFileTool{fileTool{workspaceRoot: cleanWorkspace(workspaceRoot)}}
+func NewListDirTool(workspaceRoot string, readRoots, writeRoots []string) *ListDirTool {
+	return &ListDirTool{newFileTool(workspaceRoot, readRoots, writeRoots)}
+}
+
+func NewEditFileTool(workspaceRoot string, readRoots, writeRoots []string) *EditFileTool {
+	return &EditFileTool{newFileTool(workspaceRoot, readRoots, writeRoots)}
 }
 
 func (t *ReadFileTool) Name() string { return "read_file" }
 func (t *ReadFileTool) Description() string {
-	return "Read a UTF-8 text file from the Xira workspace."
+	return "Read a UTF-8 text file from the Xira workspace or configured sandbox roots."
 }
 func (t *ReadFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{"type": "string", "description": "Path to read within the workspace."},
+			"path": map[string]any{"type": "string", "description": "Path within the workspace or configured sandbox roots. Defaults to the workspace for relative paths."},
 		},
 		"required": []string{"path"},
 	}
 }
 func (t *ReadFileTool) Execute(_ context.Context, args map[string]any) (map[string]any, error) {
-	path, err := t.resolveArgPath(args)
+	path, err := t.resolveReadArgPath(args)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +79,7 @@ func (t *ReadFileTool) Execute(_ context.Context, args map[string]any) (map[stri
 
 func (t *WriteFileTool) Name() string { return "write_file" }
 func (t *WriteFileTool) Description() string {
-	return "Create or overwrite a UTF-8 text file in the Xira workspace."
+	return "Create or overwrite a UTF-8 text file in the Xira workspace or configured sandbox roots."
 }
 func (t *WriteFileTool) Policy() ToolPolicy {
 	return ToolPolicy{Risk: "high", RequireConfirmation: true}
@@ -74,14 +88,14 @@ func (t *WriteFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path":    map[string]any{"type": "string", "description": "Path to write within the workspace."},
+			"path":    map[string]any{"type": "string", "description": "Path within the workspace or configured sandbox roots. Defaults to the workspace for relative paths."},
 			"content": map[string]any{"type": "string", "description": "File content to write."},
 		},
 		"required": []string{"path", "content"},
 	}
 }
 func (t *WriteFileTool) Execute(_ context.Context, args map[string]any) (map[string]any, error) {
-	path, err := t.resolveArgPath(args)
+	path, err := t.resolveWriteArgPath(args)
 	if err != nil {
 		return nil, err
 	}
@@ -100,13 +114,13 @@ func (t *WriteFileTool) Execute(_ context.Context, args map[string]any) (map[str
 
 func (t *ListDirTool) Name() string { return "list_dir" }
 func (t *ListDirTool) Description() string {
-	return "List files and directories in the Xira workspace."
+	return "List files and directories in the Xira workspace or configured sandbox roots."
 }
 func (t *ListDirTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{"type": "string", "description": "Directory path within the workspace. Defaults to workspace root."},
+			"path": map[string]any{"type": "string", "description": "Directory path within the workspace or configured sandbox roots. Defaults to workspace root."},
 		},
 	}
 }
@@ -115,7 +129,7 @@ func (t *ListDirTool) Execute(_ context.Context, args map[string]any) (map[strin
 	if strings.TrimSpace(rawPath) == "" {
 		rawPath = "."
 	}
-	path, err := t.resolvePath(rawPath)
+	path, err := t.resolveReadPath(rawPath)
 	if err != nil {
 		return nil, err
 	}
@@ -149,13 +163,16 @@ func (t *ListDirTool) Execute(_ context.Context, args map[string]any) (map[strin
 
 func (t *EditFileTool) Name() string { return "edit_file" }
 func (t *EditFileTool) Description() string {
-	return "Replace one exact text occurrence in an existing workspace file."
+	return "Replace one exact text occurrence in an existing file within the workspace or configured sandbox roots."
+}
+func (t *EditFileTool) Policy() ToolPolicy {
+	return ToolPolicy{Risk: "high", RequireConfirmation: true}
 }
 func (t *EditFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path":     map[string]any{"type": "string", "description": "Path to edit within the workspace."},
+			"path":     map[string]any{"type": "string", "description": "Path within the workspace or configured sandbox roots. Defaults to the workspace for relative paths."},
 			"old_text": map[string]any{"type": "string", "description": "Exact existing text to replace."},
 			"new_text": map[string]any{"type": "string", "description": "Replacement text."},
 		},
@@ -163,7 +180,7 @@ func (t *EditFileTool) Parameters() map[string]any {
 	}
 }
 func (t *EditFileTool) Execute(_ context.Context, args map[string]any) (map[string]any, error) {
-	path, err := t.resolveArgPath(args)
+	path, err := t.resolveWriteArgPath(args)
 	if err != nil {
 		return nil, err
 	}
@@ -198,40 +215,51 @@ func (t *EditFileTool) Execute(_ context.Context, args map[string]any) (map[stri
 	}, nil
 }
 
-func (t fileTool) resolveArgPath(args map[string]any) (string, error) {
+func (t fileTool) resolveReadArgPath(args map[string]any) (string, error) {
+	return t.resolveArgPathWithin(args, t.readRoots)
+}
+
+func (t fileTool) resolveWriteArgPath(args map[string]any) (string, error) {
+	return t.resolveArgPathWithin(args, t.writeRoots)
+}
+
+func (t fileTool) resolveArgPathWithin(args map[string]any, roots []string) (string, error) {
 	rawPath, ok := args["path"].(string)
 	if !ok || strings.TrimSpace(rawPath) == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	return t.resolvePath(rawPath)
+	return t.resolveWithin(rawPath, roots)
 }
 
-func (t fileTool) resolvePath(rawPath string) (string, error) {
+func (t fileTool) resolveReadPath(rawPath string) (string, error) {
+	return t.resolveWithin(rawPath, t.readRoots)
+}
+
+// resolveWithin turns a raw path into a cleaned absolute path and enforces
+// that it stays within one of the given roots. Relative paths resolve against
+// the workspace root (the first configured root), preserving the original
+// "relative means inside the workspace" contract.
+func (t fileTool) resolveWithin(rawPath string, roots []string) (string, error) {
 	rawPath = strings.TrimSpace(rawPath)
 	if rawPath == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	workspaceRoot, err := filepath.Abs(t.workspaceRoot)
-	if err != nil {
-		return "", err
-	}
-	workspaceRoot = filepath.Clean(workspaceRoot)
+	workspaceRoot := filepath.Clean(t.workspaceRoot)
 	var path string
 	if filepath.IsAbs(rawPath) {
 		path = filepath.Clean(rawPath)
 	} else {
 		path = filepath.Clean(filepath.Join(workspaceRoot, rawPath))
 	}
-	path, err = filepath.Abs(path)
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
-	path = filepath.Clean(path)
-	rel, err := filepath.Rel(workspaceRoot, path)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("path must stay within workspace")
+	abs = filepath.Clean(abs)
+	if !pathWithinRoots(abs, roots) {
+		return "", fmt.Errorf("path must stay within allowed roots")
 	}
-	return path, nil
+	return abs, nil
 }
 
 func cleanWorkspace(workspaceRoot string) string {

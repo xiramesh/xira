@@ -54,16 +54,27 @@ func NewRegistry(tools []Tool) *Registry {
 	return registry
 }
 
-func NewBuiltinRegistry(workspaceRoot string, allowed []string) *Registry {
+// SandboxRoots carries the out-of-workspace roots an agent is authorized to
+// reach. Values must already be expanded to absolute paths (see ExpandRoots).
+// AllowRoots are read/write; ReadonlyRoots are read-only.
+type SandboxRoots struct {
+	AllowRoots    []string
+	ReadonlyRoots []string
+}
+
+func NewBuiltinRegistry(workspaceRoot string, allowed []string, roots SandboxRoots) *Registry {
+	ws := cleanWorkspace(workspaceRoot)
+	readRoots := mergeRoots([]string{ws}, roots.AllowRoots, roots.ReadonlyRoots)
+	writeRoots := mergeRoots([]string{ws}, roots.AllowRoots)
 	all := map[string]Tool{
-		"command.run":      NewCommandRunTool(workspaceRoot),
-		"shell.run":        NewShellRunTool(workspaceRoot),
+		"command.run":      NewCommandRunTool(ws, writeRoots),
+		"shell.run":        NewShellRunTool(ws, writeRoots),
 		"tool_output.read": NewToolOutputReadTool(),
-		"read_file":        NewReadFileTool(workspaceRoot),
-		"search_file":      NewSearchFileTool(workspaceRoot),
-		"write_file":       NewWriteFileTool(workspaceRoot),
-		"list_dir":         NewListDirTool(workspaceRoot),
-		"edit_file":        NewEditFileTool(workspaceRoot),
+		"read_file":        NewReadFileTool(ws, readRoots, writeRoots),
+		"search_file":      NewSearchFileTool(ws, readRoots, writeRoots),
+		"write_file":       NewWriteFileTool(ws, readRoots, writeRoots),
+		"list_dir":         NewListDirTool(ws, readRoots, writeRoots),
+		"edit_file":        NewEditFileTool(ws, readRoots, writeRoots),
 	}
 	tools := make([]Tool, 0, len(allowed))
 	for _, name := range allowed {
