@@ -28,11 +28,9 @@ const (
 var websocketCapabilities = []string{
 	"message",
 	"event",
-	"assistant_delta",
 	"response",
 	"interrupt",
 	"human_response",
-	"outbound_message",
 }
 
 var errWebSocketUnsupportedMessage = errors.New("only JSON text frames are supported")

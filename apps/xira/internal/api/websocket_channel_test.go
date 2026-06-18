@@ -32,6 +32,7 @@ func TestWebSocketChannelMessageEmitsAckEventAndResponse(t *testing.T) {
 	if ready.Type != "ready" || frameDataString(ready, "entrypoint_id") != websocketDefaultEntrypoint {
 		t.Fatalf("ready = %+v", ready)
 	}
+	assertWebSocketCapabilities(t, ready, []string{"message", "event", "response", "interrupt", "human_response"})
 
 	writeWebSocketFrame(t, conn, map[string]any{
 		"type": "message",
@@ -269,4 +270,24 @@ func frameDataString(frame websocketOutboundFrame, key string) string {
 	}
 	value, _ := data[key].(string)
 	return value
+}
+
+func assertWebSocketCapabilities(t *testing.T, frame websocketOutboundFrame, want []string) {
+	t.Helper()
+	data, ok := frame.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("frame data = %+v", frame.Data)
+	}
+	raw, ok := data["capabilities"].([]any)
+	if !ok {
+		t.Fatalf("capabilities = %+v", data["capabilities"])
+	}
+	if len(raw) != len(want) {
+		t.Fatalf("capabilities len = %d, want %d: %+v", len(raw), len(want), raw)
+	}
+	for i, value := range raw {
+		if value != want[i] {
+			t.Fatalf("capabilities[%d] = %v, want %q; all=%+v", i, value, want[i], raw)
+		}
+	}
 }
