@@ -3,9 +3,9 @@ module github.com/xiramesh/xira
 go 1.25.0
 
 require (
-	github.com/google/uuid v1.6.0
+	github.com/coder/websocket v1.8.15
 	github.com/google/jsonschema-go v0.4.2
-	github.com/gorilla/websocket v1.5.3
+	github.com/google/uuid v1.6.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.7.5
 	github.com/openilink/openilink-sdk-go v0.6.0
 	github.com/spf13/cobra v1.10.2
@@ -28,6 +28,7 @@ require (
 	github.com/google/safehtml v0.1.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.15 // indirect
 	github.com/googleapis/gax-go/v2 v2.22.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

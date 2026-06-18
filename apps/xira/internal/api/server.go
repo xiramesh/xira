@@ -10,10 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelcontrol"
+	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
@@ -21,6 +23,7 @@ import (
 type Server struct {
 	runtime         *frt.Service
 	channelControls ChannelControls
+	websocketDedupe *dedupe.MessageDeduper
 	server          *http.Server
 	addr            string
 }
@@ -33,12 +36,17 @@ type ChannelControls interface {
 }
 
 const xiragardenChannel = "xiragarden"
+const websocketChannel = "websocket"
 
 func NewServer(rt *frt.Service, addr string, controls ...ChannelControls) *Server {
 	if strings.TrimSpace(addr) == "" {
 		addr = "127.0.0.1:0"
 	}
-	s := &Server{runtime: rt, addr: addr}
+	s := &Server{
+		runtime:         rt,
+		addr:            addr,
+		websocketDedupe: dedupe.New("", websocketMessageDedupeTTL),
+	}
 	if len(controls) > 0 {
 		s.channelControls = controls[0]
 	}
@@ -52,6 +60,7 @@ func NewServer(rt *frt.Service, addr string, controls ...ChannelControls) *Serve
 	mux.HandleFunc("/api/v1/human-requests/", s.humanRequestByID)
 	mux.HandleFunc("/api/v1/channels/xiragarden/messages", s.xiragardenMessages)
 	mux.HandleFunc("/api/v1/channels/xiragarden/events", s.xiragardenEvents)
+	mux.HandleFunc("/api/v1/channels/websocket/messages", s.websocketMessages)
 	mux.HandleFunc("/api/v1/entrypoints/", s.entrypointControls)
 	mux.HandleFunc("/api/v1/runs", s.runs)
 	mux.HandleFunc("/api/v1/runs/", s.runByID)
@@ -196,15 +205,15 @@ func (s *Server) runByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		return
 	}
-	defer conn.Close()
-	events := s.runtime.EventBus().Subscribe(r.Context())
+	defer conn.CloseNow()
+	ctx := conn.CloseRead(r.Context())
+	events := s.runtime.EventBus().Subscribe(ctx)
 	for evt := range events {
-		if err := conn.WriteJSON(evt); err != nil {
+		if err := wsjson.Write(ctx, conn, evt); err != nil {
 			return
 		}
 	}
@@ -379,19 +388,19 @@ func (s *Server) channelEvents(w http.ResponseWriter, r *http.Request, channelNa
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	defer conn.CloseNow()
+	ctx := conn.CloseRead(r.Context())
 	runIDs := map[string]struct{}{}
-	events := s.runtime.EventBus().Subscribe(r.Context())
+	events := s.runtime.EventBus().Subscribe(ctx)
 	for evt := range events {
 		if !eventBelongsToChannel(evt, channelName, runIDs) {
 			continue
 		}
-		if err := conn.WriteJSON(evt); err != nil {
+		if err := wsjson.Write(ctx, conn, evt); err != nil {
 			return
 		}
 	}
@@ -491,10 +500,10 @@ func (s *Server) flowRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		FlowPath     string                 `json:"flow_path"`
-		FlowID       string                 `json:"flow_id"`
-		EntrypointID string                 `json:"entrypoint_id"`
-		Input        map[string]string      `json:"input"`
+		FlowPath     string                  `json:"flow_path"`
+		FlowID       string                  `json:"flow_id"`
+		EntrypointID string                  `json:"entrypoint_id"`
+		Input        map[string]string       `json:"input"`
 		Context      *channel.InboundContext `json:"context"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
