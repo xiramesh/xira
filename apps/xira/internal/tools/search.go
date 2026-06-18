@@ -25,7 +25,7 @@ func NewSearchFileTool(workspaceRoot string, readRoots, writeRoots []string) *Se
 func (t *SearchFileTool) Name() string { return "search_file" }
 
 func (t *SearchFileTool) Description() string {
-	return "Search UTF-8 text files in the Xira workspace and return matching paths, line numbers, and short snippets."
+	return "Search UTF-8 text files in the Xira workspace or configured sandbox roots and return matching paths, line numbers, and short snippets."
 }
 
 func (t *SearchFileTool) Parameters() map[string]any {
@@ -33,7 +33,7 @@ func (t *SearchFileTool) Parameters() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"query":       map[string]any{"type": "string", "description": "Literal text to search for, case-insensitive."},
-			"root":        map[string]any{"type": "string", "description": "Directory or file path to search, relative to the workspace unless absolute. Defaults to workspace root."},
+			"root":        map[string]any{"type": "string", "description": "Directory or file path to search, within the workspace or configured sandbox roots. Defaults to workspace root."},
 			"max_results": map[string]any{"type": "integer", "description": "Maximum number of matches to return. Defaults to 20 and caps at 50."},
 		},
 		"required": []string{"query"},

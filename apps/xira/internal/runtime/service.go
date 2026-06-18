@@ -368,6 +368,8 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"thinking_type":    resp.ModelPolicy.ThinkingType,
 		"tools":            resp.ModelPolicy.Tools,
 		"skills":           resp.ModelPolicy.Skills,
+		"allow_roots":      resp.ModelPolicy.AllowRoots,
+		"readonly_roots":   resp.ModelPolicy.ReadonlyRoots,
 		"profile_source":   resp.ModelPolicy.ProfileSource,
 		"instruction_hash": resp.ModelPolicy.InstructionHash,
 	})
@@ -1610,6 +1612,8 @@ func (s *Service) modelPolicySnapshot(profile agents.Profile) ModelPolicySnapsho
 func (s *Service) modelPolicySnapshotForRun(profile agents.Profile, instructionText string, activeSkillIDs []string) ModelPolicySnapshot {
 	snapshot := modelPolicySnapshot(profile, s.profileSource)
 	snapshot.Skills = append([]string{}, activeSkillIDs...)
+	snapshot.AllowRoots = profile.Permissions.AllowRoots
+	snapshot.ReadonlyRoots = profile.Permissions.ReadonlyRoots
 	snapshot.InstructionHash = instructionHash(instructionText)
 	return snapshot
 }

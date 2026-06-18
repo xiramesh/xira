@@ -50,13 +50,13 @@ func NewEditFileTool(workspaceRoot string, readRoots, writeRoots []string) *Edit
 
 func (t *ReadFileTool) Name() string { return "read_file" }
 func (t *ReadFileTool) Description() string {
-	return "Read a UTF-8 text file from the Xira workspace."
+	return "Read a UTF-8 text file from the Xira workspace or configured sandbox roots."
 }
 func (t *ReadFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{"type": "string", "description": "Path to read within the workspace."},
+			"path": map[string]any{"type": "string", "description": "Path within the workspace or configured sandbox roots. Defaults to the workspace for relative paths."},
 		},
 		"required": []string{"path"},
 	}
@@ -79,7 +79,7 @@ func (t *ReadFileTool) Execute(_ context.Context, args map[string]any) (map[stri
 
 func (t *WriteFileTool) Name() string { return "write_file" }
 func (t *WriteFileTool) Description() string {
-	return "Create or overwrite a UTF-8 text file in the Xira workspace."
+	return "Create or overwrite a UTF-8 text file in the Xira workspace or configured sandbox roots."
 }
 func (t *WriteFileTool) Policy() ToolPolicy {
 	return ToolPolicy{Risk: "high", RequireConfirmation: true}
@@ -88,7 +88,7 @@ func (t *WriteFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path":    map[string]any{"type": "string", "description": "Path to write within the workspace."},
+			"path":    map[string]any{"type": "string", "description": "Path within the workspace or configured sandbox roots. Defaults to the workspace for relative paths."},
 			"content": map[string]any{"type": "string", "description": "File content to write."},
 		},
 		"required": []string{"path", "content"},
@@ -114,13 +114,13 @@ func (t *WriteFileTool) Execute(_ context.Context, args map[string]any) (map[str
 
 func (t *ListDirTool) Name() string { return "list_dir" }
 func (t *ListDirTool) Description() string {
-	return "List files and directories in the Xira workspace."
+	return "List files and directories in the Xira workspace or configured sandbox roots."
 }
 func (t *ListDirTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{"type": "string", "description": "Directory path within the workspace. Defaults to workspace root."},
+			"path": map[string]any{"type": "string", "description": "Directory path within the workspace or configured sandbox roots. Defaults to workspace root."},
 		},
 	}
 }
@@ -163,13 +163,16 @@ func (t *ListDirTool) Execute(_ context.Context, args map[string]any) (map[strin
 
 func (t *EditFileTool) Name() string { return "edit_file" }
 func (t *EditFileTool) Description() string {
-	return "Replace one exact text occurrence in an existing workspace file."
+	return "Replace one exact text occurrence in an existing file within the workspace or configured sandbox roots."
+}
+func (t *EditFileTool) Policy() ToolPolicy {
+	return ToolPolicy{Risk: "high", RequireConfirmation: true}
 }
 func (t *EditFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path":     map[string]any{"type": "string", "description": "Path to edit within the workspace."},
+			"path":     map[string]any{"type": "string", "description": "Path within the workspace or configured sandbox roots. Defaults to the workspace for relative paths."},
 			"old_text": map[string]any{"type": "string", "description": "Exact existing text to replace."},
 			"new_text": map[string]any{"type": "string", "description": "Replacement text."},
 		},
