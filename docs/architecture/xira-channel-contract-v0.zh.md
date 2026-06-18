@@ -162,7 +162,7 @@ Inbound 指 channel transport / adapter 发给 Xira runtime 的消息。
 | `source.channel` | 是 | runtime channel 身份。 |
 | `source.entrypoint_id` | 推荐 | 多 entrypoint 时必须显式指定。 |
 | `source.chat_id` | 是 | conversation 维度。 |
-| `source.chat_type` | 是 | `direct`、`group`、`thread` 等中性值。 |
+| `source.chat_type` | 否 | 省略时 runtime 归一化为 `direct`；显式传 `group`、`thread` 等中性值可启用对应策略。 |
 | `source.sender_id` | 是 | 用户或外部系统身份。 |
 | `source.message_id` | 强烈建议 | 幂等去重键。 |
 | `data.content` | 是 | 用户可见输入。 |
@@ -312,8 +312,7 @@ WebSocket 私有概念。
 - 同一 `request_id` 内可多次发送。
 - `assistant_delta` 不是最终答案，客户端不应把它当 run completion。
 - `sequence` 在同一 `request_id` 内单调递增。
-- 内容是 append delta，不是完整 final snapshot，除非 `data.mode` 明确声明为
-  `snapshot`。
+- 内容是 append delta，不是完整内容替换；如果未来需要替换模式，应另行定义显式字段，不在 v0 中隐含。
 
 ### 4.4 `assistant_final`
 
@@ -363,14 +362,16 @@ Xira 暂停执行，等待人类输入或外部条件。
       {
         "id": "hr_001",
         "kind": "approval",
-        "message": "是否允许执行该操作？"
+        "question": "是否允许执行该操作？"
       }
     ]
   }
 }
 ```
 
-`interrupt` 是 request-bound 的暂停结果。后续可通过 `human_response` 恢复。
+`interrupt` 是 request-bound 的暂停结果。`human_requests[]` 直接对齐
+`humanrequest.HumanRequest` 的 JSON 形状，问题文本字段是 `question`。后续可
+通过 `human_response` 恢复。
 
 ### 4.6 `outbound_message`
 
@@ -432,10 +433,12 @@ Xira 主动向某个 channel / chat 发消息。它不一定由当前用户请�
 | `entrypoint_not_found` | entrypoint 不存在或不可用。 |
 | `channel_conflict` | inbound channel 与 entrypoint/runtime channel 冲突。 |
 | `agent_not_allowed` | 请求 agent 不在 allowlist。 |
-| `duplicate_message` | 幂等窗口内重复消息。 |
 | `run_failed` | runtime.RunAgent 或 flow run 失败。 |
 | `delivery_failed` | outbound_message 投递失败。 |
 | `internal_error` | 未分类服务端错误。 |
+
+幂等窗口内的重复消息不是错误；transport 应返回 `ack` 且
+`data.status == "duplicate"`，并且不得再次触发 run。
 
 ## 5. Request-Bound 与 Proactive Outbound
 
@@ -485,6 +488,8 @@ source.entrypoint_id + ":" + source.message_id
 
 如果 `source.message_id` 为空，可退化为 inbound `id`。二者都为空时无法提供
 幂等保证。
+
+命中重复键时，transport 返回 `ack(status=duplicate)`，而不是 `error`。
 
 ### 6.2 顺序
 

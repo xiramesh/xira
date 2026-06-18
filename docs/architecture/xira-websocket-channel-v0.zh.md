@@ -226,11 +226,11 @@ Inbound frame 指客户端发给 Xira 的帧。
 | `context.channel` | 否 | 若传，必须是 `websocket`。服务端最终会强制为 `websocket`。 |
 | `context.entrypoint_id` | 否 | 若传，必须与 `data.entrypoint_id` 一致。 |
 | `context.chat_id` | 是 | 会话维度。缺失会导致 session 不稳定。 |
-| `context.chat_type` | 是 | `direct`、`group`、`thread` 等中性值。 |
+| `context.chat_type` | 否 | 省略时 runtime 默认为 `direct`；显式传 `group`、`thread` 等中性值可启用对应策略。 |
 | `context.sender_id` | 是 | 发送者身份。 |
 | `context.message_id` | 强烈建议 | 幂等去重键。缺失时可使用 inbound frame `id`。 |
 | `context.mentioned` | 否 | 群聊过滤使用。 |
-| `context.raw` | 否 | 非路由元数据；不要放 secrets。 |
+| `context.raw` | 否 | 非路由元数据，必须是扁平 `map[string]string`；不要放 secrets。 |
 
 服务端构造 `runtime.TurnRequest`：
 
@@ -297,7 +297,15 @@ Outbound frame 指 Xira 发给客户端的帧。
     "channel": "websocket",
     "entrypoint_id": "websocket-default",
     "server": "xira",
-        "capabilities": ["message", "event", "assistant_delta", "response", "interrupt", "human_response", "outbound_message"]
+    "capabilities": [
+      "message",
+      "event",
+      "assistant_delta",
+      "response",
+      "interrupt",
+      "human_response",
+      "outbound_message"
+    ]
   }
 }
 ```
@@ -333,6 +341,19 @@ Outbound frame 指 Xira 发给客户端的帧。
 }
 ```
 
+若消息命中幂等窗口，返回：
+
+```json
+{
+  "type": "ack",
+  "request_id": "msg_001",
+  "data": {
+    "status": "duplicate",
+    "message_id": "client-msg-001"
+  }
+}
+```
+
 ### 5.3 `event`
 
 runtime event 的实时推送。
@@ -342,6 +363,7 @@ runtime event 的实时推送。
   "type": "event",
   "id": "srv_evt_001",
   "request_id": "msg_001",
+  "run_id": "run_xxx",
   "data": {
     "event": {
       "id": "...",
@@ -380,8 +402,8 @@ runtime event 的实时推送。
   "type": "assistant_delta",
   "id": "srv_delta_001",
   "request_id": "msg_001",
+  "run_id": "run_xxx",
   "data": {
-    "run_id": "run_xxx",
     "sequence": 1,
     "content": "我先看一下当前状态...",
     "content_format": "markdown"
@@ -396,19 +418,22 @@ runtime event 的实时推送。
 
 agent run 完成后的最终回复。它是通用 Channel Contract 里 `assistant_final`
 在 WebSocket binding 里的帧名；正常情况下，同一 `request_id` 只发送一次。
+WebSocket binding 把通用 `assistant_final.data.content` 重命名为
+`data.final_response`，并保留 `data.content_format` 表达内容格式。
 
 ```json
 {
   "type": "response",
   "id": "srv_resp_001",
   "request_id": "msg_001",
+  "run_id": "run_xxx",
   "data": {
-    "run_id": "run_xxx",
     "agent_id": "xira-assistant",
     "entrypoint_id": "websocket-default",
     "session_id": "conversation:abcd1234",
     "status": "completed",
     "final_response": "这是处理结果。",
+    "content_format": "markdown",
     "usage": {},
     "verification": {}
   }
@@ -426,19 +451,22 @@ run 因 HITL 或其他 suspendable condition 暂停时发送。
 {
   "type": "interrupt",
   "request_id": "msg_001",
+  "run_id": "run_xxx",
   "data": {
-    "run_id": "run_xxx",
     "status": "waiting_human",
     "human_requests": [
       {
         "id": "hr_20260618_001",
         "kind": "approval",
-        "message": "是否允许执行该操作？"
+        "question": "是否允许执行该操作？"
       }
     ]
   }
 }
 ```
+
+`human_requests[]` 直接使用 `humanrequest.HumanRequest` 的 JSON 形状；
+问题文本字段是 `question`。
 
 随后客户端可通过 `human_response` 帧或现有 HTTP human-request API 回复。
 
@@ -492,9 +520,10 @@ v0 只要求能向当前已连接客户端推送；离线队列或 relay 不属�
 | `entrypoint_not_found` | entrypoint 不存在或未启用。 |
 | `channel_conflict` | inbound channel 不是 `websocket`，或与 entrypoint channel 冲突。 |
 | `agent_not_allowed` | 请求 agent 不在 entrypoint allowlist。 |
-| `duplicate_message` | message id 在去重窗口内已处理或处理中。 |
 | `run_failed` | runtime.RunAgent 返回错误。 |
 | `internal_error` | 其他服务端错误。 |
+
+message id 命中去重窗口时返回 `ack(status=duplicate)`，不是 `error`。
 
 ### 5.9 `pong`
 
@@ -557,11 +586,13 @@ entrypoint_id + ":" + context.message_id
 如果 `context.message_id` 为空，使用 inbound frame `id`。如果二者都为空，
 服务端无法提供幂等保证。
 
-去重状态：
+去重行为：
 
-- `processing`：同 key 新请求返回 `duplicate_message` 或 `ack ignored`。
-- `completed`：同 key 新请求返回 `duplicate_message`。
-- `run_failed` 或发送失败：删除去重记录，允许重试。
+- 新 key：记录为 processing，然后触发 `runtime.RunAgent`。
+- processing / completed 命中同 key：返回 `ack(status=duplicate)`，不再次
+  调用 `runtime.RunAgent`。
+- `runtime.RunAgent` 失败或最终帧发送失败：`Forget` / 删除去重记录，允许
+  客户端重试。
 
 当前 `dedupe` 包位于 `internal/channelrunner/dedupe`。如果 API server 也要复用，
 建议先把它提升到中性包，例如 `internal/channel/dedupe` 或
@@ -661,7 +692,7 @@ apps/xira/internal/api/server_test.go
   - channel conflict
   - entrypoint mismatch
   - group ignored
-  - duplicate message
+  - duplicate ack
   - auth
 ```
 
@@ -687,7 +718,8 @@ apps/xira/internal/channelrunner/websocket
 
 - `GET /api/v1/channels/websocket/messages` 可以 upgrade。
 - `message` 帧会触发 `runtime.RunAgent`。
-- `response` 帧包含 `run_id`、`agent_id`、`session_id`、`final_response`。
+- `response` 帧包含 `run_id`、`agent_id`、`session_id`、`final_response`、
+  `content_format`。
 - `event` 帧只包含当前连接当前请求相关 run。
 - `interrupt` 帧能表达 waiting human。
 
@@ -703,6 +735,7 @@ apps/xira/internal/channelrunner/websocket
 ### 9.3 幂等与过滤
 
 - 同一 `entrypoint_id + message_id` 在 TTL 内不会重复触发 run。
+- 重复消息返回 `ack(status=duplicate)`。
 - run 失败后允许重试。
 - 未 mention 的 group message 在配置禁止时不触发 run。
 
@@ -738,7 +771,16 @@ Server:
   "data": {
     "channel": "websocket",
     "entrypoint_id": "websocket-default",
-    "capabilities": ["message", "event", "response", "interrupt", "human_response"]
+    "server": "xira",
+    "capabilities": [
+      "message",
+      "event",
+      "assistant_delta",
+      "response",
+      "interrupt",
+      "human_response",
+      "outbound_message"
+    ]
   }
 }
 ```
@@ -785,6 +827,7 @@ Server:
 {
   "type": "event",
   "request_id": "msg_001",
+  "run_id": "run_xxx",
   "data": {
     "event": {
       "kind": "run.started",
@@ -804,12 +847,13 @@ Server:
 {
   "type": "response",
   "request_id": "msg_001",
+  "run_id": "run_xxx",
   "data": {
-    "run_id": "run_xxx",
     "agent_id": "xira-assistant",
     "session_id": "conversation:abcd1234",
     "status": "completed",
-    "final_response": "当前 run 已完成。"
+    "final_response": "当前 run 已完成。",
+    "content_format": "markdown"
   }
 }
 ```
