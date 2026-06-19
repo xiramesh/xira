@@ -34,7 +34,7 @@ type Config struct {
 	DefaultAgentID string
 	RunRoot        string
 	SessionRoot    string
-	StateRoot      string
+	StateDir       string
 	DeepSeekClient *deepseek.Client
 }
 
@@ -55,7 +55,7 @@ type Service struct {
 	deepseek       *deepseek.Client
 	configPath     string
 	workspace      string
-	stateRoot      string
+	stateDir       string
 	defaultAgent   string
 	profileSource  string
 	pricing        UsagePricing
@@ -104,15 +104,15 @@ func NewService(cfg Config) (*Service, error) {
 		runs:           NewRunStore(resolved.RunRoot),
 		entrypoints:    entrypoints.NewRegistry(resolved.DefaultAgentID, resolved.Entrypoints),
 		sessions:       sessionManager,
-		usage:          NewUsageStore(resolved.StateRoot),
-		humanRequests:  mustHumanRequestStore(resolved.StateRoot),
+		usage:          NewUsageStore(resolved.StateDir),
+		humanRequests:  mustHumanRequestStore(resolved.StateDir),
 		adkSessions:    adksession.InMemoryService(),
 		verifier:       NewVerificationRunner(),
 		evolution:      NewEvolutionEngine(),
 		deepseek:       dsClient,
 		configPath:     resolved.ConfigPath,
 		workspace:      resolved.WorkspaceRoot,
-		stateRoot:      resolved.StateRoot,
+		stateDir:       resolved.StateDir,
 		defaultAgent:   resolved.DefaultAgentID,
 		profileSource:  profileSource,
 		pricing:        resolved.Pricing,
@@ -135,10 +135,14 @@ func (s *Service) RunStore() *RunStore {
 }
 
 func (s *Service) StateRoot() string {
+	return s.StateDir()
+}
+
+func (s *Service) StateDir() string {
 	if s == nil {
 		return ""
 	}
-	return s.stateRoot
+	return s.stateDir
 }
 
 func (s *Service) SessionManager() *fsession.Manager {
@@ -211,7 +215,7 @@ func (s *Service) Status() map[string]any {
 		"workspace":      s.workspace,
 		"run_root":       s.runs.Root(),
 		"session_root":   s.sessions.Root(),
-		"state_root":     s.stateRoot,
+		"state_dir":      s.stateDir,
 		"agents":         len(s.Agents()),
 		"entrypoints":    len(s.entrypoints.Definitions()),
 		"default_agent":  s.defaultAgent,
@@ -1226,8 +1230,8 @@ func sessionMessagesForRun(userMessage, finalResponse, agentID, runID string, to
 				AgentID: agentID,
 				RunID:   runID,
 				Metadata: map[string]any{
-					"kind":            string(hr.Response.Kind),
-					"actor":           hr.Response.Actor,
+					"kind":             string(hr.Response.Kind),
+					"actor":            hr.Response.Actor,
 					"human_request_id": hr.ID,
 				},
 			})
@@ -1256,9 +1260,9 @@ func sessionMessagesForRun(userMessage, finalResponse, agentID, runID string, to
 // metadata for audit readability.
 func humanRequestMetadata(hr humanrequest.HumanRequest) map[string]any {
 	meta := map[string]any{
-		"kind":              string(hr.Kind),
-		"human_request_id":  hr.ID,
-		"request_kind":      string(hr.Kind),
+		"kind":             string(hr.Kind),
+		"human_request_id": hr.ID,
+		"request_kind":     string(hr.Kind),
 	}
 	if hr.Source != "" {
 		meta["source"] = hr.Source

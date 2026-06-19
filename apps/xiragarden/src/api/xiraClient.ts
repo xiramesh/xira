@@ -9,7 +9,7 @@ export type XiraStatus = {
   workspace: string;
   run_root: string;
   session_root: string;
-  state_root: string;
+  state_dir: string;
   agents: number;
   entrypoints: number;
   default_agent: string;

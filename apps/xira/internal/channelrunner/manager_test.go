@@ -12,8 +12,7 @@ func TestManagerIgnoresDisabledEntrypoints(t *testing.T) {
 	instance := t.TempDir()
 	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
 default_agent: xira-assistant
-run_root: .xira/runs
-entrypoints: workspace/entrypoints.yaml
+entrypoints: entrypoints.yaml
 `)
 	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
   - id: feishu-default
@@ -39,8 +38,7 @@ func TestManagerRequiresFeishuCredentialsForEnabledEntrypoint(t *testing.T) {
 	instance := t.TempDir()
 	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
 default_agent: xira-assistant
-run_root: .xira/runs
-entrypoints: workspace/entrypoints.yaml
+entrypoints: entrypoints.yaml
 `)
 	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
   - id: feishu-default
@@ -60,8 +58,7 @@ func TestManagerRequiresIlinkTokenForEnabledEntrypoint(t *testing.T) {
 	instance := t.TempDir()
 	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
 default_agent: xira-assistant
-run_root: .xira/runs
-entrypoints: workspace/entrypoints.yaml
+entrypoints: entrypoints.yaml
 `)
 	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
   - id: ilink-default
@@ -81,8 +78,7 @@ func TestManagerAllowsRuntimeIlinkPairingWithoutToken(t *testing.T) {
 	instance := t.TempDir()
 	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
 default_agent: xira-assistant
-run_root: .xira/runs
-entrypoints: workspace/entrypoints.yaml
+entrypoints: entrypoints.yaml
 `)
 	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
   - id: ilink-default
@@ -107,8 +103,7 @@ func TestManagerRegistersIlinkEntrypoint(t *testing.T) {
 	instance := t.TempDir()
 	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
 default_agent: xira-assistant
-run_root: .xira/runs
-entrypoints: workspace/entrypoints.yaml
+entrypoints: entrypoints.yaml
 `)
 	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
   - id: ilink-default

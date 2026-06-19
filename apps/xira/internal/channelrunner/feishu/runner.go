@@ -221,7 +221,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		// Trigger identity travels as a first-class InboundContext: channel +
 		// chat/sender/space are extracted from the metadata map so the session
 		// lands under sessions/feishu/<entrypoint>/chat_<id>__sender_<id>/.
-		Context:      channel.NewInboundContextWithEntrypoint("feishu", r.definition.ID, senderID, metadata),
+		Context: channel.NewInboundContextWithEntrypoint("feishu", r.definition.ID, senderID, metadata),
 	})
 	if err != nil {
 		slog.Error("feishu runtime run failed",
@@ -410,7 +410,7 @@ func channelStateDir(definition entrypoints.Definition, stateRoot, channel strin
 		return strings.TrimSpace(definition.StateDir)
 	}
 	if strings.TrimSpace(stateRoot) == "" {
-		stateRoot = filepath.Join(".xira", "state")
+		stateRoot = ".xira"
 	}
 	return filepath.Join(stateRoot, "channels", channel, safePathSegment(definition.ID))
 }

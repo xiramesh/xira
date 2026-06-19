@@ -4,7 +4,6 @@ vars:
   GO_CACHE: '{{.GO_CACHE | default "/tmp/xira-go-build"}}'
   GO_PATH: '{{.GO_PATH | default "/tmp/xira-go"}}'
   CONFIG: '{{.CONFIG | default "xira.yaml"}}'
-  RUN_ROOT: '{{.RUN_ROOT | default ".xira/runs"}}'
   BIN_DIR: '{{.BIN_DIR | default "bin"}}'
   BIN: '{{.BIN | default "bin/xira"}}'
   AGENT: '{{.AGENT | default ""}}'
@@ -73,34 +72,31 @@ tasks:
   serve:
     desc: Run the Xira runtime API server
     cmds:
-      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} serve
+      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} serve
 
   agent:list:
     desc: List agent profiles
     cmds:
-      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} agent list
+      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} agent list
 
   agent:run:
     desc: Run an agent once; override with MSG='...' and AGENT='...'
     cmds:
-      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} agent run {{if .AGENT}}--agent {{.AGENT}} {{end}}--message {{quote .MSG}}
+      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} agent run {{if .AGENT}}--agent {{.AGENT}} {{end}}--message {{quote .MSG}}
 
   runs:list:
     desc: List recorded runs
     cmds:
-      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} --run-root {{.RUN_ROOT}} runs list
+      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} runs list
 
   smoke:
     desc: Run a non-interactive DeepSeek smoke test
-    vars:
-      SMOKE_ROOT: /tmp/xira-smoke-runs
     cmds:
-      - rm -rf {{.SMOKE_ROOT}}
       - go run ./apps/xira/cmd/xira version
-      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} --run-root {{.SMOKE_ROOT}} agent run --message "please call command"
-      - test -f {{.SMOKE_ROOT}}/*/run.yaml
+      - go run ./apps/xira/cmd/xira --config {{.CONFIG}} agent run --message "please call command"
+      - test -d workspace/.xira/runs
 
   clean:
     desc: Remove local Xira run/cache output
     cmds:
-      - rm -rf .xira .cache /tmp/xira-go-build /tmp/xira-smoke-runs /tmp/xira-task-smoke-runs
+      - rm -rf .xira workspace/.xira .cache /tmp/xira-go-build /tmp/xira-smoke-runs /tmp/xira-task-smoke-runs

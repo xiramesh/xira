@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -202,10 +201,10 @@ func (b *flowBridge) PolicyValue(_ context.Context, run *flow.Run, key string) (
 // flow.Store itself appends "flow-runs/<id>" under this root, so this returns
 // the state root only (avoiding a doubled "flow-runs/flow-runs" segment).
 func (s *Service) flowStateRoot() string {
-	if s == nil || s.stateRoot == "" {
-		return filepath.Join(".xira", "state")
+	if s == nil || s.stateDir == "" {
+		return ".xira"
 	}
-	return s.stateRoot
+	return s.stateDir
 }
 
 // FlowKernel returns (lazily creating) the flow kernel wired to this runtime.

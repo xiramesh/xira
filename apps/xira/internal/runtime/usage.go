@@ -29,22 +29,22 @@ type ModelUsagePricing struct {
 }
 
 type UsageStore struct {
-	stateRoot string
-	mu        sync.Mutex
+	stateDir string
+	mu       sync.Mutex
 }
 
-func NewUsageStore(stateRoot string) *UsageStore {
-	if strings.TrimSpace(stateRoot) == "" {
-		stateRoot = filepath.Join(".xira", "state")
+func NewUsageStore(stateDir string) *UsageStore {
+	if strings.TrimSpace(stateDir) == "" {
+		stateDir = ".xira"
 	}
-	return &UsageStore{stateRoot: stateRoot}
+	return &UsageStore{stateDir: stateDir}
 }
 
 func (s *UsageStore) Root() string {
 	if s == nil {
 		return ""
 	}
-	return s.stateRoot
+	return s.stateDir
 }
 
 func (s *UsageStore) AppendCalls(calls []LLMCallRecord) error {
@@ -53,10 +53,10 @@ func (s *UsageStore) AppendCalls(calls []LLMCallRecord) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := os.MkdirAll(s.stateRoot, 0o755); err != nil {
+	if err := os.MkdirAll(s.stateDir, 0o755); err != nil {
 		return err
 	}
-	path := filepath.Join(s.stateRoot, "usage-ledger.jsonl")
+	path := filepath.Join(s.stateDir, "usage-ledger.jsonl")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err

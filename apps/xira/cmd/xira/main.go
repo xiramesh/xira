@@ -34,17 +34,14 @@ func newRootCommand() *cobra.Command {
 
 func newRootCommandWithFactory(serviceFactory func(runtime.Config) (*runtime.Service, error)) *cobra.Command {
 	var configPath string
-	var runRoot string
 	cmd := &cobra.Command{
 		Use:   "xira",
 		Short: "Xira customer delivery runtime",
 	}
 	cmd.PersistentFlags().StringVar(&configPath, "config", "xira.yaml", "Runtime instance config path")
-	cmd.PersistentFlags().StringVar(&runRoot, "run-root", "", "Override run log root directory")
 	newRuntime := func() (*runtime.Service, error) {
 		return serviceFactory(runtime.Config{
 			ConfigPath: configPath,
-			RunRoot:    runRoot,
 		})
 	}
 	cmd.AddCommand(versionCommand())
@@ -83,7 +80,7 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 				"config_path", status["config_path"],
 				"workspace", status["workspace"],
 				"run_root", status["run_root"],
-				"state_root", status["state_root"],
+				"state_dir", status["state_dir"],
 				"default_agent", status["default_agent"],
 				"profile_source", status["profile_source"],
 			)

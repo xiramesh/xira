@@ -382,8 +382,7 @@ func writeCLIFixture(t *testing.T, defaultAgentID string) string {
 	instance := t.TempDir()
 	writeCLIFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
 default_agent: `+defaultAgentID+`
-run_root: .xira/runs
-state_root: .xira/state
+state_dir: .xira
 `)
 	writeCLIFile(t, filepath.Join(instance, "workspace", "agents", "xira-assistant", "PROFILE.md"), `---
 id: xira-assistant

@@ -15,8 +15,8 @@ import (
 
 func TestFlowHumanApprovalUsesRuntimeHumanRequestStore(t *testing.T) {
 	rt := newTestService(t, Config{
-		RunRoot:   filepath.Join(t.TempDir(), "runs"),
-		StateRoot: filepath.Join(t.TempDir(), "state"),
+		RunRoot:  filepath.Join(t.TempDir(), "runs"),
+		StateDir: filepath.Join(t.TempDir(), "state"),
 	})
 	def := &flow.Definition{
 		SchemaVersion: flow.SchemaVersionDefinition,
@@ -84,8 +84,8 @@ func TestFlowHumanApprovalUsesRuntimeHumanRequestStore(t *testing.T) {
 
 func TestFlowRuntimePolicyInputRoutesToApproval(t *testing.T) {
 	rt := newTestService(t, Config{
-		RunRoot:   filepath.Join(t.TempDir(), "runs"),
-		StateRoot: filepath.Join(t.TempDir(), "state"),
+		RunRoot:  filepath.Join(t.TempDir(), "runs"),
+		StateDir: filepath.Join(t.TempDir(), "state"),
 	})
 	def := &flow.Definition{
 		SchemaVersion: flow.SchemaVersionDefinition,
@@ -146,8 +146,8 @@ func (s flowStaticDefinitions) Definition(id string) (*flow.Definition, error) {
 func TestFlowAgentStepPersistsSessionInTriggerChannel(t *testing.T) {
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	rt := newTestService(t, Config{
-		RunRoot:   filepath.Join(t.TempDir(), "runs"),
-		StateRoot: stateRoot,
+		RunRoot:  filepath.Join(t.TempDir(), "runs"),
+		StateDir: stateRoot,
 	})
 	def := &flow.Definition{
 		SchemaVersion: flow.SchemaVersionDefinition,
@@ -214,10 +214,10 @@ func TestFlowAgentStepPersistsSessionInTriggerChannel(t *testing.T) {
 	// (not sessions/flow/...).
 	scope := agentRun.SessionScope
 	msgPath := rt.SessionManager().AgentMessagesPath(fsession.AgentTurnInput{
-		SessionID:   agentRun.SessionID,
-		AgentID:     agentRun.AgentID,
-		Context:     channel.InboundContext{Channel: scope.Channel, EntrypointID: agentRun.EntrypointID, ChatID: scopeChatID(scope.Values["chat"]), SenderID: scope.Values["sender"]},
-		Scope:       scope,
+		SessionID: agentRun.SessionID,
+		AgentID:   agentRun.AgentID,
+		Context:   channel.InboundContext{Channel: scope.Channel, EntrypointID: agentRun.EntrypointID, ChatID: scopeChatID(scope.Values["chat"]), SenderID: scope.Values["sender"]},
+		Scope:     scope,
 	})
 	rel := strings.TrimPrefix(filepath.ToSlash(msgPath), filepath.ToSlash(stateRoot)+"/")
 	if !strings.HasPrefix(rel, "sessions/feishu/") {
@@ -231,7 +231,6 @@ func scopeChatID(scopeChat string) string {
 	}
 	return scopeChat
 }
-
 
 // TestFlowBridgeMergesMetadataIntoContextRaw asserts that flow-internal
 // traceability keys (flow_run_id/flow_id/flow_step_id) from

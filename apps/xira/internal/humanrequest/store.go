@@ -31,7 +31,7 @@ type Store struct {
 func NewStore(root string) (*Store, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
-		root = ".xira/state"
+		root = ".xira"
 	}
 	return &Store{root: root}, nil
 }

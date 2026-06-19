@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-		"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 )
@@ -1309,7 +1309,7 @@ Careful.
 	return newTestService(t, Config{
 		WorkspaceRoot: workspace,
 		RunRoot:       runRoot,
-		StateRoot:     stateRoot,
+		StateDir:      stateRoot,
 		DeepSeekClient: deepseek.New(
 			deepseek.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
 		),
@@ -1399,7 +1399,7 @@ Direct and concise.
 	return newTestService(t, Config{
 		WorkspaceRoot: workspace,
 		RunRoot:       runRoot,
-		StateRoot:     stateRoot,
+		StateDir:      stateRoot,
 		DeepSeekClient: deepseek.New(
 			deepseek.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
 		),
@@ -1553,7 +1553,7 @@ Ground every claim in the requested tool output.
 	return newTestService(t, Config{
 		WorkspaceRoot: workspace,
 		RunRoot:       runRoot,
-		StateRoot:     stateRoot,
+		StateDir:      stateRoot,
 		DeepSeekClient: deepseek.New(
 			deepseek.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
 		),
@@ -1656,7 +1656,7 @@ Ground every artifact in workspace files and keep confirmations short.
 	return newTestService(t, Config{
 		WorkspaceRoot: workspace,
 		RunRoot:       runRoot,
-		StateRoot:     stateRoot,
+		StateDir:      stateRoot,
 		DeepSeekClient: deepseek.New(
 			deepseek.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
 		),
@@ -2165,7 +2165,7 @@ steps:
 	return newTestService(t, Config{
 		WorkspaceRoot: workspace,
 		RunRoot:       runRoot,
-		StateRoot:     stateRoot,
+		StateDir:      stateRoot,
 		DeepSeekClient: deepseek.New(
 			deepseek.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
 		),

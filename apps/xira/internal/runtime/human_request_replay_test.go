@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
-		"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 	rtools "github.com/xiramesh/xira/internal/tools"
@@ -654,7 +654,7 @@ Direct.
 	return newTestService(t, Config{
 		WorkspaceRoot:  workspace,
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 }

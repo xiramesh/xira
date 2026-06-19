@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-		"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 )
@@ -47,7 +47,7 @@ func TestDelegateChildWaitingHumanSuspendsParent(t *testing.T) {
 	})}
 	rt := newTestService(t, Config{
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 
@@ -139,7 +139,7 @@ func TestDelegateChildWaitingHumanReleasesActiveSlot(t *testing.T) {
 }
 
 func TestDelegateChildWaitingHumanCountsAgainstMaxOutstanding(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs"), StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs"), StateDir: filepath.Join(t.TempDir(), "state")})
 	parentRunID := "parent-outstanding"
 	if err := rt.RunStore().InitRun(parentRunID); err != nil {
 		t.Fatal(err)
@@ -497,7 +497,7 @@ func newDelegationWaitingTestService(t *testing.T) *Service {
 	})}
 	return newTestService(t, Config{
 		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 }
@@ -543,7 +543,7 @@ func newDelegationResumeTestServiceWithRoots(t *testing.T, runRoot, stateRoot st
 	})}
 	return newTestService(t, Config{
 		RunRoot:        runRoot,
-		StateRoot:      stateRoot,
+		StateDir:       stateRoot,
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 }

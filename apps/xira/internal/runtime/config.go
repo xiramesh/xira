@@ -18,9 +18,7 @@ const defaultConfigPath = "xira.yaml"
 type runtimeConfigFile struct {
 	Workspace      string       `yaml:"workspace"`
 	DefaultAgentID string       `yaml:"default_agent"`
-	RunRoot        string       `yaml:"run_root"`
-	SessionRoot    string       `yaml:"session_root"`
-	StateRoot      string       `yaml:"state_root"`
+	StateDir       string       `yaml:"state_dir"`
 	Entrypoints    string       `yaml:"entrypoints"`
 	Pricing        UsagePricing `yaml:"pricing"`
 }
@@ -37,7 +35,7 @@ type resolvedRuntimeConfig struct {
 	DefaultAgentID    string
 	RunRoot           string
 	SessionRoot       string
-	StateRoot         string
+	StateDir          string
 	Pricing           UsagePricing
 	Entrypoints       []entrypoints.Definition
 }
@@ -77,44 +75,29 @@ func resolveRuntimeConfig(cfg Config) (resolvedRuntimeConfig, error) {
 	}
 	workspace = resolveRelativePath(baseDir, workspace)
 
-	stateRoot := strings.TrimSpace(cfg.StateRoot)
-	if stateRoot == "" {
-		stateRoot = strings.TrimSpace(configFile.StateRoot)
+	stateDir := strings.TrimSpace(cfg.StateDir)
+	if stateDir == "" {
+		stateDir = strings.TrimSpace(configFile.StateDir)
+	}
+	if stateDir == "" {
+		stateDir = filepath.Join(workspace, ".xira")
+	}
+	stateDir = resolveRelativePath(baseDir, stateDir)
+
+	runRoot := filepath.Join(stateDir, "runs")
+	if override := strings.TrimSpace(cfg.RunRoot); override != "" {
+		runRoot = resolveRelativePath(baseDir, override)
 	}
 
-	runRoot := strings.TrimSpace(cfg.RunRoot)
-	if runRoot == "" {
-		runRoot = strings.TrimSpace(configFile.RunRoot)
+	sessionRoot := filepath.Join(stateDir, "sessions")
+	if override := strings.TrimSpace(cfg.SessionRoot); override != "" {
+		sessionRoot = resolveRelativePath(baseDir, override)
 	}
-	if runRoot == "" && stateRoot != "" {
-		runRoot = filepath.Join(stateRoot, "runs")
-	}
-	if runRoot == "" {
-		runRoot = ".xira/runs"
-	}
-	runRoot = resolveRelativePath(baseDir, runRoot)
-
-	sessionRoot := strings.TrimSpace(cfg.SessionRoot)
-	if sessionRoot == "" {
-		sessionRoot = strings.TrimSpace(configFile.SessionRoot)
-	}
-	if sessionRoot == "" && stateRoot != "" {
-		sessionRoot = filepath.Join(stateRoot, "sessions")
-	}
-	if sessionRoot == "" {
-		sessionRoot = filepath.Join(filepath.Dir(runRoot), "sessions")
-	}
-	sessionRoot = resolveRelativePath(baseDir, sessionRoot)
-
-	if stateRoot == "" {
-		stateRoot = filepath.Join(filepath.Dir(runRoot), "state")
-	}
-	stateRoot = resolveRelativePath(baseDir, stateRoot)
 
 	entrypointsPath := strings.TrimSpace(configFile.Entrypoints)
 	entrypointsRequired := false
 	if entrypointsPath != "" {
-		entrypointsPath = resolveRelativePath(baseDir, entrypointsPath)
+		entrypointsPath = resolveRelativePath(workspace, entrypointsPath)
 		entrypointsRequired = true
 	} else if configLoaded {
 		entrypointsPath = filepath.Join(workspace, "entrypoints.yaml")
@@ -140,7 +123,7 @@ func resolveRuntimeConfig(cfg Config) (resolvedRuntimeConfig, error) {
 		DefaultAgentID:    defaultAgentID,
 		RunRoot:           runRoot,
 		SessionRoot:       sessionRoot,
-		StateRoot:         stateRoot,
+		StateDir:          stateDir,
 		Pricing:           normalizeUsagePricing(configFile.Pricing),
 		Entrypoints:       entrypointDefs,
 	}, nil
@@ -155,7 +138,9 @@ func readRuntimeConfigFile(path string, optional bool) (runtimeConfigFile, bool,
 		return runtimeConfigFile{}, false, fmt.Errorf("read config %s: %w", path, err)
 	}
 	var cfg runtimeConfigFile
-	if err := yaml.Unmarshal(content, &cfg); err != nil {
+	decoder := yaml.NewDecoder(strings.NewReader(string(content)))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		return runtimeConfigFile{}, false, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	return cfg, true, nil
