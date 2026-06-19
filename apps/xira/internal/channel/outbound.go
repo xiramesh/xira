@@ -1,0 +1,154 @@
+package channel
+
+import (
+	"context"
+	"strings"
+	"time"
+)
+
+const ContractSchemaVersion = "xira.channel.v0"
+
+type OutboundType string
+
+const (
+	OutboundAck              OutboundType = "ack"
+	OutboundRuntimeEvent     OutboundType = "runtime_event"
+	OutboundAssistantDelta   OutboundType = "assistant_delta"
+	OutboundAssistantFinal   OutboundType = "assistant_final"
+	OutboundInterrupt        OutboundType = "interrupt"
+	OutboundProactiveMessage OutboundType = "outbound_message"
+	OutboundError            OutboundType = "error"
+)
+
+type Capability string
+
+const (
+	CapabilityStreamingDelta           Capability = "streaming_delta"
+	CapabilityRuntimeEventStream       Capability = "runtime_event_stream"
+	CapabilityInteractiveHumanResponse Capability = "interactive_human_response"
+	CapabilityProactiveOutbound        Capability = "proactive_outbound"
+	CapabilityOfflineQueue             Capability = "offline_queue"
+)
+
+type CapabilitySet []Capability
+
+func (set CapabilitySet) Supports(capability Capability) bool {
+	for _, candidate := range set {
+		if candidate == capability {
+			return true
+		}
+	}
+	return false
+}
+
+func NormalizeCapabilities(capabilities []Capability) CapabilitySet {
+	seen := map[Capability]struct{}{}
+	out := make(CapabilitySet, 0, len(capabilities))
+	for _, capability := range capabilities {
+		capability = Capability(strings.TrimSpace(string(capability)))
+		if capability == "" {
+			continue
+		}
+		if _, ok := seen[capability]; ok {
+			continue
+		}
+		seen[capability] = struct{}{}
+		out = append(out, capability)
+	}
+	return out
+}
+
+type OutboundCorrelation struct {
+	TraceID         string `json:"trace_id,omitempty" yaml:"trace_id,omitempty"`
+	ParentRunID     string `json:"parent_run_id,omitempty" yaml:"parent_run_id,omitempty"`
+	ChildRunID      string `json:"child_run_id,omitempty" yaml:"child_run_id,omitempty"`
+	ParentEventID   string `json:"parent_event_id,omitempty" yaml:"parent_event_id,omitempty"`
+	ToolCallID      string `json:"tool_call_id,omitempty" yaml:"tool_call_id,omitempty"`
+	ParentMessageID string `json:"parent_message_id,omitempty" yaml:"parent_message_id,omitempty"`
+}
+
+type OutboundEnvelope struct {
+	SchemaVersion string              `json:"schema_version" yaml:"schema_version"`
+	Type          OutboundType        `json:"type" yaml:"type"`
+	ID            string              `json:"id,omitempty" yaml:"id,omitempty"`
+	RequestID     string              `json:"request_id,omitempty" yaml:"request_id,omitempty"`
+	RunID         string              `json:"run_id,omitempty" yaml:"run_id,omitempty"`
+	Time          time.Time           `json:"time" yaml:"time"`
+	Source        *InboundContext     `json:"source,omitempty" yaml:"source,omitempty"`
+	Target        *InboundContext     `json:"target,omitempty" yaml:"target,omitempty"`
+	Correlation   OutboundCorrelation `json:"correlation,omitempty" yaml:"correlation,omitempty"`
+	Data          map[string]any      `json:"data,omitempty" yaml:"data,omitempty"`
+}
+
+func NewOutboundEnvelope(outboundType OutboundType) OutboundEnvelope {
+	return OutboundEnvelope{
+		SchemaVersion: ContractSchemaVersion,
+		Type:          outboundType,
+		Time:          time.Now().UTC(),
+	}
+}
+
+func (msg OutboundEnvelope) Normalize() OutboundEnvelope {
+	if strings.TrimSpace(msg.SchemaVersion) == "" {
+		msg.SchemaVersion = ContractSchemaVersion
+	} else {
+		msg.SchemaVersion = strings.TrimSpace(msg.SchemaVersion)
+	}
+	msg.Type = OutboundType(strings.TrimSpace(string(msg.Type)))
+	msg.ID = strings.TrimSpace(msg.ID)
+	msg.RequestID = strings.TrimSpace(msg.RequestID)
+	msg.RunID = strings.TrimSpace(msg.RunID)
+	if msg.Time.IsZero() {
+		msg.Time = time.Now().UTC()
+	} else {
+		msg.Time = msg.Time.UTC()
+	}
+	msg.Source = normalizeOptionalInboundContext(msg.Source)
+	msg.Target = normalizeOptionalInboundContext(msg.Target)
+	msg.Data = copyAnyMap(msg.Data)
+	return msg
+}
+
+type OutboundEmitter interface {
+	Capabilities() CapabilitySet
+	Emit(context.Context, OutboundEnvelope) error
+}
+
+func copyAnyMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[strings.TrimSpace(key)] = value
+	}
+	return out
+}
+
+func normalizeOptionalInboundContext(ctx *InboundContext) *InboundContext {
+	if ctx == nil || inboundContextIsEmpty(*ctx) {
+		return nil
+	}
+	normalized := NormalizeInboundContext(*ctx)
+	return &normalized
+}
+
+func inboundContextIsEmpty(ctx InboundContext) bool {
+	if ctx.Mentioned || len(ctx.Raw) > 0 {
+		return false
+	}
+	return strings.TrimSpace(ctx.Channel) == "" &&
+		strings.TrimSpace(ctx.EntrypointID) == "" &&
+		strings.TrimSpace(ctx.Account) == "" &&
+		strings.TrimSpace(ctx.ChannelAppID) == "" &&
+		strings.TrimSpace(ctx.BotID) == "" &&
+		strings.TrimSpace(ctx.ChatID) == "" &&
+		strings.TrimSpace(ctx.ChatType) == "" &&
+		strings.TrimSpace(ctx.TopicID) == "" &&
+		strings.TrimSpace(ctx.SpaceID) == "" &&
+		strings.TrimSpace(ctx.SpaceType) == "" &&
+		strings.TrimSpace(ctx.SenderID) == "" &&
+		strings.TrimSpace(ctx.MessageID) == "" &&
+		strings.TrimSpace(ctx.ReplyToMessageID) == "" &&
+		strings.TrimSpace(ctx.ReplyToSenderID) == ""
+}
