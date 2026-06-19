@@ -481,6 +481,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		recordEvent("run.waiting_human", "runtime", "agent run waiting for human input", map[string]any{
 			"human_requests": len(interrupt.HumanRequests),
 			"blocked_by":     interrupt.Reason,
+			"summary":        waitingHumanSummary(interrupt),
 		})
 	} else {
 		resp.VerificationResult = s.verifier.Verify(final, profile.Verification.DefaultChecks)
@@ -592,6 +593,17 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 				})
 			}
 		}
+	}
+	// assistant.final: a live "final answer ready" signal. Published only when
+	// there is a final response to deliver AND the run is not paused for human
+	// input. This closes a runtime contract gap (the event had a visibility
+	// definition but was never published) and gives the progress forwarder a
+	// precise drain signal that precedes run.finished. See
+	// docs/architecture/xira-conversation-progress-feed-v0.zh.md §8.5.
+	if final != "" && resp.Status != StatusWaitingHuman {
+		recordEvent("assistant.final", "runtime", "assistant final response ready", map[string]any{
+			"final_chars": utf8.RuneCountInString(final),
+		})
 	}
 	recordEvent("run.finished", "runtime", "agent run finished", map[string]any{
 		"status":              resp.Status,

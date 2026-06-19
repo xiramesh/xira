@@ -252,6 +252,13 @@ func eventVisibility(kind string) *RuntimeEventVisibility {
 		return &RuntimeEventVisibility{Conversation: true, Activity: true, Inspector: true, Audit: false}
 	case "assistant.final":
 		return &RuntimeEventVisibility{Conversation: true, Activity: false, Inspector: true, Audit: false}
+	case "run.waiting_human", "agent.delegate.failed", "agent.delegate.timeout":
+		// v0 progress forwarder delivers these runtime-fact kinds into IM chat
+		// (waiting_human as interaction signal; delegate failed/timeout as
+		// progress). Without explicit conversation=true they fall through to the
+		// default below and are silently dropped by the forwarder's visibility
+		// filter. See docs/architecture/xira-conversation-progress-feed-v0.zh.md §7.
+		return &RuntimeEventVisibility{Conversation: true, Activity: true, Inspector: true, Audit: true}
 	case "adk.event":
 		return &RuntimeEventVisibility{Conversation: false, Activity: false, Inspector: true, Audit: true}
 	case "model.policy_resolved":
@@ -265,4 +272,22 @@ func eventVisibility(kind string) *RuntimeEventVisibility {
 	default:
 		return &RuntimeEventVisibility{Conversation: false, Activity: true, Inspector: true, Audit: true}
 	}
+}
+
+// waitingHumanSummary derives a human-facing summary for the run.waiting_human
+// event payload. The progress forwarder renders it directly into IM chat as an
+// interaction signal ("need your confirmation: ..."). It prefers the first
+// pending human-request question (already phrased for the user) and falls back
+// to the interrupt reason. This is the only payload field the renderer may
+// splice into chat text verbatim — see progress feed §14.
+func waitingHumanSummary(interrupt *RunInterrupt) string {
+	if interrupt == nil {
+		return ""
+	}
+	for _, hr := range interrupt.HumanRequests {
+		if q := strings.TrimSpace(hr.Question); q != "" {
+			return q
+		}
+	}
+	return strings.TrimSpace(interrupt.Reason)
 }

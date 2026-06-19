@@ -19,6 +19,7 @@ import (
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
+	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
@@ -611,13 +612,28 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		"message_id", messageID,
 		"sender_id", senderID,
 	)
+	inbound := channel.NewInboundContextWithEntrypoint("ilink", r.definition.ID, senderID, metadata)
+	// Conversation progress forwarder: projects allowlisted runtime facts
+	// (delegate failed/timeout, waiting_human) into this IM chat during the
+	// run, request-bound to this one RunAgent turn. Progress delivery failures
+	// only log a warning; they never fail the run. See
+	// docs/architecture/xira-conversation-progress-feed-v0.zh.md §13.
+	progressForwarder := progress.Start(ctx, progress.Request{
+		EventBus: r.runtime.EventBus(),
+		Inbound:  inbound,
+		Policy:   progress.DefaultPolicy(),
+		Sender: progress.SenderFunc(func(ctx context.Context, m progress.Message) error {
+			return r.send(ctx, account, msg, m.Text)
+		}),
+	})
 	resp, err := r.runtime.RunAgent(ctx, frt.TurnRequest{
 		EntrypointID: r.definition.ID,
 		Message:      content,
 		// Trigger identity as a first-class InboundContext so the session lands
 		// under sessions/ilink/<entrypoint>/chat_<id>__sender_<id>/.
-		Context: channel.NewInboundContextWithEntrypoint("ilink", r.definition.ID, senderID, metadata),
+		Context: inbound,
 	})
+	progressForwarder.Stop()
 	if err != nil {
 		slog.Error("ilink runtime run failed",
 			"entrypoint_id", r.definition.ID,
