@@ -522,47 +522,53 @@ Channel adapter 应声明自己支持哪些能力。没有能力时的默认降�
 
 ## 8. Existing Channel Mapping
 
+本节只给出 Channel Contract 的语义映射摘要。当前实现状态、能力分类和 proactive
+target model 见 `docs/architecture/xira-channel-adapter-mapping-v0.zh.md`。
+
 ### 8.1 WebSocket
 
-WebSocket 是 Channel Contract 的第一个实时 transport binding：
+WebSocket 是 Channel Contract 的第一个实时 transport binding。当前实现支持：
 
 - `message` -> JSON text frame -> `runtime.TurnRequest`
-- `runtime_event` -> JSON text frame
-- `assistant_delta` -> JSON text frame，实时展示
-- `assistant_final` -> JSON text frame，WebSocket binding 可命名为 `response`
-- `outbound_message` -> 推送给匹配 target 的已连接客户端
+- `runtime_event` -> `event` frame
+- `assistant_final` -> `response` frame
+- `interrupt` -> `interrupt` frame
+- `error` -> `error` frame
+
+`assistant_delta`、`outbound_message` 和 resume-over-WS `human_response` 是保留能力，
+未在当前 WebSocket `ready.capabilities` 中广告。
 
 WebSocket 语义细节见 `docs/architecture/xira-websocket-channel-v0.zh.md`。
 
 ### 8.2 CLI / TUI
 
-CLI/TUI 可以这样映射：
+当前 CLI 是 final-only：
 
-- `assistant_delta` -> stdout / TUI incremental render
-- `assistant_final` -> final answer / completion marker
-- `runtime_event` -> verbose/activity panel
-- `interrupt` -> prompt / approval UI
-- `outbound_message` -> notification 或本地消息流
+- `assistant_final` -> stdout final response / `--json` 完整 `TurnResponse`
+- `runtime_event` -> `--json` 或 run log，默认不流式展示
+- `interrupt` -> 通过 `xira human ...` 命令处理，不在 `agent run` 内联 prompt
+- `assistant_delta` / `outbound_message` -> 保留
 
 ### 8.3 XiraGarden
 
-XiraGarden 推荐映射：
+当前 XiraGarden 是 final-only + runtime-event-stream：
 
-- `assistant_delta` -> 聊天区流式文本
-- `assistant_final` -> 聊天消息最终态
-- `runtime_event` -> Activity / Run Inspector
-- `interrupt` -> HITL panel
-- `outbound_message` -> agent/system 主动消息或 notification
+- `assistant_final` -> `POST /api/v1/channels/xiragarden/messages` 返回的 final response
+- `runtime_event` -> `WS /api/v1/channels/xiragarden/events`
+- `assistant_delta` -> 目标为聊天区流式文本，当前未实现
+- `interrupt` -> 目标为 HITL panel，当前依赖 human request APIs
+- `outbound_message` -> 目标为 notification / 主动消息，当前未实现 dispatcher
 
 ### 8.4 Feishu / iLink
 
-Feishu/iLink 的 channel runner 可以先保持 final-only：
+Feishu/iLink 的 channel runner 当前保持 final-only：
 
 - `assistant_delta` -> buffer，不逐条发送
 - `assistant_final` -> 平台文本/卡片消息
 - `runtime_event` -> run log / inspector，不默认发到群
-- `interrupt` -> 平台消息或外部 approval UI 链接
-- `outbound_message` -> 调平台 send API
+- `interrupt` -> 目标为平台消息或外部 approval UI 链接，当前未实现
+- `outbound_message` -> 平台 send API 具备基础能力，但 generic proactive dispatcher
+  当前未实现
 
 若未来要把 delta 发到聊天平台，必须先定义节流、合并和撤回/编辑策略，避免刷屏。
 
@@ -577,16 +583,17 @@ Feishu/iLink 的 channel runner 可以先保持 final-only：
 
 ## 9. Implementation Notes
 
-### 9.1 建议的中性类型
+### 9.1 中性类型位置
 
-后续实现可考虑新增内部中性包：
+Channel inbound/outbound 的中性类型位于：
 
 ```
-apps/xira/internal/channelcontract
+apps/xira/internal/channel
 ```
 
-或复用 `internal/channel` 增加 outbound 类型。关键是不要放在
-`internal/channelrunner` 下，因为 API server、CLI 和 UI binding 也需要使用。
+`internal/channel` 可以被 API server、CLI 和 channel runner 共同使用，但不引用
+runtime 或 vendor SDK。具体 transport 的连接生命周期、鉴权、重试和平台投递仍留在
+API server 或对应 runner 内，不下沉到 common layer。
 
 ### 9.2 Dedupe 位置
 
@@ -610,11 +617,12 @@ apps/xira/internal/messagededupe
 
 ## 10. Non-Goals
 
-- 本 issue 不实现 WebSocket endpoint。
-- 本 issue 不重构 Feishu/iLink runner。
-- 本 issue 不要求所有 channel 立刻支持 streaming delta。
-- 本 issue 不引入 `channelrunner/websocket`。
-- 本 issue 不定义具体 UI 组件。
+- 本 contract 不要求所有 channel 立刻支持 streaming delta。
+- 本 contract 不要求当前 WebSocket slice 支持 `assistant_delta`、resume-over-WS
+  `human_response` 或 proactive `outbound_message`。
+- 本 contract 不重构 Feishu/iLink runner。
+- 本 contract 不引入 `channelrunner/websocket`。
+- 本 contract 不定义具体 UI 组件。
 
 ## 11. Acceptance Checklist
 
