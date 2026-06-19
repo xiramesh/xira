@@ -291,15 +291,11 @@ func TestWebSocketChannelRejectsOversizedInboundFrame(t *testing.T) {
 	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer readCancel()
 	var frame websocketOutboundFrame
-	err := wsjson.Read(readCtx, conn, &frame)
-	if err == nil {
-		if frame.Type == "error" && frameDataString(frame, "code") == "validation_failed" {
-			return
-		}
-		t.Fatalf("oversized response frame = %+v", frame)
+	if err := wsjson.Read(readCtx, conn, &frame); err != nil {
+		t.Fatal(err)
 	}
-	if websocket.CloseStatus(err) != websocket.StatusMessageTooBig {
-		t.Fatalf("oversized read err = %v", err)
+	if frame.Type != "error" || frameDataString(frame, "code") != "validation_failed" {
+		t.Fatalf("oversized response frame = %+v", frame)
 	}
 }
 

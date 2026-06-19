@@ -90,7 +90,7 @@ func (s *Server) websocketMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.CloseNow()
-	conn.SetReadLimit(websocketMaxFrameBytes)
+	conn.SetReadLimit(-1)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -199,9 +199,16 @@ func readWebSocketInboundFrame(ctx context.Context, conn *websocket.Conn) (webso
 	if typ != websocket.MessageText {
 		return websocketInboundFrame{}, errWebSocketUnsupportedMessage
 	}
-	data, err := io.ReadAll(reader)
+	limited := &io.LimitedReader{R: reader, N: websocketMaxFrameBytes + 1}
+	data, err := io.ReadAll(limited)
 	if err != nil {
+		if errors.Is(err, websocket.ErrMessageTooBig) {
+			return websocketInboundFrame{}, errWebSocketMessageTooBig
+		}
 		return websocketInboundFrame{}, err
+	}
+	if limited.N == 0 {
+		return websocketInboundFrame{}, errWebSocketMessageTooBig
 	}
 	var frame websocketInboundFrame
 	if err := json.Unmarshal(data, &frame); err != nil {

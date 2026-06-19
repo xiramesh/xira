@@ -123,6 +123,9 @@ entrypoints:
 
 - 不需要 `ws_url`。别人连进 Xira，不是 Xira 连出去。
 - `channel` 必须是 `websocket`。
+- 若要限制客户端可请求的 `agent_id`，必须配置显式 websocket entrypoint
+  和 `allowed_agents`；未配置 entrypoint 时，runtime 隐式 entrypoint 会走
+  Xira 默认 agent 解析策略。
 - 如果未来需要鉴权，可复用 entrypoint 的 `token` / `token_env` 作为 inbound
   bearer token。
 
@@ -609,6 +612,8 @@ event scope。当前实现要求二者至少有一个；如果都为空，返回
   调用 `runtime.RunAgent`。
 - `runtime.RunAgent` 失败或最终帧发送失败：`Forget` / 删除去重记录，允许
   客户端重试。
+
+当前实现使用 API server 进程内内存去重，TTL 为 1h，不跨进程重启或多副本共享。
 
 当前 `dedupe` 包位于 `internal/channelrunner/dedupe`。如果 API server 也要复用，
 建议先把它提升到中性包，例如 `internal/channel/dedupe` 或
