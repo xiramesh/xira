@@ -38,6 +38,14 @@ func TestOutboundEnvelopeNormalizesContractFields(t *testing.T) {
 	msg.RunID = " run-1 "
 	msg.Source = &InboundContext{Channel: "XiraGarden", ChatID: " chat-1 ", SenderID: " user-1 "}
 	msg.Target = &InboundContext{Channel: "Feishu", ChatID: " oc-1 ", SenderID: " xira "}
+	msg.Correlation = OutboundCorrelation{
+		TraceID:         " trace-1 ",
+		ParentRunID:     " parent-run ",
+		ChildRunID:      " child-run ",
+		ParentEventID:   " parent-event ",
+		ToolCallID:      " tool-call ",
+		ParentMessageID: " parent-message ",
+	}
 	msg.Data = map[string]any{
 		" content ": "done",
 	}
@@ -58,6 +66,14 @@ func TestOutboundEnvelopeNormalizesContractFields(t *testing.T) {
 	}
 	if normalized.Target == nil || normalized.Target.Channel != "feishu" || normalized.Target.ChatID != "oc-1" || normalized.Target.SenderID != "xira" {
 		t.Fatalf("target not normalized: %+v", normalized.Target)
+	}
+	if normalized.Correlation.TraceID != "trace-1" ||
+		normalized.Correlation.ParentRunID != "parent-run" ||
+		normalized.Correlation.ChildRunID != "child-run" ||
+		normalized.Correlation.ParentEventID != "parent-event" ||
+		normalized.Correlation.ToolCallID != "tool-call" ||
+		normalized.Correlation.ParentMessageID != "parent-message" {
+		t.Fatalf("correlation not normalized: %+v", normalized.Correlation)
 	}
 	if normalized.Data["content"] != "done" {
 		t.Fatalf("data not normalized: %+v", normalized.Data)
@@ -81,6 +97,24 @@ func TestOutboundEnvelopeKeepsOptionalContextsEmpty(t *testing.T) {
 	}
 }
 
+func TestOutboundEnvelopeDropsSupplementOnlyContexts(t *testing.T) {
+	for name, ctx := range map[string]InboundContext{
+		"mentioned": {Mentioned: true},
+		"raw":       {Raw: map[string]string{"context_token": "token-1"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			msg := NewOutboundEnvelope(OutboundProactiveMessage)
+			msg.Target = &ctx
+
+			normalized := msg.Normalize()
+
+			if normalized.Target != nil {
+				t.Fatalf("supplement-only target should be omitted, got %+v", normalized.Target)
+			}
+		})
+	}
+}
+
 func TestOutboundEnvelopeOmitsEmptyOptionalContextsFromJSON(t *testing.T) {
 	encoded, err := json.Marshal(NewOutboundEnvelope(OutboundAssistantFinal).Normalize())
 	if err != nil {
@@ -92,6 +126,57 @@ func TestOutboundEnvelopeOmitsEmptyOptionalContextsFromJSON(t *testing.T) {
 	}
 	if !strings.Contains(body, `"time"`) {
 		t.Fatalf("time should be encoded: %s", body)
+	}
+}
+
+func TestOutboundTypeValidity(t *testing.T) {
+	validTypes := []OutboundType{
+		OutboundAck,
+		OutboundRuntimeEvent,
+		OutboundAssistantDelta,
+		OutboundAssistantFinal,
+		OutboundInterrupt,
+		OutboundProactiveMessage,
+		OutboundError,
+	}
+	for _, outboundType := range validTypes {
+		if !outboundType.IsValid() {
+			t.Fatalf("%q should be valid", outboundType)
+		}
+	}
+	if OutboundType("unknown").IsValid() {
+		t.Fatal("unknown outbound type should be invalid")
+	}
+	if NewOutboundEnvelope(OutboundType(" unknown ")).Normalize().Type != OutboundType("unknown") {
+		t.Fatal("Normalize should trim but not reject unknown outbound types")
+	}
+}
+
+func TestOutboundEnvelopeDataCopyIsShallowAndPrefersExactKeys(t *testing.T) {
+	nested := map[string]any{"state": "shared"}
+	msg := NewOutboundEnvelope(OutboundAssistantFinal)
+	msg.Data = map[string]any{
+		" content ": "padded",
+		"content":   "exact",
+		" nested ":  nested,
+	}
+
+	normalized := msg.Normalize()
+
+	if normalized.Data["content"] != "exact" {
+		t.Fatalf("exact key should win over padded duplicate: %+v", normalized.Data)
+	}
+	nestedCopy, ok := normalized.Data["nested"].(map[string]any)
+	if !ok {
+		t.Fatalf("nested value should be preserved: %+v", normalized.Data)
+	}
+	nestedCopy["state"] = "changed"
+	if nested["state"] != "changed" {
+		t.Fatalf("data copy should be shallow: %+v", normalized.Data)
+	}
+	normalized.Data["new"] = "value"
+	if _, ok := msg.Data["new"]; ok {
+		t.Fatalf("top-level data map should be copied: %+v", msg.Data)
 	}
 }
 

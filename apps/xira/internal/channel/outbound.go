@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 )
@@ -19,6 +20,21 @@ const (
 	OutboundProactiveMessage OutboundType = "outbound_message"
 	OutboundError            OutboundType = "error"
 )
+
+func (outboundType OutboundType) IsValid() bool {
+	switch outboundType {
+	case OutboundAck,
+		OutboundRuntimeEvent,
+		OutboundAssistantDelta,
+		OutboundAssistantFinal,
+		OutboundInterrupt,
+		OutboundProactiveMessage,
+		OutboundError:
+		return true
+	default:
+		return false
+	}
+}
 
 type Capability string
 
@@ -67,6 +83,16 @@ type OutboundCorrelation struct {
 	ParentMessageID string `json:"parent_message_id,omitempty" yaml:"parent_message_id,omitempty"`
 }
 
+func (correlation OutboundCorrelation) Normalize() OutboundCorrelation {
+	correlation.TraceID = strings.TrimSpace(correlation.TraceID)
+	correlation.ParentRunID = strings.TrimSpace(correlation.ParentRunID)
+	correlation.ChildRunID = strings.TrimSpace(correlation.ChildRunID)
+	correlation.ParentEventID = strings.TrimSpace(correlation.ParentEventID)
+	correlation.ToolCallID = strings.TrimSpace(correlation.ToolCallID)
+	correlation.ParentMessageID = strings.TrimSpace(correlation.ParentMessageID)
+	return correlation
+}
+
 type OutboundEnvelope struct {
 	SchemaVersion string              `json:"schema_version" yaml:"schema_version"`
 	Type          OutboundType        `json:"type" yaml:"type"`
@@ -88,6 +114,9 @@ func NewOutboundEnvelope(outboundType OutboundType) OutboundEnvelope {
 	}
 }
 
+// Normalize trims wire-shape fields and fills transport-neutral defaults. It
+// does not reject unknown outbound types; callers can use OutboundType.IsValid
+// when they need strict value validation at an adapter boundary.
 func (msg OutboundEnvelope) Normalize() OutboundEnvelope {
 	if strings.TrimSpace(msg.SchemaVersion) == "" {
 		msg.SchemaVersion = ContractSchemaVersion
@@ -105,6 +134,7 @@ func (msg OutboundEnvelope) Normalize() OutboundEnvelope {
 	}
 	msg.Source = normalizeOptionalInboundContext(msg.Source)
 	msg.Target = normalizeOptionalInboundContext(msg.Target)
+	msg.Correlation = msg.Correlation.Normalize()
 	msg.Data = copyAnyMap(msg.Data)
 	return msg
 }
@@ -114,41 +144,56 @@ type OutboundEmitter interface {
 	Emit(context.Context, OutboundEnvelope) error
 }
 
+// copyAnyMap makes a shallow copy, trims keys, and gives exact untrimmed keys
+// precedence over padded duplicates after trimming.
 func copyAnyMap(in map[string]any) map[string]any {
 	if len(in) == 0 {
 		return nil
 	}
 	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[strings.TrimSpace(key)] = value
+	keys := make([]string, 0, len(in))
+	for key := range in {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == key {
+			out[key] = in[key]
+		}
+	}
+	for _, key := range keys {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == key {
+			continue
+		}
+		if _, ok := out[trimmed]; ok {
+			continue
+		}
+		out[trimmed] = in[key]
 	}
 	return out
 }
 
 func normalizeOptionalInboundContext(ctx *InboundContext) *InboundContext {
-	if ctx == nil || inboundContextIsEmpty(*ctx) {
+	if ctx == nil || !inboundContextHasAddress(*ctx) {
 		return nil
 	}
 	normalized := NormalizeInboundContext(*ctx)
 	return &normalized
 }
 
-func inboundContextIsEmpty(ctx InboundContext) bool {
-	if ctx.Mentioned || len(ctx.Raw) > 0 {
-		return false
-	}
-	return strings.TrimSpace(ctx.Channel) == "" &&
-		strings.TrimSpace(ctx.EntrypointID) == "" &&
-		strings.TrimSpace(ctx.Account) == "" &&
-		strings.TrimSpace(ctx.ChannelAppID) == "" &&
-		strings.TrimSpace(ctx.BotID) == "" &&
-		strings.TrimSpace(ctx.ChatID) == "" &&
-		strings.TrimSpace(ctx.ChatType) == "" &&
-		strings.TrimSpace(ctx.TopicID) == "" &&
-		strings.TrimSpace(ctx.SpaceID) == "" &&
-		strings.TrimSpace(ctx.SpaceType) == "" &&
-		strings.TrimSpace(ctx.SenderID) == "" &&
-		strings.TrimSpace(ctx.MessageID) == "" &&
-		strings.TrimSpace(ctx.ReplyToMessageID) == "" &&
-		strings.TrimSpace(ctx.ReplyToSenderID) == ""
+func inboundContextHasAddress(ctx InboundContext) bool {
+	return strings.TrimSpace(ctx.Channel) != "" ||
+		strings.TrimSpace(ctx.EntrypointID) != "" ||
+		strings.TrimSpace(ctx.Account) != "" ||
+		strings.TrimSpace(ctx.ChannelAppID) != "" ||
+		strings.TrimSpace(ctx.BotID) != "" ||
+		strings.TrimSpace(ctx.ChatID) != "" ||
+		strings.TrimSpace(ctx.TopicID) != "" ||
+		strings.TrimSpace(ctx.SpaceID) != "" ||
+		strings.TrimSpace(ctx.SenderID) != "" ||
+		strings.TrimSpace(ctx.MessageID) != "" ||
+		strings.TrimSpace(ctx.ReplyToMessageID) != "" ||
+		strings.TrimSpace(ctx.ReplyToSenderID) != ""
 }
