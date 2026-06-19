@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-		"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 )
@@ -40,8 +40,7 @@ func TestE2EDirectHumanRequestAnswerResumesRun(t *testing.T) {
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 
@@ -85,8 +84,7 @@ func TestE2EDirectHumanRequestApproveAndResume(t *testing.T) {
 		})), nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask direct approval", Context: channel.NewInboundContext("test", "user-1", nil)})
@@ -125,8 +123,7 @@ func TestE2EDirectHumanRequestDeny(t *testing.T) {
 		})), nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "ask direct deny", Context: channel.NewInboundContext("test", "user-1", nil)})
@@ -306,8 +303,7 @@ func TestE2EDelegateCompleted(t *testing.T) {
 		}
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and complete", Context: channel.NewInboundContext("test", "user-1", nil)})
@@ -383,7 +379,6 @@ func TestE2EDelegateChildWaitingCancel(t *testing.T) {
 }
 
 func TestE2EProcessRestartBeforeHumanResponse(t *testing.T) {
-	runRoot := filepath.Join(t.TempDir(), "runs")
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	newService := func(t *testing.T) *Service {
 		t.Helper()
@@ -401,8 +396,7 @@ func TestE2EProcessRestartBeforeHumanResponse(t *testing.T) {
 			})), nil
 		})}
 		return newTestService(t, Config{
-			RunRoot:        runRoot,
-			StateRoot:      stateRoot,
+			StateDir:       stateRoot,
 			DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 		})
 	}
@@ -462,13 +456,11 @@ func TestE2EWorkspaceIsolation(t *testing.T) {
 	sharedState := filepath.Join(t.TempDir(), "state")
 	rtA := newTestService(t, Config{
 		WorkspaceRoot: filepath.Join(instanceA, "workspace"),
-		RunRoot:       filepath.Join(t.TempDir(), "runs-a"),
-		StateRoot:     sharedState,
+		StateDir:      sharedState,
 	})
 	rtB := newTestService(t, Config{
 		WorkspaceRoot: filepath.Join(instanceB, "workspace"),
-		RunRoot:       filepath.Join(t.TempDir(), "runs-b"),
-		StateRoot:     sharedState,
+		StateDir:      sharedState,
 	})
 	req, err := rtA.CreateHumanRequest(context.Background(), humanrequest.CreateRequest{
 		WorkspaceID:  rtA.workspace,

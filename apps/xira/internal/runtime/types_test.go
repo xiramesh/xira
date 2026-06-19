@@ -84,7 +84,7 @@ func TestTurnRequestDecodesNestedContext(t *testing.T) {
 // This runs against the fake DeepSeek client — session placement is determined
 // entirely by InboundContext, independent of what the LLM returns.
 func TestRunAgentPersistsSessionInTriggerChannel(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "hello",
 		Context: channel.InboundContext{
@@ -117,8 +117,8 @@ func TestRunAgentPersistsSessionInTriggerChannel(t *testing.T) {
 	// And the messages.jsonl must physically land under sessions/feishu/...
 	scope := resp.SessionScope
 	msgPath := rt.SessionManager().AgentMessagesPath(fsession.AgentTurnInput{
-		SessionID:   resp.SessionID,
-		AgentID:     resp.AgentID,
+		SessionID: resp.SessionID,
+		AgentID:   resp.AgentID,
 		Context: channel.InboundContext{
 			Channel:      scope.Channel,
 			EntrypointID: resp.EntrypointID,

@@ -16,8 +16,8 @@ import (
 	"github.com/google/uuid"
 	openilink "github.com/openilink/openilink-sdk-go"
 
-	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
@@ -92,7 +92,7 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 	stateDir := strings.TrimSpace(definition.StateDir)
 	if stateDir == "" {
 		if strings.TrimSpace(stateRoot) == "" {
-			stateRoot = filepath.Join(".xira", "state")
+			return nil, fmt.Errorf("ilink entrypoint %q requires runtime state_dir or entrypoint state_dir", definition.ID)
 		}
 		stateDir = filepath.Join(stateRoot, "channels", "ilink", safePathSegment(definition.ID))
 	}
@@ -616,7 +616,7 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		Message:      content,
 		// Trigger identity as a first-class InboundContext so the session lands
 		// under sessions/ilink/<entrypoint>/chat_<id>__sender_<id>/.
-		Context:      channel.NewInboundContextWithEntrypoint("ilink", r.definition.ID, senderID, metadata),
+		Context: channel.NewInboundContextWithEntrypoint("ilink", r.definition.ID, senderID, metadata),
 	})
 	if err != nil {
 		slog.Error("ilink runtime run failed",

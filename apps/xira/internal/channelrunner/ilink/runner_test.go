@@ -3,6 +3,7 @@ package ilink
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,18 @@ func TestNewRunnerUsesTokenEnv(t *testing.T) {
 	}
 	if runner.stateDir != filepath.Join(stateRoot, "channels", "ilink", "ilink-default") {
 		t.Fatalf("stateDir = %q", runner.stateDir)
+	}
+}
+
+func TestNewRunnerRequiresStateDir(t *testing.T) {
+	t.Setenv("TEST_ILINK_TOKEN", "bot-token")
+	_, err := NewRunner(entrypoints.Definition{
+		ID:       "ilink-default",
+		Channel:  "ilink",
+		TokenEnv: "TEST_ILINK_TOKEN",
+	}, nil, " ")
+	if err == nil || !strings.Contains(err.Error(), "requires runtime state_dir") {
+		t.Fatalf("NewRunner() error = %v, want state dir requirement", err)
 	}
 }
 

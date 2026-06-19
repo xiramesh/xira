@@ -15,8 +15,7 @@ import (
 
 func TestFlowHumanApprovalUsesRuntimeHumanRequestStore(t *testing.T) {
 	rt := newTestService(t, Config{
-		RunRoot:   filepath.Join(t.TempDir(), "runs"),
-		StateRoot: filepath.Join(t.TempDir(), "state"),
+		StateDir: filepath.Join(t.TempDir(), "state"),
 	})
 	def := &flow.Definition{
 		SchemaVersion: flow.SchemaVersionDefinition,
@@ -84,8 +83,7 @@ func TestFlowHumanApprovalUsesRuntimeHumanRequestStore(t *testing.T) {
 
 func TestFlowRuntimePolicyInputRoutesToApproval(t *testing.T) {
 	rt := newTestService(t, Config{
-		RunRoot:   filepath.Join(t.TempDir(), "runs"),
-		StateRoot: filepath.Join(t.TempDir(), "state"),
+		StateDir: filepath.Join(t.TempDir(), "state"),
 	})
 	def := &flow.Definition{
 		SchemaVersion: flow.SchemaVersionDefinition,
@@ -146,8 +144,7 @@ func (s flowStaticDefinitions) Definition(id string) (*flow.Definition, error) {
 func TestFlowAgentStepPersistsSessionInTriggerChannel(t *testing.T) {
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	rt := newTestService(t, Config{
-		RunRoot:   filepath.Join(t.TempDir(), "runs"),
-		StateRoot: stateRoot,
+		StateDir: stateRoot,
 	})
 	def := &flow.Definition{
 		SchemaVersion: flow.SchemaVersionDefinition,
@@ -214,10 +211,10 @@ func TestFlowAgentStepPersistsSessionInTriggerChannel(t *testing.T) {
 	// (not sessions/flow/...).
 	scope := agentRun.SessionScope
 	msgPath := rt.SessionManager().AgentMessagesPath(fsession.AgentTurnInput{
-		SessionID:   agentRun.SessionID,
-		AgentID:     agentRun.AgentID,
-		Context:     channel.InboundContext{Channel: scope.Channel, EntrypointID: agentRun.EntrypointID, ChatID: scopeChatID(scope.Values["chat"]), SenderID: scope.Values["sender"]},
-		Scope:       scope,
+		SessionID: agentRun.SessionID,
+		AgentID:   agentRun.AgentID,
+		Context:   channel.InboundContext{Channel: scope.Channel, EntrypointID: agentRun.EntrypointID, ChatID: scopeChatID(scope.Values["chat"]), SenderID: scope.Values["sender"]},
+		Scope:     scope,
 	})
 	rel := strings.TrimPrefix(filepath.ToSlash(msgPath), filepath.ToSlash(stateRoot)+"/")
 	if !strings.HasPrefix(rel, "sessions/feishu/") {
@@ -232,14 +229,13 @@ func scopeChatID(scopeChat string) string {
 	return scopeChat
 }
 
-
 // TestFlowBridgeMergesMetadataIntoContextRaw asserts that flow-internal
 // traceability keys (flow_run_id/flow_id/flow_step_id) from
 // AgentTurnRequest.Metadata survive into the TurnRequest.Context.Raw, so they
 // reach the session and run records. Without this merge, flow step provenance
 // is silently dropped at the bridge.
 func TestFlowBridgeMergesMetadataIntoContextRaw(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	def := &flow.Definition{
 		SchemaVersion: flow.SchemaVersionDefinition,
 		ID:            "trace-flow",

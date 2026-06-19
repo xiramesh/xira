@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-		"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 )
@@ -1242,12 +1242,10 @@ func newLiveDeepSeekHITLService(t *testing.T, allowWrite bool) *Service {
 	}
 	artifactRoot := strings.TrimSpace(os.Getenv("XIRA_LIVE_ARTIFACT_ROOT"))
 	workspace := t.TempDir()
-	runRoot := filepath.Join(t.TempDir(), "runs")
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	if artifactRoot != "" {
 		testRoot := liveDeepSeekTestRoot(t, artifactRoot)
 		workspace = filepath.Join(testRoot, "workspace")
-		runRoot = filepath.Join(testRoot, "runs")
 		stateRoot = filepath.Join(testRoot, "state")
 		t.Logf("preserving live HITL artifacts under %s", testRoot)
 	}
@@ -1308,8 +1306,7 @@ Careful.
 `)
 	return newTestService(t, Config{
 		WorkspaceRoot: workspace,
-		RunRoot:       runRoot,
-		StateRoot:     stateRoot,
+		StateDir:      stateRoot,
 		DeepSeekClient: deepseek.New(
 			deepseek.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
 		),
@@ -1333,12 +1330,10 @@ func newLiveDeepSeekLongFlowService(t *testing.T) *Service {
 	}
 	artifactRoot := strings.TrimSpace(os.Getenv("XIRA_LIVE_ARTIFACT_ROOT"))
 	workspace := t.TempDir()
-	runRoot := filepath.Join(t.TempDir(), "runs")
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	if artifactRoot != "" {
 		testRoot := liveDeepSeekTestRoot(t, artifactRoot)
 		workspace = filepath.Join(testRoot, "workspace")
-		runRoot = filepath.Join(testRoot, "runs")
 		stateRoot = filepath.Join(testRoot, "state")
 		t.Logf("preserving live long flow artifacts under %s", testRoot)
 	}
@@ -1398,8 +1393,7 @@ Direct and concise.
 	}
 	return newTestService(t, Config{
 		WorkspaceRoot: workspace,
-		RunRoot:       runRoot,
-		StateRoot:     stateRoot,
+		StateDir:      stateRoot,
 		DeepSeekClient: deepseek.New(
 			deepseek.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
 		),
@@ -1423,12 +1417,10 @@ func newLiveDeepSeekLongFlowToolService(t *testing.T) *Service {
 	}
 	artifactRoot := strings.TrimSpace(os.Getenv("XIRA_LIVE_ARTIFACT_ROOT"))
 	workspace := t.TempDir()
-	runRoot := filepath.Join(t.TempDir(), "runs")
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	if artifactRoot != "" {
 		testRoot := liveDeepSeekTestRoot(t, artifactRoot)
 		workspace = filepath.Join(testRoot, "workspace")
-		runRoot = filepath.Join(testRoot, "runs")
 		stateRoot = filepath.Join(testRoot, "state")
 		t.Logf("preserving live long flow tool artifacts under %s", testRoot)
 	}
@@ -1552,8 +1544,7 @@ Ground every claim in the requested tool output.
 	}
 	return newTestService(t, Config{
 		WorkspaceRoot: workspace,
-		RunRoot:       runRoot,
-		StateRoot:     stateRoot,
+		StateDir:      stateRoot,
 		DeepSeekClient: deepseek.New(
 			deepseek.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
 		),
@@ -1577,12 +1568,10 @@ func newLiveDeepSeekFlowFileSkillService(t *testing.T) *Service {
 	}
 	artifactRoot := strings.TrimSpace(os.Getenv("XIRA_LIVE_ARTIFACT_ROOT"))
 	workspace := t.TempDir()
-	runRoot := filepath.Join(t.TempDir(), "runs")
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	if artifactRoot != "" {
 		testRoot := liveDeepSeekTestRoot(t, artifactRoot)
 		workspace = filepath.Join(testRoot, "workspace")
-		runRoot = filepath.Join(testRoot, "runs")
 		stateRoot = filepath.Join(testRoot, "state")
 		t.Logf("preserving live Flow file artifact artifacts under %s", testRoot)
 	}
@@ -1655,8 +1644,7 @@ Ground every artifact in workspace files and keep confirmations short.
 	}
 	return newTestService(t, Config{
 		WorkspaceRoot: workspace,
-		RunRoot:       runRoot,
-		StateRoot:     stateRoot,
+		StateDir:      stateRoot,
 		DeepSeekClient: deepseek.New(
 			deepseek.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
 		),
@@ -2113,12 +2101,10 @@ func newLiveDeepSeekFlowRegistryService(t *testing.T) *Service {
 
 	artifactRoot := strings.TrimSpace(os.Getenv("XIRA_LIVE_ARTIFACT_ROOT"))
 	workspace := t.TempDir()
-	runRoot := filepath.Join(t.TempDir(), "runs")
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	if artifactRoot != "" {
 		testRoot := liveDeepSeekTestRoot(t, artifactRoot)
 		workspace = filepath.Join(testRoot, "workspace")
-		runRoot = filepath.Join(testRoot, "runs")
 		stateRoot = filepath.Join(testRoot, "state")
 		t.Logf("preserving live flow registry artifacts under %s", testRoot)
 	}
@@ -2164,8 +2150,7 @@ steps:
 
 	return newTestService(t, Config{
 		WorkspaceRoot: workspace,
-		RunRoot:       runRoot,
-		StateRoot:     stateRoot,
+		StateDir:      stateRoot,
 		DeepSeekClient: deepseek.New(
 			deepseek.WithAPIKey(os.Getenv("DEEPSEEK_API_KEY")),
 		),

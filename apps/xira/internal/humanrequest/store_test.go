@@ -731,6 +731,12 @@ func newTestStore(t *testing.T, root string) *Store {
 	return store
 }
 
+func TestNewStoreRequiresStateDir(t *testing.T) {
+	if _, err := NewStore(" "); err == nil || !strings.Contains(err.Error(), "state dir is required") {
+		t.Fatalf("NewStore() error = %v, want state dir requirement", err)
+	}
+}
+
 func mustCreateHumanRequest(t *testing.T, store *Store, req CreateRequest) *HumanRequest {
 	t.Helper()
 	created, err := store.Create(context.Background(), req)

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-		"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 )
@@ -46,8 +46,7 @@ func TestDelegateChildWaitingHumanSuspendsParent(t *testing.T) {
 		return nil, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 
@@ -139,7 +138,7 @@ func TestDelegateChildWaitingHumanReleasesActiveSlot(t *testing.T) {
 }
 
 func TestDelegateChildWaitingHumanCountsAgainstMaxOutstanding(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs"), StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newTestService(t, Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	parentRunID := "parent-outstanding"
 	if err := rt.RunStore().InitRun(parentRunID); err != nil {
 		t.Fatal(err)
@@ -384,9 +383,8 @@ func TestDelegateResumeCancelMaterializesCanceledOutput(t *testing.T) {
 }
 
 func TestDelegateResumeAfterProcessRestart(t *testing.T) {
-	runRoot := filepath.Join(t.TempDir(), "runs")
 	stateRoot := filepath.Join(t.TempDir(), "state")
-	rt := newDelegationResumeTestServiceWithRoots(t, runRoot, stateRoot)
+	rt := newDelegationResumeTestServiceWithRoots(t, stateRoot)
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and restart", Context: channel.NewInboundContext("test", "user-1", nil)})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
@@ -395,7 +393,7 @@ func TestDelegateResumeAfterProcessRestart(t *testing.T) {
 		t.Fatalf("waiting response = %+v", resp)
 	}
 
-	restarted := newDelegationResumeTestServiceWithRoots(t, runRoot, stateRoot)
+	restarted := newDelegationResumeTestServiceWithRoots(t, stateRoot)
 	outstanding, err := restarted.outstandingChildCount(resp.RunID)
 	if err != nil {
 		t.Fatalf("outstanding after restart: %v", err)
@@ -420,8 +418,9 @@ func TestDelegateResumeAfterProcessRestart(t *testing.T) {
 }
 
 func TestFindDelegationJoinByHumanRequestSkipsCorruptJoinFiles(t *testing.T) {
-	runRoot := filepath.Join(t.TempDir(), "runs")
-	rt := newDelegationResumeTestServiceWithRoots(t, runRoot, filepath.Join(t.TempDir(), "state"))
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	rt := newDelegationResumeTestServiceWithRoots(t, stateRoot)
+	runRoot := filepath.Join(stateRoot, "runs")
 	badDir := filepath.Join(runRoot, "aaa_bad_run", "delegations")
 	if err := os.MkdirAll(badDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -496,18 +495,17 @@ func newDelegationWaitingTestService(t *testing.T) *Service {
 		return nil, nil
 	})}
 	return newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 }
 
 func newDelegationResumeTestService(t *testing.T) *Service {
 	t.Helper()
-	return newDelegationResumeTestServiceWithRoots(t, filepath.Join(t.TempDir(), "runs"), filepath.Join(t.TempDir(), "state"))
+	return newDelegationResumeTestServiceWithRoots(t, filepath.Join(t.TempDir(), "state"))
 }
 
-func newDelegationResumeTestServiceWithRoots(t *testing.T, runRoot, stateRoot string) *Service {
+func newDelegationResumeTestServiceWithRoots(t *testing.T, stateRoot string) *Service {
 	t.Helper()
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		var req deepseek.ChatRequest
@@ -542,8 +540,7 @@ func newDelegationResumeTestServiceWithRoots(t *testing.T, runRoot, stateRoot st
 		return nil, nil
 	})}
 	return newTestService(t, Config{
-		RunRoot:        runRoot,
-		StateRoot:      stateRoot,
+		StateDir:       stateRoot,
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 }

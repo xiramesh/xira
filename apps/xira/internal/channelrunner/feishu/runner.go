@@ -57,7 +57,10 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 	if definition.IsLark {
 		opts = append(opts, lark.WithOpenBaseUrl(lark.LarkBaseUrl))
 	}
-	stateDir := channelStateDir(definition, stateRoot, "feishu")
+	stateDir, err := channelStateDir(definition, stateRoot, "feishu")
+	if err != nil {
+		return nil, err
+	}
 	slog.Info("feishu runner configured",
 		"entrypoint_id", definition.ID,
 		"app_id", appID,
@@ -221,7 +224,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		// Trigger identity travels as a first-class InboundContext: channel +
 		// chat/sender/space are extracted from the metadata map so the session
 		// lands under sessions/feishu/<entrypoint>/chat_<id>__sender_<id>/.
-		Context:      channel.NewInboundContextWithEntrypoint("feishu", r.definition.ID, senderID, metadata),
+		Context: channel.NewInboundContextWithEntrypoint("feishu", r.definition.ID, senderID, metadata),
 	})
 	if err != nil {
 		slog.Error("feishu runtime run failed",
@@ -405,14 +408,14 @@ func newMessageDeduper(ttl time.Duration) *messageDeduper {
 	return dedupe.New("", ttl)
 }
 
-func channelStateDir(definition entrypoints.Definition, stateRoot, channel string) string {
+func channelStateDir(definition entrypoints.Definition, stateRoot, channel string) (string, error) {
 	if strings.TrimSpace(definition.StateDir) != "" {
-		return strings.TrimSpace(definition.StateDir)
+		return strings.TrimSpace(definition.StateDir), nil
 	}
 	if strings.TrimSpace(stateRoot) == "" {
-		stateRoot = filepath.Join(".xira", "state")
+		return "", fmt.Errorf("%s entrypoint %q requires runtime state_dir or entrypoint state_dir", channel, definition.ID)
 	}
-	return filepath.Join(stateRoot, "channels", channel, safePathSegment(definition.ID))
+	return filepath.Join(stateRoot, "channels", channel, safePathSegment(definition.ID)), nil
 }
 
 func safePathSegment(value string) string {

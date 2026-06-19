@@ -25,7 +25,7 @@ import (
 )
 
 func TestAgentRunAPI(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -51,7 +51,7 @@ func TestAgentRunAPI(t *testing.T) {
 }
 
 func TestXiraGardenMessageChannelAPI(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -83,7 +83,7 @@ func TestXiraGardenMessageChannelAPI(t *testing.T) {
 }
 
 func TestXiraGardenMessageRejectsMismatchedChannel(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -102,7 +102,7 @@ func TestXiraGardenMessageRejectsMismatchedChannel(t *testing.T) {
 }
 
 func TestShellTurnAPIIsNotAChannelEntrypoint(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -125,7 +125,7 @@ func TestAgentsAPIUsesWorkspaceDiscoveredAgents(t *testing.T) {
 	rt, err := frt.NewService(frt.Config{
 		WorkspaceRoot:  workspace,
 		DefaultAgentID: "xira-assistant",
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateDir:       t.TempDir(),
 		DeepSeekClient: fakeAPIDeepSeekClient(t),
 	})
 	if err != nil {
@@ -159,7 +159,7 @@ func TestAgentsAPIUsesWorkspaceDiscoveredAgents(t *testing.T) {
 }
 
 func TestEventsWebSocketReceivesRunEvents(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -192,7 +192,7 @@ func TestEventsWebSocketReceivesRunEvents(t *testing.T) {
 }
 
 func TestXiraGardenEventsWebSocketReceivesChannelEvents(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -318,7 +318,7 @@ func TestEntrypointPairingAPIUsesChannelControls(t *testing.T) {
 }
 
 func TestPostHumanRequestResponseApprove(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newAPITestService(t, frt.Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
 		ID:       "hrq_api_approve",
 		Kind:     humanrequest.RequestApproval,
@@ -343,7 +343,7 @@ func TestPostHumanRequestResponseApprove(t *testing.T) {
 }
 
 func TestPostHumanRequestResponseAnswer(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newAPITestService(t, frt.Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
 		ID:       "hrq_api_answer",
 		Kind:     humanrequest.RequestFreeform,
@@ -369,7 +369,7 @@ func TestPostHumanRequestResponseAnswer(t *testing.T) {
 }
 
 func TestPostHumanRequestResponseRejectsInvalidKind(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newAPITestService(t, frt.Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
 		ID:       "hrq_api_invalid",
 		Kind:     humanrequest.RequestFreeform,
@@ -394,7 +394,7 @@ func TestPostHumanRequestResponseRejectsInvalidKind(t *testing.T) {
 }
 
 func TestPostHumanRequestResponseConflictOnResolved(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newAPITestService(t, frt.Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
 		ID:       "hrq_api_conflict",
 		Kind:     humanrequest.RequestFreeform,
@@ -421,7 +421,7 @@ func TestPostHumanRequestResponseConflictOnResolved(t *testing.T) {
 }
 
 func TestPostHumanRequestResponseMissingRequest(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newAPITestService(t, frt.Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	server := NewServer(rt, "127.0.0.1:0")
 
 	resp := serveJSON(t, server, http.MethodPost, "/api/v1/human-requests/missing/responses", map[string]any{
@@ -435,7 +435,7 @@ func TestPostHumanRequestResponseMissingRequest(t *testing.T) {
 }
 
 func TestPostHumanRequestResponseWrongWorkspaceDoesNotLeak(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newAPITestService(t, frt.Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
 		ID:       "hrq_api_workspace",
 		Kind:     humanrequest.RequestFreeform,
@@ -462,7 +462,7 @@ func TestPostHumanRequestResponseWrongWorkspaceDoesNotLeak(t *testing.T) {
 }
 
 func TestPostHumanRequestResponseTriggersResumeHookButDoesNotRequireReplayYet(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newAPITestService(t, frt.Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
 		ID:       "hrq_api_hook",
 		Kind:     humanrequest.RequestFreeform,
@@ -489,7 +489,7 @@ func TestPostHumanRequestResponseTriggersResumeHookButDoesNotRequireReplayYet(t 
 }
 
 func TestListHumanRequests(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newAPITestService(t, frt.Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	old := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{ID: "hrq_api_list_old", Kind: humanrequest.RequestFreeform, Question: "old?"})
 	newer := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{ID: "hrq_api_list_new", Kind: humanrequest.RequestFreeform, Question: "new?"})
 	if _, err := rt.ResolveHumanRequest(context.Background(), old.ID, humanrequest.ResolveRequest{Kind: humanrequest.ResponseAnswer, Actor: "tester", Message: "done"}); err != nil {
@@ -513,7 +513,7 @@ func TestListHumanRequests(t *testing.T) {
 }
 
 func TestShowHumanRequest(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newAPITestService(t, frt.Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	created := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{ID: "hrq_api_show", Kind: humanrequest.RequestFreeform, Question: "show?"})
 	server := NewServer(rt, "127.0.0.1:0")
 
@@ -533,7 +533,7 @@ func TestShowHumanRequest(t *testing.T) {
 }
 
 func TestShowHumanRequestMissing(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newAPITestService(t, frt.Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	server := NewServer(rt, "127.0.0.1:0")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/human-requests/missing", nil)
 	resp := httptest.NewRecorder()
@@ -544,7 +544,7 @@ func TestShowHumanRequestMissing(t *testing.T) {
 }
 
 func TestListHumanRequestsRejectsInvalidStatus(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateRoot: filepath.Join(t.TempDir(), "state")})
+	rt := newAPITestService(t, frt.Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	server := NewServer(rt, "127.0.0.1:0")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/human-requests?status=maybe", nil)
 	resp := httptest.NewRecorder()

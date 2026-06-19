@@ -24,7 +24,10 @@ func sandboxProfile(tools, allowRoots, readonlyRoots []string) string {
 	for _, name := range tools {
 		b.WriteString("  - " + name + "\n")
 	}
-	for _, key := range []struct{ field string; roots []string }{
+	for _, key := range []struct {
+		field string
+		roots []string
+	}{
 		{"allow_roots", allowRoots},
 		{"readonly_roots", readonlyRoots},
 	} {
@@ -47,8 +50,7 @@ func newSandboxConfirmationRuntime(t *testing.T, workspace string, client *http.
 	writeFile(t, filepath.Join(workspace, "agents", "xira-assistant", "SOUL.md"), "# Soul\n\nDirect.\n")
 	return newTestService(t, Config{
 		WorkspaceRoot:  workspace,
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
-		StateRoot:      filepath.Join(t.TempDir(), "state"),
+		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 }
