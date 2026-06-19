@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,7 +33,7 @@ func TestWebSocketChannelMessageEmitsAckEventAndResponse(t *testing.T) {
 	if ready.Type != "ready" || frameDataString(ready, "entrypoint_id") != websocketDefaultEntrypoint {
 		t.Fatalf("ready = %+v", ready)
 	}
-	assertWebSocketCapabilities(t, ready, []string{"message", "event", "response", "interrupt", "human_response"})
+	assertWebSocketCapabilities(t, ready, []string{"message", "event", "response", "interrupt"})
 
 	writeWebSocketFrame(t, conn, map[string]any{
 		"type": "message",
@@ -76,12 +77,69 @@ func TestWebSocketChannelMessageEmitsAckEventAndResponse(t *testing.T) {
 	if frameDataString(response, "final_response") == "" || frameDataString(response, "content_format") != "markdown" {
 		t.Fatalf("response data = %+v", response.Data)
 	}
+	responseData := frameDataMap(t, response)
+	if responseData["started_at"] == "" || responseData["ended_at"] == "" || responseData["route_matched_by"] == "" {
+		t.Fatalf("response missing timing/route fields: %+v", response.Data)
+	}
+	if _, ok := responseData["tool_calls"].([]any); !ok {
+		t.Fatalf("response tool_calls = %+v", responseData["tool_calls"])
+	}
+	if _, ok := responseData["artifacts"].([]any); !ok {
+		t.Fatalf("response artifacts = %+v", responseData["artifacts"])
+	}
 	runs, err := rt.RunStore().List()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(runs) != 1 || runs[0].SessionScope == nil || runs[0].SessionScope.Channel != "websocket" {
 		t.Fatalf("runs = %+v", runs)
+	}
+}
+
+func TestWebSocketChannelUsesFrameIDAsMessageIDFallback(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := NewServer(rt, "127.0.0.1:0")
+	if err := server.StartAsync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	conn := dialWebSocketChannel(t, server)
+	defer conn.CloseNow()
+
+	writeWebSocketFrame(t, conn, map[string]any{
+		"type": "message",
+		"id":   "msg_without_context_id",
+		"data": map[string]any{
+			"message": "use frame id as message id",
+			"context": map[string]any{
+				"chat_id":   "chat-1",
+				"sender_id": "user-1",
+			},
+		},
+	})
+	ack := readWebSocketFrame(t, conn)
+	if ack.Type != "ack" || frameDataString(ack, "message_id") != "msg_without_context_id" {
+		t.Fatalf("ack = %+v", ack)
+	}
+
+	var sawScopedEvent bool
+	for i := 0; i < 20; i++ {
+		frame := readWebSocketFrame(t, conn)
+		if frame.Type == "response" {
+			break
+		}
+		if frame.Type != "event" {
+			continue
+		}
+		event := frameDataMap(t, frame)["event"].(map[string]any)
+		scope, ok := event["scope"].(map[string]any)
+		if ok && scope["message_id"] == "msg_without_context_id" {
+			sawScopedEvent = true
+		}
+	}
+	if !sawScopedEvent {
+		t.Fatal("did not receive event scoped by fallback frame id")
 	}
 }
 
@@ -182,6 +240,69 @@ func TestWebSocketChannelIgnoresUnmentionedGroupMessage(t *testing.T) {
 	}
 }
 
+func TestWebSocketChannelRejectsHumanResponseUntilResumeBindingExists(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := NewServer(rt, "127.0.0.1:0")
+	if err := server.StartAsync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	conn := dialWebSocketChannel(t, server)
+	defer conn.CloseNow()
+
+	writeWebSocketFrame(t, conn, map[string]any{
+		"type": "human_response",
+		"id":   "hrsp_001",
+		"data": map[string]any{
+			"human_request_id": "hrq_001",
+			"kind":             "approve",
+			"actor":            "user-1",
+		},
+	})
+	errFrame := readWebSocketFrame(t, conn)
+	if errFrame.Type != "error" || frameDataString(errFrame, "code") != "unsupported_type" {
+		t.Fatalf("error frame = %+v", errFrame)
+	}
+}
+
+func TestWebSocketChannelRejectsOversizedInboundFrame(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := NewServer(rt, "127.0.0.1:0")
+	if err := server.StartAsync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	conn := dialWebSocketChannel(t, server)
+	defer conn.CloseNow()
+
+	writeWebSocketFrame(t, conn, map[string]any{
+		"type": "message",
+		"id":   "msg_oversized",
+		"data": map[string]any{
+			"message": strings.Repeat("x", websocketMaxFrameBytes+1),
+			"context": map[string]any{
+				"chat_id":   "chat-1",
+				"sender_id": "user-1",
+			},
+		},
+	})
+	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer readCancel()
+	var frame websocketOutboundFrame
+	err := wsjson.Read(readCtx, conn, &frame)
+	if err == nil {
+		if frame.Type == "error" && frameDataString(frame, "code") == "validation_failed" {
+			return
+		}
+		t.Fatalf("oversized response frame = %+v", frame)
+	}
+	if websocket.CloseStatus(err) != websocket.StatusMessageTooBig {
+		t.Fatalf("oversized read err = %v", err)
+	}
+}
+
 func TestWebSocketChannelDedupesMessageID(t *testing.T) {
 	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -264,12 +385,16 @@ func readWebSocketFrame(t *testing.T, conn *websocket.Conn) websocketOutboundFra
 }
 
 func frameDataString(frame websocketOutboundFrame, key string) string {
-	data, ok := frame.Data.(map[string]any)
-	if !ok {
-		return ""
-	}
-	value, _ := data[key].(string)
+	value, _ := frameDataMap(nil, frame)[key].(string)
 	return value
+}
+
+func frameDataMap(t *testing.T, frame websocketOutboundFrame) map[string]any {
+	data, ok := frame.Data.(map[string]any)
+	if !ok && t != nil {
+		t.Fatalf("frame data = %+v", frame.Data)
+	}
+	return data
 }
 
 func assertWebSocketCapabilities(t *testing.T, frame websocketOutboundFrame, want []string) {

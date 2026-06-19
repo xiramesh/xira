@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/coder/websocket/wsjson"
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelcontrol"
@@ -213,7 +212,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	ctx := conn.CloseRead(r.Context())
 	events := s.runtime.EventBus().Subscribe(ctx)
 	for evt := range events {
-		if err := wsjson.Write(ctx, conn, evt); err != nil {
+		if err := writeWebSocketJSON(ctx, conn, evt); err != nil {
 			return
 		}
 	}
@@ -400,7 +399,7 @@ func (s *Server) channelEvents(w http.ResponseWriter, r *http.Request, channelNa
 		if !eventBelongsToChannel(evt, channelName, runIDs) {
 			continue
 		}
-		if err := wsjson.Write(ctx, conn, evt); err != nil {
+		if err := writeWebSocketJSON(ctx, conn, evt); err != nil {
 			return
 		}
 	}

@@ -16,13 +16,14 @@ import (
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/entrypoints"
-	"github.com/xiramesh/xira/internal/humanrequest"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
 const (
 	websocketDefaultEntrypoint = "websocket-default"
 	websocketMessageDedupeTTL  = time.Hour
+	websocketWriteTimeout      = 10 * time.Second
+	websocketMaxFrameBytes     = 1 << 20
 )
 
 var websocketCapabilities = []string{
@@ -30,10 +31,10 @@ var websocketCapabilities = []string{
 	"event",
 	"response",
 	"interrupt",
-	"human_response",
 }
 
 var errWebSocketUnsupportedMessage = errors.New("only JSON text frames are supported")
+var errWebSocketMessageTooBig = fmt.Errorf("websocket frame exceeds %d bytes", websocketMaxFrameBytes)
 
 type websocketBadJSONError struct {
 	err error
@@ -71,14 +72,6 @@ type websocketMessageData struct {
 	Context      channel.InboundContext `json:"context"`
 }
 
-type websocketHumanResponseData struct {
-	HumanRequestID string                    `json:"human_request_id"`
-	Kind           humanrequest.ResponseKind `json:"kind"`
-	Actor          string                    `json:"actor"`
-	Message        string                    `json:"message,omitempty"`
-	IdempotencyKey string                    `json:"idempotency_key,omitempty"`
-}
-
 type websocketActiveRequest struct {
 	requestID string
 	context   channel.InboundContext
@@ -97,6 +90,7 @@ func (s *Server) websocketMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.CloseNow()
+	conn.SetReadLimit(websocketMaxFrameBytes)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -108,7 +102,11 @@ func (s *Server) websocketMessages(w http.ResponseWriter, r *http.Request) {
 	writeFrame := func(frame websocketOutboundFrame) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		return wsjson.Write(ctx, conn, frame)
+		if err := writeWebSocketJSON(ctx, conn, frame); err != nil {
+			cancel()
+			return err
+		}
+		return nil
 	}
 	addActive := func(req *websocketActiveRequest) {
 		activeMu.Lock()
@@ -144,6 +142,9 @@ func (s *Server) websocketMessages(w http.ResponseWriter, r *http.Request) {
 			case errors.Is(err, errWebSocketUnsupportedMessage):
 				_ = writeFrame(websocketErrorFrame("", requestID, "unsupported_type", err.Error(), false))
 				continue
+			case errors.Is(err, errWebSocketMessageTooBig):
+				_ = writeFrame(websocketErrorFrame("", requestID, "validation_failed", err.Error(), false))
+				return
 			}
 			return
 		}
@@ -174,7 +175,7 @@ func (s *Server) websocketMessages(w http.ResponseWriter, r *http.Request) {
 		case "message":
 			s.handleWebSocketMessage(ctx, frame, defaultEntrypointID, writeFrame, addActive, removeActive)
 		case "human_response":
-			s.handleWebSocketHumanResponse(ctx, frame, writeFrame)
+			_ = writeFrame(websocketErrorFrame(frame.ID, requestID, "unsupported_type", "human_response is reserved for a later websocket resume slice; use the HTTP human-request API for now", false))
 		case "ping":
 			_ = writeFrame(websocketOutboundFrame{
 				Type:      "pong",
@@ -190,6 +191,9 @@ func (s *Server) websocketMessages(w http.ResponseWriter, r *http.Request) {
 func readWebSocketInboundFrame(ctx context.Context, conn *websocket.Conn) (websocketInboundFrame, error) {
 	typ, reader, err := conn.Reader(ctx)
 	if err != nil {
+		if errors.Is(err, websocket.ErrMessageTooBig) {
+			return websocketInboundFrame{}, errWebSocketMessageTooBig
+		}
 		return websocketInboundFrame{}, err
 	}
 	if typ != websocket.MessageText {
@@ -366,6 +370,10 @@ func (s *Server) prepareWebSocketTurn(frame websocketInboundFrame, data websocke
 		errFrame := websocketErrorFrame(frame.ID, requestID, "entrypoint_not_found", fmt.Sprintf("entrypoint %q not found", effectiveEntrypointID), false)
 		return preparedWebSocketTurn{}, &errFrame
 	}
+	if agentID := strings.TrimSpace(data.AgentID); agentID != "" && found && !definition.AllowsAgent(agentID) {
+		errFrame := websocketErrorFrame(frame.ID, requestID, "agent_not_allowed", fmt.Sprintf("agent %q is not allowed by entrypoint %q", agentID, definition.ID), false)
+		return preparedWebSocketTurn{}, &errFrame
+	}
 	runEntrypointID := ""
 	if found {
 		runEntrypointID = effectiveEntrypointID
@@ -380,6 +388,12 @@ func (s *Server) prepareWebSocketTurn(frame websocketInboundFrame, data websocke
 	if messageID == "" {
 		messageID = strings.TrimSpace(frame.ID)
 	}
+	if messageID == "" {
+		errFrame := websocketErrorFrame(frame.ID, requestID, "validation_failed", "context.message_id or frame.id is required", false)
+		return preparedWebSocketTurn{}, &errFrame
+	}
+	ctx.MessageID = messageID
+	eventCtx.MessageID = messageID
 	handle := shouldHandleWebSocketMessage(ctx, definition)
 	return preparedWebSocketTurn{
 		turn: frt.TurnRequest{
@@ -394,47 +408,6 @@ func (s *Server) prepareWebSocketTurn(frame websocketInboundFrame, data websocke
 		messageID:    messageID,
 		handle:       handle,
 	}, nil
-}
-
-func (s *Server) handleWebSocketHumanResponse(ctx context.Context, frame websocketInboundFrame, writeFrame func(websocketOutboundFrame) error) {
-	requestID := websocketRequestID(frame)
-	var data websocketHumanResponseData
-	if err := json.Unmarshal(frame.Data, &data); err != nil {
-		_ = writeFrame(websocketErrorFrame(frame.ID, requestID, "bad_json", err.Error(), false))
-		return
-	}
-	if strings.TrimSpace(data.HumanRequestID) == "" {
-		_ = writeFrame(websocketErrorFrame(frame.ID, requestID, "validation_failed", "data.human_request_id is required", false))
-		return
-	}
-	resolved, err := s.runtime.ResolveHumanRequest(ctx, data.HumanRequestID, humanrequest.ResolveRequest{
-		Kind:           data.Kind,
-		Actor:          data.Actor,
-		Message:        data.Message,
-		IdempotencyKey: data.IdempotencyKey,
-	})
-	if err != nil {
-		code := "internal_error"
-		switch {
-		case errors.Is(err, humanrequest.ErrNotFound):
-			code = "validation_failed"
-		case errors.Is(err, humanrequest.ErrConflict):
-			code = "validation_failed"
-		case errors.Is(err, humanrequest.ErrValidation):
-			code = "validation_failed"
-		}
-		_ = writeFrame(websocketErrorFrame(frame.ID, requestID, code, err.Error(), false))
-		return
-	}
-	_ = writeFrame(websocketOutboundFrame{
-		Type:      "ack",
-		ID:        "srv_ack_" + requestID,
-		RequestID: requestID,
-		Data: map[string]any{
-			"status":           "accepted",
-			"human_request_id": resolved.ID,
-		},
-	})
 }
 
 func (s *Server) findEntrypoint(entrypointID string) (entrypoints.Definition, bool) {
@@ -565,21 +538,34 @@ func websocketRuntimeEventFrame(requestID string, evt frt.RuntimeEvent) websocke
 }
 
 func websocketResponseFrame(frameID, requestID string, resp frt.TurnResponse) websocketOutboundFrame {
+	toolCalls := resp.ToolCalls
+	if toolCalls == nil {
+		toolCalls = []frt.ToolCallRecord{}
+	}
+	artifacts := resp.Artifacts
+	if artifacts == nil {
+		artifacts = []string{}
+	}
 	return websocketOutboundFrame{
 		Type:      "response",
 		ID:        "srv_resp_" + firstNonEmpty(frameID, requestID),
 		RequestID: requestID,
 		RunID:     resp.RunID,
 		Data: map[string]any{
-			"run_id":         resp.RunID,
-			"agent_id":       resp.AgentID,
-			"entrypoint_id":  resp.EntrypointID,
-			"session_id":     resp.SessionID,
-			"status":         resp.Status,
-			"final_response": resp.FinalResponse,
-			"content_format": "markdown",
-			"usage":          resp.Usage,
-			"verification":   resp.VerificationResult,
+			"run_id":           resp.RunID,
+			"agent_id":         resp.AgentID,
+			"entrypoint_id":    resp.EntrypointID,
+			"session_id":       resp.SessionID,
+			"route_matched_by": resp.RouteMatchedBy,
+			"status":           resp.Status,
+			"final_response":   resp.FinalResponse,
+			"content_format":   "markdown",
+			"started_at":       resp.StartedAt,
+			"ended_at":         resp.EndedAt,
+			"tool_calls":       toolCalls,
+			"artifacts":        artifacts,
+			"usage":            resp.Usage,
+			"verification":     resp.VerificationResult,
 		},
 	}
 }
@@ -623,6 +609,12 @@ func websocketDedupeKey(entrypointID, messageID string) string {
 		return ""
 	}
 	return firstNonEmpty(entrypointID, websocketDefaultEntrypoint) + ":" + messageID
+}
+
+func writeWebSocketJSON(ctx context.Context, conn *websocket.Conn, value any) error {
+	writeCtx, cancel := context.WithTimeout(ctx, websocketWriteTimeout)
+	defer cancel()
+	return wsjson.Write(writeCtx, conn, value)
 }
 
 func firstNonEmpty(values ...string) string {
