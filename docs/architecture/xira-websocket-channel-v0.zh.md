@@ -2,7 +2,10 @@
 
 > 本文定义 Xira 自身的通用 WebSocket channel 标准：别人连进 `xira serve`，
 > 通过同一条 WebSocket 连接向 runtime 发送 inbound 消息，并接收 outbound
-> ack、runtime events、assistant delta、最终回复、interrupt、主动消息和错误。
+> ack、runtime events、最终回复、interrupt 和错误。`assistant_delta`、
+> `human_response` resume-over-WS、`outbound_message` 是 Channel Contract
+> 保留帧，待 channel adapter / streaming / proactive dispatch slice 落地后
+> 才会在 `ready.capabilities` 广告。
 >
 > 通用 channel inbound / outbound 语义见
 > `docs/architecture/xira-channel-contract-v0.zh.md`。本文只定义 WebSocket
@@ -32,8 +35,8 @@ client / gateway / UI / local tool
 | WebSocket endpoint | `xira serve` 暴露的 HTTP upgrade 入口，属于 API server。 |
 | channel | runtime 来源身份。v0 固定为 `websocket`。 |
 | entrypoint | Xira 路由配置，决定默认 agent、允许 agent、session policy、鉴权策略。 |
-| inbound frame | 客户端发给 Xira 的帧，例如 `message`、`human_response`、`ping`。 |
-| outbound frame | Xira 发给客户端的帧，例如 `ack`、`event`、`assistant_delta`、`response`、`interrupt`、`outbound_message`、`error`。 |
+| inbound frame | 客户端发给 Xira 的帧，例如 `message`、`ping`；`human_response` 是保留帧。 |
+| outbound frame | Xira 发给客户端的帧，例如 `ack`、`event`、`response`、`interrupt`、`error`；`assistant_delta`、`outbound_message` 是保留帧。 |
 | request_id | 单次 inbound 请求的相关 ID。所有对应 outbound 帧必须回带。 |
 | run_id | Xira runtime 生成的 agent run ID。 |
 
@@ -120,6 +123,9 @@ entrypoints:
 
 - 不需要 `ws_url`。别人连进 Xira，不是 Xira 连出去。
 - `channel` 必须是 `websocket`。
+- 若要限制客户端可请求的 `agent_id`，必须配置显式 websocket entrypoint
+  和 `allowed_agents`；未配置 entrypoint 时，runtime 隐式 entrypoint 会走
+  Xira 默认 agent 解析策略。
 - 如果未来需要鉴权，可复用 entrypoint 的 `token` / `token_env` 作为 inbound
   bearer token。
 
@@ -255,8 +261,10 @@ frt.TurnRequest{
 
 ### 4.3 `human_response`
 
-用于回答 runtime 发出的 human request。v0 可以先保留协议，落地时复用现有
-`ResolveHumanRequest` 逻辑。
+用于回答 runtime 发出的 human request。当前 #14 transport slice 只保留协议形状，
+不在 `ready.capabilities` 广告，也不处理该帧；客户端需要继续使用现有 HTTP
+human-request API。完整 resume-over-WS 需要后续 slice 把 resume 后的新 run 与
+原 WebSocket request 重新关联。
 
 ```json
 {
@@ -300,11 +308,8 @@ Outbound frame 指 Xira 发给客户端的帧。
     "capabilities": [
       "message",
       "event",
-      "assistant_delta",
       "response",
-      "interrupt",
-      "human_response",
-      "outbound_message"
+      "interrupt"
     ]
   }
 }
@@ -397,6 +402,9 @@ runtime event 的实时推送。
 面向用户的中间文本增量。它来自通用 Channel Contract 的
 `assistant_delta`，WebSocket 只负责把它编码成 JSON frame。
 
+当前 #14 transport slice 不实现该帧，也不会在 `ready.capabilities` 广告；
+待 runtime streaming / channel adapter slice 落地后再启用。
+
 ```json
 {
   "type": "assistant_delta",
@@ -429,11 +437,17 @@ WebSocket binding 把通用 `assistant_final.data.content` 重命名为
   "run_id": "run_xxx",
   "data": {
     "agent_id": "xira-assistant",
+    "run_id": "run_xxx",
     "entrypoint_id": "websocket-default",
     "session_id": "conversation:abcd1234",
+    "route_matched_by": "entrypoint.implicit",
     "status": "completed",
     "final_response": "这是处理结果。",
     "content_format": "markdown",
+    "started_at": "2026-06-19T08:00:00Z",
+    "ended_at": "2026-06-19T08:00:01Z",
+    "tool_calls": [],
+    "artifacts": [],
     "usage": {},
     "verification": {}
   }
@@ -468,12 +482,16 @@ run 因 HITL 或其他 suspendable condition 暂停时发送。
 `human_requests[]` 直接使用 `humanrequest.HumanRequest` 的 JSON 形状；
 问题文本字段是 `question`。
 
-随后客户端可通过 `human_response` 帧或现有 HTTP human-request API 回复。
+当前 #14 transport slice 中，客户端需通过现有 HTTP human-request API 回复；
+`human_response` 帧保留给后续 resume-over-WS slice。
 
 ### 5.7 `outbound_message`
 
 Xira 主动向已连接且匹配 target 的 WebSocket client 推送请求外消息。它来自通用
 Channel Contract 的 proactive `outbound_message`。
+
+当前 #14 transport slice 不实现该帧，也不会在 `ready.capabilities` 广告；
+需要后续 channel outbound adapter / proactive dispatch slice。
 
 ```json
 {
@@ -583,8 +601,9 @@ session:
 entrypoint_id + ":" + context.message_id
 ```
 
-如果 `context.message_id` 为空，使用 inbound frame `id`。如果二者都为空，
-服务端无法提供幂等保证。
+如果 `context.message_id` 为空，使用 inbound frame `id` 并写回 runtime
+event scope。当前实现要求二者至少有一个；如果都为空，返回
+`validation_failed`。
 
 去重行为：
 
@@ -593,6 +612,8 @@ entrypoint_id + ":" + context.message_id
   调用 `runtime.RunAgent`。
 - `runtime.RunAgent` 失败或最终帧发送失败：`Forget` / 删除去重记录，允许
   客户端重试。
+
+当前实现使用 API server 进程内内存去重，TTL 为 1h，不跨进程重启或多副本共享。
 
 当前 `dedupe` 包位于 `internal/channelrunner/dedupe`。如果 API server 也要复用，
 建议先把它提升到中性包，例如 `internal/channel/dedupe` 或
@@ -640,8 +661,11 @@ v0 默认：WebSocket 连接断开时，取消该连接上仍在执行的请求 
 `request_id` 内大致顺序为：
 
 ```
-ack -> event* -> assistant_delta* -> interrupt? -> response | error
+ack -> event* -> interrupt? -> response | error
 ```
+
+后续启用 streaming 后，同一 `request_id` 内可在最终帧前插入
+`assistant_delta*`。
 
 ## 7. 鉴权与部署
 
@@ -775,11 +799,8 @@ Server:
     "capabilities": [
       "message",
       "event",
-      "assistant_delta",
       "response",
-      "interrupt",
-      "human_response",
-      "outbound_message"
+      "interrupt"
     ]
   }
 }
@@ -850,10 +871,16 @@ Server:
   "run_id": "run_xxx",
   "data": {
     "agent_id": "xira-assistant",
+    "run_id": "run_xxx",
     "session_id": "conversation:abcd1234",
+    "route_matched_by": "entrypoint.implicit",
     "status": "completed",
     "final_response": "当前 run 已完成。",
-    "content_format": "markdown"
+    "content_format": "markdown",
+    "started_at": "2026-06-19T08:00:00Z",
+    "ended_at": "2026-06-19T08:00:01Z",
+    "tool_calls": [],
+    "artifacts": []
   }
 }
 ```

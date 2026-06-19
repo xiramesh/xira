@@ -13,7 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/channel"
@@ -166,12 +167,13 @@ func TestEventsWebSocketReceivesRunEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	wsURL := "ws" + server.URL()[4:] + "/api/v1/events"
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer readCancel()
+	conn, _, err := websocket.Dial(readCtx, wsURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	defer conn.CloseNow()
 
 	body, _ := json.Marshal(frt.TurnRequest{Message: "hello", Context: channel.NewInboundContext("test", "", nil)})
 	resp, err := http.Post(server.URL()+"/api/v1/agent-runs", "application/json", bytes.NewReader(body))
@@ -181,7 +183,7 @@ func TestEventsWebSocketReceivesRunEvents(t *testing.T) {
 	_ = resp.Body.Close()
 
 	var evt frt.RuntimeEvent
-	if err := conn.ReadJSON(&evt); err != nil {
+	if err := wsjson.Read(readCtx, conn, &evt); err != nil {
 		t.Fatal(err)
 	}
 	if evt.Kind != "run.started" {
@@ -198,12 +200,13 @@ func TestXiraGardenEventsWebSocketReceivesChannelEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	wsURL := "ws" + server.URL()[4:] + "/api/v1/channels/xiragarden/events"
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer readCancel()
+	conn, _, err := websocket.Dial(readCtx, wsURL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	defer conn.CloseNow()
 
 	body, _ := json.Marshal(frt.TurnRequest{Message: "hello garden"})
 	resp, err := http.Post(server.URL()+"/api/v1/channels/xiragarden/messages", "application/json", bytes.NewReader(body))
@@ -213,7 +216,7 @@ func TestXiraGardenEventsWebSocketReceivesChannelEvents(t *testing.T) {
 	_ = resp.Body.Close()
 
 	var evt frt.RuntimeEvent
-	if err := conn.ReadJSON(&evt); err != nil {
+	if err := wsjson.Read(readCtx, conn, &evt); err != nil {
 		t.Fatal(err)
 	}
 	if evt.Kind != "run.started" {
