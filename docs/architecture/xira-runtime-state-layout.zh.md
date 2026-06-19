@@ -205,17 +205,18 @@ flowRoot    = stateDir/flow-runs
 第一步改默认推导和新字段名，移除旧 root 字段：
 
 ```text
-if no explicit state/run/session roots:
+if no explicit state_dir:
   stateDir = workspace/.xira
-  runRoot = stateDir/runs
-  sessionRoot = stateDir/sessions
+runRoot = stateDir/runs
+sessionRoot = stateDir/sessions
 ```
 
 配置读取规则：
 
 ```text
 只读取 state_dir
-不读取 state_root / run_root / session_root
+不读取 state_root / run_root / session_root；strict YAML 错误应提示改用 state_dir
+store 构造函数不接受空 stateDir；调用方必须传入 resolved state_dir，空值应直接失败
 status 返回 state_dir
 ```
 
@@ -241,6 +242,7 @@ stateDir/workspaces/<workspace-key>/
 - 删除示例里的 `run_root`
 - `entrypoints` 新配置相对 workspace 解析，示例写 `entrypoints: entrypoints.yaml`
 - 在 `xira status` 里展示最终 resolved paths
+- 如果 repo-root `.xira/` 与 resolved `state_dir` 同时存在，启动时给出 warning；不自动迁移旧状态。
 
 ## 已确认决策
 

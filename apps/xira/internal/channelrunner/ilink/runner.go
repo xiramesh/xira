@@ -92,7 +92,7 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 	stateDir := strings.TrimSpace(definition.StateDir)
 	if stateDir == "" {
 		if strings.TrimSpace(stateRoot) == "" {
-			stateRoot = ".xira"
+			return nil, fmt.Errorf("ilink entrypoint %q requires runtime state_dir or entrypoint state_dir", definition.ID)
 		}
 		stateDir = filepath.Join(stateRoot, "channels", "ilink", safePathSegment(definition.ID))
 	}

@@ -32,8 +32,6 @@ type Config struct {
 	ConfigPath     string
 	WorkspaceRoot  string
 	DefaultAgentID string
-	RunRoot        string
-	SessionRoot    string
 	StateDir       string
 	DeepSeekClient *deepseek.Client
 }
@@ -96,6 +94,7 @@ func NewService(cfg Config) (*Service, error) {
 		}
 		dsClient = deepseek.New()
 	}
+	warnIfSplitStateDirs(resolved)
 	return &Service{
 		agents:         manager,
 		flows:          flowRegistry,
@@ -138,11 +137,63 @@ func (s *Service) StateRoot() string {
 	return s.StateDir()
 }
 
+// StateDir returns the resolved runtime state directory. It contains runs,
+// sessions, flow runs, usage ledger, channel state, and workspace-keyed HITL
+// state. StateRoot is kept as a temporary compatibility alias for internal
+// callers that have not been renamed yet.
 func (s *Service) StateDir() string {
 	if s == nil {
 		return ""
 	}
 	return s.stateDir
+}
+
+func warnIfSplitStateDirs(resolved resolvedRuntimeConfig) {
+	legacyDir, stateDir, ok := splitStateDirs(resolved)
+	if !ok {
+		return
+	}
+	slog.Warn("legacy repo-root .xira and workspace state_dir both exist; Xira will use state_dir and will not migrate old state automatically",
+		"legacy_state_dir", legacyDir,
+		"state_dir", stateDir,
+	)
+}
+
+func splitStateDirs(resolved resolvedRuntimeConfig) (string, string, bool) {
+	if !resolved.ConfigLoaded {
+		return "", "", false
+	}
+	legacyDir := filepath.Join(filepath.Dir(resolved.ConfigPath), ".xira")
+	if samePath(legacyDir, resolved.StateDir) {
+		return "", "", false
+	}
+	legacyExists, err := dirExists(legacyDir)
+	if err != nil || !legacyExists {
+		return "", "", false
+	}
+	stateExists, err := dirExists(resolved.StateDir)
+	if err != nil || !stateExists {
+		return "", "", false
+	}
+	return legacyDir, resolved.StateDir, true
+}
+
+func dirExists(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return info.IsDir(), nil
+}
+
+func samePath(left, right string) bool {
+	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
+		return false
+	}
+	return filepath.Clean(left) == filepath.Clean(right)
 }
 
 func (s *Service) SessionManager() *fsession.Manager {

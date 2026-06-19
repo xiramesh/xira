@@ -85,14 +85,7 @@ func resolveRuntimeConfig(cfg Config) (resolvedRuntimeConfig, error) {
 	stateDir = resolveRelativePath(baseDir, stateDir)
 
 	runRoot := filepath.Join(stateDir, "runs")
-	if override := strings.TrimSpace(cfg.RunRoot); override != "" {
-		runRoot = resolveRelativePath(baseDir, override)
-	}
-
 	sessionRoot := filepath.Join(stateDir, "sessions")
-	if override := strings.TrimSpace(cfg.SessionRoot); override != "" {
-		sessionRoot = resolveRelativePath(baseDir, override)
-	}
 
 	entrypointsPath := strings.TrimSpace(configFile.Entrypoints)
 	entrypointsRequired := false
@@ -141,9 +134,25 @@ func readRuntimeConfigFile(path string, optional bool) (runtimeConfigFile, bool,
 	decoder := yaml.NewDecoder(strings.NewReader(string(content)))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
+		if hint := oldRootFieldHint(content); hint != "" {
+			return runtimeConfigFile{}, false, fmt.Errorf("parse config %s: %w; %s", path, err, hint)
+		}
 		return runtimeConfigFile{}, false, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	return cfg, true, nil
+}
+
+func oldRootFieldHint(content []byte) string {
+	var raw map[string]any
+	if err := yaml.Unmarshal(content, &raw); err != nil {
+		return ""
+	}
+	for _, field := range []string{"run_root", "session_root", "state_root"} {
+		if _, ok := raw[field]; ok {
+			return "hint: run_root/session_root/state_root have been replaced by state_dir"
+		}
+	}
+	return ""
 }
 
 func readEntrypointsFile(path string, required bool) ([]entrypoints.Definition, error) {

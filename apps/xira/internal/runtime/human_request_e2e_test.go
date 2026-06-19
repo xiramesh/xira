@@ -40,7 +40,6 @@ func TestE2EDirectHumanRequestAnswerResumesRun(t *testing.T) {
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -85,7 +84,6 @@ func TestE2EDirectHumanRequestApproveAndResume(t *testing.T) {
 		})), nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -125,7 +123,6 @@ func TestE2EDirectHumanRequestDeny(t *testing.T) {
 		})), nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -306,7 +303,6 @@ func TestE2EDelegateCompleted(t *testing.T) {
 		}
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -383,7 +379,6 @@ func TestE2EDelegateChildWaitingCancel(t *testing.T) {
 }
 
 func TestE2EProcessRestartBeforeHumanResponse(t *testing.T) {
-	runRoot := filepath.Join(t.TempDir(), "runs")
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	newService := func(t *testing.T) *Service {
 		t.Helper()
@@ -401,7 +396,6 @@ func TestE2EProcessRestartBeforeHumanResponse(t *testing.T) {
 			})), nil
 		})}
 		return newTestService(t, Config{
-			RunRoot:        runRoot,
 			StateDir:       stateRoot,
 			DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 		})
@@ -462,12 +456,10 @@ func TestE2EWorkspaceIsolation(t *testing.T) {
 	sharedState := filepath.Join(t.TempDir(), "state")
 	rtA := newTestService(t, Config{
 		WorkspaceRoot: filepath.Join(instanceA, "workspace"),
-		RunRoot:       filepath.Join(t.TempDir(), "runs-a"),
 		StateDir:      sharedState,
 	})
 	rtB := newTestService(t, Config{
 		WorkspaceRoot: filepath.Join(instanceB, "workspace"),
-		RunRoot:       filepath.Join(t.TempDir(), "runs-b"),
 		StateDir:      sharedState,
 	})
 	req, err := rtA.CreateHumanRequest(context.Background(), humanrequest.CreateRequest{

@@ -15,7 +15,6 @@ import (
 
 func TestFlowHumanApprovalUsesRuntimeHumanRequestStore(t *testing.T) {
 	rt := newTestService(t, Config{
-		RunRoot:  filepath.Join(t.TempDir(), "runs"),
 		StateDir: filepath.Join(t.TempDir(), "state"),
 	})
 	def := &flow.Definition{
@@ -84,7 +83,6 @@ func TestFlowHumanApprovalUsesRuntimeHumanRequestStore(t *testing.T) {
 
 func TestFlowRuntimePolicyInputRoutesToApproval(t *testing.T) {
 	rt := newTestService(t, Config{
-		RunRoot:  filepath.Join(t.TempDir(), "runs"),
 		StateDir: filepath.Join(t.TempDir(), "state"),
 	})
 	def := &flow.Definition{
@@ -146,7 +144,6 @@ func (s flowStaticDefinitions) Definition(id string) (*flow.Definition, error) {
 func TestFlowAgentStepPersistsSessionInTriggerChannel(t *testing.T) {
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	rt := newTestService(t, Config{
-		RunRoot:  filepath.Join(t.TempDir(), "runs"),
 		StateDir: stateRoot,
 	})
 	def := &flow.Definition{
@@ -238,7 +235,7 @@ func scopeChatID(scopeChat string) string {
 // reach the session and run records. Without this merge, flow step provenance
 // is silently dropped at the bridge.
 func TestFlowBridgeMergesMetadataIntoContextRaw(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	def := &flow.Definition{
 		SchemaVersion: flow.SchemaVersionDefinition,
 		ID:            "trace-flow",

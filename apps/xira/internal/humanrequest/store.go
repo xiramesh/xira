@@ -31,7 +31,7 @@ type Store struct {
 func NewStore(root string) (*Store, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
-		root = ".xira"
+		return nil, fmt.Errorf("human request store state dir is required")
 	}
 	return &Store{root: root}, nil
 }

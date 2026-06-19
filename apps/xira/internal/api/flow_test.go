@@ -82,7 +82,6 @@ steps:
 func newFlowAPIServer(t *testing.T) (*Server, *frt.Service, string) {
 	t.Helper()
 	cfg := frt.Config{
-		RunRoot:  filepath.Join(t.TempDir(), "runs"),
 		StateDir: filepath.Join(t.TempDir(), "state"),
 	}
 	rt := newAPITestService(t, cfg)
@@ -103,7 +102,6 @@ func newFlowRegistryAPIServer(t *testing.T, ids ...string) (*Server, *frt.Servic
 	}
 	cfg := frt.Config{
 		WorkspaceRoot: workspace,
-		RunRoot:       filepath.Join(t.TempDir(), "runs"),
 		StateDir:      filepath.Join(t.TempDir(), "state"),
 	}
 	rt := newAPITestService(t, cfg)

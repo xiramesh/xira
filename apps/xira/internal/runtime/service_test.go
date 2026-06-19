@@ -25,7 +25,7 @@ import (
 )
 
 func TestRunAgentWritesHarnessStore(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "hello",
 		Context: channel.NewInboundContext("test", "user-1", map[string]string{
@@ -60,7 +60,7 @@ func TestRunAgentWritesHarnessStore(t *testing.T) {
 }
 
 func TestDefaultAgentRespondsWithDeepSeekAdapter(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "hi", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatalf("run default agent: %v", err)
@@ -176,7 +176,7 @@ func TestHydrateADKSessionRestoresPersistedAgentHistory(t *testing.T) {
 }
 
 func TestStatusDoesNotExposeToolDiscoveryInternals(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	status := rt.Status()
 	for _, key := range []string{"known_tool_present", "known_tool_path"} {
 		if _, ok := status[key]; ok {
@@ -288,7 +288,67 @@ func TestRuntimeConfigRejectsOldRootFields(t *testing.T) {
 			if !strings.Contains(err.Error(), "field "+field+" not found") {
 				t.Fatalf("error = %v, want unknown field", err)
 			}
+			if !strings.Contains(err.Error(), "have been replaced by state_dir") {
+				t.Fatalf("error = %v, want state_dir migration hint", err)
+			}
 		})
+	}
+}
+
+func TestUsageStoreRequiresStateDir(t *testing.T) {
+	defer func() {
+		if recovered := recover(); recovered == nil {
+			t.Fatal("expected NewUsageStore to panic on empty state dir")
+		}
+	}()
+	_ = NewUsageStore(" ")
+}
+
+func TestSplitStateDirsDetectsLegacyRepoRootAndWorkspaceState(t *testing.T) {
+	instance := t.TempDir()
+	legacyDir := filepath.Join(instance, ".xira")
+	stateDir := filepath.Join(instance, "workspace", ".xira")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	gotLegacy, gotState, ok := splitStateDirs(resolvedRuntimeConfig{
+		ConfigLoaded: true,
+		ConfigPath:   filepath.Join(instance, "xira.yaml"),
+		StateDir:     stateDir,
+	})
+	if !ok {
+		t.Fatal("expected split state dirs to be detected")
+	}
+	if gotLegacy != legacyDir || gotState != stateDir {
+		t.Fatalf("split state dirs = %q %q, want %q %q", gotLegacy, gotState, legacyDir, stateDir)
+	}
+}
+
+func TestSplitStateDirsIgnoresMissingOrSameStateDir(t *testing.T) {
+	instance := t.TempDir()
+	legacyDir := filepath.Join(instance, ".xira")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, ok := splitStateDirs(resolvedRuntimeConfig{
+		ConfigLoaded: true,
+		ConfigPath:   filepath.Join(instance, "xira.yaml"),
+		StateDir:     legacyDir,
+	}); ok {
+		t.Fatal("same state dir should not be reported as split")
+	}
+
+	if _, _, ok := splitStateDirs(resolvedRuntimeConfig{
+		ConfigLoaded: true,
+		ConfigPath:   filepath.Join(instance, "xira.yaml"),
+		StateDir:     filepath.Join(instance, "workspace", ".xira"),
+	}); ok {
+		t.Fatal("missing workspace state dir should not be reported as split")
 	}
 }
 
@@ -353,7 +413,7 @@ func TestToolOutputForModelBoundsCommandStreams(t *testing.T) {
 }
 
 func TestRunAgentCanUseCommandRunTool(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: agents.ResearchAssistantAgentID,
 		Message: "please call command",
@@ -368,7 +428,7 @@ func TestRunAgentCanUseCommandRunTool(t *testing.T) {
 }
 
 func TestRuntimeToolDefinitionsDoNotExposeExec(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	profile := agents.BuiltinResearchAssistant()
 	for _, tool := range rt.toolDefinitions(context.Background(), profile) {
 		if tool.Function.Name == "exec" {
@@ -387,7 +447,7 @@ func TestRuntimeToolDefinitionsDoNotExposeExec(t *testing.T) {
 }
 
 func TestAgentRegistryExposesLoadedValidEnabledProfiles(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	entries := rt.AgentRegistry()
 	if len(entries) != 2 {
 		t.Fatalf("registry entries = %+v", entries)
@@ -589,7 +649,7 @@ Use local evidence before summaries.
 }
 
 func TestRuntimeOwnedToolsAreInjectedByPolicyOnly(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	defaultProfile := agents.BuiltinXiraAssistant()
 	researchProfile := agents.BuiltinResearchAssistant()
 	for _, name := range []string{"delegate_agent", "emit_status"} {
@@ -619,7 +679,7 @@ func TestRuntimeOwnedToolsAreInjectedByPolicyOnly(t *testing.T) {
 }
 
 func TestRuntimeToolAllowlistFiltersProfileTools(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	profile := agents.BuiltinXiraAssistant()
 	ctx := contextWithRuntimeToolAllowlist(context.Background(), []string{"write_file"})
 	defs := rt.toolDefinitions(ctx, profile)
@@ -646,7 +706,7 @@ func TestRuntimeToolAllowlistFiltersProfileTools(t *testing.T) {
 }
 
 func TestRuntimeToolAllowlistCanDisableAllTools(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	profile := agents.BuiltinXiraAssistant()
 	ctx := contextWithRuntimeToolAllowlist(context.Background(), nil)
 	if defs := rt.toolDefinitions(ctx, profile); len(defs) != 0 {
@@ -666,7 +726,7 @@ func TestRuntimeToolAllowlistCanDisableAllTools(t *testing.T) {
 }
 
 func TestRuntimeToolAllowlistCanExplicitlyIncludeNativeTools(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	profile := agents.BuiltinXiraAssistant()
 	ctx := contextWithRuntimeToolAllowlist(context.Background(), []string{"write_file", "human.request", "emit_status", "delegate_agent"})
 	defs := rt.toolDefinitions(ctx, profile)
@@ -714,7 +774,7 @@ func TestRuntimeToolAllowlistRejectsUndeclaredNativeHumanRequestCall(t *testing.
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot: filepath.Join(t.TempDir(), "runs"),
+		StateDir: t.TempDir(),
 		DeepSeekClient: deepseek.New(
 			deepseek.WithBaseURLForTest("http://deepseek.test"),
 			deepseek.WithAPIKey("test-key"),
@@ -774,7 +834,7 @@ func TestRuntimeToolAllowlistRejectsUndeclaredNativeHumanRequestCall(t *testing.
 }
 
 func TestRuntimeEventsUseV1EnvelopeWithLegacyFields(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "please call command",
 		Context: channel.NewInboundContext("xiragarden", "user-1", nil),
@@ -811,7 +871,7 @@ func TestRuntimeEventsUseV1EnvelopeWithLegacyFields(t *testing.T) {
 }
 
 func TestToolStartedEventInputCannotSpoofRuntimeIdentity(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	runID := "spoof-tool-event-run"
 	base := runtimeEventBase{
 		RunID:        runID,
@@ -855,7 +915,7 @@ func TestToolStartedEventInputCannotSpoofRuntimeIdentity(t *testing.T) {
 }
 
 func TestToolOnlyTurnEmitsNoDelegationEvents(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "please call command",
 		Context: channel.NewInboundContext("test", "", nil),
@@ -885,7 +945,7 @@ func TestAssistantStatusToolEmitsStatusEventWithoutPersistingContent(t *testing.
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "emit status", Context: channel.NewInboundContext("test", "user-1", nil)})
@@ -946,7 +1006,7 @@ func TestAuthorizedDelegationEmitsProgressAndUsesEphemeralChildRun(t *testing.T)
 	})}
 	runRoot := filepath.Join(t.TempDir(), "runs")
 	rt := newTestService(t, Config{
-		RunRoot:        runRoot,
+		StateDir:       filepath.Dir(runRoot),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "please delegate", Context: channel.NewInboundContext("xiragarden", "user-1", nil)})
@@ -1034,7 +1094,7 @@ func TestAuthorizedDelegationEmitsProgressAndUsesEphemeralChildRun(t *testing.T)
 }
 
 func TestContextPacketTargetUsesEffectiveInstructionAndActualRegistryTools(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	childRunID := "child-run"
 	if err := rt.RunStore().InitRun(childRunID); err != nil {
 		t.Fatal(err)
@@ -1071,7 +1131,7 @@ func TestContextPacketTargetUsesEffectiveInstructionAndActualRegistryTools(t *te
 }
 
 func TestDelegateDoesNotExposeParentTranscriptToChild(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	childRunID := "child-transcript-boundary"
 	if err := rt.RunStore().InitRun(childRunID); err != nil {
 		t.Fatal(err)
@@ -1103,7 +1163,7 @@ func TestDelegateDoesNotExposeParentTranscriptToChild(t *testing.T) {
 
 func TestContextPacketMaterializesParentToolOutputRef(t *testing.T) {
 	runRoot := filepath.Join(t.TempDir(), "runs")
-	rt := newTestService(t, Config{RunRoot: runRoot})
+	rt := newTestService(t, Config{StateDir: filepath.Dir(runRoot)})
 	parentRunID := "parent-run"
 	childRunID := "child-run"
 	if err := rt.RunStore().InitRun(parentRunID); err != nil {
@@ -1248,7 +1308,7 @@ func TestDelegateOutputEnvelopeHidesInternalChildState(t *testing.T) {
 }
 
 func TestDelegateRejectsUnauthorizedDepthAndParallelBeforeChildRun(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	base := runtimeEventBase{
 		RunID:        "parent-run",
 		AgentID:      agents.DefaultAgentID,
@@ -1374,7 +1434,7 @@ func TestDelegationContextTruncationIsVisibleToParent(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
@@ -1419,7 +1479,7 @@ func TestDelegateTimeoutPreventsLateSuccessEvents(t *testing.T) {
 		}
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate slowly", Context: channel.NewInboundContext("test", "", nil)})
@@ -1465,7 +1525,7 @@ func TestDelegateOversizedDurationClampsToPolicyMax(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate oversized duration", Context: channel.NewInboundContext("test", "", nil)})
@@ -1509,7 +1569,7 @@ func TestDelegateAgentRejectsEmptyChildResultAsInvalidChildResult(t *testing.T) 
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate empty result", Context: channel.NewInboundContext("test", "", nil)})
@@ -1539,7 +1599,7 @@ func TestDelegateAgentRejectsEmptyChildResultAsInvalidChildResult(t *testing.T) 
 }
 
 func TestDelegateAgentRejectsSpoofedRuntimeFieldsBeforeChildRun(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	base := runtimeEventBase{
 		RunID:        "parent-run",
 		AgentID:      agents.DefaultAgentID,
@@ -1573,7 +1633,7 @@ func TestDelegateAgentRejectsSpoofedRuntimeFieldsBeforeChildRun(t *testing.T) {
 }
 
 func TestDelegateAgentRejectsUnknownInputFieldsBeforeChildRun(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	base := runtimeEventBase{
 		RunID:        "parent-run",
 		AgentID:      agents.DefaultAgentID,
@@ -1604,7 +1664,7 @@ func TestDelegateAgentRejectsUnknownInputFieldsBeforeChildRun(t *testing.T) {
 }
 
 func TestDelegateAgentRejectsUnsupportedExpectedOutputSchemaBeforeChildRun(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	base := runtimeEventBase{
 		RunID:        "parent-run",
 		AgentID:      agents.DefaultAgentID,
@@ -1662,7 +1722,7 @@ func TestDelegateAgentRejectsForgedChildResultRefs(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate forged result", Context: channel.NewInboundContext("test", "", nil)})
@@ -1697,7 +1757,7 @@ func TestDelegateAgentRejectsUnregisteredChildArtifactEvidenceRef(t *testing.T) 
 
 func TestDelegateEvidenceRefsAllowExistingChildToolArtifact(t *testing.T) {
 	runRoot := filepath.Join(t.TempDir(), "runs")
-	rt := newTestService(t, Config{RunRoot: runRoot})
+	rt := newTestService(t, Config{StateDir: filepath.Dir(runRoot)})
 	childRunID := "child-run"
 	if err := rt.RunStore().InitRun(childRunID); err != nil {
 		t.Fatal(err)
@@ -1740,7 +1800,7 @@ func TestDelegateEvidenceRefsAllowExistingChildToolArtifact(t *testing.T) {
 }
 
 func TestUnauthorizedDelegationRecordsCapabilityGap(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	base := runtimeEventBase{
 		RunID:        "parent-run",
 		AgentID:      agents.DefaultAgentID,
@@ -1774,7 +1834,7 @@ func TestUnauthorizedDelegationRecordsCapabilityGap(t *testing.T) {
 }
 
 func TestRunAgentRejectsLegacyExecToolCall(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	rec := rt.executeToolCall(
 		context.Background(),
 		agents.BuiltinResearchAssistant(),
@@ -1819,7 +1879,7 @@ func TestRunAgentReturnsBoundedShellFailureToADKModel(t *testing.T) {
 	})}
 
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
@@ -1875,7 +1935,7 @@ func TestRunAgentReturnsBoundedShellFailureToADKModel(t *testing.T) {
 }
 
 func TestToolOutputReadCanReadRawOutputFromCurrentRun(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	runID := "tool-output-read-run"
 	if err := rt.RunStore().InitRun(runID); err != nil {
 		t.Fatal(err)
@@ -1924,7 +1984,7 @@ func TestToolOutputReadCanReadRawOutputFromCurrentRun(t *testing.T) {
 }
 
 func TestRunAgentPersistsToolTranscriptMessages(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: agents.ResearchAssistantAgentID,
 		Message: "please call command",
@@ -1961,7 +2021,7 @@ func TestRunAgentPersistsToolTranscriptMessages(t *testing.T) {
 
 func TestHydrateADKSessionRestoresPersistedToolHistory(t *testing.T) {
 	stateRoot := t.TempDir()
-	rt := newTestService(t, Config{RunRoot: filepath.Join(stateRoot, "runs")})
+	rt := newTestService(t, Config{StateDir: stateRoot})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		AgentID: agents.ResearchAssistantAgentID,
 		Message: "please call command",
@@ -1971,7 +2031,7 @@ func TestHydrateADKSessionRestoresPersistedToolHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reloaded := newTestService(t, Config{RunRoot: filepath.Join(stateRoot, "runs")})
+	reloaded := newTestService(t, Config{StateDir: stateRoot})
 	agentSessionID := adkSessionID(fsession.BuildAgentSessionID(resp.SessionID, resp.AgentID), "rehydrate-test")
 	if restored, _, err := reloaded.hydrateADKSession(context.Background(), "user-1", agentSessionID, resp.AgentID, resp.SessionID); err != nil {
 		t.Fatal(err)
@@ -2029,7 +2089,7 @@ func TestADKSessionDoesNotReuseUnpersistedToolEventsAcrossRuns(t *testing.T) {
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	_, err := rt.RunAgent(context.Background(), TurnRequest{Message: "bad shell", Context: channel.NewInboundContext("test", "user-1", nil)})
@@ -2066,7 +2126,7 @@ func TestRepeatedFailedShellCommandIsBlockedOnThirdAttempt(t *testing.T) {
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
@@ -2107,7 +2167,7 @@ func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
 	})}
 
 	rt, err := NewService(Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
 	if err != nil {
@@ -2157,7 +2217,7 @@ func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
 func TestRunAgentTracesLLMRequestWhenEnabled(t *testing.T) {
 	t.Setenv(llmTraceEnv, "1")
 	runRoot := filepath.Join(t.TempDir(), "runs")
-	rt := newTestService(t, Config{RunRoot: runRoot})
+	rt := newTestService(t, Config{StateDir: filepath.Dir(runRoot)})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "trace me", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
@@ -2200,7 +2260,7 @@ func TestRunAgentTracesLLMRequestWhenEnabled(t *testing.T) {
 func TestRunAgentStoresRawLLMRequestAndResponseWhenTraceEnabled(t *testing.T) {
 	t.Setenv(llmTraceEnv, "1")
 	runRoot := filepath.Join(t.TempDir(), "runs")
-	rt := newTestService(t, Config{RunRoot: runRoot})
+	rt := newTestService(t, Config{StateDir: filepath.Dir(runRoot)})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "raw trace me", Context: channel.NewInboundContext("test", "", nil)})
 	if err != nil {
 		t.Fatalf("run agent: %v", err)
@@ -2240,7 +2300,6 @@ func TestRunAgentStoresRawLLMRequestAndResponseWhenTraceEnabled(t *testing.T) {
 }
 
 func TestRunAgentRecordsUsageWithoutLLMTrace(t *testing.T) {
-	runRoot := filepath.Join(t.TempDir(), "runs")
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
@@ -2254,7 +2313,6 @@ func TestRunAgentRecordsUsageWithoutLLMTrace(t *testing.T) {
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        runRoot,
 		StateDir:       stateRoot,
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -2308,7 +2366,6 @@ func TestRunAgentRecordsUsageWithoutLLMTrace(t *testing.T) {
 }
 
 func TestDelegatedChildRunAppendsLLMCallsToUsageLedger(t *testing.T) {
-	runRoot := filepath.Join(t.TempDir(), "runs")
 	stateRoot := filepath.Join(t.TempDir(), "state")
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		var req deepseek.ChatRequest
@@ -2338,7 +2395,6 @@ func TestDelegatedChildRunAppendsLLMCallsToUsageLedger(t *testing.T) {
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        runRoot,
 		StateDir:       stateRoot,
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -2493,7 +2549,7 @@ func TestExplicitAgentCanRunWorkspaceResearchAssistant(t *testing.T) {
 }
 
 func TestExplicitAgentSharesConversationSessionWithDefaultAgent(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	metadata := map[string]string{
 		"account":   "tenant-a",
 		"chat_id":   "chat-1",
@@ -2617,7 +2673,7 @@ func TestVerificationFailureCreatesEvolutionCandidate(t *testing.T) {
 
 func TestNewServiceRequiresDeepSeekAPIKey(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "")
-	if _, err := NewService(Config{RunRoot: filepath.Join(t.TempDir(), "runs")}); err == nil || !strings.Contains(err.Error(), "DEEPSEEK_API_KEY is required") {
+	if _, err := NewService(Config{StateDir: t.TempDir()}); err == nil || !strings.Contains(err.Error(), "DEEPSEEK_API_KEY is required") {
 		t.Fatalf("NewService() error = %v, want DEEPSEEK_API_KEY requirement", err)
 	}
 }
@@ -2628,11 +2684,7 @@ func newTestService(t *testing.T, cfg Config) *Service {
 		cfg.DeepSeekClient = fakeDeepSeekClient(t)
 	}
 	if cfg.StateDir == "" {
-		if cfg.RunRoot != "" {
-			cfg.StateDir = filepath.Dir(cfg.RunRoot)
-		} else {
-			cfg.StateDir = t.TempDir()
-		}
+		cfg.StateDir = t.TempDir()
 	}
 	rt, err := NewService(cfg)
 	if err != nil {
@@ -3142,7 +3194,6 @@ func TestWaitingHumanRunPersistsSessionHistory(t *testing.T) {
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -3202,7 +3253,6 @@ func TestResumeAfterHumanResponsePersistsAnswer(t *testing.T) {
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})

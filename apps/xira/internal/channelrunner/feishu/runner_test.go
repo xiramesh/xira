@@ -2,6 +2,8 @@ package feishu
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,6 +68,29 @@ func TestMessageDeduperRejectsInFlightDuplicate(t *testing.T) {
 	}
 	if deduper.Begin("feishu-default:om-1", now.Add(time.Second)) {
 		t.Fatal("duplicate in-flight message should be rejected")
+	}
+}
+
+func TestChannelStateDirRequiresRuntimeOrEntrypointStateDir(t *testing.T) {
+	stateRoot := t.TempDir()
+	got, err := channelStateDir(entrypoints.Definition{ID: "feishu/default"}, stateRoot, "feishu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Join(stateRoot, "channels", "feishu", "feishu_default") {
+		t.Fatalf("state dir = %q", got)
+	}
+
+	got, err = channelStateDir(entrypoints.Definition{ID: "feishu-default", StateDir: "custom-state"}, "", "feishu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "custom-state" {
+		t.Fatalf("explicit state dir = %q", got)
+	}
+
+	if _, err := channelStateDir(entrypoints.Definition{ID: "feishu-default"}, " ", "feishu"); err == nil || !strings.Contains(err.Error(), "requires runtime state_dir") {
+		t.Fatalf("channelStateDir() error = %v, want state dir requirement", err)
 	}
 }
 

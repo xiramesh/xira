@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +13,7 @@ import (
 )
 
 func TestWebSocketChannelMessageEmitsAckEventAndResponse(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -97,7 +96,7 @@ func TestWebSocketChannelMessageEmitsAckEventAndResponse(t *testing.T) {
 }
 
 func TestWebSocketChannelUsesFrameIDAsMessageIDFallback(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -144,7 +143,7 @@ func TestWebSocketChannelUsesFrameIDAsMessageIDFallback(t *testing.T) {
 }
 
 func TestWebSocketChannelRejectsMismatchedChannel(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -173,7 +172,7 @@ func TestWebSocketChannelRejectsMismatchedChannel(t *testing.T) {
 }
 
 func TestWebSocketChannelRejectsEntrypointMismatch(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -203,7 +202,7 @@ func TestWebSocketChannelRejectsEntrypointMismatch(t *testing.T) {
 }
 
 func TestWebSocketChannelIgnoresUnmentionedGroupMessage(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -241,7 +240,7 @@ func TestWebSocketChannelIgnoresUnmentionedGroupMessage(t *testing.T) {
 }
 
 func TestWebSocketChannelRejectsHumanResponseUntilResumeBindingExists(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -267,7 +266,7 @@ func TestWebSocketChannelRejectsHumanResponseUntilResumeBindingExists(t *testing
 }
 
 func TestWebSocketChannelRejectsOversizedInboundFrame(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -300,7 +299,7 @@ func TestWebSocketChannelRejectsOversizedInboundFrame(t *testing.T) {
 }
 
 func TestWebSocketChannelDedupesMessageID(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")

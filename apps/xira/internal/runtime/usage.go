@@ -35,7 +35,7 @@ type UsageStore struct {
 
 func NewUsageStore(stateDir string) *UsageStore {
 	if strings.TrimSpace(stateDir) == "" {
-		stateDir = ".xira"
+		panic("usage store state dir is required")
 	}
 	return &UsageStore{stateDir: stateDir}
 }

@@ -16,7 +16,7 @@ import (
 )
 
 func TestHumanRequestToolIsAvailableToNativeProfiles(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	defs := rt.toolDefinitions(context.Background(), agents.BuiltinXiraAssistant())
 	for _, def := range defs {
 		if def.Function.Name == "human_request" {
@@ -27,7 +27,7 @@ func TestHumanRequestToolIsAvailableToNativeProfiles(t *testing.T) {
 }
 
 func TestHumanRequestToolCanBeDisabledForApprovedToolReplay(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	ctx := contextWithRuntimeNativeToolsDisabled(context.Background())
 	defs := rt.toolDefinitions(ctx, agents.BuiltinXiraAssistant())
 	for _, def := range defs {
@@ -47,7 +47,7 @@ func TestHumanRequestToolCanBeDisabledForApprovedToolReplay(t *testing.T) {
 }
 
 func TestHumanRequestToolIsAvailableToADKProfiles(t *testing.T) {
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	tools, err := rt.adkTools(context.Background(), agents.BuiltinXiraAssistant(), func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {}, func(ToolCallRecord) {})
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +81,6 @@ func TestHumanRequestToolCreatesPendingRequestAndInterrupt(t *testing.T) {
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -137,7 +136,6 @@ func TestHumanRequestToolDefaultsMissingKindToFreeform(t *testing.T) {
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -232,7 +230,6 @@ func TestNativePathStopsBeforeSecondModelCallOnInterrupt(t *testing.T) {
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -298,7 +295,6 @@ func TestADKPathStopsBeforeSecondModelCallOnInterrupt(t *testing.T) {
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -327,7 +323,6 @@ func TestRunInterruptDoesNotValidateFinalResponseOrCreateEvolutionCandidate(t *t
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -368,7 +363,6 @@ func runHumanRequestInterrupt(t *testing.T, callID, question string) (*Service, 
 		}, nil
 	})}
 	rt := newTestService(t, Config{
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
@@ -450,7 +444,7 @@ func TestHumanRequestToolRejectsInvalidOptions(t *testing.T) {
 
 func newHumanRequestToolTestRuntime(t *testing.T, runID, sessionID string) (*Service, context.Context) {
 	t.Helper()
-	rt := newTestService(t, Config{RunRoot: filepath.Join(t.TempDir(), "runs"), StateDir: filepath.Join(t.TempDir(), "state")})
+	rt := newTestService(t, Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	if err := rt.RunStore().InitRun(runID); err != nil {
 		t.Fatal(err)
 	}

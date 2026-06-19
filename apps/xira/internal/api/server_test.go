@@ -25,7 +25,7 @@ import (
 )
 
 func TestAgentRunAPI(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -51,7 +51,7 @@ func TestAgentRunAPI(t *testing.T) {
 }
 
 func TestXiraGardenMessageChannelAPI(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -83,7 +83,7 @@ func TestXiraGardenMessageChannelAPI(t *testing.T) {
 }
 
 func TestXiraGardenMessageRejectsMismatchedChannel(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -102,7 +102,7 @@ func TestXiraGardenMessageRejectsMismatchedChannel(t *testing.T) {
 }
 
 func TestShellTurnAPIIsNotAChannelEntrypoint(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -125,7 +125,7 @@ func TestAgentsAPIUsesWorkspaceDiscoveredAgents(t *testing.T) {
 	rt, err := frt.NewService(frt.Config{
 		WorkspaceRoot:  workspace,
 		DefaultAgentID: "xira-assistant",
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
+		StateDir:       t.TempDir(),
 		DeepSeekClient: fakeAPIDeepSeekClient(t),
 	})
 	if err != nil {
@@ -159,7 +159,7 @@ func TestAgentsAPIUsesWorkspaceDiscoveredAgents(t *testing.T) {
 }
 
 func TestEventsWebSocketReceivesRunEvents(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -192,7 +192,7 @@ func TestEventsWebSocketReceivesRunEvents(t *testing.T) {
 }
 
 func TestXiraGardenEventsWebSocketReceivesChannelEvents(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{RunRoot: filepath.Join(t.TempDir(), "runs")})
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")

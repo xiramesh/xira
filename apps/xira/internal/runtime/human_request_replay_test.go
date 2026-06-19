@@ -653,7 +653,6 @@ Direct.
 `)
 	return newTestService(t, Config{
 		WorkspaceRoot:  workspace,
-		RunRoot:        filepath.Join(t.TempDir(), "runs"),
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
