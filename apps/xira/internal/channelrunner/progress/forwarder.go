@@ -138,6 +138,17 @@ func (f *Forwarder) handleBusEvent(evt runtime.RuntimeEvent) {
 	if !isDeliverableKind(evt.Kind) {
 		return
 	}
+	// A delegated (child) run can also emit run.waiting_human, and because the
+	// child inherits the parent's MessageID it matches this forwarder's inbound
+	// scope. It carries no summary, so it renders as a context-free prompt that
+	// arrives BEFORE the parent's authoritative run.waiting_human (which carries
+	// the summary). Two prompts + no dedup (different text) = a confusing
+	// duplicate. Only the top-level run (DelegationDepth 0) is the canonical
+	// interaction signal; the child's is still audited/logged, just not projected
+	// to IM chat. See docs/architecture/xira-conversation-progress-feed-v0.zh.md.
+	if evt.Kind == "run.waiting_human" && evt.Scope != nil && evt.Scope.DelegationDepth > 0 {
+		return
+	}
 	if !f.enqueue(evt) {
 		slog.Warn("progress forwarder queue full; dropping event",
 			"kind", evt.Kind, "event_id", evt.ID)

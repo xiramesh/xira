@@ -363,3 +363,37 @@ func TestForwarderDisabledWithoutMessageID(t *testing.T) {
 	}
 	fwd.Stop() // must be a safe no-op
 }
+
+// TestForwarderSkipsChildWaitingHuman: a delegated (child) run emits
+// run.waiting_human with the parent's MessageID in its scope (it inherits the
+// trigger identity), so it matches this forwarder. But it carries no summary
+// and is NOT the canonical interaction signal — the parent's own
+// run.waiting_human (DelegationDepth 0, with summary) is. Projecting the
+// child's would yield a context-free duplicate prompt. The child event is still
+// audited/logged upstream; it must only be suppressed from IM delivery.
+func TestForwarderSkipsChildWaitingHuman(t *testing.T) {
+	bus := runtime.NewEventBus()
+	defer bus.Close()
+	sender := &recordingSender{}
+	fwd := Start(context.Background(), Request{EventBus: bus, Inbound: inboundFixture(), Policy: testPolicy(), Sender: sender})
+
+	// Child run waiting_human: matches inbound scope (same MessageID) but
+	// DelegationDepth > 0 -> must NOT be delivered.
+	childEvt := makeEvent("run.waiting_human", true)
+	childEvt.Scope.DelegationDepth = 1
+	bus.Publish(childEvt)
+
+	// Parent (top-level) run waiting_human: DelegationDepth 0 -> IS delivered.
+	parentEvt := makeEvent("run.waiting_human", true)
+	parentEvt.ID = "evt-parent-waiting"
+	bus.Publish(parentEvt)
+
+	if !waitUntil(t, time.Second, func() bool { return containsKind(sender, "run.waiting_human") }) {
+		t.Fatalf("parent waiting_human (depth 0) must be delivered: %v", sender.kinds())
+	}
+	time.Sleep(120 * time.Millisecond)
+	if n := countKind(sender, "run.waiting_human"); n != 1 {
+		t.Fatalf("child waiting_human must be suppressed; got %d deliveries: %v", n, sender.kinds())
+	}
+	fwd.Stop()
+}

@@ -105,3 +105,44 @@ func TestRunDoesNotEmitAssistantFinalOnWaitingHuman(t *testing.T) {
 		t.Fatalf("assistant.final must NOT be emitted on waiting_human: %v", eventKinds(resp.Events))
 	}
 }
+
+// TestRunDoesNotEmitAssistantFinalOnFailed: a run whose final response is
+// non-empty but FAILS verification must NOT publish assistant.final. This is
+// the regression for the drain bug — the old blacklist condition
+// (`status != waiting_human`) fired assistant.final on failed runs, which
+// drain()ed the forwarder and dropped the delegate failed/timeout progress the
+// user most needs to see. The whitelist (`status == completed`) must hold even
+// when final is populated.
+func TestRunDoesNotEmitAssistantFinalOnFailed(t *testing.T) {
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
+	// Force verification to fail on a non-empty final. Without this seam the
+	// failed-run path is unreachable through the public API (the default runner
+	// only fails on empty final).
+	rt.verifier = failingVerifier{}
+
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		Message: "produce a draft that won't pass checks",
+		Context: channel.NewInboundContext("test", "user-1", nil),
+	})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if resp.Status != "failed" {
+		t.Fatalf("status = %q, want failed", resp.Status)
+	}
+	if strings.TrimSpace(resp.FinalResponse) == "" {
+		t.Fatalf("expected non-empty final response even on failed verification")
+	}
+	if _, ok := findEvent(resp.Events, "assistant.final"); ok {
+		t.Fatalf("assistant.final must NOT be emitted on a failed run (would drain progress): %v", eventKinds(resp.Events))
+	}
+}
+
+// failingVerifier always returns a failed result, regardless of input. Used to
+// reach the non-empty-final + failed-verification path that the default runner
+// cannot produce.
+type failingVerifier struct{}
+
+func (failingVerifier) Verify(string, []string) VerificationResult {
+	return VerificationResult{Status: "failed", Errors: []string{"forced verification failure"}}
+}
