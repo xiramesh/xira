@@ -585,8 +585,9 @@ payload 默认不可直接拼接到文案。`payload.summary` 是唯一允许直
 5. 同一个 turn 的 progress（silence + delegate 异常）不超过 `MaxMessagesPerTurn` 上限。`run.waiting_human` 与 final 是交互信号，不计入此限；即使 progress 已达上限，waiting_human 仍须投递。
 6. progress 发送失败不影响 final response 生成。
 7. 不同 chat/sender/entrypoint 的 events 不会串发。
-8. runtime 在 run 正常产出 final 时发布 live `assistant.final`（`final` 非空且非 `waiting_human`）；
-   HITL 与纯失败不发。forwarder 收到后停止发送，不与 `sendFinal` 重复投递。
+8. runtime 在 run 正常产出 final 时发布 live `assistant.final`（`final` 非空且
+   `resp.Status == "completed"`，白名单：failed run 即便 final 非空也不发，避免 drain 吞掉
+   失败进度）；HITL 与纯失败不发。forwarder 收到后停止发送，不与 `sendFinal` 重复投递。
 
 （`assistant.status` 的 chat projection 是 v1+ 验收项，不在 v0 验收内。）
 
