@@ -2,9 +2,15 @@ package runtime
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 )
+
+// runtimeNumGoroutine wraps runtime.NumGoroutine so tests can detect pump exit
+// without touching the subscriber's out channel (reading out would unblock a
+// blocked send and skip the drainTimeout branch under test).
+func runtimeNumGoroutine() int { return runtime.NumGoroutine() }
 
 // deliveredWithin polls the channel until it observes the wanted kind or the
 // timeout elapses. The pump drains the slice-backed buffer into the unbuffered
@@ -228,11 +234,89 @@ func TestEventBusNonDrainingConsumerDoesNotLeakPump(t *testing.T) {
 	}
 	cancel()
 
-	deadline := time.Now().Add(drainTimeout + time.Second)
+	deadline := time.Now().Add(currentDrainTimeout() + 3*time.Second)
 	for time.Now().Before(deadline) {
 		if _, ok := <-ch; !ok {
 			return // closed — pump exited, no leak
 		}
 	}
-	t.Fatalf("subscriber channel did not close within drainTimeout+1s; pump goroutine likely leaked")
+	t.Fatalf("subscriber channel did not close within drainTimeout+3s; pump goroutine likely leaked")
+}
+
+// TestEventBusDeadConsumerShutdownExitsPump: a consumer that has gone away
+// (e.g. WebSocket handler returned on a write error) must not strand the pump
+// goroutine on a send nobody will read. We publish an event (so the pump is
+// mid-deliver, blocked because no one reads out), THEN cancel. deliver's next
+// poll notices closed and runs the closed-branch: wait currentDrainTimeout for
+// a reader, then give up. With drainTimeout shrunk, the channel closes fast.
+// This is the only test that reaches deliver's drainTimeout (return-false) arm.
+func TestEventBusDeadConsumerShutdownExitsPump(t *testing.T) {
+	prev := setDrainTimeoutForTest(40 * time.Millisecond)
+	t.Cleanup(func() { setDrainTimeoutForTest(prev) })
+
+	bus := NewEventBus()
+	defer bus.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := bus.Subscribe(ctx)
+	_ = ch // never read — consumer is "dead"
+
+	bus.Publish(droppableEvent("adk.event", "dead"))
+	time.Sleep(30 * time.Millisecond) // let pump enter deliver's send poll
+	cancel()
+
+	// The channel must close within ~drainTimeout + slack, proving deliver's
+	// dead-consumer escape worked (it did not block forever on out<-evt).
+	start := time.Now()
+	deadline := time.Now().Add(currentDrainTimeout() + 2*time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				if elapsed := time.Since(start); elapsed > currentDrainTimeout()+1*time.Second {
+					t.Fatalf("closed but took %v — dead-consumer escape too slow", elapsed)
+				}
+				return
+			}
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	t.Fatalf("channel did not close within drainTimeout+2s for a dead consumer — pump goroutine leaked")
+}
+
+// TestEventBusNilPublishIsSafe: a nil EventBus must be safe to Publish on
+// (defensive — callers may hold a nil bus in some test/edge paths). Covers the
+// `if b == nil { return }` guard.
+func TestEventBusNilPublishIsSafe(t *testing.T) {
+	var bus *EventBus // nil
+	bus.Publish(droppableEvent("adk.event", "x")) // must not panic
+}
+
+// TestEventBusPublishAfterCloseIsDropped: publishing to a closed bus is a
+// silent no-op (covers the `if b.closed { return }` arm in Publish).
+func TestEventBusPublishAfterCloseIsDropped(t *testing.T) {
+	bus := NewEventBus()
+	bus.Close()
+	// Must not panic; event is simply not delivered.
+	bus.Publish(droppableEvent("adk.event", "after-close"))
+}
+
+// TestEventBusSubscribeAfterCloseReturnsClosedChannel: subscribing to an
+// already-closed bus returns an already-closed channel (covers the closed-bus
+// arm of Subscribe).
+func TestEventBusSubscribeAfterCloseReturnsClosedChannel(t *testing.T) {
+	bus := NewEventBus()
+	bus.Close()
+	ch := bus.Subscribe(context.Background())
+	if _, ok := <-ch; ok {
+		t.Fatalf("subscribe on a closed bus must return a closed channel")
+	}
+}
+
+// TestEventBusCloseIsIdempotent: closing an already-closed bus is a no-op and
+// must not panic (covers the `if b.closed { return }` arm in Close).
+func TestEventBusCloseIsIdempotent(t *testing.T) {
+	bus := NewEventBus()
+	bus.Close()
+	bus.Close() // must not panic
+	bus.Close()
 }

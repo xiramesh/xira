@@ -199,13 +199,14 @@ func oldestBelowLocked(buf []RuntimeEvent, level int) int {
 // the burst absorber means a slow consumer (blocked on out) cannot cause the
 // publisher to drop — the buffer absorbs the burst first.
 //
-// Send is a blocking send that yields to a shutdown timer: at shutdown the
-// consumer may have stopped reading (e.g. the WebSocket handler returned on a
-// write error without draining). To avoid stranding this goroutine forever on
-// such a consumer, the send races against drainTimeout after shutdown is set —
-// but only after shutdown, so a still-draining consumer (the forwarder, whose
-// Stop() waits for consumeLoop to finish) always gets the buffered events
-// (§16.5). Events are never dropped before shutdown.
+// Send never blocks indefinitely: deliver polls every sendWait, re-checking the
+// closed flag. So a consumer that has gone away (e.g. a WebSocket handler that
+// returned on a write error without draining) cannot strand this goroutine on a
+// send nobody will read — once shutdown flips closed, the next poll notices it,
+// abandons the blocked event, drops the remaining buffer, and closes out. A
+// draining consumer (the forwarder, whose Stop() keeps consumeLoop reading
+// until the channel closes) always wins each send promptly, preserving the
+// §16.5 drain guarantee.
 func (s *subscriber) pump() {
 	s.mu.Lock()
 	for {
@@ -218,18 +219,13 @@ func (s *subscriber) pump() {
 		}
 		evt := s.buf[0]
 		s.buf = s.buf[1:]
-		closed := s.closed
 		s.mu.Unlock()
-		if !closed {
-			s.out <- evt
-		} else {
-			// Shutting down: prefer the consumer (forwarder drains at Stop),
-			// but bound the wait so a non-draining consumer can't leak this
-			// goroutine.
-			select {
-			case s.out <- evt:
-			case <-time.After(drainTimeout):
-			}
+		if !s.deliver(evt) {
+			// Shutdown noticed mid-deliver: a dead consumer can't be satisfied.
+			// Drop the remaining buffer and exit so we don't leak.
+			s.mu.Lock()
+			s.buf = s.buf[:0]
+			break
 		}
 		s.mu.Lock()
 	}
@@ -237,15 +233,70 @@ func (s *subscriber) pump() {
 	close(s.out)
 }
 
-// drainTimeout bounds how long pump waits for a consumer to read a buffered
-// event during shutdown. Long enough that a draining forwarder (which reads in
-// a tight loop at Stop) always wins; short enough that a dead consumer (e.g. a
-// WebSocket handler that returned) can't leak the goroutine for long.
-const drainTimeout = 2 * time.Second
+// deliver hands one event to the consumer on out. While open it polls every
+// sendWait so a shutdown is noticed within ~sendWait; once closed it still
+// tries to hand the event to a draining consumer (the forwarder, whose Stop
+// keeps reading) but bounded by drainTimeout — so a dead consumer (e.g. a
+// WebSocket handler that returned) can't strand this goroutine, while a
+// draining consumer still gets every buffered event (§16.5). Returns true if
+// delivered, false if abandoned on shutdown.
+func (s *subscriber) deliver(evt RuntimeEvent) bool {
+	const sendWait = 100 * time.Millisecond
+	for {
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if closed {
+			// Shutdown: give a draining consumer up to drainTimeout to read this
+			// event; if it doesn't (dead consumer), give up and let the caller
+			// drop the remaining buffer. This preserves the forwarder's drain
+			// guarantee while bounding the dead-consumer stall.
+			select {
+			case s.out <- evt:
+				return true
+			case <-time.After(currentDrainTimeout()):
+				return false
+			}
+		}
+		select {
+		case s.out <- evt:
+			return true
+		case <-time.After(sendWait):
+			// re-check closed on next iteration
+		}
+	}
+}
+
+// drainTimeout bounds how long deliver waits, once closed, for a consumer to
+// read a buffered event before giving up (the dead-consumer escape). Long
+// enough that a draining forwarder (reads in a tight loop at Stop) always gets
+// every buffered event (§16.5); short enough that a dead consumer (e.g. a
+// WebSocket handler that returned) can't stall shutdown for long. Guarded by
+// drainTimeoutMu so tests can shrink it safely while a pump goroutine reads it.
+var (
+	drainTimeoutMu sync.RWMutex
+	drainTimeout   = 2 * time.Second
+)
+
+func currentDrainTimeout() time.Duration {
+	drainTimeoutMu.RLock()
+	defer drainTimeoutMu.RUnlock()
+	return drainTimeout
+}
+
+// setDrainTimeoutForTest swaps drainTimeout and returns the previous value;
+// tests must restore it (t.Cleanup). Only the test build should call this.
+func setDrainTimeoutForTest(d time.Duration) time.Duration {
+	drainTimeoutMu.Lock()
+	defer drainTimeoutMu.Unlock()
+	prev := drainTimeout
+	drainTimeout = d
+	return prev
+}
 
 // shutdown marks the subscriber closed and wakes the pump so it can finish
-// draining buf into out (bounded by drainTimeout) and close out. Called under
-// the bus write lock.
+// draining buf into out (or abandon it if the consumer is gone) and close out.
+// Called under the bus write lock.
 func (s *subscriber) shutdown() {
 	s.mu.Lock()
 	s.closed = true

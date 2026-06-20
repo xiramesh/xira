@@ -186,3 +186,119 @@ func TestScopeMatcherSkipsEmptyAccountFields(t *testing.T) {
 		t.Fatalf("event with empty account fields should still match (skip, not reject)")
 	}
 }
+
+// TestScopeMatcherMatchesByKnownScopeRunID: once a run id is adopted from a
+// scope-matched event, a later event whose Scope.RunID is that known id matches
+// even if its other scope fields differ (the run-id affiliation fast path).
+func TestScopeMatcherMatchesByKnownScopeRunID(t *testing.T) {
+	m := newScopeMatcher(inboundFixture())
+	// First event adopts run-1 via scope match.
+	if !m.match(evtWithScope("run.started", "run-1", scopeFixture())) {
+		t.Fatalf("initial scope match should adopt run-1")
+	}
+	// A follow-up event with a different (non-matching) scope but carrying the
+	// known RunID in Scope still matches.
+	other := runtime.RuntimeEventScope{RunID: "run-1"} // bare scope, only RunID
+	evt := runtime.RuntimeEvent{ID: "e", Kind: "tool.completed", Scope: &other}
+	if !m.match(evt) {
+		t.Fatalf("event with known Scope.RunID should match via affiliation")
+	}
+}
+
+// TestScopeMatcherAdoptsChildRunViaCorrelation: after adopting a run id, an
+// event correlated by that id as ChildRunID matches (the child-run affiliation
+// path, line 65) without a scope match.
+func TestScopeMatcherAdoptsChildRunViaCorrelation(t *testing.T) {
+	m := newScopeMatcher(inboundFixture())
+	if !m.match(evtWithScope("run.started", "parent-run", scopeFixture())) {
+		t.Fatalf("initial scope match should adopt parent-run")
+	}
+	// An event whose Correlation.ChildRunID == parent-run matches. (In practice
+	// child runs are adopted via adoptCorrelation from a parent event, but the
+	// knows(ChildRunID) arm must also match when the id is already known.)
+	evt := runtime.RuntimeEvent{
+		ID:    "e",
+		Kind:  "agent.delegate.completed",
+		RunID: "child-run",
+		Correlation: &runtime.RuntimeEventCorrelation{
+			ParentRunID: "parent-run",
+			ChildRunID:  "parent-run", // known id used as child affiliation
+		},
+	}
+	if !m.match(evt) {
+		t.Fatalf("event correlated by a known id should match")
+	}
+}
+
+// TestScopeMatcherRejectsMismatchedEntrypoint: scope matching fails fast when
+// EntrypointID differs (covers the first scopeMatchesInbound negative branch).
+func TestScopeMatcherRejectsMismatchedEntrypoint(t *testing.T) {
+	m := newScopeMatcher(inboundFixture())
+	other := scopeFixture()
+	other.EntrypointID = "ep-other"
+	if m.match(evtWithScope("agent.delegate.failed", "run-x", other)) {
+		t.Fatalf("event with a different EntrypointID must not match")
+	}
+}
+
+// TestScopeMatcherRejectsMismatchedChannel: scope matching fails when Channel
+// differs.
+func TestScopeMatcherRejectsMismatchedChannel(t *testing.T) {
+	m := newScopeMatcher(inboundFixture())
+	other := scopeFixture()
+	other.Channel = "feishu"
+	if m.match(evtWithScope("agent.delegate.failed", "run-x", other)) {
+		t.Fatalf("event with a different Channel must not match")
+	}
+}
+
+// TestScopeMatcherRejectsMismatchedSender: scope matching fails when SenderID
+// differs.
+func TestScopeMatcherRejectsMismatchedSender(t *testing.T) {
+	m := newScopeMatcher(inboundFixture())
+	other := scopeFixture()
+	other.SenderID = "user-other"
+	if m.match(evtWithScope("agent.delegate.failed", "run-x", other)) {
+		t.Fatalf("event with a different SenderID must not match")
+	}
+}
+
+// TestScopeMatcherRejectsNilScope: an event with no Scope at all does not match
+// (and does not panic).
+func TestScopeMatcherRejectsNilScope(t *testing.T) {
+	m := newScopeMatcher(inboundFixture())
+	evt := runtime.RuntimeEvent{ID: "e", Kind: "agent.delegate.failed"}
+	if m.match(evt) {
+		t.Fatalf("event with nil Scope must not match")
+	}
+}
+
+// TestScopeMatcherRejectsMismatchedChannelAppID: account isolation fails when
+// ChannelAppID differs on both sides (covers that branch of accountIsolated).
+func TestScopeMatcherRejectsMismatchedChannelAppID(t *testing.T) {
+	in := channel.NormalizeInboundContext(channel.InboundContext{
+		Channel: "ilink", EntrypointID: "ep-1", ChatID: "chat-1",
+		SenderID: "user-1", MessageID: "msg-1", ChannelAppID: "app-a",
+	})
+	m := newScopeMatcher(in)
+	sc := scopeFixture()
+	sc.ChannelAppID = "app-b"
+	if m.match(evtWithScope("agent.delegate.failed", "run-x", sc)) {
+		t.Fatalf("event with a different ChannelAppID must not match")
+	}
+}
+
+// TestScopeMatcherRejectsMismatchedBotID: account isolation fails when BotID
+// differs on both sides.
+func TestScopeMatcherRejectsMismatchedBotID(t *testing.T) {
+	in := channel.NormalizeInboundContext(channel.InboundContext{
+		Channel: "ilink", EntrypointID: "ep-1", ChatID: "chat-1",
+		SenderID: "user-1", MessageID: "msg-1", BotID: "bot-a",
+	})
+	m := newScopeMatcher(in)
+	sc := scopeFixture()
+	sc.BotID = "bot-b"
+	if m.match(evtWithScope("agent.delegate.failed", "run-x", sc)) {
+		t.Fatalf("event with a different BotID must not match")
+	}
+}

@@ -89,6 +89,52 @@ func TestRendererTruncatesToMaxChars(t *testing.T) {
 	}
 }
 
+// TestRendererLevelCarriesSeverity: a populated Severity propagates to the
+// rendered message Level; an empty Severity falls back to "info".
+func TestRendererLevelCarriesSeverity(t *testing.T) {
+	r := ProgressRenderer{MaxChars: 180}
+	evt := renderEvt("agent.delegate.failed", nil)
+	evt.Severity = "warning"
+	msg, _ := r.Render(evt)
+	if msg.Level != "warning" {
+		t.Fatalf("level = %q, want warning", msg.Level)
+	}
+	// Empty/whitespace severity -> info.
+	evt2 := renderEvt("agent.delegate.failed", nil)
+	evt2.Severity = "   "
+	msg2, _ := r.Render(evt2)
+	if msg2.Level != "info" {
+		t.Fatalf("level = %q, want info for empty severity", msg2.Level)
+	}
+}
+
+// TestRendererWaitingHumanSummaryNonStringIsIgnored: a summary payload that is
+// not a string (e.g. a number) is ignored, and the generic prompt renders.
+func TestRendererWaitingHumanSummaryNonStringIsIgnored(t *testing.T) {
+	r := ProgressRenderer{MaxChars: 180}
+	msg, ok := r.Render(renderEvt("run.waiting_human", map[string]any{"summary": 42}))
+	if !ok {
+		t.Fatalf("should render")
+	}
+	if strings.Contains(msg.Text, "42") {
+		t.Fatalf("non-string summary leaked into text: %q", msg.Text)
+	}
+}
+
+// TestRendererNoTruncationWhenWithinLimit: text at or below MaxChars is returned
+// verbatim (covers the truncateRunes early-return branch).
+func TestRendererNoTruncationWhenWithinLimit(t *testing.T) {
+	r := ProgressRenderer{MaxChars: 180}
+	msg, ok := r.Render(renderEvt("agent.delegate.failed", nil))
+	if !ok {
+		t.Fatalf("should render")
+	}
+	// Short templated text well under 180 — must not gain a truncation marker.
+	if strings.Contains(msg.Text, "…") {
+		t.Fatalf("short text was needlessly truncated: %q", msg.Text)
+	}
+}
+
 func countRunes(s string) int {
 	n := 0
 	for range s {
