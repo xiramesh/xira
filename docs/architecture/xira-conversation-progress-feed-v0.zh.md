@@ -327,10 +327,10 @@ drain 信号（次要收益——它只比 `Stop()` 早几秒停发 progress，�
 > request-bound 模型下 HITL 时 forwarder 本就会停，不存在「误停」。撤回该论据。
 
 **实现（runtime 侧，落在 `service.go`）**：在 `run.finished`（约 596 行）之前，仅当
-`final != "" && resp.Status != StatusWaitingHuman` 时补发：
+`final != "" && resp.Status == "completed"` 时补发：
 
 ```go
-if final != "" && resp.Status != StatusWaitingHuman {
+if final != "" && resp.Status == "completed" {
     recordEvent("assistant.final", "runtime", "assistant final response ready", map[string]any{
         "final_chars": utf8.RuneCountInString(final),
     })
@@ -339,6 +339,9 @@ if final != "" && resp.Status != StatusWaitingHuman {
 
 约束：
 
+- 采用**白名单**（`== "completed"`）而非黑名单（`!= StatusWaitingHuman`）：failed run
+  可以有非空 final（例如 verification 在有内容草稿上判 failed），此时不该发 `assistant.final`
+  ——否则 forwarder 会 drain，丢掉最该提示的 delegate failed/timeout 进度。HITL 同理不发。
 - HITL / `final` 为空（纯失败）不发：没有 final 要投递，靠 `Stop()` 兜底。
 - payload 只放 `final_chars`，**final 全文不进事件**（`resp.FinalResponse` 与 session messages 已存，避免三存）。
 
@@ -537,7 +540,7 @@ payload 默认不可直接拼接到文案。`payload.summary` 是唯一允许直
 ### Phase 0.5: 可靠性前置（必须先于 forwarder）
 
 - **runtime 侧**：在 `service.go` 补发 live `assistant.final`（§8.5），仅
-  `final != "" && resp.Status != StatusWaitingHuman` 时发，payload 只放 `final_chars`。
+  `final != "" && resp.Status == "completed"` 时发（白名单，failed run 即便 final 非空也不发），payload 只放 `final_chars`。
 - **visibility（关键）**：在 `events.go` 的 `eventVisibility` 为 `run.waiting_human`、
   `agent.delegate.failed`、`agent.delegate.timeout` 显式设 `conversation=true`。当前它们走 default
   `conversation=false`，会被 forwarder drop，导致 v0 allowlist 一个事件都发不出去（§7）。渲染模板化。

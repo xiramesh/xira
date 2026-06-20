@@ -208,3 +208,31 @@ func TestEventBusCloseClosesAllSubscribers(t *testing.T) {
 		}
 	}
 }
+
+// TestEventBusNonDrainingConsumerDoesNotLeakPump: regression for the goroutine
+// leak. A consumer (e.g. the WebSocket handler returning on a write error) may
+// cancel its ctx WITHOUT draining buffered events. The pump must still exit
+// (bounded by drainTimeout) and close the channel, rather than blocking forever
+// on a send no one will read.
+func TestEventBusNonDrainingConsumerDoesNotLeakPump(t *testing.T) {
+	bus := NewEventBus()
+	defer bus.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := bus.Subscribe(ctx)
+
+	// Fill the buffer, then cancel ctx WITHOUT ever reading ch — simulating a
+	// consumer that returned mid-stream. The channel must still close within a
+	// bounded time (drainTimeout + slack), proving the pump goroutine exited.
+	for i := 0; i < subscriberBufferSize; i++ {
+		bus.Publish(droppableEvent("adk.event", "noise"))
+	}
+	cancel()
+
+	deadline := time.Now().Add(drainTimeout + time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := <-ch; !ok {
+			return // closed — pump exited, no leak
+		}
+	}
+	t.Fatalf("subscriber channel did not close within drainTimeout+1s; pump goroutine likely leaked")
+}

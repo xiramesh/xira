@@ -122,5 +122,30 @@ func (m *scopeMatcher) scopeMatchesInbound(evt runtime.RuntimeEvent) bool {
 	if sc.MessageID != m.inbound.MessageID {
 		return false
 	}
+	// Account/App/Bot isolation: iLink supports multiple accounts under one
+	// entrypoint. Two turns can share EntrypointID+ChatID+SenderID across
+	// accounts, so without this check account B's progress could be projected
+	// to account A's forwarder. When a field is present on BOTH sides it must
+	// match; an empty side is skipped (not all events/inbound carry all three).
+	if !accountIsolated(*sc, m.inbound) {
+		return false
+	}
+	return true
+}
+
+// accountIsolated enforces account/channel-app/bot equality when both sides
+// carry a value. A field set on only one side does not fail the match (events
+// and inbound contexts don't uniformly populate all three), but a field set on
+// both with differing values is a definite cross-account mismatch.
+func accountIsolated(sc runtime.RuntimeEventScope, in channel.InboundContext) bool {
+	if sc.Account != "" && in.Account != "" && sc.Account != in.Account {
+		return false
+	}
+	if sc.ChannelAppID != "" && in.ChannelAppID != "" && sc.ChannelAppID != in.ChannelAppID {
+		return false
+	}
+	if sc.BotID != "" && in.BotID != "" && sc.BotID != in.BotID {
+		return false
+	}
 	return true
 }

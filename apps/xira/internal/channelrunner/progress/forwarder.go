@@ -34,13 +34,20 @@ type Forwarder struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	busCh  <-chan runtime.RuntimeEvent
-	queue  chan runtime.RuntimeEvent
 
-	consumerWg  sync.WaitGroup
-	senderWg    sync.WaitGroup
-	stopOnce    sync.Once
+	// queue is the burst absorber between the bus consumer and the sender. It is
+	// a slice-backed bounded queue (not a buffered channel) so that a full queue
+	// can EVICT a low-priority event to admit a critical one — mirroring the bus
+	// contract. The interaction signal run.waiting_human must never be dropped
+	// here; a delegate progress burst must not starve it.
 	queueMu     sync.Mutex
+	queue       []runtime.RuntimeEvent
+	queueCh     chan struct{} // signaled when queue becomes non-empty
 	queueClosed bool
+
+	consumerWg sync.WaitGroup
+	senderWg   sync.WaitGroup
+	stopOnce   sync.Once
 
 	mu           sync.Mutex
 	progressSent int
@@ -60,7 +67,8 @@ func Start(parent context.Context, req Request) *Forwarder {
 		req:     req,
 		matcher: newScopeMatcher(req.Inbound),
 		render:  ProgressRenderer{MaxChars: req.Policy.MaxChars},
-		queue:   make(chan runtime.RuntimeEvent, queueCapacity),
+		queue:   make([]runtime.RuntimeEvent, 0, queueCapacity),
+		queueCh: make(chan struct{}, 1),
 		dedup:   make(map[string]struct{}),
 	}
 	if req.EventBus == nil || req.Sender == nil || req.Inbound.MessageID == "" || req.Inbound.ChatType != "direct" {
@@ -170,8 +178,49 @@ func isDeliverableKind(kind string) bool {
 // closes the queue after the bus consumer has exited.
 func (f *Forwarder) sendLoop() {
 	defer f.senderWg.Done()
-	for evt := range f.queue {
+	for {
+		evt, ok := f.dequeue()
+		if !ok {
+			return
+		}
 		f.dispatch(evt)
+	}
+}
+
+// dequeue returns the next queued event, blocking until one is available. It
+// returns ok=false when the queue is closed AND empty (i.e. shutdown is complete
+// and all buffered events have been dispatched).
+func (f *Forwarder) dequeue() (runtime.RuntimeEvent, bool) {
+	for {
+		f.queueMu.Lock()
+		if len(f.queue) > 0 {
+			evt := f.queue[0]
+			f.queue = f.queue[1:]
+			f.queueMu.Unlock()
+			return evt, true
+		}
+		if f.queueClosed {
+			f.queueMu.Unlock()
+			return runtime.RuntimeEvent{}, false
+		}
+		f.queueMu.Unlock()
+		select {
+		case <-f.queueCh:
+		case <-f.ctx.Done():
+			// On shutdown, drain anything already buffered (§16.5) before exiting.
+			f.queueMu.Lock()
+			if len(f.queue) > 0 {
+				evt := f.queue[0]
+				f.queue = f.queue[1:]
+				f.queueMu.Unlock()
+				return evt, true
+			}
+			closed := f.queueClosed
+			f.queueMu.Unlock()
+			if closed {
+				return runtime.RuntimeEvent{}, false
+			}
+		}
 	}
 }
 
@@ -268,17 +317,59 @@ func (f *Forwarder) enqueueSilence() {
 	}
 }
 
+// eventQueuePriority ranks a forwarder-queue event by delivery reliability,
+// mirroring the bus contract. Only run.waiting_human is critical (must reach
+// the user); the delegate progress kinds are important; the synthetic silence
+// notice and anything else are droppable. This is what prevents a delegate
+// progress burst from filling the queue and dropping a waiting_human that
+// arrives after it (§8.4, §9.1).
+func eventQueuePriority(evt runtime.RuntimeEvent) int {
+	switch evt.Kind {
+	case "run.waiting_human":
+		return 2 // critical
+	case "agent.delegate.failed", "agent.delegate.timeout":
+		return 1 // important
+	default:
+		return 0 // droppable
+	}
+}
+
 func (f *Forwarder) enqueue(evt runtime.RuntimeEvent) bool {
 	f.queueMu.Lock()
 	defer f.queueMu.Unlock()
 	if f.queueClosed {
 		return false
 	}
-	select {
-	case f.queue <- evt:
+	if len(f.queue) < queueCapacity {
+		f.appendLocked(evt)
 		return true
+	}
+	// Queue full: evict the oldest buffered event STRICTLY lower priority than
+	// the incoming one, so critical (waiting_human) always wins over important/
+	// droppable and important wins over droppable. A droppable incoming event
+	// evicts nothing and is itself dropped. Never silent.
+	incoming := eventQueuePriority(evt)
+	for i, existing := range f.queue {
+		if eventQueuePriority(existing) < incoming {
+			evicted := f.queue[i]
+			f.queue = append(f.queue[:i], f.queue[i+1:]...)
+			f.appendLocked(evt)
+			slog.Warn("progress forwarder queue full; evicted lower-priority event",
+				"evicted_kind", evicted.Kind, "evicted_event_id", evicted.ID,
+				"kind", evt.Kind, "event_id", evt.ID)
+			return true
+		}
+	}
+	slog.Warn("progress forwarder queue full; dropping event",
+		"kind", evt.Kind, "event_id", evt.ID)
+	return false
+}
+
+func (f *Forwarder) appendLocked(evt runtime.RuntimeEvent) {
+	f.queue = append(f.queue, evt)
+	select {
+	case f.queueCh <- struct{}{}:
 	default:
-		return false
 	}
 }
 
@@ -289,7 +380,11 @@ func (f *Forwarder) closeQueue() {
 		return
 	}
 	f.queueClosed = true
-	close(f.queue)
+	// Wake a blocked dequeue so it observes closure and can drain the remainder.
+	select {
+	case f.queueCh <- struct{}{}:
+	default:
+	}
 }
 
 func (f *Forwarder) stopSilence() {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // subscriberBufferSize bounds the per-subscriber buffer. It must absorb a
@@ -195,6 +196,14 @@ func oldestBelowLocked(buf []RuntimeEvent, level int) int {
 // pump drains buf into out until the subscription is shut down. Keeping buf as
 // the burst absorber means a slow consumer (blocked on out) cannot cause the
 // publisher to drop — the buffer absorbs the burst first.
+//
+// Send is a blocking send that yields to a shutdown timer: at shutdown the
+// consumer may have stopped reading (e.g. the WebSocket handler returned on a
+// write error without draining). To avoid stranding this goroutine forever on
+// such a consumer, the send races against drainTimeout after shutdown is set —
+// but only after shutdown, so a still-draining consumer (the forwarder, whose
+// Stop() waits for consumeLoop to finish) always gets the buffered events
+// (§16.5). Events are never dropped before shutdown.
 func (s *subscriber) pump() {
 	s.mu.Lock()
 	for {
@@ -207,19 +216,34 @@ func (s *subscriber) pump() {
 		}
 		evt := s.buf[0]
 		s.buf = s.buf[1:]
-		// Send out without holding the lock, so a slow consumer does not block
-		// enqueue under this lock. out is unbuffered, so this parks until the
-		// consumer reads — which is fine, buf has already absorbed the burst.
+		closed := s.closed
 		s.mu.Unlock()
-		s.out <- evt
+		if !closed {
+			s.out <- evt
+		} else {
+			// Shutting down: prefer the consumer (forwarder drains at Stop),
+			// but bound the wait so a non-draining consumer can't leak this
+			// goroutine.
+			select {
+			case s.out <- evt:
+			case <-time.After(drainTimeout):
+			}
+		}
 		s.mu.Lock()
 	}
 	s.mu.Unlock()
 	close(s.out)
 }
 
+// drainTimeout bounds how long pump waits for a consumer to read a buffered
+// event during shutdown. Long enough that a draining forwarder (which reads in
+// a tight loop at Stop) always wins; short enough that a dead consumer (e.g. a
+// WebSocket handler that returned) can't leak the goroutine for long.
+const drainTimeout = 2 * time.Second
+
 // shutdown marks the subscriber closed and wakes the pump so it can finish
-// draining buf and close out. Called under the bus write lock.
+// draining buf into out (bounded by drainTimeout) and close out. Called under
+// the bus write lock.
 func (s *subscriber) shutdown() {
 	s.mu.Lock()
 	s.closed = true

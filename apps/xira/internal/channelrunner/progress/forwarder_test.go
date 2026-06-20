@@ -3,6 +3,7 @@ package progress
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -213,6 +214,39 @@ func TestForwarderSurvivesEventBusBurst(t *testing.T) {
 		return containsKind(sender, "agent.delegate.failed") && containsKind(sender, "agent.delegate.timeout")
 	}) {
 		t.Fatalf("critical events lost during bus burst: %v", sender.kinds())
+	}
+	fwd.Stop()
+}
+
+// TestForwarderQueueEvictsForWaitingHuman: the forwarder's OWN internal queue
+// must not drop run.waiting_human when full of delegate progress. A delegate
+// progress burst (agent.delegate.failed) can fill the 256-slot queue while the
+// sender is slow; a subsequent run.waiting_human must be admitted by evicting a
+// lower-priority queued event, never dropped. This is the unit-level regression
+// for the rereview's "queue full; dropping run.waiting_human" finding — the
+// interaction signal is independent of the progress quota (§9.1) and must
+// always reach the user.
+func TestForwarderQueueEvictsForWaitingHuman(t *testing.T) {
+	bus := runtime.NewEventBus()
+	defer bus.Close()
+	// Slow sender so the queue saturates before it drains.
+	sender := &recordingSender{delay: 15 * time.Millisecond}
+	fwd := Start(context.Background(), Request{EventBus: bus, Inbound: inboundFixture(), Policy: testPolicy(), Sender: sender})
+
+	// Saturate the forwarder's internal queue with important-but-evictable
+	// delegate progress. Each event has a distinct ID so dedup (kind|text) does
+	// not collapse them at the sender.
+	for i := 0; i < queueCapacity+50; i++ {
+		evt := makeEvent("agent.delegate.failed", true)
+		evt.ID = "burst-" + strconv.Itoa(i)
+		bus.Publish(evt)
+	}
+	// The interaction signal arrives last, after the queue is full. It must be
+	// delivered (evicting a queued delegate event), not dropped.
+	bus.Publish(makeEvent("run.waiting_human", true))
+
+	if !waitUntil(t, 5*time.Second, func() bool { return containsKind(sender, "run.waiting_human") }) {
+		t.Fatalf("run.waiting_human was dropped when the forwarder queue was full of delegate progress: %v", sender.kinds())
 	}
 	fwd.Stop()
 }
