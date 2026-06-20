@@ -126,6 +126,9 @@ func (s *Service) Close() {
 }
 
 func (s *Service) EventBus() *EventBus {
+	if s == nil {
+		return nil
+	}
 	return s.events
 }
 

@@ -294,3 +294,67 @@ func TestFlowBridgeMergesMetadataIntoContextRaw(t *testing.T) {
 		t.Fatalf("flow_step_id = %q, want work", agentRun.Metadata["flow_step_id"])
 	}
 }
+
+// TestServiceFlowAccessorsNilSafe covers nil-safe + normal paths of
+// FlowRegistry / FlowRefs / flowStateRoot.
+func TestServiceFlowAccessorsNilSafe(t *testing.T) {
+	var nilSvc *Service
+	if nilSvc.FlowRegistry() != nil {
+		t.Fatalf("nil FlowRegistry should be nil")
+	}
+	if nilSvc.FlowRefs() != nil {
+		t.Fatalf("nil FlowRefs should be nil")
+	}
+	if got := nilSvc.flowStateRoot(); got != ".xira" {
+		t.Fatalf("nil flowStateRoot should default to .xira, got %q", got)
+	}
+	svc := newTestService(t, Config{})
+	if got := svc.flowStateRoot(); got == ".xira" || got == "" {
+		t.Fatalf("flowStateRoot with state dir should not be .xira/empty, got %q", got)
+	}
+	_ = svc.FlowRegistry()
+	_ = svc.FlowRefs()
+}
+
+// TestFlowBridgePolicyValue covers every branch: nil run, missing key, valid
+// bool, un-parseable value (returns raw).
+func TestFlowBridgePolicyValue(t *testing.T) {
+	svc := newTestService(t, Config{})
+	b := newFlowBridge(svc)
+	ctx := context.Background()
+
+	if _, ok := b.PolicyValue(ctx, nil, "k"); ok {
+		t.Fatalf("nil run should return ok=false")
+	}
+	run := &flow.Run{Input: map[string]string{}}
+	if _, ok := b.PolicyValue(ctx, run, "missing"); ok {
+		t.Fatalf("missing key should return ok=false")
+	}
+	run.Input["flag"] = " true "
+	if v, ok := b.PolicyValue(ctx, run, "flag"); !ok || v != true {
+		t.Fatalf("valid bool: got v=%v ok=%v", v, ok)
+	}
+	run.Input["other"] = "maybe"
+	if v, ok := b.PolicyValue(ctx, run, "other"); !ok || v != "maybe" {
+		t.Fatalf("un-parseable: got v=%v ok=%v", v, ok)
+	}
+}
+
+// TestFlowBridgeAgentStepStatusErrors covers the error arms.
+func TestFlowBridgeAgentStepStatusErrors(t *testing.T) {
+	svc := newTestService(t, Config{})
+	b := newFlowBridge(svc)
+	ctx := context.Background()
+
+	if _, err := b.AgentStepStatus(ctx, nil, flow.Step{ID: "s"}); err == nil {
+		t.Fatalf("nil run should error")
+	}
+	run := &flow.Run{Steps: map[string]flow.StepState{}}
+	if _, err := b.AgentStepStatus(ctx, run, flow.Step{ID: "nope"}); err == nil {
+		t.Fatalf("missing step should error")
+	}
+	run.Steps["s"] = flow.StepState{}
+	if _, err := b.AgentStepStatus(ctx, run, flow.Step{ID: "s"}); err == nil {
+		t.Fatalf("step without agent run id should error")
+	}
+}

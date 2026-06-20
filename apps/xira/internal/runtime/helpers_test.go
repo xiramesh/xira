@@ -1,0 +1,256 @@
+package runtime
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/xiramesh/xira/internal/humanrequest"
+)
+
+// TestValidateDelegationJoinPathID covers the required / invalid / valid arms.
+func TestValidateDelegationJoinPathID(t *testing.T) {
+	if err := validateDelegationJoinPathID("", "id"); err == nil {
+		t.Fatalf("empty value should be invalid")
+	}
+	for _, bad := range []string{"a/b", `a\b`, "..", ".hidden", "/abs"} {
+		if err := validateDelegationJoinPathID(bad, "id"); err == nil {
+			t.Fatalf("value %q should be invalid", bad)
+		}
+	}
+	if err := validateDelegationJoinPathID("  ok-id  ", "id"); err != nil {
+		t.Fatalf("valid id should pass, got %v", err)
+	}
+}
+
+// TestFirstHumanRequestID covers first-non-empty / all-empty / empty-slice arms.
+func TestFirstHumanRequestID(t *testing.T) {
+	if got := firstHumanRequestID(nil); got != "" {
+		t.Fatalf("nil slice should be empty")
+	}
+	if got := firstHumanRequestID([]humanrequest.HumanRequest{{ID: ""}, {ID: "  "}}); got != "" {
+		t.Fatalf("all-blank ids should yield empty")
+	}
+	if got := firstHumanRequestID([]humanrequest.HumanRequest{{ID: ""}, {ID: " real "}}); got != "real" {
+		t.Fatalf("first non-blank should win, got %q", got)
+	}
+}
+
+// TestIsTerminalDelegateCallStatus covers terminal vs non-terminal statuses.
+func TestIsTerminalDelegateCallStatus(t *testing.T) {
+	for _, s := range []string{"completed", "failed", "timeout", "canceled", " completed "} {
+		if !isTerminalDelegateCallStatus(s) {
+			t.Errorf("%q should be terminal", s)
+		}
+	}
+	for _, s := range []string{"running", "", "pending"} {
+		if isTerminalDelegateCallStatus(s) {
+			t.Errorf("%q should NOT be terminal", s)
+		}
+	}
+}
+
+// TestAnyString covers string / Stringer / default arms.
+func TestAnyString(t *testing.T) {
+	if got := anyString("  hi  "); got != "hi" {
+		t.Fatalf("string: got %q", got)
+	}
+	if got := anyString(123); got != "" {
+		t.Fatalf("default arm should be empty, got %q", got)
+	}
+	// fmt.Stringer path.
+	if got := anyString(strings.ToLower("ABC")); got != "abc" {
+		t.Fatalf("Stringer path: got %q", got)
+	}
+}
+
+// TestInterruptReason covers empty / non-empty.
+func TestInterruptReason(t *testing.T) {
+	if got := interruptReason(nil); got != "" {
+		t.Fatalf("empty should be empty")
+	}
+	if got := interruptReason([]BlockedBy{{Type: "approval"}}); got != "approval" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// TestRequestKindFromString covers freeform / approval / unsupported arms.
+func TestRequestKindFromString(t *testing.T) {
+	if k, err := requestKindFromString("freeform"); err != nil || k != humanrequest.RequestFreeform {
+		t.Fatalf("freeform: k=%v err=%v", k, err)
+	}
+	if k, err := requestKindFromString("approval"); err != nil || k != humanrequest.RequestApproval {
+		t.Fatalf("approval: k=%v err=%v", k, err)
+	}
+	if _, err := requestKindFromString("bogus"); err == nil {
+		t.Fatalf("unsupported should error")
+	}
+}
+
+// TestCloneAnyMapDeep covers empty / roundtrip-deep-clone.
+func TestCloneAnyMapDeep(t *testing.T) {
+	if got := cloneAnyMapDeep(nil); got != nil {
+		t.Fatalf("nil should be nil")
+	}
+	if got := cloneAnyMapDeep(map[string]any{}); got != nil {
+		t.Fatalf("empty should be nil")
+	}
+	src := map[string]any{"a": 1, "nested": map[string]any{"b": 2}}
+	clone := cloneAnyMapDeep(src)
+	// JSON roundtrip turns int into float64; compare by numeric value.
+	if a, ok := clone["a"].(float64); !ok || a != 1 {
+		t.Fatalf("clone missing key a: %v", clone["a"])
+	}
+	// Deep independence: mutating nested in clone must not affect src.
+	if nested, ok := clone["nested"].(map[string]any); ok {
+		nested["b"] = 999
+		if orig, ok := src["nested"].(map[string]any); ok && orig["b"] == 999 {
+			t.Fatalf("clone is not deep — nested map shared")
+		}
+	}
+}
+
+// TestCloneAnyMap covers the shallow-clone helper (empty -> nil, non-empty ->
+// independent copy).
+func TestCloneAnyMap(t *testing.T) {
+	if got := cloneAnyMap(nil); got != nil {
+		t.Fatalf("nil should be nil")
+	}
+	if got := cloneAnyMap(map[string]any{}); got != nil {
+		t.Fatalf("empty should be nil")
+	}
+	src := map[string]any{"a": 1, "b": "x"}
+	clone := cloneAnyMap(src)
+	if clone["a"] != 1 || clone["b"] != "x" {
+		t.Fatalf("shallow clone lost keys: %v", clone)
+	}
+	clone["a"] = 99
+	if src["a"] != 1 {
+		t.Fatalf("shallow clone should not share top-level keys with src")
+	}
+}
+
+// TestCanonicalActionSnapshotArguments covers nil / roundtrip / error.
+func TestCanonicalActionSnapshotArguments(t *testing.T) {
+	if got, err := canonicalActionSnapshotArguments(nil); err != nil || got != nil {
+		t.Fatalf("nil args: got=%v err=%v", got, err)
+	}
+	got, err := canonicalActionSnapshotArguments(map[string]any{"x": 1, "y": "z"})
+	if err != nil {
+		t.Fatalf("valid args error: %v", err)
+	}
+	if got["x"] != 1 || got["y"] != "z" {
+		t.Fatalf("roundtrip lost keys: %v", got)
+	}
+}
+
+// TestDigestAny covers the sha256 digest format + determinism.
+func TestDigestAny(t *testing.T) {
+	d1, err := digestAny(map[string]any{"a": 1})
+	if err != nil {
+		t.Fatalf("digest error: %v", err)
+	}
+	if !strings.HasPrefix(d1, "sha256:") || len(d1) <= len("sha256:") {
+		t.Fatalf("digest not sha256-prefixed: %q", d1)
+	}
+	// Same input -> same digest; different input -> different digest.
+	d2, _ := digestAny(map[string]any{"a": 1})
+	if d1 != d2 {
+		t.Fatalf("digest not deterministic")
+	}
+	d3, _ := digestAny(map[string]any{"a": 2})
+	if d1 == d3 {
+		t.Fatalf("different inputs produced same digest")
+	}
+}
+
+// TestValidateActionSnapshotDigest covers nil/empty-hash (skip) / match / mismatch.
+func TestValidateActionSnapshotDigest(t *testing.T) {
+	if err := validateActionSnapshotDigest(nil); err != nil {
+		t.Fatalf("nil snapshot should pass")
+	}
+	if err := validateActionSnapshotDigest(&humanrequest.ActionSnapshot{}); err != nil {
+		t.Fatalf("empty ContextHash should pass")
+	}
+	args := map[string]any{"x": 1}
+	hash, _ := digestAny(args)
+	if err := validateActionSnapshotDigest(&humanrequest.ActionSnapshot{ContextHash: hash, Arguments: args}); err != nil {
+		t.Fatalf("matching digest should pass: %v", err)
+	}
+	if err := validateActionSnapshotDigest(&humanrequest.ActionSnapshot{ContextHash: "sha256:deadbeef", Arguments: args}); err == nil {
+		t.Fatalf("mismatched digest should fail")
+	}
+}
+
+// TestHumanOptionsFromAny covers each type arm + non-map element skip.
+func TestHumanOptionsFromAny(t *testing.T) {
+	// Typed slice arm.
+	got := humanOptionsFromAny([]humanrequest.HumanOption{{ID: "a", Label: "A"}})
+	if len(got) != 1 || got[0].ID != "a" {
+		t.Fatalf("typed slice: got %v", got)
+	}
+	// []map[string]any arm.
+	got = humanOptionsFromAny([]map[string]any{{"id": " b ", "label": "B"}})
+	if len(got) != 1 || got[0].ID != "b" {
+		t.Fatalf("[]map arm: got %v", got)
+	}
+	// []any arm with a non-map element (skipped) + a valid one.
+	got = humanOptionsFromAny([]any{"not-a-map", map[string]any{"id": "c", "label": "C"}})
+	if len(got) != 1 || got[0].ID != "c" {
+		t.Fatalf("[]any arm: got %v", got)
+	}
+	// default arm.
+	if humanOptionsFromAny("nope") != nil {
+		t.Fatalf("default arm should be nil")
+	}
+}
+
+// TestEventVisibility covers the conversation-plane classification for every
+// kind the progress feed depends on. This is the §1.4 contract: the kind set
+// that conversation=true must be exactly the deliverable facts.
+func TestEventVisibility(t *testing.T) {
+	conversationKinds := map[string]bool{
+		"assistant.status":       true,
+		"assistant.final":        true,
+		"run.waiting_human":      true,
+		"agent.delegate.failed":  true,
+		"agent.delegate.timeout": true,
+		"capability_gap":         true,
+	}
+	for kind := range conversationKinds {
+		v := eventVisibility(kind)
+		if v == nil || !v.Conversation {
+			t.Errorf("kind %q should be Conversation=true", kind)
+		}
+	}
+	for _, kind := range []string{"adk.event", "model.policy_resolved", "context.packet.started", "context.item.included", "tool.completed"} {
+		v := eventVisibility(kind)
+		if v == nil || v.Conversation {
+			t.Errorf("kind %q should be Conversation=false", kind)
+		}
+	}
+	// Unknown kind -> default (Conversation false, others true).
+	v := eventVisibility("unknown.kind")
+	if v == nil || v.Conversation || !v.Activity || !v.Inspector || !v.Audit {
+		t.Fatalf("unknown kind default wrong: %+v", v)
+	}
+}
+
+// TestWaitingHumanSummary covers nil / question-from-request / reason fallback.
+func TestWaitingHumanSummary(t *testing.T) {
+	if got := waitingHumanSummary(nil); got != "" {
+		t.Fatalf("nil interrupt should be empty")
+	}
+	// First pending human-request question wins.
+	got := waitingHumanSummary(&RunInterrupt{
+		HumanRequests: []humanrequest.HumanRequest{{Question: ""}, {Question: "  confirm?  "}},
+		Reason:        "fallback",
+	})
+	if got != "confirm?" {
+		t.Fatalf("question should win, got %q", got)
+	}
+	// No question -> reason fallback.
+	got = waitingHumanSummary(&RunInterrupt{Reason: "  approval needed  "})
+	if got != "approval needed" {
+		t.Fatalf("reason fallback wrong, got %q", got)
+	}
+}
