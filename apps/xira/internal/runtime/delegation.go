@@ -489,11 +489,22 @@ func (s *Service) executeDelegateAgentTool(
 		recordAudit("agent.delegate", target.ID, false, err.Error(), nil)
 		return delegateErrorOutput(target.ID, childRunID, "rejected", err), err
 	}
+	// Resolve per-target override (may carry a different timeout ceiling and
+	// worker mode). When a target policy sets MaxDurationMS, it replaces the
+	// caller's global ceiling for THIS target — so an external-command worker
+	// (e.g. code-agent running `claude -p`) can legitimately run for minutes
+	// without being clamped to the 120s default meant for bounded LLM delegates.
+	targetPolicy, hasTargetPolicy := policy.Targets[target.ID]
+
 	effectiveMaxDurationMS := policy.DefaultMaxDurationMS
+	ceilingMS := policy.MaxDurationMS
+	if hasTargetPolicy && targetPolicy.MaxDurationMS > 0 {
+		ceilingMS = targetPolicy.MaxDurationMS
+	}
 	if input.MaxDurationMS > 0 {
 		effectiveMaxDurationMS = input.MaxDurationMS
-		if effectiveMaxDurationMS > policy.MaxDurationMS {
-			effectiveMaxDurationMS = policy.MaxDurationMS
+		if effectiveMaxDurationMS > ceilingMS {
+			effectiveMaxDurationMS = ceilingMS
 		}
 	}
 	activeBefore, reserved := s.reserveChildSlot(exec.Base.RunID, policy.MaxParallel)
@@ -521,6 +532,12 @@ func (s *Service) executeDelegateAgentTool(
 		"policy_max_duration_ms":      policy.MaxDurationMS,
 		"child_session_mode":          policy.ChildSessionMode,
 		"expose_child_output_to_user": policy.ExposeChildOutputToUser,
+		"worker_mode":                 workerModeValue(targetPolicy, hasTargetPolicy),
+		"target_policy_max_duration_ms": targetPolicyMaxDurationMS(targetPolicy, hasTargetPolicy),
+		// expose_progress lets the progress forwarder surface this lifecycle
+		// event into IM chat (not just Activity/Inspector/Audit). Only set when
+		// the caller's per-target policy opts in.
+		"expose_progress": hasTargetPolicy && targetPolicy.ExposeProgress,
 	}))
 	recordAudit("agent.delegate", target.ID, true, "delegation allowed by caller profile", map[string]any{
 		"caller_agent_id": caller.ID,
@@ -539,6 +556,8 @@ func (s *Service) executeDelegateAgentTool(
 	recordEvent("agent.delegate.started", "runtime", "child agent run started", mergeAnyMaps(correlationPayload, map[string]any{
 		"context_packet_id": packet.ID,
 		"target_agent_id":   target.ID,
+		"effective_max_duration_ms": effectiveMaxDurationMS,
+		"expose_progress":   hasTargetPolicy && targetPolicy.ExposeProgress,
 	}))
 	childCtx, cancel := context.WithTimeout(ctx, time.Duration(effectiveMaxDurationMS)*time.Millisecond)
 	defer cancel()
@@ -614,6 +633,7 @@ func (s *Service) executeDelegateAgentTool(
 		"limitations_count":  len(result.Limitations),
 		"confidence":         result.Confidence,
 		"followup_needed":    result.FollowupNeeded,
+		"expose_progress":    hasTargetPolicy && targetPolicy.ExposeProgress,
 	}))
 	recordEvent("agent.delegate.result_delivered", "runtime", "delegate result delivered to caller", mergeAnyMaps(correlationPayload, map[string]any{
 		"status":             result.Status,
@@ -1205,12 +1225,21 @@ func delegateResultOutput(result DelegateAgentResult) map[string]any {
 }
 
 func delegateErrorOutput(agentID, runID, status string, err error) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"agent_id": agentID,
 		"run_id":   runID,
 		"status":   status,
 		"error":    errString(err),
 	}
+	// On timeout/failure the parent often re-runs the task itself (e.g. its own
+	// claude -p). Disclosure is a soft contract — the hint tells the parent LLM
+	// to state in its final answer that this is a fallback, not the child's
+	// result. Without it the user is misled into thinking the delegated agent
+	// succeeded. See docs/architecture/xira-ilink-delegation-rca-2026-06-21.zh.md.
+	if status == "timeout" || status == "failed" {
+		out["fallback_hint"] = "child did not return a usable result; if you complete this task yourself, disclose in your answer that the delegated agent did not succeed"
+	}
+	return out
 }
 
 func delegateInvalidResultOutput(agentID, runID string, validation delegateResultValidationError, rawPath string) map[string]any {
@@ -1255,6 +1284,24 @@ func (s *Service) persistRejectedDelegateResult(childRunID, raw string, validati
 func delegateWorkerProfile(profile agents.Profile) agents.Profile {
 	profile.Instructions = append(append([]string(nil), profile.Instructions...), delegateWorkerRuntimeContract())
 	return profile
+}
+
+// workerModeValue returns the target's worker_mode (or empty when no per-target
+// policy applies), for the agent.delegate.allowed event payload.
+func workerModeValue(tp agents.DelegationTargetPolicy, has bool) string {
+	if !has {
+		return ""
+	}
+	return tp.WorkerMode
+}
+
+// targetPolicyMaxDurationMS returns the per-target ceiling (or 0 when none),
+// so the allowed event makes the clamp decision auditable.
+func targetPolicyMaxDurationMS(tp agents.DelegationTargetPolicy, has bool) int {
+	if !has || tp.MaxDurationMS <= 0 {
+		return 0
+	}
+	return tp.MaxDurationMS
 }
 
 func delegateWorkerRuntimeContract() string {

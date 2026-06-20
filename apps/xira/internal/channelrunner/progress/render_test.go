@@ -28,6 +28,7 @@ func TestRendererRendersDelegateFailureProgress(t *testing.T) {
 		}
 		if strings.Contains(msg.Text, "boom") {
 			t.Fatalf("renderer leaked raw payload reason: %q", msg.Text)
+
 		}
 		if msg.Text == "" {
 			t.Fatalf("rendered text empty for %q", kind)
@@ -141,4 +142,59 @@ func countRunes(s string) int {
 		n++
 	}
 	return n
+}
+
+// TestRendererTimeoutIsHonest: the timeout template must NOT claim "整理已获得的
+// 信息" when there may be no result. It must state the timeout fact plainly.
+func TestRendererTimeoutIsHonest(t *testing.T) {
+	r := ProgressRenderer{MaxChars: 180}
+	msg, ok := r.Render(renderEvt("agent.delegate.timeout", map[string]any{
+		"effective_max_duration_ms": float64(120000),
+	}))
+	if !ok {
+		t.Fatalf("should render")
+	}
+	// Must NOT contain the old misleading phrase.
+	if strings.Contains(msg.Text, "整理已获得的信息") {
+		t.Fatalf("timeout template still uses misleading '整理已获得的信息': %q", msg.Text)
+	}
+	// Should mention the timeout fact.
+	if !strings.Contains(msg.Text, "超时") {
+		t.Fatalf("timeout text should mention 超时: %q", msg.Text)
+	}
+}
+
+// TestRendererAllowedShowsTargetAndDuration: the allowed template surfaces the
+// target agent and the effective (post-clamp) timeout so the user can see the
+// real deadline.
+func TestRendererAllowedShowsTargetAndDuration(t *testing.T) {
+	r := ProgressRenderer{MaxChars: 180}
+	msg, ok := r.Render(renderEvt("agent.delegate.allowed", map[string]any{
+		"target_agent_id":         "code-agent",
+		"effective_max_duration_ms": float64(7200000),
+	}))
+	if !ok {
+		t.Fatalf("allowed should render")
+	}
+	if !strings.Contains(msg.Text, "code-agent") {
+		t.Fatalf("allowed text should name the target agent: %q", msg.Text)
+	}
+	// 7200000ms = 2 hours; surface a human duration.
+	if !strings.Contains(msg.Text, "2 小时") {
+		t.Fatalf("allowed text should surface human duration (2 小时): %q", msg.Text)
+	}
+}
+
+// TestRendererStartedAndCompleted: simple lifecycle notifications render.
+func TestRendererStartedAndCompleted(t *testing.T) {
+	r := ProgressRenderer{MaxChars: 180}
+	for _, kind := range []string{"agent.delegate.started", "agent.delegate.completed"} {
+		msg, ok := r.Render(renderEvt(kind, nil))
+		if !ok {
+			t.Fatalf("kind %q should render", kind)
+		}
+		if strings.TrimSpace(msg.Text) == "" {
+			t.Fatalf("kind %q rendered empty text", kind)
+		}
+	}
 }

@@ -124,3 +124,126 @@ func TestDelegationPolicyValidationRejectsInvalidValues(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want delegation.max_outstanding", err)
 	}
 }
+
+// TestDelegationTargetPolicyNormalize: per-target policy gets normalized (worker_mode
+// trimmed/lowercased, empty targets dropped) and MaxDurationMS preserved.
+func TestDelegationTargetPolicyNormalize(t *testing.T) {
+	policy := DelegationPolicy{
+		Enabled: true, Allow: []string{"code-agent"},
+		MaxDepth: 1, MaxParallel: 1, ChildSessionMode: "ephemeral_worker", ReturnTo: "caller",
+		Targets: map[string]DelegationTargetPolicy{
+			"code-agent": {
+				WorkerMode:    "  External_Command ",
+				MaxDurationMS: 7200000,
+				ExposeProgress: true,
+			},
+			"  ": {WorkerMode: "external_command"}, // blank key dropped
+		},
+	}
+	normalized := NormalizeDelegationPolicy(policy)
+	if len(normalized.Targets) != 1 {
+		t.Fatalf("expected 1 target after normalize, got %d: %+v", len(normalized.Targets), normalized.Targets)
+	}
+	tp, ok := normalized.Targets["code-agent"]
+	if !ok {
+		t.Fatalf("code-agent target missing after normalize: %+v", normalized.Targets)
+	}
+	if tp.WorkerMode != "external_command" {
+		t.Fatalf("worker_mode not normalized: %q", tp.WorkerMode)
+	}
+	if tp.MaxDurationMS != 7200000 {
+		t.Fatalf("max_duration_ms not preserved: %d", tp.MaxDurationMS)
+	}
+	if !tp.ExposeProgress {
+		t.Fatalf("expose_progress not preserved")
+	}
+}
+
+// TestDelegationTargetPolicyValidate: worker_mode must be a known value; an
+// unknown mode is rejected by Validate.
+func TestDelegationTargetPolicyValidate(t *testing.T) {
+	// Known mode passes.
+	profile := BuiltinXiraAssistant()
+	profile.Delegation = DelegationPolicy{
+		Enabled: true, Allow: []string{"code-agent"},
+		MaxDepth: 1, MaxParallel: 1, ChildSessionMode: "ephemeral_worker", ReturnTo: "caller",
+		Targets: map[string]DelegationTargetPolicy{
+			"code-agent": {WorkerMode: "external_command", MaxDurationMS: 7200000},
+		},
+	}
+	if err := profile.Validate(); err != nil {
+		t.Fatalf("valid worker_mode should pass, got: %v", err)
+	}
+
+	// Unknown mode fails.
+	profile.Delegation.Targets["code-agent"] = DelegationTargetPolicy{WorkerMode: "bogus_mode"}
+	if err := profile.Validate(); err == nil || !strings.Contains(err.Error(), "worker_mode") {
+		t.Fatalf("unknown worker_mode should fail with worker_mode mention, got: %v", err)
+	}
+}
+
+// TestDelegationTargetPolicyAbsent: a target with no fields is dropped (empty
+// target policy = no per-target override).
+func TestDelegationTargetPolicyAbsent(t *testing.T) {
+	policy := DelegationPolicy{
+		Enabled: true, Allow: []string{"x"},
+		MaxDepth: 1, MaxParallel: 1, ChildSessionMode: "ephemeral_worker", ReturnTo: "caller",
+		Targets: map[string]DelegationTargetPolicy{"x": {}},
+	}
+	normalized := NormalizeDelegationPolicy(policy)
+	if _, ok := normalized.Targets["x"]; ok {
+		t.Fatalf("empty target policy should be dropped after normalize")
+	}
+}
+
+// TestBuiltinManagerAndList: the builtin manager loads builtin profiles and
+// List returns them sorted by ID. Also covers BuiltinProfiles + NewBuiltinManager.
+func TestBuiltinManagerAndList(t *testing.T) {
+	m, err := NewBuiltinManager()
+	if err != nil {
+		t.Fatalf("NewBuiltinManager: %v", err)
+	}
+	list := m.List()
+	if len(list) < 1 {
+		t.Fatalf("expected at least one builtin profile, got %d", len(list))
+	}
+	// Sorted by ID.
+	for i := 1; i < len(list); i++ {
+		if list[i-1].ID > list[i].ID {
+			t.Fatalf("List not sorted by ID at %d: %q > %q", i, list[i-1].ID, list[i].ID)
+		}
+	}
+	// Get returns the profile.
+	if _, ok := m.Get(DefaultAgentID); !ok {
+		t.Fatalf("Get(%q) missing", DefaultAgentID)
+	}
+	if _, ok := m.Get("does-not-exist"); ok {
+		t.Fatalf("Get on missing id should return false")
+	}
+}
+
+// TestAllowsEdgeCases: Allows rejects empty/whitespace and matches trimmed.
+func TestAllowsEdgeCases(t *testing.T) {
+	policy := DelegationPolicy{Allow: []string{"  code-agent  "}}
+	if !policy.Allows("code-agent") {
+		t.Fatalf("Allows should match trimmed entry")
+	}
+	if policy.Allows("") {
+		t.Fatalf("Allows('') should be false")
+	}
+	if policy.Allows("   ") {
+		t.Fatalf("Allows(whitespace) should be false")
+	}
+	if policy.Allows("other") {
+		t.Fatalf("Allows on non-listed id should be false")
+	}
+}
+
+// TestNewManagerRejectsInvalidProfile: NewManager validates each profile.
+func TestNewManagerRejectsInvalidProfile(t *testing.T) {
+	bad := BuiltinXiraAssistant()
+	bad.ID = "" // invalid
+	if _, err := NewManager([]Profile{bad}); err == nil {
+		t.Fatalf("NewManager should reject invalid profile")
+	}
+}

@@ -251,6 +251,70 @@ func TestForwarderQueueEvictsForWaitingHuman(t *testing.T) {
 	fwd.Stop()
 }
 
+// makeExposeEvent builds a delegate-lifecycle event (allowed/started/completed)
+// which defaults to Conversation=false, carrying the given expose_progress flag
+// in its payload.
+func makeExposeEvent(kind string, expose bool) runtime.RuntimeEvent {
+	sc := scopeFixture()
+	v := &runtime.RuntimeEventVisibility{Conversation: false, Activity: true, Inspector: true, Audit: true}
+	return runtime.RuntimeEvent{
+		ID:         "e-" + kind,
+		Kind:       kind,
+		RunID:      "run-1",
+		Scope:      &sc,
+		Visibility: v,
+		Payload:    map[string]any{"expose_progress": expose, "target_agent_id": "code-agent", "effective_max_duration_ms": 7200000},
+	}
+}
+
+// TestForwarderDeliversLifecycleWhenExposeProgress: with expose_progress=true,
+// the delegate lifecycle events (allowed/started/completed) — which default to
+// Conversation=false — are delivered to IM, surfacing the target and real
+// deadline for external-command workers.
+func TestForwarderDeliversLifecycleWhenExposeProgress(t *testing.T) {
+	bus := runtime.NewEventBus()
+	defer bus.Close()
+	sender := &recordingSender{}
+	// Allow enough progress quota for all three lifecycle events (each counts
+	// against MaxMessagesPerTurn).
+	policy := testPolicy()
+	policy.MaxMessagesPerTurn = 8
+	fwd := Start(context.Background(), Request{EventBus: bus, Inbound: inboundFixture(), Policy: policy, Sender: sender})
+
+	for _, kind := range []string{"agent.delegate.allowed", "agent.delegate.started", "agent.delegate.completed"} {
+		bus.Publish(makeExposeEvent(kind, true))
+	}
+	if !waitUntil(t, 2*time.Second, func() bool {
+		return containsKind(sender, "agent.delegate.allowed") &&
+			containsKind(sender, "agent.delegate.started") &&
+			containsKind(sender, "agent.delegate.completed")
+	}) {
+		t.Fatalf("lifecycle events with expose_progress should be delivered: %v", sender.kinds())
+	}
+	fwd.Stop()
+}
+
+// TestForwarderHidesLifecycleWithoutExposeProgress: without expose_progress,
+// the lifecycle events stay invisible (the default — ordinary bounded
+// delegates don't spam IM with start/complete chatter).
+func TestForwarderHidesLifecycleWithoutExposeProgress(t *testing.T) {
+	bus := runtime.NewEventBus()
+	defer bus.Close()
+	sender := &recordingSender{}
+	fwd := Start(context.Background(), Request{EventBus: bus, Inbound: inboundFixture(), Policy: testPolicy(), Sender: sender})
+
+	for _, kind := range []string{"agent.delegate.allowed", "agent.delegate.started", "agent.delegate.completed"} {
+		bus.Publish(makeExposeEvent(kind, false))
+	}
+	time.Sleep(150 * time.Millisecond)
+	for _, kind := range []string{"agent.delegate.allowed", "agent.delegate.started", "agent.delegate.completed"} {
+		if containsKind(sender, kind) {
+			t.Fatalf("lifecycle event %q without expose_progress should NOT be delivered: %v", kind, sender.kinds())
+		}
+	}
+	fwd.Stop()
+}
+
 func TestForwarderConcurrentRunsDoNotCross(t *testing.T) {
 	bus := runtime.NewEventBus()
 	defer bus.Close()

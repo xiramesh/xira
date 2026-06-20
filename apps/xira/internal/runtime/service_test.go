@@ -1544,6 +1544,92 @@ func TestDelegateOversizedDurationClampsToPolicyMax(t *testing.T) {
 	}
 }
 
+// TestDelegatePerTargetTimeoutNotClampedByCallerMax: when the caller's
+// delegation policy has a per-target MaxDurationMS override, a requested
+// duration above the caller's GLOBAL max (120000) is allowed up to the
+// per-target ceiling — this is the fix for code-agent (external worker) being
+// clamped from 7200000 to 120000.
+func TestDelegatePerTargetTimeoutNotClampedByCallerMax(t *testing.T) {
+	instance := writeRuntimeFixture(t, agents.DefaultAgentID, []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "workspace", "agents", "xira-assistant", "PROFILE.md"), `---
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.1
+description: Default Xira runtime assistant.
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-flash
+delegation:
+  enabled: true
+  allow:
+    - research-assistant
+  max_depth: 1
+  targets:
+    research-assistant:
+      worker_mode: external_command
+      max_duration_ms: 7200000
+      expose_progress: true
+verification:
+  default_checks:
+    - final_response_non_empty
+---
+# Working Contract
+
+Delegate to research-assistant.
+`)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		system := ""
+		if len(req.Messages) > 0 {
+			system = fmt.Sprint(req.Messages[0].Content)
+		}
+		var body string
+		switch {
+		case lastRole(req.Messages) == "tool":
+			body = deepSeekTextResponse("parent synthesized final")
+		case strings.Contains(system, "Current Xira agent: research-assistant"):
+			body = deepSeekTextResponse(`{"summary":"per-target child completed","confidence":"high","followup_needed":false}`)
+		default:
+			body = deepSeekToolCallResponseWithArgs("delegate-per-target", "delegate_agent", map[string]any{
+				"agent_id":        agents.ResearchAssistantAgentID,
+				"task":            "run as external worker",
+				"max_duration_ms": 7200000, // 2h requested, way above caller global 120000
+			})
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	rt := newTestService(t, Config{
+		ConfigPath:     filepath.Join(instance, "xira.yaml"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate per-target", Context: channel.NewInboundContext("test", "", nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed, ok := findEvent(resp.Events, "agent.delegate.allowed")
+	if !ok {
+		t.Fatalf("events missing agent.delegate.allowed: %+v", eventKinds(resp.Events))
+	}
+	// The fix: effective is the per-target ceiling (7200000), NOT the caller
+	// global clamp (120000).
+	if got := allowed.Payload["effective_max_duration_ms"]; got != 7200000 {
+		t.Fatalf("effective_max_duration_ms = %v, want 7200000 (per-target override must not be clamped by caller global max): %+v", got, allowed.Payload)
+	}
+	if got := allowed.Payload["target_policy_max_duration_ms"]; got != 7200000 {
+		t.Fatalf("target_policy_max_duration_ms = %v, want 7200000: %+v", got, allowed.Payload)
+	}
+	if got := allowed.Payload["worker_mode"]; got != "external_command" {
+		t.Fatalf("worker_mode = %v, want external_command: %+v", got, allowed.Payload)
+	}
+	if got := allowed.Payload["policy_max_duration_ms"]; got != 120000 {
+		t.Fatalf("policy_max_duration_ms should still report caller global (120000) for audit: %v", got)
+	}
+}
+
 func TestDelegateAgentRejectsEmptyChildResultAsInvalidChildResult(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		var req deepseek.ChatRequest

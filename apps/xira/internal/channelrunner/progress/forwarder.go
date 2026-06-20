@@ -140,11 +140,19 @@ func (f *Forwarder) handleBusEvent(evt runtime.RuntimeEvent) {
 		f.drain()
 		return
 	}
-	if evt.Visibility == nil || !evt.Visibility.Conversation {
-		return
-	}
-	if !isDeliverableKind(evt.Kind) {
-		return
+	// delegate lifecycle events (allowed/started/completed) default to
+	// Conversation=false. They pass through ONLY when the caller's per-target
+	// policy set expose_progress=true (recorded in the payload at delegation
+	// time). This keeps them silent for ordinary bounded delegates but visible
+	// for external-command workers (e.g. code-agent) where the user needs to
+	// see the real deadline and execution path.
+	if !exposeProgressDeliverable(evt) {
+		if evt.Visibility == nil || !evt.Visibility.Conversation {
+			return
+		}
+		if !isDeliverableKind(evt.Kind) {
+			return
+		}
 	}
 	// A delegated (child) run can also emit run.waiting_human, and because the
 	// child inherits the parent's MessageID it matches this forwarder's inbound
@@ -172,6 +180,26 @@ func isDeliverableKind(kind string) bool {
 		return true
 	}
 	return false
+}
+
+// exposeProgressDeliverable reports whether an event is one of the
+// delegate-lifecycle kinds (allowed/started/completed) that is opted into IM
+// delivery by a payload flag (expose_progress=true). These default to
+// conversation-invisible; only callers whose per-target delegation policy set
+// expose_progress surface them, so the user sees the real deadline and
+// execution path for external-command workers without noisifying every
+// ordinary bounded delegate.
+func exposeProgressDeliverable(evt runtime.RuntimeEvent) bool {
+	switch evt.Kind {
+	case "agent.delegate.allowed", "agent.delegate.started", "agent.delegate.completed":
+	default:
+		return false
+	}
+	if evt.Payload == nil {
+		return false
+	}
+	b, ok := evt.Payload["expose_progress"].(bool)
+	return ok && b
 }
 
 // sendLoop drains the internal queue and dispatches each event until Stop()

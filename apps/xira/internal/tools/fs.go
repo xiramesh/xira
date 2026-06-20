@@ -244,6 +244,15 @@ func (t fileTool) resolveWithin(rawPath string, roots []string) (string, error) 
 	if rawPath == "" {
 		return "", fmt.Errorf("path is required")
 	}
+	// Expand a leading ~ so file tools and shell.run agree on the same repo
+	// path. Without this, read_file "~/work/..." resolved to
+	// "workspace/~/work/..." while `cd ~/work/...` in shell.run expanded ~ —
+	// an inconsistency that confused models and caused retries (RCA §7).
+	expanded, err := expandHome(rawPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+	rawPath = expanded
 	workspaceRoot := filepath.Clean(t.workspaceRoot)
 	var path string
 	if filepath.IsAbs(rawPath) {
