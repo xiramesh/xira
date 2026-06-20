@@ -64,8 +64,43 @@ func assertUniqueRecorderIDs(t *testing.T, label string, total int, idAt func(in
 			t.Fatalf("%s[%d] missing id", label, i)
 		}
 		if _, ok := seen[id]; ok {
-			t.Fatalf("%s duplicate id %q", label, id)
+			t.Fatalf("%s duplicate id %q", label, i)
 		}
 		seen[id] = struct{}{}
+	}
+}
+
+// TestRuntimeRecordersNilGuards: every append method is safe on a nil receiver
+// and on a recorder with a nil resp (covers the early-return arms left at 80%).
+func TestRuntimeRecordersNilGuards(t *testing.T) {
+	var nilRec *runRecorder
+	nilRec.appendEvent(RuntimeEvent{Kind: "x"})      // must not panic
+	nilRec.appendAudit(AuditEvent{Action: "x"})
+	nilRec.appendLLMCall(LLMCallRecord{Model: "m"})
+
+	emptyRec := &runRecorder{resp: nil} // recorder exists, no response
+	emptyRec.appendEvent(RuntimeEvent{Kind: "x"})
+	emptyRec.appendAudit(AuditEvent{Action: "x"})
+	emptyRec.appendLLMCall(LLMCallRecord{Model: "m"})
+
+	var nilTool *toolCallRecorder
+	nilTool.append(ToolCallRecord{Name: "x"})
+	if got := nilTool.snapshot(); got != nil {
+		t.Fatalf("nil tool recorder snapshot should be nil, got %v", got)
+	}
+}
+
+// TestToolCallRecorderSnapshotIsCopy: snapshot returns an independent copy.
+func TestToolCallRecorderSnapshotIsCopy(t *testing.T) {
+	rec := &toolCallRecorder{}
+	rec.append(ToolCallRecord{Name: "a"})
+	rec.append(ToolCallRecord{Name: "b"})
+	snap := rec.snapshot()
+	if len(snap) != 2 || snap[1].Name != "b" {
+		t.Fatalf("snapshot content wrong: %v", snap)
+	}
+	snap[0].Name = "mutated"
+	if again := rec.snapshot(); again[0].Name != "a" {
+		t.Fatalf("snapshot was not a copy: %v", again)
 	}
 }

@@ -48,7 +48,7 @@ type Service struct {
 	humanRequests  *humanrequest.Store
 	humanResume    func(context.Context, humanrequest.HumanRequest) error
 	adkSessions    adksession.Service
-	verifier       *VerificationRunner
+	verifier       verifier
 	evolution      *EvolutionEngine
 	deepseek       *deepseek.Client
 	configPath     string
@@ -126,6 +126,9 @@ func (s *Service) Close() {
 }
 
 func (s *Service) EventBus() *EventBus {
+	if s == nil {
+		return nil
+	}
 	return s.events
 }
 
@@ -481,6 +484,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		recordEvent("run.waiting_human", "runtime", "agent run waiting for human input", map[string]any{
 			"human_requests": len(interrupt.HumanRequests),
 			"blocked_by":     interrupt.Reason,
+			"summary":        waitingHumanSummary(interrupt),
 		})
 	} else {
 		resp.VerificationResult = s.verifier.Verify(final, profile.Verification.DefaultChecks)
@@ -592,6 +596,20 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 				})
 			}
 		}
+	}
+	// assistant.final: a live "final answer ready" signal. Published only when a
+	// final response was produced AND the run succeeded — this is a whitelist
+	// (status == completed), not a blacklist. A failed run can have a non-empty
+	// final (e.g. verification failed on a populated draft), and in that case the
+	// forwarder must NOT drain: the delegate failed/timeout progress sitting in
+	// its queue is exactly the signal the user needs. Emitting assistant.final
+	// there would drain it away. HITL (waiting_human) has no final answer ready
+	// either. See docs/architecture/xira-conversation-progress-feed-v0.zh.md §8.5
+	// and the failed-run regression test TestRunDoesNotEmitAssistantFinalOnFailed.
+	if final != "" && resp.Status == "completed" {
+		recordEvent("assistant.final", "runtime", "assistant final response ready", map[string]any{
+			"final_chars": utf8.RuneCountInString(final),
+		})
 	}
 	recordEvent("run.finished", "runtime", "agent run finished", map[string]any{
 		"status":              resp.Status,

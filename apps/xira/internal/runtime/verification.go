@@ -2,6 +2,15 @@ package runtime
 
 import "strings"
 
+// verifier is the contract Service depends on to verify a final response. It
+// is an interface (not the concrete *VerificationRunner) so tests can inject a
+// failing verifier without going through the network — this is what lets the
+// failed-run path (non-empty final + failed verification) be exercised, which
+// is exactly the assistant.final drain bug's trigger.
+type verifier interface {
+	Verify(finalResponse string, checks []string) VerificationResult
+}
+
 type VerificationRunner struct{}
 
 func NewVerificationRunner() *VerificationRunner {
