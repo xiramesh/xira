@@ -106,11 +106,40 @@ func newSubscriber() *subscriber {
 	return s
 }
 
-// isHighPriority reports whether an event must beat low-priority noise for
-// delivery. Conversation-facing facts are the high-priority set; everything
-// else (adk.event, model.*, context.*, tool.*) is droppable noise.
-func isHighPriority(evt RuntimeEvent) bool {
-	return evt.Visibility != nil && evt.Visibility.Conversation
+// eventPriority ranks an event kind by delivery reliability — how much it
+// hurts the IM progress feed if the bus drops it. This is NOT the same axis as
+// Visibility.Conversation: that says which *plane* an event belongs to
+// (conversation vs inspector vs audit), not whether dropping it is tolerable.
+// Using Conversation as a proxy for priority was a bug — it put the
+// high-volume `assistant.status` heartbeat in the same tier as the
+// must-not-drop `run.waiting_human` interaction signal, so a status burst could
+// starve waiting_human. Priority is now explicit and kind-based (AGENTS.md
+// §1.1: "kind 优先级").
+//
+// Tiers, by the forwarder's actual delivery contract:
+//   - priorityCritical: run.waiting_human (blocks the user; the one interaction
+//     signal that must reach IM) and assistant.final (the forwarder's drain
+//     signal; missing it breaks drain ordering). These may evict anything.
+//   - priorityImportant: agent.delegate.failed / .timeout (user-facing failure
+//     progress the forwarder renders). These evict only droppable events.
+//   - priorityDroppable: everything else — assistant.status heartbeat,
+//     adk.event, tool.*, llm.*, context.*, model.*, session.*, usage.*. These
+//     are dropped (never evict) when the buffer is full.
+const (
+	priorityDroppable = iota
+	priorityImportant
+	priorityCritical
+)
+
+func eventPriority(evt RuntimeEvent) int {
+	switch evt.Kind {
+	case "run.waiting_human", "assistant.final":
+		return priorityCritical
+	case "agent.delegate.failed", "agent.delegate.timeout":
+		return priorityImportant
+	default:
+		return priorityDroppable
+	}
 }
 
 // enqueue appends evt to the buffer, applying the priority-eviction policy
@@ -126,21 +155,21 @@ func (s *subscriber) enqueue(evt RuntimeEvent) {
 		s.appendLocked(evt)
 		return
 	}
-	// Buffer full. High-priority events evict the oldest low-priority event to
-	// make room; otherwise the incoming event is dropped. Either way, Warn —
-	// never silent (AGENTS.md §1.1).
-	if isHighPriority(evt) {
-		if idx := oldestLowPriorityLocked(s.buf); idx >= 0 {
-			evicted := s.buf[idx]
-			s.buf = append(s.buf[:idx], s.buf[idx+1:]...)
-			s.appendLocked(evt)
-			slog.Warn("event bus subscriber buffer full; evicted low-priority event for high-priority event",
-				"evicted_kind", evicted.Kind,
-				"evicted_event_id", evicted.ID,
-				"kind", evt.Kind,
-				"event_id", evt.ID)
-			return
-		}
+	// Buffer full. Evict the oldest buffered event STRICTLY lower priority than
+	// the incoming one (so a critical event can evict important/droppable, an
+	// important event can evict droppable, but a droppable event evicts nothing
+	// and is itself dropped). Either way, Warn — never silent (AGENTS.md §1.1).
+	incoming := eventPriority(evt)
+	if idx := oldestBelowLocked(s.buf, incoming); idx >= 0 {
+		evicted := s.buf[idx]
+		s.buf = append(s.buf[:idx], s.buf[idx+1:]...)
+		s.appendLocked(evt)
+		slog.Warn("event bus subscriber buffer full; evicted lower-priority event",
+			"evicted_kind", evicted.Kind,
+			"evicted_event_id", evicted.ID,
+			"kind", evt.Kind,
+			"event_id", evt.ID)
+		return
 	}
 	slog.Warn("event bus subscriber buffer full; dropping event",
 		"kind", evt.Kind, "event_id", evt.ID)
@@ -151,11 +180,12 @@ func (s *subscriber) appendLocked(evt RuntimeEvent) {
 	s.cond.Signal()
 }
 
-// oldestLowPriorityLocked returns the index of the oldest non-conversation
-// (low-priority) event in buf, or -1 if none exists.
-func oldestLowPriorityLocked(buf []RuntimeEvent) int {
+// oldestBelowLocked returns the index of the oldest buffered event whose
+// priority is strictly below `level`, or -1 if none exists. This is the
+// eviction victim: the least-valuable event that the incoming event outranks.
+func oldestBelowLocked(buf []RuntimeEvent, level int) int {
 	for i, evt := range buf {
-		if !isHighPriority(evt) {
+		if eventPriority(evt) < level {
 			return i
 		}
 	}

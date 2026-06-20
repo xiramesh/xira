@@ -6,25 +6,51 @@ import (
 	"time"
 )
 
-func timeNow() time.Time        { return time.Now() }
-func timeSince(t time.Time) time.Duration { return time.Since(t) }
+// deliveredWithin polls the channel until it observes the wanted kind or the
+// timeout elapses. The pump drains the slice-backed buffer into the unbuffered
+// out channel asynchronously, so a freshly enqueued event may sit behind many
+// buffered ones — we poll rather than assume head-of-line ordering.
+func deliveredWithin(ch <-chan RuntimeEvent, want string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if contains(drainAll(ch), want) {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return false
+}
 
-// lowPriorityEvent and highPriorityEvent build events at opposite ends of the
-// bus drop policy: adk.event (conversation=false, droppable noise) vs
-// agent.delegate.failed (conversation=true, must-be-delivered fact).
-func lowPriorityEvent(id string) RuntimeEvent {
+// droppableEvent, importantEvent, and criticalEvent build events at each of the
+// three bus priority tiers (AGENTS.md §1.1, event_bus.go eventPriority):
+//   - droppable: high-volume noise the forwarder never renders (adk.event) or
+//     conversation-visible heartbeats (assistant.status). Dropped, never evicts.
+//   - important: agent.delegate.failed/timeout (user-facing failure progress).
+//     Evicts droppable events only.
+//   - critical: run.waiting_human (interaction signal) / assistant.final
+//     (drain signal). Evict anything below them.
+func droppableEvent(kind, id string) RuntimeEvent {
 	return RuntimeEvent{
 		ID:         id,
-		Kind:       "adk.event",
+		Kind:       kind,
 		RunID:      "run-1",
-		Visibility: &RuntimeEventVisibility{Conversation: false, Activity: true, Inspector: true, Audit: true},
+		Visibility: &RuntimeEventVisibility{Conversation: kind == "assistant.status", Activity: true, Inspector: true, Audit: true},
 	}
 }
 
-func highPriorityEvent(id string) RuntimeEvent {
+func importantEvent(id string) RuntimeEvent {
 	return RuntimeEvent{
 		ID:         id,
 		Kind:       "agent.delegate.failed",
+		RunID:      "run-1",
+		Visibility: &RuntimeEventVisibility{Conversation: true, Activity: true, Inspector: true, Audit: true},
+	}
+}
+
+func criticalEvent(kind, id string) RuntimeEvent {
+	return RuntimeEvent{
+		ID:         id,
+		Kind:       kind,
 		RunID:      "run-1",
 		Visibility: &RuntimeEventVisibility{Conversation: true, Activity: true, Inspector: true, Audit: true},
 	}
@@ -56,94 +82,100 @@ func contains(s []string, want string) bool {
 	return false
 }
 
-// TestEventBusDeliversHighPriorityUnderBurst: the bus must not drop a
-// high-priority (conversation) event even when a subscriber's buffer is filled
-// with low-priority noise first. This is the core AGENTS.md §1.1 contract and
-// the unit-level form of TestForwarderSurvivesEventBusBurst.
-func TestEventBusDeliversHighPriorityUnderBurst(t *testing.T) {
+// TestEventBusDeliversImportantUnderDroppableBurst: the bus must not drop an
+// important event (agent.delegate.failed) even when a subscriber's buffer is
+// filled with droppable noise (adk.event) first. Important events evict
+// droppable ones. This is the core AGENTS.md §1.1 contract and the unit-level
+// form of TestForwarderSurvivesEventBusBurst.
+func TestEventBusDeliversImportantUnderDroppableBurst(t *testing.T) {
 	bus := NewEventBus()
 	defer bus.Close()
 	ch := bus.Subscribe(context.Background())
 
-	// Fill the buffer beyond capacity with noise, then publish one critical
-	// event. The critical event must still arrive (it evicts a noise event or
-	// rides a drained slot).
 	for i := 0; i < subscriberBufferSize+50; i++ {
-		bus.Publish(lowPriorityEvent("noise"))
+		bus.Publish(droppableEvent("adk.event", "noise"))
 	}
-	bus.Publish(highPriorityEvent("critical"))
+	bus.Publish(importantEvent("critical"))
 
-	// The critical event is appended after up to 256 noise events, so we must
-	// drain until we see it, not assume it is first. Give the pump time to push.
-	deadline := timeNow()
-	sawCritical := false
-	for !sawCritical && timeSince(deadline) < 2*time.Second {
-		if contains(drainAll(ch), "agent.delegate.failed") {
-			sawCritical = true
-		}
-	}
-	if !sawCritical {
-		t.Fatalf("high-priority event lost after noise burst")
+	if !deliveredWithin(ch, "agent.delegate.failed", 2*time.Second) {
+		t.Fatalf("important event lost after droppable noise burst")
 	}
 }
 
-// TestEventBusEvictsLowPriorityForHighPriority: when the buffer is full and a
-// high-priority event arrives, a low-priority event is evicted to make room
-// (not the high-priority event dropped).
-func TestEventBusEvictsLowPriorityForHighPriority(t *testing.T) {
+// TestEventBusStatusBurstMustNotStarveWaitingHuman: regression for the
+// visibility-as-priority bug. assistant.status is conversation-visible BUT
+// droppable (a progress heartbeat the forwarder never renders); run.waiting_human
+// is critical (the interaction signal). A status burst must NOT fill the buffer
+// and starve waiting_human — both were conversation=true, so the old
+// visibility-based priority put them in the same tier and dropped waiting_human.
+func TestEventBusStatusBurstMustNotStarveWaitingHuman(t *testing.T) {
 	bus := NewEventBus()
 	defer bus.Close()
 	ch := bus.Subscribe(context.Background())
 
-	// Exactly fill with noise.
-	for i := 0; i < subscriberBufferSize; i++ {
-		bus.Publish(lowPriorityEvent("noise"))
+	// Flood with assistant.status (conversation=true, but droppable), then send
+	// the critical interaction signal.
+	for i := 0; i < subscriberBufferSize+50; i++ {
+		bus.Publish(droppableEvent("assistant.status", "status"))
 	}
-	// One critical arrives: buffer is full, must evict a noise event.
-	bus.Publish(highPriorityEvent("critical"))
+	bus.Publish(criticalEvent("run.waiting_human", "waiting"))
 
-	sawCritical := false
-	deadline := timeNow()
-	for !sawCritical && timeSince(deadline) < 2*time.Second {
-		if contains(drainAll(ch), "agent.delegate.failed") {
-			sawCritical = true
-		}
-	}
-	if !sawCritical {
-		t.Fatalf("high-priority event was dropped instead of evicting a low-priority event")
+	if !deliveredWithin(ch, "run.waiting_human", 2*time.Second) {
+		t.Fatalf("run.waiting_human was not delivered after assistant.status burst")
 	}
 }
 
-// TestEventBusDropsLowPriorityWhenFullOfHighPriority: if the buffer is full of
-// high-priority events and another low-priority event arrives, the low-priority
-// event is the one dropped (no high-priority eviction).
-func TestEventBusDropsLowPriorityWhenFullOfHighPriority(t *testing.T) {
+// TestEventBusCriticalEvictsImportant: a critical event (run.waiting_human)
+// evicts an important event (agent.delegate.failed) when the buffer holds only
+// important events — i.e. critical outranks important, not just droppable.
+func TestEventBusCriticalEvictsImportant(t *testing.T) {
 	bus := NewEventBus()
 	defer bus.Close()
 	ch := bus.Subscribe(context.Background())
 
-	// Fill with high-priority events.
+	// Fill with important events.
 	for i := 0; i < subscriberBufferSize; i++ {
-		bus.Publish(highPriorityEvent("hp"))
+		bus.Publish(importantEvent("imp"))
 	}
-	// Extra low-priority event must be dropped, not evict a high-priority one.
-	bus.Publish(lowPriorityEvent("dropped"))
+	// Critical arrives: must evict an important event to make room.
+	bus.Publish(criticalEvent("run.waiting_human", "waiting"))
 
-	// Drain and confirm no adk.event leaked through.
-	var sawLow bool
-	deadline := timeNow()
-	for timeSince(deadline) < time.Second {
-		kinds := drainAll(ch)
-		if contains(kinds, "adk.event") {
-			sawLow = true
-			break
-		}
-		if len(kinds) == 0 {
-			break
-		}
+	if !deliveredWithin(ch, "run.waiting_human", 2*time.Second) {
+		t.Fatalf("critical event was dropped instead of evicting an important event")
 	}
-	if sawLow {
-		t.Fatalf("low-priority event should have been dropped when buffer was full of high-priority events")
+}
+
+// TestEventBusDroppableNeverEvicts: a droppable event arriving at a full buffer
+// is dropped and never evicts anything (important or critical).
+//
+// Determinism note: the pump always pops one event into a blocking send, so to
+// guarantee the buffer is observed full we publish capacity+1 important events
+// first (one is in-flight in the pump's blocked send, the rest fill the
+// buffer), then the droppable event must be dropped rather than evict an
+// important event or be enqueued.
+func TestEventBusDroppableNeverEvicts(t *testing.T) {
+	bus := NewEventBus()
+	defer bus.Close()
+	ch := bus.Subscribe(context.Background())
+	// Never read ch -> the pump's send blocks, keeping the buffer saturated.
+
+	// capacity+1 important events saturate the buffer despite the pump holding
+	// one in its blocked send.
+	for i := 0; i < subscriberBufferSize+1; i++ {
+		bus.Publish(importantEvent("imp"))
+	}
+	// Droppable event must be dropped at enqueue (buffer full of important).
+	bus.Publish(droppableEvent("adk.event", "dropped"))
+
+	// Now drain: every delivered event must be agent.delegate.failed; no
+	// adk.event may appear (it was dropped, not enqueued).
+	end := time.Now().Add(2 * time.Second)
+	for time.Now().Before(end) {
+		if got := drainAll(ch); contains(got, "adk.event") {
+			t.Fatalf("droppable event was delivered; it should have been dropped when buffer was full of important events: %v", got)
+		} else if len(got) == 0 {
+			break
+		}
 	}
 }
 
@@ -160,7 +192,7 @@ func TestEventBusSubscribeCancelledOnContext(t *testing.T) {
 		t.Fatalf("subscriber channel should be closed after context cancel")
 	}
 	// Publishing after cancel must not panic.
-	bus.Publish(highPriorityEvent("after-cancel"))
+	bus.Publish(importantEvent("after-cancel"))
 }
 
 // TestEventBusCloseClosesAllSubscribers: Close closes every subscriber channel.
