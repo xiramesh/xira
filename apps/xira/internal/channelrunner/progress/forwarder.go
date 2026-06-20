@@ -190,6 +190,11 @@ func (f *Forwarder) sendLoop() {
 // dequeue returns the next queued event, blocking until one is available. It
 // returns ok=false when the queue is closed AND empty (i.e. shutdown is complete
 // and all buffered events have been dispatched).
+//
+// It blocks on queueCh (woken by enqueue/closeQueue) rather than polling, so a
+// canceled ctx between Stop()'s cancel and closeQueue steps does NOT busy-spin:
+// the loop parks on queueCh until closeQueue signals. Buffered events are still
+// drained first (§16.5), then it exits on close.
 func (f *Forwarder) dequeue() (runtime.RuntimeEvent, bool) {
 	for {
 		f.queueMu.Lock()
@@ -204,23 +209,12 @@ func (f *Forwarder) dequeue() (runtime.RuntimeEvent, bool) {
 			return runtime.RuntimeEvent{}, false
 		}
 		f.queueMu.Unlock()
-		select {
-		case <-f.queueCh:
-		case <-f.ctx.Done():
-			// On shutdown, drain anything already buffered (§16.5) before exiting.
-			f.queueMu.Lock()
-			if len(f.queue) > 0 {
-				evt := f.queue[0]
-				f.queue = f.queue[1:]
-				f.queueMu.Unlock()
-				return evt, true
-			}
-			closed := f.queueClosed
-			f.queueMu.Unlock()
-			if closed {
-				return runtime.RuntimeEvent{}, false
-			}
-		}
+		// Park until enqueue or closeQueue signals. We deliberately do NOT select
+		// on ctx.Done() here: doing so caused a busy-spin once ctx was canceled
+		// (Stop cancels ctx before closeQueue, and ctx.Done stays ready forever,
+		// re-entering the loop at 100% CPU). closeQueue always signals queueCh, so
+		// the park reliably ends at shutdown while buffered events still drain.
+		<-f.queueCh
 	}
 }
 

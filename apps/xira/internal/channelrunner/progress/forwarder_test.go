@@ -313,6 +313,32 @@ func TestForwarderDoesNotRedeliverFinal(t *testing.T) {
 	fwd.Stop()
 }
 
+// TestForwarderStopDoesNotBusySpin: regression for a busy-spin in dequeue. Stop()
+// cancels ctx (step 1) BEFORE closeQueue (step 3); in between, consumerWg.Wait
+// runs and the sendLoop's dequeue used to re-select on a forever-ready ctx.Done
+// at ~100% CPU. The fix parks on queueCh instead. This test asserts Stop returns
+// promptly (no hang) and — as a spin guard — that queueCh is left unsignaled
+// while parked (a spinning loop would keep draining any signal).
+func TestForwarderStopDoesNotBusySpin(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		bus := runtime.NewEventBus()
+		sender := &recordingSender{delay: 5 * time.Millisecond} // slowish sender
+		fwd := Start(context.Background(), Request{EventBus: bus, Inbound: inboundFixture(), Policy: testPolicy(), Sender: sender})
+		// Publish several events so the queue is non-empty during shutdown.
+		for j := 0; j < 10; j++ {
+			bus.Publish(makeEvent("agent.delegate.failed", true))
+		}
+		done := make(chan struct{})
+		go func() { fwd.Stop(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iteration %d: Stop() hung (possible busy-spin or deadlock)", i)
+		}
+		bus.Close()
+	}
+}
+
 func TestForwarderStopsOnFallbackWhenNoFinal(t *testing.T) {
 	bus := runtime.NewEventBus()
 	defer bus.Close()

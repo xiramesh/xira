@@ -13,16 +13,18 @@ import (
 const subscriberBufferSize = 256
 
 // EventBus is a best-effort, per-Service singleton fan-out. Its correctness
-// contract (AGENTS.md §1.1) is NOT "never drops" — it is "when it must drop,
-// it drops by kind priority and logs Warn, never silently". Conversation-facing
-// facts (run.waiting_human, agent.delegate.failed/timeout, assistant.final,
-// assistant.status, capability_gap — i.e. Visibility.Conversation==true) are
-// high-priority: when a subscriber buffer is full and a high-priority event
-// arrives, a low-priority buffered event is evicted to make room. If only
-// high-priority events are buffered (or the new event is low-priority), the new
-// event is dropped. Both cases log Warn. This is what makes critical events
-// reachable under a noise burst — the drop happens at the bus layer, before the
-// forwarder's internal queue can recover it.
+// contract (AGENTS.md §1.1) is NOT "never drops" — it is "when it must drop, it
+// drops by kind priority and logs Warn, never silently". Priority is explicit
+// and kind-based (see eventPriority): critical (run.waiting_human,
+// assistant.final) outranks important (agent.delegate.failed/timeout) outranks
+// droppable (everything else, including the assistant.status heartbeat). When a
+// subscriber buffer is full and a higher-priority event arrives, the oldest
+// strictly-lower-priority buffered event is evicted to make room; otherwise the
+// incoming event is dropped. Both cases log Warn. This is what makes critical
+// events reachable under a noise burst — the drop happens at the bus layer,
+// before the forwarder's internal queue can recover it. Note priority is a
+// distinct axis from Visibility.Conversation: that selects the *plane*
+// (conversation/inspector/audit), not whether dropping is tolerable.
 type EventBus struct {
 	mu     sync.RWMutex
 	subs   map[*subscriber]struct{}
