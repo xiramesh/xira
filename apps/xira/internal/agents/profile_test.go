@@ -125,19 +125,18 @@ func TestDelegationPolicyValidationRejectsInvalidValues(t *testing.T) {
 	}
 }
 
-// TestDelegationTargetPolicyNormalize: per-target policy gets normalized (worker_mode
-// trimmed/lowercased, empty targets dropped) and MaxDurationMS preserved.
+// TestDelegationTargetPolicyNormalize: per-target policy gets normalized (empty
+// targets dropped) and MaxDurationMS preserved.
 func TestDelegationTargetPolicyNormalize(t *testing.T) {
 	policy := DelegationPolicy{
 		Enabled: true, Allow: []string{"code-agent"},
 		MaxDepth: 1, MaxParallel: 1, ChildSessionMode: "ephemeral_worker", ReturnTo: "caller",
 		Targets: map[string]DelegationTargetPolicy{
 			"code-agent": {
-				WorkerMode:    "  External_Command ",
-				MaxDurationMS: 7200000,
+				MaxDurationMS:  7200000,
 				ExposeProgress: true,
 			},
-			"  ": {WorkerMode: "external_command"}, // blank key dropped
+			"  ": {MaxDurationMS: 1000}, // blank key dropped
 		},
 	}
 	normalized := NormalizeDelegationPolicy(policy)
@@ -148,37 +147,11 @@ func TestDelegationTargetPolicyNormalize(t *testing.T) {
 	if !ok {
 		t.Fatalf("code-agent target missing after normalize: %+v", normalized.Targets)
 	}
-	if tp.WorkerMode != "external_command" {
-		t.Fatalf("worker_mode not normalized: %q", tp.WorkerMode)
-	}
 	if tp.MaxDurationMS != 7200000 {
 		t.Fatalf("max_duration_ms not preserved: %d", tp.MaxDurationMS)
 	}
 	if !tp.ExposeProgress {
 		t.Fatalf("expose_progress not preserved")
-	}
-}
-
-// TestDelegationTargetPolicyValidate: worker_mode must be a known value; an
-// unknown mode is rejected by Validate.
-func TestDelegationTargetPolicyValidate(t *testing.T) {
-	// Known mode passes.
-	profile := BuiltinXiraAssistant()
-	profile.Delegation = DelegationPolicy{
-		Enabled: true, Allow: []string{"code-agent"},
-		MaxDepth: 1, MaxParallel: 1, ChildSessionMode: "ephemeral_worker", ReturnTo: "caller",
-		Targets: map[string]DelegationTargetPolicy{
-			"code-agent": {WorkerMode: "external_command", MaxDurationMS: 7200000},
-		},
-	}
-	if err := profile.Validate(); err != nil {
-		t.Fatalf("valid worker_mode should pass, got: %v", err)
-	}
-
-	// Unknown mode fails.
-	profile.Delegation.Targets["code-agent"] = DelegationTargetPolicy{WorkerMode: "bogus_mode"}
-	if err := profile.Validate(); err == nil || !strings.Contains(err.Error(), "worker_mode") {
-		t.Fatalf("unknown worker_mode should fail with worker_mode mention, got: %v", err)
 	}
 }
 

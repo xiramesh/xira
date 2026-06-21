@@ -1566,7 +1566,6 @@ delegation:
   max_depth: 1
   targets:
     research-assistant:
-      worker_mode: external_command
       max_duration_ms: 7200000
       expose_progress: true
 verification:
@@ -1621,9 +1620,6 @@ Delegate to research-assistant.
 	}
 	if got := allowed.Payload["target_policy_max_duration_ms"]; got != 7200000 {
 		t.Fatalf("target_policy_max_duration_ms = %v, want 7200000: %+v", got, allowed.Payload)
-	}
-	if got := allowed.Payload["worker_mode"]; got != "external_command" {
-		t.Fatalf("worker_mode = %v, want external_command: %+v", got, allowed.Payload)
 	}
 	if got := allowed.Payload["policy_max_duration_ms"]; got != 120000 {
 		t.Fatalf("policy_max_duration_ms should still report caller global (120000) for audit: %v", got)

@@ -78,9 +78,8 @@ type DelegationPolicy struct {
 	ChildSessionMode        string                            `json:"child_session_mode,omitempty" yaml:"child_session_mode,omitempty"`
 	// Targets carries per-target delegation overrides. Keys are target agent IDs.
 	// A target present here may get a different timeout ceiling (MaxDurationMS, not
-	// clamped by the caller's global MaxDurationMS), a worker mode (e.g.
-	// "external_command" for long-running external command wrappers like code-agent),
-	// and progress exposure (ExposeProgress delivers allowed/started/completed into IM).
+	// clamped by the caller's global MaxDurationMS) and progress exposure
+	// (ExposeProgress delivers allowed/started/completed into IM).
 	// Tool surface is NOT configured here — that stays on the target's own profile.
 	Targets map[string]DelegationTargetPolicy `json:"targets,omitempty" yaml:"targets,omitempty"`
 	maxDepthConfigured bool
@@ -88,7 +87,6 @@ type DelegationPolicy struct {
 
 // DelegationTargetPolicy is a per-target override applied during delegation.
 type DelegationTargetPolicy struct {
-	WorkerMode string `json:"worker_mode,omitempty" yaml:"worker_mode,omitempty"`
 	// MaxDurationMS is this target's own timeout ceiling. When set, the effective
 	// timeout is clamped to this value instead of the caller's global MaxDurationMS.
 	MaxDurationMS int `json:"max_duration_ms,omitempty" yaml:"max_duration_ms,omitempty"`
@@ -225,8 +223,8 @@ func NormalizeDelegationPolicy(policy DelegationPolicy) DelegationPolicy {
 	if strings.TrimSpace(normalized.ChildSessionMode) == "" {
 		normalized.ChildSessionMode = "ephemeral_worker"
 	}
-	// Normalize per-target policies: trim/lowercase worker_mode, drop empty
-	// targets (an empty target policy = no override).
+	// Normalize per-target policies: drop empty targets (an empty target policy
+	// = no override).
 	if len(normalized.Targets) > 0 {
 		cleaned := make(map[string]DelegationTargetPolicy, len(normalized.Targets))
 		for id, tp := range normalized.Targets {
@@ -234,8 +232,7 @@ func NormalizeDelegationPolicy(policy DelegationPolicy) DelegationPolicy {
 			if id == "" {
 				continue
 			}
-			tp.WorkerMode = strings.ToLower(strings.TrimSpace(tp.WorkerMode))
-			if tp.WorkerMode == "" && tp.MaxDurationMS == 0 && !tp.ExposeProgress {
+			if tp.MaxDurationMS == 0 && !tp.ExposeProgress {
 				continue // empty target policy
 			}
 			cleaned[id] = tp
@@ -323,14 +320,6 @@ func validateDelegationPolicy(policy DelegationPolicy) error {
 	case "ephemeral_worker":
 	default:
 		errs = append(errs, "delegation.child_session_mode must be ephemeral_worker in Phase 1")
-	}
-	// Validate per-target policies: worker_mode must be a known value.
-	for id, tp := range policy.Targets {
-		switch tp.WorkerMode {
-		case "", "external_command":
-		default:
-			errs = append(errs, fmt.Sprintf("delegation.targets.%s.worker_mode must be external_command (got %q)", id, tp.WorkerMode))
-		}
 	}
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "; "))

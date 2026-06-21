@@ -532,7 +532,6 @@ func (s *Service) executeDelegateAgentTool(
 		"policy_max_duration_ms":      policy.MaxDurationMS,
 		"child_session_mode":          policy.ChildSessionMode,
 		"expose_child_output_to_user": policy.ExposeChildOutputToUser,
-		"worker_mode":                 workerModeValue(targetPolicy, hasTargetPolicy),
 		"target_policy_max_duration_ms": targetPolicyMaxDurationMS(targetPolicy, hasTargetPolicy),
 		// expose_progress lets the progress forwarder surface this lifecycle
 		// event into IM chat (not just Activity/Inspector/Audit). Only set when
@@ -1284,15 +1283,6 @@ func (s *Service) persistRejectedDelegateResult(childRunID, raw string, validati
 func delegateWorkerProfile(profile agents.Profile) agents.Profile {
 	profile.Instructions = append(append([]string(nil), profile.Instructions...), delegateWorkerRuntimeContract())
 	return profile
-}
-
-// workerModeValue returns the target's worker_mode (or empty when no per-target
-// policy applies), for the agent.delegate.allowed event payload.
-func workerModeValue(tp agents.DelegationTargetPolicy, has bool) string {
-	if !has {
-		return ""
-	}
-	return tp.WorkerMode
 }
 
 // targetPolicyMaxDurationMS returns the per-target ceiling (or 0 when none),
