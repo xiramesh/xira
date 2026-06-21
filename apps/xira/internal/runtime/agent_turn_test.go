@@ -116,6 +116,9 @@ func TestIsValidTransition_HappyPath(t *testing.T) {
 		to   AgentTurnStatus
 	}{
 		{"requested→running", AgentTurnStatusRequested, AgentTurnStatusRunning},
+		{"requested→failed", AgentTurnStatusRequested, AgentTurnStatusFailed},
+		{"requested→canceled", AgentTurnStatusRequested, AgentTurnStatusCanceled},
+		{"requested→timeout", AgentTurnStatusRequested, AgentTurnStatusTimeout},
 		{"running→waiting_human", AgentTurnStatusRunning, AgentTurnStatusWaitingHuman},
 		{"running→completed", AgentTurnStatusRunning, AgentTurnStatusCompleted},
 		{"running→failed", AgentTurnStatusRunning, AgentTurnStatusFailed},
@@ -125,6 +128,7 @@ func TestIsValidTransition_HappyPath(t *testing.T) {
 		{"waiting_human→completed", AgentTurnStatusWaitingHuman, AgentTurnStatusCompleted},
 		{"waiting_human→failed", AgentTurnStatusWaitingHuman, AgentTurnStatusFailed},
 		{"waiting_human→canceled", AgentTurnStatusWaitingHuman, AgentTurnStatusCanceled},
+		{"waiting_human→timeout", AgentTurnStatusWaitingHuman, AgentTurnStatusTimeout},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -168,7 +172,10 @@ func TestIsValidTransition_IllegalTransitions(t *testing.T) {
 		{"failed→completed", AgentTurnStatusFailed, AgentTurnStatusCompleted},
 		{"canceled→running", AgentTurnStatusCanceled, AgentTurnStatusRunning},
 		{"requested→completed", AgentTurnStatusRequested, AgentTurnStatusCompleted},
-		{"requested→failed", AgentTurnStatusRequested, AgentTurnStatusFailed},
+		// requested→waiting_human is illegal: a turn must reach Running
+		// before it can pause for HITL. (requested→failed/canceled/timeout
+		// ARE legal — a turn can die during scheduling.)
+		{"requested→waiting_human", AgentTurnStatusRequested, AgentTurnStatusWaitingHuman},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -264,25 +271,29 @@ func TestAgentTurnSessionScopeNilAllowed(t *testing.T) {
 // AgentTurnPayload sealed interface
 // -----------------------------------------------------------------------------
 
-func TestAgentTurnPayloadSealed(t *testing.T) {
-	// Exhaustiveness: every payload type must appear in this switch. Adding a
-	// new payload type without updating consumers is a compile-time risk in
-	// Go (no sealed keyword), so we encode the closed set as a runtime test.
-	payloads := []AgentTurnPayload{
-		FlowPayload{},
-		AgentPayload{},
-	}
-	for _, p := range payloads {
-		// Call isAgentTurnPayload() so the cover counter records the empty
-		// sealed-marker body (Go cover scores zero-statement methods 0%
-		// otherwise).
-		p.isAgentTurnPayload()
-		switch p.(type) {
-		case FlowPayload, AgentPayload:
-			// known payload types
+// NOTE: the old TestAgentTurnPayloadSealed iterated a hand-written list and
+// missed new payload types (same PR #31 review W3 defect as the Message
+// variant). It is replaced by TestPayloadSealIsClosedAgainstSource in
+// sealed_exhaustive_test.go, which scans package SOURCE for
+// isAgentTurnPayload() receivers. The empty-method coverage it provided is
+// preserved by TestPayloadSealedMarkerBodies below.
+
+// TestPayloadSealedMarkerBodies calls isAgentTurnPayload() on every expected
+// payload so the cover counter records the (empty) sealed-marker bodies.
+// Go cover scores zero-statement methods 0% even when called; this test keeps
+// them exercised regardless.
+func TestPayloadSealedMarkerBodies(t *testing.T) {
+	for name := range expectedPayloadTypes {
+		var p AgentTurnPayload
+		switch name {
+		case "FlowPayload":
+			p = FlowPayload{}
+		case "AgentPayload":
+			p = AgentPayload{}
 		default:
-			t.Errorf("unknown AgentTurnPayload type %T — update this switch", p)
+			t.Fatalf("expectedPayloadTypes lists %q but TestPayloadSealedMarkerBodies has no case — add one", name)
 		}
+		p.isAgentTurnPayload()
 	}
 }
 

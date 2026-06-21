@@ -115,7 +115,10 @@ type AgentTurnStarted struct {
 	AgentTurnIDVal       AgentTurnID
 	ParentAgentTurnIDVal AgentTurnID
 	TimestampVal         time.Time
-	Kind2                AgentTurnKind
+	// TurnKind is the Kind of the turn that started (flow | agent). Lets a
+	// subscriber tell flow-run starts from agent-run starts without loading
+	// the turn. PR #31 review W4: carried on all lifecycle messages.
+	TurnKind AgentTurnKind
 }
 
 func (AgentTurnStarted) isMessage()                       {}
@@ -133,6 +136,7 @@ type AgentTurnCompleted struct {
 	AgentTurnIDVal       AgentTurnID
 	ParentAgentTurnIDVal AgentTurnID
 	TimestampVal         time.Time
+	TurnKind             AgentTurnKind
 	Summary              string
 }
 
@@ -151,6 +155,7 @@ type AgentTurnFailed struct {
 	AgentTurnIDVal       AgentTurnID
 	ParentAgentTurnIDVal AgentTurnID
 	TimestampVal         time.Time
+	TurnKind             AgentTurnKind
 	Error                string
 }
 
@@ -170,6 +175,7 @@ type AgentTurnCanceled struct {
 	AgentTurnIDVal       AgentTurnID
 	ParentAgentTurnIDVal AgentTurnID
 	TimestampVal         time.Time
+	TurnKind             AgentTurnKind
 	Reason               string
 }
 
@@ -296,13 +302,22 @@ type Filter struct {
 // predicate must hold.
 func (f Filter) Match(msg Message) bool {
 	if f.AgentTurnID != nil {
+		// An empty AgentTurnID in the filter is a caller bug (turn ids are
+		// always non-empty). Treat it as "matches nothing" rather than as a
+		// wildcard — otherwise a filter with turn="" + IncludeChildren leaks
+		// every root event (whose ParentAgentTurnID is also "").
+		// PR #31 review W2: previously this case matched all root events.
+		if *f.AgentTurnID == "" {
+			return false
+		}
 		turn := msg.AgentTurnID()
-		isChild := msg.ParentAgentTurnID() == *f.AgentTurnID && msg.AgentTurnID() != *f.AgentTurnID
-		// Direct child match requires IncludeChildren and the child's
-		// ParentAgentTurnID == filter turn. The "!= filter turn" guard
-		// prevents a self-event from being counted as a child event.
+		// A direct child has ParentAgentTurnID == filter turn AND a different
+		// own turn id. The "different own turn" guard prevents a self-event
+		// (turn == filter turn, parent == filter turn, which never happens
+		// in practice but is defensive) from being counted as a child.
+		isDirectChild := msg.ParentAgentTurnID() == *f.AgentTurnID && turn != *f.AgentTurnID
 		if turn != *f.AgentTurnID {
-			if !f.IncludeChildren || !isChild {
+			if !f.IncludeChildren || !isDirectChild {
 				return false
 			}
 		}

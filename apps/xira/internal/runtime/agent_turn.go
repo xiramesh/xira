@@ -112,6 +112,15 @@ func IsValidTransition(from, to AgentTurnStatus) error {
 	switch {
 	case from == AgentTurnStatusRequested && to == AgentTurnStatusRunning:
 		return nil
+	// requested → terminal: a turn can fail/cancel/timeout before it ever
+	// reaches Running (agent profile missing, startup rejected, deadline
+	// hit during scheduling). PR #31 review W1: these were missing.
+	case from == AgentTurnStatusRequested && to == AgentTurnStatusFailed:
+		return nil
+	case from == AgentTurnStatusRequested && to == AgentTurnStatusCanceled:
+		return nil
+	case from == AgentTurnStatusRequested && to == AgentTurnStatusTimeout:
+		return nil
 	case from == AgentTurnStatusRunning && to == AgentTurnStatusWaitingHuman:
 		return nil
 	case from == AgentTurnStatusRunning && to == AgentTurnStatusCompleted:
@@ -129,6 +138,10 @@ func IsValidTransition(from, to AgentTurnStatus) error {
 	case from == AgentTurnStatusWaitingHuman && to == AgentTurnStatusFailed:
 		return nil
 	case from == AgentTurnStatusWaitingHuman && to == AgentTurnStatusCanceled:
+		return nil
+	// waiting_human → timeout: a HITL pause can exceed its deadline.
+	// PR #31 review W1: this was missing.
+	case from == AgentTurnStatusWaitingHuman && to == AgentTurnStatusTimeout:
 		return nil
 	default:
 		return &transitionError{from: from, to: to}

@@ -106,27 +106,11 @@ func TestMessagePriorityImportantTier(t *testing.T) {
 	}
 }
 
-func TestMessageSealedExhaustive(t *testing.T) {
-	// Every Message implementation must appear here. Adding a new type
-	// without updating the routing table is caught at test time.
-	all := []Message{
-		InboundMessage{}, OutboundMessage{},
-		AgentTurnStarted{}, AgentTurnCompleted{}, AgentTurnFailed{}, AgentTurnCanceled{},
-		HumanRequested{}, HumanResponded{},
-		AssistantStatus{}, ToolCalled{}, ToolResult{},
-	}
-	for _, m := range all {
-		switch m.(type) {
-		case InboundMessage, OutboundMessage,
-			AgentTurnStarted, AgentTurnCompleted, AgentTurnFailed, AgentTurnCanceled,
-			HumanRequested, HumanResponded,
-			AssistantStatus, ToolCalled, ToolResult:
-			// known
-		default:
-			t.Errorf("unknown Message type %T — update routing table + this switch", m)
-		}
-	}
-}
+// NOTE: the old TestMessageSealedExhaustive iterated a hand-written list and
+// therefore missed new types added to the package (PR #31 review W3). It is
+// replaced by TestMessageSealIsClosedAgainstSource in
+// sealed_exhaustive_test.go, which scans package SOURCE for isMessage()
+// receivers and compares against expectedMessageTypes.
 
 // Compile-time: every declared Message type satisfies the interface.
 var (
@@ -231,6 +215,50 @@ func TestAllMessageAccessors(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
+// Lifecycle turn-kind field (PR #31 review W4)
+// -----------------------------------------------------------------------------
+
+func TestLifecycleMessagesCarryTurnKind(t *testing.T) {
+	// Every turn-lifecycle message carries TurnKind so a subscriber can tell
+	// flow-run events from agent-run events without loading the turn.
+	cases := []struct {
+		name string
+		msg  Message
+	}{
+		{"started", AgentTurnStarted{TurnKind: AgentTurnKindFlow}},
+		{"completed", AgentTurnCompleted{TurnKind: AgentTurnKindAgent}},
+		{"failed", AgentTurnFailed{TurnKind: AgentTurnKindAgent}},
+		{"canceled", AgentTurnCanceled{TurnKind: AgentTurnKindFlow}},
+	}
+	want := map[string]AgentTurnKind{
+		"started":   AgentTurnKindFlow,
+		"completed": AgentTurnKindAgent,
+		"failed":    AgentTurnKindAgent,
+		"canceled":  AgentTurnKindFlow,
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := AgentTurnKind("")
+			switch m := c.msg.(type) {
+			case AgentTurnStarted:
+				got = m.TurnKind
+			case AgentTurnCompleted:
+				got = m.TurnKind
+			case AgentTurnFailed:
+				got = m.TurnKind
+			case AgentTurnCanceled:
+				got = m.TurnKind
+			default:
+				t.Fatalf("%s is not a lifecycle message carrying TurnKind: %T", c.name, c.msg)
+			}
+			if got != want[c.name] {
+				t.Errorf("%s.TurnKind = %q, want %q", c.name, got, want[c.name])
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
 // Filter.Match — the one piece of real logic
 // -----------------------------------------------------------------------------
 
@@ -291,6 +319,24 @@ func TestFilterMatch_SiblingChildExcluded(t *testing.T) {
 	}
 	if fChildA.Match(siblingB) {
 		t.Error("child A filter must not match sibling B's event (cross-sibling leak)")
+	}
+}
+
+func TestFilterMatch_EmptyAgentTurnIDDoesNotLeakRoots(t *testing.T) {
+	// PR #31 review W2 regression: a filter whose AgentTurnID is "" (caller
+	// bug — turn ids are always non-empty) must NOT match anything, even
+	// with IncludeChildren=true. Previously it matched every root event
+	// (whose ParentAgentTurnID is also ""), leaking the whole root tier.
+	emptyTurn := AgentTurnID("")
+	f := Filter{AgentTurnID: &emptyTurn, IncludeChildren: true}
+	rootEvt := AgentTurnStarted{AgentTurnIDVal: "aturn_root", ParentAgentTurnIDVal: ""}
+	if f.Match(rootEvt) {
+		t.Error("filter with empty AgentTurnID must not match root event (W2 leak)")
+	}
+	// Also must not match a non-root event.
+	other := AgentTurnStarted{AgentTurnIDVal: "aturn_x", ParentAgentTurnIDVal: "aturn_p"}
+	if f.Match(other) {
+		t.Error("filter with empty AgentTurnID must not match any event")
 	}
 }
 
