@@ -95,6 +95,16 @@ type AgentTurn struct {
     //     flow→agent 默认 true（保持 flow 编排下的会话连续性）
     //     agent→agent 默认 false（worker 用临时 session，对齐现有
     //     delegation.go:996 的 ephemeral_worker 语义）
+    //
+    //   nil 的传播语义（2026-06-22 PR #30 review 补充）：
+    //   - 父 SessionScope=nil spawn 子：子也是 nil（nil 不因 spawn 变非 nil）。
+    //     含义：系统维护 turn（无 IM 身份）spawn 的子，也保持无 IM 身份。
+    //   - 父 SessionScope!=nil spawn 子 + InheritSession=true：子继承父的 SessionScope（深拷贝指针）。
+    //   - 父 SessionScope!=nil spawn 子 + InheritSession=false：子 SessionScope=nil（worker 用临时 session，
+    //     不挂在父的会话树下；但子的 MessageID/ChatID 仍从父继承，这是 IM 触发身份，不是 session 身份——
+    //     两者是正交维度，不要混淆。见 §2.1 末尾"身份维度"）。
+    //   - forwarder / WAL 遇 nil SessionScope：正常处理，nil 不影响消息投递（投递靠 AgentTurnID/ParentAgentTurnID，
+    //     不靠 SessionScope）。SessionScope=nil 仅影响"这个 turn 挂在哪个会话树"的归属判断，用于 session 历史聚合。
     SessionScope      *fsession.SessionScope
     InheritSession    bool
     Payload           AgentTurnPayload  // sealed interface
@@ -170,6 +180,7 @@ type AgentTurnFailed struct{ ... }       //                ← Reliable()=true, 
 type AgentTurnCanceled struct{ ... }     //                ← Reliable()=true, Priority()=Critical
 type ToolCalled struct{ ... }
 type ToolResult struct{ ... }
+type AssistantStatus struct{ ... }       // 进度心跳      ← Reliable()=false, Priority()=Droppable
 type HumanRequested struct{ ... }        //                ← Reliable()=true, Priority()=Critical
 type HumanResponded struct{ ... }        //                ← Reliable()=true, Priority()=Critical
 
@@ -210,7 +221,11 @@ type Filter struct {
 
 **不落盘的消息**仍然走优先级驱逐（critical 抢 important 抢 droppable 的位子），满载时 droppable 先丢 + log.Warn，从不在 bus 层静默。
 
-**为什么不用背压**：背压（满了阻塞 Publish）会让慢消费者（IM HTTP 卡顿）拖垮快生产者（LLM 推理），一路阻塞回 `recordEvent`，卡住 model turn——这是反模式。bus 的 Publish 对所有消息非阻塞。
+**阻塞语义按消息类型分两档**（统一 §2.3.1 与附录 C.4，2026-06-22 PR #30 review 修正）：
+- **进度类（`Reliable()==false`）**：Publish **非阻塞**。内存投递满载时按优先级驱逐 + log.Warn，永不阻塞调用方。理由：这类消息高频低价值（`assistant.status` / `adk.event` / `tool.*`），阻塞会拖慢 model turn。
+- **lifecycle 类（`Reliable()==true`）**：Publish **同步落盘（SQLite WAL fsync）后返回**。落盘失败返回 error，调用方决策（不吞错、不假装投递成功）。理由：这类消息低频高价值（每 turn 几条），同步 fsync 的延迟可接受；且"宁可报错也不丢 lifecycle"是硬契约。
+
+**为什么不用背压**：背压（满了阻塞 Publish）会让慢消费者（IM HTTP 卡顿）拖垮快生产者（LLM 推理），一路阻塞回 `recordEvent`，卡住 model turn——这是反模式。所以进度类 Publish 永不阻塞。lifecycle 类的"阻塞"是**磁盘 IO 同步**（毫秒级、确定性），不是**消费者背压**（秒级、不可控）——两者性质不同，不能混为一谈。
 
 #### 2.3.2 WAL 形态：独立 SQLite（glebarez/sqlite，纯 Go 无 cgo）
 
@@ -387,12 +402,14 @@ spawnTurnTool := streamingtool.New("spawn_turn", func(ctx, args) iter.Seq[string
 - `progress.Forwarder` 改订阅新 bus
 - 并发测试（突发 + 慢消费者 + 订阅者崩溃恢复）
 
-**验收**：
+**验收（DoD）**：
 - 现有 progress feed 行为**完全不变**（E2E 测试全绿）
 - 新 bus Publish/Subscribe 可用，lifecycle 消息进 WAL
 - 进程重启后订阅者能从 WAL 重放补齐漏掉的 lifecycle 消息
 - 并发测试覆盖 AGENTS.md §1.1 场景，drop 时 log.Warn（不静默）
 - scope filter 生效：子 turn 订不到兄弟 turn 的事件
+- **WAL 清理策略已决策并实现**（C.6 候选 a/b 二选一），且有测试覆盖"慢订阅者崩溃 >TTL"场景不丢终态消息
+- **offset 崩溃恢复可测验收**：构造"订阅者 offset 更新前崩溃 → 重启重放 → 重复投递 lifecycle → 订阅者基于 turn 状态机 CAS 正确处理（only-once spawn，no 重复副作用）"的端到端测试
 
 **双写过渡，老路径优先**。
 
@@ -578,12 +595,15 @@ MessageBus WAL 用**独立的 SQLite db 文件 + 独立表**，不与 ADK 的 `s
 CREATE TABLE bus_messages (
     id              TEXT PRIMARY KEY,          -- Message.ID()
     seq             INTEGER,                   -- 全局自增序号（订阅者 offset 锚点）
+                                                -- 并发安全：进程内 atomic 计数器取号 +
+                                                -- 同一 SQLite 事务内 INSERT，事务保证 seq 单调
     turn_id         TEXT NOT NULL,             -- Message.AgentTurnID()
     parent_turn_id  TEXT,                      -- 父 turn（便于父订阅者按子过滤）
     kind            TEXT NOT NULL,             -- Message 类型名（用于过滤）
     payload         BLOB NOT NULL,             -- JSON 序列化的 Message
     created_at      INTEGER NOT NULL,          -- Message.Timestamp() UnixNano
-    consumed        INTEGER NOT NULL DEFAULT 0 -- 是否已被所有订阅者消费（清理用）
+    consumed        INTEGER NOT NULL DEFAULT 0 -- 本条消息已被多少订阅者消费（清理用）
+                                                -- 见 C.6：清理策略必须考虑慢订阅者崩溃场景
 );
 
 CREATE INDEX idx_bus_messages_seq        ON bus_messages(seq);
@@ -626,18 +646,36 @@ func (b *Bus) Publish(ctx context.Context, msg Message) error {
   5. 追上实时后，切换到内存 channel 模式（新 Publish 直接投递）
 ```
 
-**offset 更新策略**：至少一次（at-least-once）——订阅者可能收到重复消息（offset 更新前崩溃）。订阅者必须幂等（靠 Message.ID() 去重）。这比"恰好一次"简单且足够——lifecycle 消息天然幂等（重复收到 `AgentTurnCompleted` 不会破坏状态机）。
+**offset 更新策略**：至少一次（at-least-once）——订阅者可能收到重复消息（offset 更新前崩溃，重启后从旧 offset 重放）。
+
+**⚠️ lifecycle 订阅者的硬约束**（2026-06-22 PR #30 review 修正，纠正"lifecycle 天然幂等"的过强断言）：
+
+"lifecycle 天然幂等"只在**数据层面**成立——重复收到一条 `AgentTurnCompleted`，它携带的 turn 状态不变。但在**副作用层面不成立**——如果父订阅者用 `AgentTurnStarted` 触发 spawn，重复投递 = 重复 spawn。崩溃恢复后内存去重集合是空的，"靠 Message.ID() 去重"会失效。
+
+因此 lifecycle 订阅者处理消息必须遵守：
+1. **基于 turn 状态机做 CAS 转移**，不得依赖内存 ID 去重。例如父收到 `AgentTurnStarted{turn: X}` 时，先 `CAS(parent.owned_turns, X not exists)`——只有 X 不在父的 owned 集合里才 spawn，否则忽略。这个 owned 集合必须持久化（不能只在内存），因为崩溃恢复后内存是空的。
+2. **状态机本身要容忍重复事件**。`AgentTurnCompleted` 到达时，如果 turn 已经是 `completed`，直接忽略（no-op），不重复执行完成逻辑。这要求 turn 状态机的每个状态转移都是幂等的（`completed + completed = completed`）。
+3. **Message.ID() 只用于日志关联**，不用于正确性保证。
+
+这是 at-least-once 投递的必然代价——换 simpler-than-exactly-once 的实现，承担"订阅者必须做 CAS"的责任。Phase 2 的并发测试必须覆盖"崩溃恢复后重复投递 lifecycle"场景。
 
 ### C.6 清理
 
-turn 完成后（`AgentTurnCompleted`/`Failed`/`Canceled` 之后），清理该 turn 的所有 WAL 记录：
+turn 完成后（`AgentTurnCompleted`/`Failed`/`Canceled` 之后），清理该 turn 的所有 WAL 记录。
+
+**⚠️ 清理不能只看 turn 终态**（2026-06-22 PR #30 review 修正）：`DELETE WHERE turn_id = ?` 只按 turn 删，没看 `consumed` 列。如果一个慢订阅者在 turn 终态前崩溃，TTL 过期后 WAL 被清理，该订阅者重启后**永久漏掉 `AgentTurnCompleted`**——它的 offset 还停在 Started 之前。这会让父 turn 永远等不到子完成。
+
+**修正策略**：清理必须满足"所有订阅者都已消费过该 turn 的终态消息"。两个候选（Phase 2 实现时定）：
+- **(a) 引用计数**：`consumed` 列记录已被多少订阅者消费（每投递一次 `consumed++`），`DELETE WHERE turn_id=? AND consumed >= subscriber_count`。慢订阅者没追上就不删。
+- **(b) 终态确认**：每个订阅者显式 `ACK(turn_id)`，收到所有订阅者的 ACK 后才删。订阅者崩溃则不删（靠其重连后 ACK，或超时降级）。
 
 ```sql
-DELETE FROM bus_messages WHERE turn_id = ?;
-DELETE FROM bus_subscriber_offsets WHERE subscriber_id IN (该 turn 的订阅者);
+-- 候选 (a) 引用计数版
+DELETE FROM bus_messages WHERE turn_id = ? AND consumed >= (SELECT COUNT(*) FROM bus_subscriber_offsets WHERE match(turn));
+-- 候选 (b) 终态确认版见上
 ```
 
-清理时机：turn 终态后延迟一个 TTL（如 5 分钟，给慢订阅者追平的机会），或由 turn 完成事件显式触发。**Phase 2 决策具体策略**。
+**清理时机**：turn 终态 + 上述条件满足后立即删，或延迟 TTL 兜底（防订阅者永久不 ACK）。**Phase 2 决策 (a) 还是 (b)**。
 
 ---
 
@@ -651,3 +689,8 @@ DELETE FROM bus_subscriber_offsets WHERE subscriber_id IN (该 turn 的订阅者
   1. **bus 可靠性策略定为级别 4（WAL 持久化）**：lifecycle 消息落 SQLite WAL（glebarez/sqlite 纯 Go），进度类 best-effort + 优先级驱逐。WAL 从 Phase 5 **前移到 Phase 2**，让 Phase 3 的 spawn_turn 一开始就有可靠 bus 支撑。新增 §2.3.1（可靠性策略）、§2.3.2（WAL 形态）、附录 C（SQLite 表结构与流程）。Phase 5 缩水为 HITL resume 逻辑迁移。
   2. **Session ↔ Turn 关系定为方案 Z**：`AgentTurn.SessionScope *fsession.SessionScope`（可空）+ `InheritSession bool`。flow→agent 默认 true，agent→agent 默认 false（对齐现有 ephemeral_worker 语义）。更新 §2.1 struct 定义。
   3. `Message` 接口新增 `Reliable() bool` 和 `Priority() MessagePriority`，从"按 Kind 字符串 switch"升级为"按 sealed 类型方法"（编译期保证）。更新 §2.3。
+- **2026-06-22**：修正 PR #30 review 的 2 个 CRITICAL 设计矛盾 + 6 条 non-blocking：
+  1. **CRITICAL 1：Publish 阻塞语义自相矛盾**。§2.3.1 说"Publish 对所有消息非阻塞"，附录 C.4 又说 lifecycle "宁可阻塞也不丢"。修正：把"非阻塞"限定到进度类，lifecycle 改为"同步落盘 fsync 后返回，失败返回 error"。§2.3.1 新增"阻塞语义按消息类型分两档"明确区分"磁盘 IO 同步"（毫秒级、确定性）与"消费者背压"（秒级、不可控）。
+  2. **CRITICAL 2：「lifecycle 天然幂等」断言偏强**。混淆了"数据层幂等"（重复收到 Completed 不改变状态）与"副作用层不幂等"（重复收到 Started 触发重复 spawn）。且崩溃恢复后内存去重集合为空，"靠 Message.ID() 去重"失效。修正附录 C.5：lifecycle 订阅者必须基于 turn 状态机做 CAS 转移（only-once spawn），owned 集合必须持久化，Message.ID() 只用于日志。
+  3. **non-blocking**：seq 并发原子性（进程内 atomic + 同事务 INSERT）；C.6 清理策略修正（不能只按 turn_id 删，必须考虑慢订阅者崩溃 >TTL 场景，给出引用计数/终态确认两个候选）；SessionScope=nil 传播语义（§2.1 注释补充）；§2.3 类型清单补 `AssistantStatus` 声明；Phase 2 DoD 明确"WAL 清理策略"和"offset 崩溃恢复可测验收"。
+  4. **行号澄清**：review 提到 `delegation.go:996` 应为 998，经核实 996 是 `AgentSessionID = "ephemeral_worker:"` 赋值（998 是 TraceID），RFC 的 996 引用正确，未改。
