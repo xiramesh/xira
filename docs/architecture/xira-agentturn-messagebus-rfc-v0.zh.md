@@ -89,6 +89,14 @@ type AgentTurn struct {
     Status            AgentTurnStatus
     StartedAt         time.Time
     EndedAt           time.Time
+    // Session 归属（方案 Z，2026-06-22 确认）：
+    //   - 指针允许 nil（系统维护 turn 等无 IM 触发身份的 turn）
+    //   - InheritSession 控制子 turn 是否继承父的 session
+    //     flow→agent 默认 true（保持 flow 编排下的会话连续性）
+    //     agent→agent 默认 false（worker 用临时 session，对齐现有
+    //     delegation.go:996 的 ephemeral_worker 语义）
+    SessionScope      *fsession.SessionScope
+    InheritSession    bool
     Payload           AgentTurnPayload  // sealed interface
 }
 
@@ -132,9 +140,9 @@ func (AgentPayload) isAgentTurnPayload() {}
 - 不需要"子 turn 特殊路径"。
 - 递归自然支持（子的子也是 `AgentTurn`，也有 `ParentAgentTurnID`）。
 
-### 2.3 MessageBus：强类型、多订阅者、全双工
+### 2.3 MessageBus：强类型、多订阅者、全双工、WAL 持久化
 
-**决策**：bus 消息用 sealed interface 强类型，每种 kind 一个 struct，编译期保证 switch 完备。
+**决策**：bus 消息用 sealed interface 强类型，每种 kind 一个 struct，编译期保证 switch 完备。每个 Message 类型自带 `Reliable()` 和 `Priority()` 标记，bus 据此决定是否落盘和满载时的驱逐顺序。
 
 ```go
 type Message interface {
@@ -142,28 +150,39 @@ type Message interface {
     ID()         string          // 消息唯一 ID
     AgentTurnID() AgentTurnID    // 归属哪个 turn
     Timestamp()  time.Time
+    Reliable()   bool            // 是否落盘 WAL（lifecycle = true）
+    Priority()   MessagePriority // 满载驱逐优先级（critical > important > droppable）
 }
+
+type MessagePriority int
+const (
+    PriorityDroppable  MessagePriority = iota  // 满了直接丢（assistant.status / adk.event / tool 细节）
+    PriorityImportant                          // 满了驱逐 droppable（agent.delegate.failed/timeout）
+    PriorityCritical                           // 满了驱逐 important+droppable（run.waiting_human / assistant.final / turn lifecycle）
+)
 
 // 每种 kind 一个具体类型（初版）
 type InboundMessage struct{ ... }        // IM → 系统
 type OutboundMessage struct{ ... }       // 系统 → IM
-type AgentTurnStarted struct{ ... }      // turn 生命周期
-type AgentTurnCompleted struct{ ... }
-type AgentTurnFailed struct{ ... }
-type AgentTurnCanceled struct{ ... }
+type AgentTurnStarted struct{ ... }      // turn 生命周期  ← Reliable()=true, Priority()=Critical
+type AgentTurnCompleted struct{ ... }    //                ← Reliable()=true, Priority()=Critical
+type AgentTurnFailed struct{ ... }       //                ← Reliable()=true, Priority()=Critical
+type AgentTurnCanceled struct{ ... }     //                ← Reliable()=true, Priority()=Critical
 type ToolCalled struct{ ... }
 type ToolResult struct{ ... }
-type HumanRequested struct{ ... }
-type HumanResponded struct{ ... }
+type HumanRequested struct{ ... }        //                ← Reliable()=true, Priority()=Critical
+type HumanResponded struct{ ... }        //                ← Reliable()=true, Priority()=Critical
 
-func (InboundMessage) isMessage()       {}
-func (OutboundMessage) isMessage()      {}
+func (AgentTurnStarted) Reliable() bool   { return true }
+func (AgentTurnStarted) Priority() MessagePriority { return PriorityCritical }
+func (AssistantStatus) Reliable() bool    { return false }
+func (AssistantStatus) Priority() MessagePriority { return PriorityDroppable }
 // ...
 ```
 
-**为什么强类型**：当前 `RuntimeEvent.Kind = "run.waiting_human"` 是弱类型，AGENTS.md §1.4 的 visibility 陷阱根因就是 `Kind string` + switch 漏 case。强类型从编译期杜绝"忘了加 case"。
+**为什么强类型**：当前 `RuntimeEvent.Kind = "run.waiting_human"` 是弱类型，AGENTS.md §1.4 的 visibility 陷阱根因就是 `Kind string` + switch 漏 case。强类型从编译期杜绝"忘了加 case"。`Reliable()` 和 `Priority()` 也借此从"按字符串 switch"升级为"按 sealed 类型方法"，编译期保证完备。
 
-**为什么 sealed**：加新 kind 时所有 type-switch 编译报错，强制显式决策每个新 kind 的语义。
+**为什么 sealed**：加新 kind 时所有 type-switch 编译报错，强制显式决策每个新 kind 的语义、可靠性和优先级。
 
 **接口（初版）**：
 
@@ -180,6 +199,49 @@ type Filter struct {
     IncludeChildren bool           // 是否含子 turn 的事件
 }
 ```
+
+#### 2.3.1 可靠性策略：WAL 持久化（lifecycle 落盘）+ 优先级驱逐（内存）
+
+**决策**（2026-06-22 确认）：bus 采用**级别 4（WAL 持久化）**可靠性，但**只对 `Reliable()==true` 的消息（lifecycle 类）落盘**。进度类（`Reliable()==false`）永远 best-effort + log，不落盘。
+
+这同时满足两个诉求：
+- **抗进程崩溃 / 抗订阅者崩溃**：lifecycle 事件（AgentTurnStarted/Completed/Failed、HumanRequested/Responded）落 SQLite WAL，进程重启后重放恢复，父 turn 不会因为 bus 丢消息而永远等不到子。
+- **不被高发量进度事件拖垮**：`assistant.status` / `adk.event` / `tool.*` 等低价值高频事件不落盘，磁盘 IO 只承担每 turn 几条的 lifecycle 事件。
+
+**不落盘的消息**仍然走优先级驱逐（critical 抢 important 抢 droppable 的位子），满载时 droppable 先丢 + log.Warn，从不在 bus 层静默。
+
+**为什么不用背压**：背压（满了阻塞 Publish）会让慢消费者（IM HTTP 卡顿）拖垮快生产者（LLM 推理），一路阻塞回 `recordEvent`，卡住 model turn——这是反模式。bus 的 Publish 对所有消息非阻塞。
+
+#### 2.3.2 WAL 形态：独立 SQLite（glebarez/sqlite，纯 Go 无 cgo）
+
+**驱动选型**：`github.com/glebarez/sqlite`——纯 Go（modernc.org/sqlite 的 fork，专为 GORM 优化），无 cgo，交叉编译无忧。同时 ADK 的 `session/database` 也用 GORM dialector，一套依赖两种用途。
+
+**WAL 独立于 ADK session**（关键决策，避免踩坑）：MessageBus 的 WAL 用**独立的 SQLite db 文件 + 独立表**，不与 ADK 的 `session/database` 共用。原因：ADK 的 `AppendEvent` 存的是 `session.Event`（LLM 对话历史），会被 `hydrateADKSession`（`service_adk.go:160`）回放给下一次 LLM 推理。如果把 bus 消息塞进去，会污染 LLM 上下文。两者各管各的表，只是共享同一个 SQLite 驱动。
+
+**表结构**（详见附录 C）：
+```
+bus_messages(id, seq, turn_id, parent_turn_id, kind, payload, created_at, consumed)
+bus_subscriber_offsets(subscriber_id, last_consumed_seq)
+```
+
+**Publish 流程**：
+```
+1. 若 msg.Reliable()==true:
+     SQLite 事务 INSERT bus_messages(...) → COMMIT (WAL 模式 fsync)
+2. 投递到 in-memory 订阅者 channel（非阻塞 + 优先级驱逐）
+3. 若 msg.Reliable()==false:
+     跳过 1，直接投递 in-memory channel
+```
+
+**订阅者崩溃 / 重连恢复**：
+```
+订阅者启动 → 读 bus_subscriber_offsets 拿 last_consumed_seq
+           → SELECT * FROM bus_messages WHERE seq > last AND match(filter) ORDER BY seq
+           → 逐条投递 + 更新 offset
+           → 追上后切换到实时 in-memory channel 模式
+```
+
+**清理**：turn 完成后，`DELETE FROM bus_messages WHERE turn_id = ?` + 对应 offset。TTL 或显式 ack 二选一（Phase 2 决策）。
 
 **订阅 scope / 权限**（防信息泄露）：
 - 子 turn **不能**订阅兄弟 turn（同父的其它子）的事件。
@@ -272,7 +334,7 @@ spawnTurnTool := streamingtool.New("spawn_turn", func(ctx, args) iter.Seq[string
 ### 3.2 通信层（Phase 1-2）
 - MessageBus 接口与强类型 Message
 - 订阅 scope / 权限 filter
-- **bus 可靠性策略**（⚠️ 盲区，必须 Phase 1 决策：best-effort / 背压 / 持久化）
+- **bus 可靠性策略**（✅ 已决策：级别 4 WAL，lifecycle 落盘 SQLite + 内存优先级驱逐，见 §2.3.1）
 - Routing（谁触发 turn：entrypoint resolve / flow step / bus 订阅者）
 
 ### 3.3 执行语义层（Phase 3-4）
@@ -313,26 +375,37 @@ spawnTurnTool := streamingtool.New("spawn_turn", func(ctx, args) iter.Seq[string
 
 **验收**：类型编译通过 + 设计评审通过。**不改运行时行为**。
 
-### Phase 2 — in-memory MessageBus 实现 + EventBus 迁移（旁路）
-**目标**：实现 in-memory bus，让现有 EventBus 成为 bus 的 transport/adapter，现有 `recordEvent` 调用点双写到新 bus，progress forwarder 改订阅新 bus（保留旧 EventBus 兜底）。
+### Phase 2 — MessageBus 实现（in-memory + SQLite WAL）+ EventBus 迁移
+**目标**：实现 in-memory bus + SQLite WAL 持久化（lifecycle 落盘），让现有 EventBus 成为 bus 的 adapter，现有 `recordEvent` 调用点双写，progress forwarder 改订阅新 bus（保留旧 EventBus 兜底）。
 
 **产出**：
-- `messagebus/memory.go`（in-memory 实现，含 scope filter）
+- `messagebus/memory.go`（in-memory 实现，含 scope filter + 优先级驱逐）
+- `messagebus/wal.go`（**SQLite WAL，glebarez/sqlite 纯 Go**，只存 `Reliable()==true` 消息；表结构见附录 C）
+- 订阅者崩溃/重连的 offset 恢复
+- WAL 清理（turn 完成后 `DELETE WHERE turn_id = ?`）
 - `EventBus` → `MessageBus` adapter
 - `progress.Forwarder` 改订阅新 bus
+- 并发测试（突发 + 慢消费者 + 订阅者崩溃恢复）
 
-**验收**：现有 progress feed 行为不变；新 bus 能被新代码 Publish/Subscribe。**双写过渡，老路径优先**。
+**验收**：
+- 现有 progress feed 行为**完全不变**（E2E 测试全绿）
+- 新 bus Publish/Subscribe 可用，lifecycle 消息进 WAL
+- 进程重启后订阅者能从 WAL 重放补齐漏掉的 lifecycle 消息
+- 并发测试覆盖 AGENTS.md §1.1 场景，drop 时 log.Warn（不静默）
+- scope filter 生效：子 turn 订不到兄弟 turn 的事件
+
+**双写过渡，老路径优先**。
 
 ### Phase 3 — spawn_turn + 异步子 turn（核心价值）
-**目标**：实现 `spawn_turn`（StreamingFunctionTool），父 turn 用 `spawn_turn` 启动子 turn，子 turn 在 goroutine 跑，完成时 bus.Publish；父通过 bus 订阅拿结果。
+**目标**：实现 `spawn_turn`（StreamingFunctionTool 早关闭迭代器 + detach goroutine），父 turn 用 `spawn_turn` 启动子 turn，子 turn 在 goroutine 跑，完成时 bus.Publish；父通过 bus 订阅拿结果。
 
 **产出**：
-- `spawn_turn` tool（StreamingFunctionTool）
+- `spawn_turn` tool（§2.4 修正后的实现：迭代器早关闭 + `context.WithoutCancel` detach）
 - context packet 异步版（via bus payload）
 - 异步结果校验
 - fallback 状态机
 
-**验收**：新 agent 用 `spawn_turn`，子 turn 真异步跑，父 turn 不阻塞。老 `delegate_agent` 保留（灰度共存）。
+**验收**：新 agent 用 `spawn_turn`，子 turn 真异步跑，父 turn 不阻塞。老 `delegate_agent` 保留（灰度共存）。**spawn_turn 的父子结果传递靠 bus 可靠性（Phase 2 的 WAL 已支撑），不用超时查磁盘兜底**。
 
 ### Phase 4 — checkpoint + steering（控制平面）
 **目标**：给 `generate()` 内部加 checkpoint 轮询，实现 `wait_turn` 工具，实现 steering queue（用户中途插话）。
@@ -344,15 +417,14 @@ spawnTurnTool := streamingtool.New("spawn_turn", func(ctx, args) iter.Seq[string
 
 **验收**：父 turn spawn 子后能继续推理；用户能中途插话；子完成事件能注入父的下一个 model turn。
 
-### Phase 5 — HITL / 跨进程韧性
-**目标**：bus WAL（write-ahead log）持久化，进程重启后从 WAL 重放重建 turn 状态；HITL 跨小时不再靠磁盘 join state 接力，靠 bus WAL。
+### Phase 5 — HITL resume 路径迁移（WAL 已在 Phase 2 落地）
+**目标**：把 HITL 恢复路径从磁盘 join state 接力迁移到 bus WAL 重放。WAL 本身已在 Phase 2 实现，本 Phase 只做 resume 逻辑迁移。
 
 **产出**：
-- `messagebus/wal.go`（bus 消息持久化）
-- 进程重启 → WAL 重放 → turn 状态重建
-- HITL 恢复路径改造（API → bus 重放，不再走磁盘 join state）
+- HITL 恢复路径改造（API → bus WAL 重放，不再走 `DelegationJoinState` 磁盘接力）
+- distributed tracing span 在 spawn 时继承（`ParentAgentTurnID` → child span parent）
 
-**验收**：HITL 场景进程重启后能恢复；外部 worker（`claude -p`）长任务跨进程可观察。
+**验收**：HITL 场景进程重启后能恢复 turn 状态（靠 Phase 2 的 WAL）；外部 worker（`claude -p`）长任务跨进程可观察。`DelegationJoinState` 路径仍在（Phase 6 下线）。
 
 ### Phase 6 — 迁移与下线
 **目标**：所有 agent 切到 `spawn_turn`，下线 `delegate_agent`，下线旧 EventBus，清理磁盘 join state。
@@ -393,11 +465,11 @@ Phase 1 (类型)
 
 ## 6. 待决策清单（写进各 Phase issue）
 
-以下是落地前必须决策、但本 RFC 未定死的开放问题，分配到各 Phase issue 讨论：
+以下是落地前必须决策的开放问题，分配到各 Phase issue 讨论。✅ 表示已决策（2026-06-22）。
 
 ### Phase 1 开放问题
-1. **bus 可靠性策略**：best-effort（满则丢 + log）还是背压（Publish 阻塞）还是持久化（WAL）？影响 bus 接口签名。
-2. **Session ↔ Turn 关系**：turn 属于 session 吗？一个 session 多 turn？turn 跨 session？影响 `AgentTurn.SessionScope` 字段。
+1. ✅ **bus 可靠性策略**：**已决策 = 级别 4 WAL**（SQLite 持久化 lifecycle 消息 + 内存优先级驱逐）。见 §2.3.1、§2.3.2、附录 C。
+2. ✅ **Session ↔ Turn 关系**：**已决策 = 方案 Z**（`AgentTurn.SessionScope *fsession.SessionScope` 可空 + `InheritSession bool`）。flow→agent 默认 true，agent→agent 默认 false。见 §2.1。
 3. **Payload 字段细化**：`FlowPayload` / `AgentPayload` 的具体字段，要不要把现有 `TurnResponse` 的字段全搬过去。
 4. **命名迁移范围**：`runtimeEventBase` 怎么处理（保留还是迁到 AgentTurn）。
 
@@ -410,9 +482,9 @@ Phase 1 (类型)
 8. **并发上限**：一个 turn 能 spawn 多少子？checkpoint 能收多少异步结果？
 9. **steering 语义**：用户插话时，正在跑的子 turn 取消还是继续？
 
-### Phase 5 开放问题
-10. **WAL 粒度**：全量持久化还是只持久化 lifecycle 事件（started/completed/failed）？
-11. **WAL 清理**：turn 完成后 WAL 何时清？
+### Phase 2 开放问题（WAL 已从 Phase 5 前移）
+10. ✅ **WAL 粒度**：**已决策 = 只持久化 `Reliable()==true` 的 lifecycle 事件**（started/completed/failed/canceled/human_requested/human_responded）。进度类不落盘。见 §2.3.1。
+11. **WAL 清理**：turn 完成后 WAL 何时清？（候选：TTL 延迟清理 vs 显式 ack；附录 C.6 列了两选项，Phase 2 实现时定。）
 
 ---
 
@@ -479,9 +551,103 @@ Epic issue #22 + 6 个 Phase 子 issue，全部归入 milestone [AgentTurn + Mes
 
 ---
 
+## 附录 C：SQLite WAL 选型与表结构（MessageBus 持久化层）
+
+### C.1 驱动选型：glebarez/sqlite（纯 Go，无 cgo）
+
+**选定**：`github.com/glebarez/sqlite`。
+
+- 纯 Go，无 cgo，交叉编译无忧（Xira 需要在 macOS/Linux/容器多平台编译）。
+- `modernc.org/sqlite` 的 fork，专为 GORM 优化，drop-in 替换 cgo 版 `gorm.io/driver/sqlite`。
+- 与 ADK `session/database` 的 `gorm.Dialector` 接口兼容——一套依赖，两种用途（ADK session 一个 db 文件，MessageBus WAL 另一个 db 文件）。
+
+**否决**：`mattn/go-sqlite3`（cgo，编译麻烦）、`modernc.org/sqlite`（纯 Go 但 GORM 集成需手动配置，不如 glebarez 省事）、自写 append-only 文件 WAL（无索引/无事务/清理麻烦）。
+
+### C.2 WAL 独立于 ADK session（关键决策）
+
+MessageBus WAL 用**独立的 SQLite db 文件 + 独立表**，不与 ADK 的 `session/database` 共用。
+
+**原因**：ADK 的 `AppendEvent`（`session/database/service.go:319`）存的是 `session.Event`（LLM 对话历史），会被 `hydrateADKSession`（`service_adk.go:160`）回放给下一次 LLM 推理作为上下文。如果把 bus 消息塞进 ADK session，会污染 LLM 上下文——模型会在下一轮看到不该看到的 lifecycle 事件。
+
+两者各管各的表，只是共享同一个 SQLite 驱动依赖。
+
+### C.3 表结构
+
+```sql
+-- lifecycle 消息持久化（只存 Reliable()==true 的消息）
+CREATE TABLE bus_messages (
+    id              TEXT PRIMARY KEY,          -- Message.ID()
+    seq             INTEGER,                   -- 全局自增序号（订阅者 offset 锚点）
+    turn_id         TEXT NOT NULL,             -- Message.AgentTurnID()
+    parent_turn_id  TEXT,                      -- 父 turn（便于父订阅者按子过滤）
+    kind            TEXT NOT NULL,             -- Message 类型名（用于过滤）
+    payload         BLOB NOT NULL,             -- JSON 序列化的 Message
+    created_at      INTEGER NOT NULL,          -- Message.Timestamp() UnixNano
+    consumed        INTEGER NOT NULL DEFAULT 0 -- 是否已被所有订阅者消费（清理用）
+);
+
+CREATE INDEX idx_bus_messages_seq        ON bus_messages(seq);
+CREATE INDEX idx_bus_messages_turn       ON bus_messages(turn_id);
+CREATE INDEX idx_bus_messages_parent     ON bus_messages(parent_turn_id);
+
+-- 订阅者读取进度（崩溃/重连恢复用）
+CREATE TABLE bus_subscriber_offsets (
+    subscriber_id      TEXT PRIMARY KEY,
+    last_consumed_seq  INTEGER NOT NULL DEFAULT 0  -- 该订阅者已投递到哪条 seq
+);
+```
+
+### C.4 Publish 流程
+
+```
+func (b *Bus) Publish(ctx context.Context, msg Message) error {
+    if msg.Reliable() {
+        // 1. 落盘（SQLite WAL 模式，COMMIT 时 fsync）
+        if err := b.wal.Append(ctx, msg); err != nil {
+            return err  // 落盘失败 → 返回 error，不投递内存（宁可阻塞也不丢 lifecycle）
+        }
+    }
+    // 2. 投递 in-memory 订阅者（非阻塞 + 优先级驱逐）
+    b.fanout(msg)
+    return nil
+}
+```
+
+**关键约束**：`Reliable()==true` 的消息**落盘失败必须返回 error**（不投递内存、不吞错）。这是 lifecycle 可靠性的硬契约——宁可 Publish 报错让调用方决策，也不能假装投递成功然后内存丢掉。对 `Reliable()==false` 的消息，内存投递满载时直接丢 + log.Warn（§2.3.1）。
+
+### C.5 订阅者崩溃 / 重连恢复
+
+```
+订阅者启动/重连:
+  1. 读 bus_subscriber_offsets[subID].last_consumed_seq = N
+  2. SELECT * FROM bus_messages WHERE seq > N AND match(filter) ORDER BY seq
+  3. 逐条投递到订阅者 channel
+  4. 每投递一条（或批量）UPDATE bus_subscriber_offsets SET last_consumed_seq = seq
+  5. 追上实时后，切换到内存 channel 模式（新 Publish 直接投递）
+```
+
+**offset 更新策略**：至少一次（at-least-once）——订阅者可能收到重复消息（offset 更新前崩溃）。订阅者必须幂等（靠 Message.ID() 去重）。这比"恰好一次"简单且足够——lifecycle 消息天然幂等（重复收到 `AgentTurnCompleted` 不会破坏状态机）。
+
+### C.6 清理
+
+turn 完成后（`AgentTurnCompleted`/`Failed`/`Canceled` 之后），清理该 turn 的所有 WAL 记录：
+
+```sql
+DELETE FROM bus_messages WHERE turn_id = ?;
+DELETE FROM bus_subscriber_offsets WHERE subscriber_id IN (该 turn 的订阅者);
+```
+
+清理时机：turn 终态后延迟一个 TTL（如 5 分钟，给慢订阅者追平的机会），或由 turn 完成事件显式触发。**Phase 2 决策具体策略**。
+
+---
+
 ## 变更日志
 
 - **2026-06-21**：RFC v0 初稿，基于设计对话复盘创建。覆盖 6 个 Phase、11 个开放问题、ADK v1.4.0 能力盘点。
 - **2026-06-22**：修正两处事实性错误（PR #29 review 反馈）：
   1. **StreamingFunctionTool 路径错位**：`base_flow.go:1066` 的 fire-and-forget 只对 Live API（`RunLive`）生效；Xira 走常规 `runner.Run()`（`service_adk.go:89`），StreamingFunctionTool 在此走 `base_flow.go:1108` else 分支的**同步迭代**。修正 §1.2、§1.3、§2.4、附录 A，并据此重写 spawn_turn 实现假设（靠迭代器早关闭 + detach goroutine，而非 fire-and-forget）。这也是对方法论 AGENTS.md §2"先核实再判断"的自审：把 Live API 专属行为当通用能力引用，恰恰是没核实到位。
   2. **行号错**：`RequestConfirmation()` 定义在 `agent/callback_context.go:196`，`tool.go:199`（实际 203）只是调用点之一。修正附录 A。
+- **2026-06-22**：关闭两个关键盲区，调整 Phase 划分：
+  1. **bus 可靠性策略定为级别 4（WAL 持久化）**：lifecycle 消息落 SQLite WAL（glebarez/sqlite 纯 Go），进度类 best-effort + 优先级驱逐。WAL 从 Phase 5 **前移到 Phase 2**，让 Phase 3 的 spawn_turn 一开始就有可靠 bus 支撑。新增 §2.3.1（可靠性策略）、§2.3.2（WAL 形态）、附录 C（SQLite 表结构与流程）。Phase 5 缩水为 HITL resume 逻辑迁移。
+  2. **Session ↔ Turn 关系定为方案 Z**：`AgentTurn.SessionScope *fsession.SessionScope`（可空）+ `InheritSession bool`。flow→agent 默认 true，agent→agent 默认 false（对齐现有 ephemeral_worker 语义）。更新 §2.1 struct 定义。
+  3. `Message` 接口新增 `Reliable() bool` 和 `Priority() MessagePriority`，从"按 Kind 字符串 switch"升级为"按 sealed 类型方法"（编译期保证）。更新 §2.3。
