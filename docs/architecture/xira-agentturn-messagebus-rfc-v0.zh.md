@@ -94,7 +94,7 @@ type AgentTurn struct {
     //   - InheritSession 控制子 turn 是否继承父的 session
     //     flow→agent 默认 true（保持 flow 编排下的会话连续性）
     //     agent→agent 默认 false（worker 用临时 session，对齐现有
-    //     delegation.go:996 的 ephemeral_worker 语义）
+    //     delegation.go:977 的 ephemeral_worker 语义，origin/main 行号）
     //
     //   nil 的传播语义（2026-06-22 PR #30 review 补充）：
     //   - 父 SessionScope=nil spawn 子：子也是 nil（nil 不因 spawn 变非 nil）。
@@ -693,4 +693,4 @@ DELETE FROM bus_messages WHERE turn_id = ? AND consumed >= (SELECT COUNT(*) FROM
   1. **CRITICAL 1：Publish 阻塞语义自相矛盾**。§2.3.1 说"Publish 对所有消息非阻塞"，附录 C.4 又说 lifecycle "宁可阻塞也不丢"。修正：把"非阻塞"限定到进度类，lifecycle 改为"同步落盘 fsync 后返回，失败返回 error"。§2.3.1 新增"阻塞语义按消息类型分两档"明确区分"磁盘 IO 同步"（毫秒级、确定性）与"消费者背压"（秒级、不可控）。
   2. **CRITICAL 2：「lifecycle 天然幂等」断言偏强**。混淆了"数据层幂等"（重复收到 Completed 不改变状态）与"副作用层不幂等"（重复收到 Started 触发重复 spawn）。且崩溃恢复后内存去重集合为空，"靠 Message.ID() 去重"失效。修正附录 C.5：lifecycle 订阅者必须基于 turn 状态机做 CAS 转移（only-once spawn），owned 集合必须持久化，Message.ID() 只用于日志。
   3. **non-blocking**：seq 并发原子性（进程内 atomic + 同事务 INSERT）；C.6 清理策略修正（不能只按 turn_id 删，必须考虑慢订阅者崩溃 >TTL 场景，给出引用计数/终态确认两个候选）；SessionScope=nil 传播语义（§2.1 注释补充）；§2.3 类型清单补 `AssistantStatus` 声明；Phase 2 DoD 明确"WAL 清理策略"和"offset 崩溃恢复可测验收"。
-  4. **行号澄清**：review 提到 `delegation.go:996` 应为 998，经核实 996 是 `AgentSessionID = "ephemeral_worker:"` 赋值（998 是 TraceID），RFC 的 996 引用正确，未改。
+  4. **行号订正**：上一轮回复误称"经核实 996 引用正确"，核实有误——本地工作树 `delegation.go` 有未提交改动导致行号偏移，我读到的 996 是偏移后的行号，不是 origin/main 的行号。origin/main 上 `AgentSessionID = "ephemeral_worker:"` 在 **977**（996 是 `StartedAt: time.Now()`，998 是 `delegation_mode`）。RFC §2.1 行号已从 996 改为 977。这是对 AGENTS.md §2"先核实再判断"的教训：核实必须锚定正确的 ref（origin/main），而不是带本地 diff 的脏工作树。
