@@ -137,7 +137,16 @@ func (f *Forwarder) handleBusEvent(evt runtime.RuntimeEvent) {
 		return
 	}
 	if evt.Kind == "assistant.final" {
-		f.drain()
+		// Do NOT drain synchronously here. If a high-value event (failed/timeout)
+		// was enqueued just before final (the 10:38 sequence: allowed→started→
+		// failed→final), a synchronous drain would drop it before the send loop
+		// reached it. Instead, enqueue final: the send loop processes events in
+		// arrival order, so failed/timeout drain first, then final's dispatch
+		// triggers drain() and drops anything after it.
+		if !f.enqueue(evt) {
+			// Queue closed (already shutting down) — drain best-effort.
+			f.drain()
+		}
 		return
 	}
 	// delegate lifecycle events (allowed/started/completed) default to
@@ -247,11 +256,25 @@ func (f *Forwarder) dequeue() (runtime.RuntimeEvent, bool) {
 }
 
 func (f *Forwarder) dispatch(evt runtime.RuntimeEvent) {
+	// assistant.final is the drain signal, not a renderable message. It was
+	// enqueued (rather than draining synchronously in handleBusEvent) so that
+	// any high-value failed/timeout enqueued just before it drains first.
+	if evt.Kind == "assistant.final" {
+		f.drain()
+		return
+	}
 	msg, ok := f.render.Render(evt)
 	if !ok {
 		return
 	}
-	isWaiting := evt.Kind == "run.waiting_human"
+	// High-value events bypass the per-turn progress quota: a child failure or
+	// timeout is a fact the user MUST see, not optional chatter. waiting_human is
+	// the interaction signal. Without this, expose_progress lifecycle events
+	// (allowed/started) can fill the MaxMessagesPerTurn quota and starve a
+	// subsequent failed/timeout — the 2026-06-21 10:38 regression.
+	isHighValue := evt.Kind == "run.waiting_human" ||
+		evt.Kind == "agent.delegate.failed" ||
+		evt.Kind == "agent.delegate.timeout"
 
 	for {
 		f.mu.Lock()
@@ -259,9 +282,9 @@ func (f *Forwarder) dispatch(evt runtime.RuntimeEvent) {
 			f.mu.Unlock()
 			return
 		}
-		// waiting_human is an interaction signal: delivered independently of the
-		// progress quota (§9.1).
-		if !isWaiting && f.progressSent >= f.req.Policy.MaxMessagesPerTurn {
+		// waiting_human / delegate failure / timeout: delivered independently of
+		// the progress quota (§9.1, and the 10:38 RCA).
+		if !isHighValue && f.progressSent >= f.req.Policy.MaxMessagesPerTurn {
 			f.mu.Unlock()
 			return
 		}
@@ -270,9 +293,9 @@ func (f *Forwarder) dispatch(evt runtime.RuntimeEvent) {
 			f.mu.Unlock()
 			return
 		}
-		// Throttle progress; interaction signals bypass MinInterval. Skip the
+		// Throttle progress; high-value signals bypass MinInterval. Skip the
 		// wait once shutting down so queued items are delivered at Stop().
-		if !isWaiting && !f.lastSend.IsZero() && f.req.Policy.MinInterval > 0 && f.ctx.Err() == nil {
+		if !isHighValue && !f.lastSend.IsZero() && f.req.Policy.MinInterval > 0 && f.ctx.Err() == nil {
 			if wait := f.req.Policy.MinInterval - time.Since(f.lastSend); wait > 0 {
 				f.mu.Unlock()
 				select {
@@ -284,7 +307,7 @@ func (f *Forwarder) dispatch(evt runtime.RuntimeEvent) {
 		}
 		f.dedup[dedupKey] = struct{}{}
 		f.lastSend = time.Now()
-		if !isWaiting {
+		if !isHighValue {
 			f.progressSent++
 		}
 		f.mu.Unlock()

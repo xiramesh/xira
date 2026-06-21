@@ -1168,7 +1168,11 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 
 func validateDelegateAgentResult(raw, targetAgentID, childRunID string, runtimeEvidenceRefs []string, allowedEvidenceRefs map[string]struct{}) (DelegateAgentResult, error) {
 	var modelResult modelDelegateResult
-	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &modelResult); err != nil {
+	// Child agents (notably code-agent running `claude -p --output-format json`)
+	// frequently wrap their JSON in a Markdown fence. Strip it before parsing so
+	// a valid result inside ```json ... ``` is accepted, not rejected as
+	// result_parse_failed. See RCA 2026-06-21 10:38.
+	if err := json.Unmarshal([]byte(stripMarkdownFence(raw)), &modelResult); err != nil {
 		return DelegateAgentResult{}, delegateResultValidationError{Reason: "result_parse_failed", Err: err}
 	}
 	if strings.TrimSpace(modelResult.Summary) == "" {
@@ -1292,6 +1296,30 @@ func targetPolicyMaxDurationMS(tp agents.DelegationTargetPolicy, has bool) int {
 		return 0
 	}
 	return tp.MaxDurationMS
+}
+
+// stripMarkdownFence removes a single surrounding Markdown code fence (``` or
+// ```lang) from a child agent's final output, if present. Child agents like
+// code-agent (running `claude -p --output-format json`) often wrap JSON in a
+// ```json fence; without stripping, json.Unmarshal fails on the leading backtick.
+// Returns the trimmed input when no fence is present.
+func stripMarkdownFence(raw string) string {
+	s := strings.TrimSpace(raw)
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	// Drop the opening fence line (``` or ```json).
+	if nl := strings.IndexByte(s, '\n'); nl >= 0 {
+		s = s[nl+1:]
+	} else {
+		return s // malformed single-line fence; let JSON parsing reject it
+	}
+	// Drop the closing fence.
+	s = strings.TrimSpace(s)
+	if idx := strings.LastIndex(s, "```"); idx >= 0 {
+		s = strings.TrimSpace(s[:idx])
+	}
+	return s
 }
 
 func delegateWorkerRuntimeContract() string {

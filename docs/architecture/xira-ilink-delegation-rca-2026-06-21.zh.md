@@ -1,5 +1,10 @@
 # Xira iLink Delegation RCA - 2026-06-21
 
+> **修复状态（2026-06-21，PR #21）**：本 RCA 记录的所有根因均已修复。每个章节末尾标注
+> `[已修复]` 并指向具体改动。最新复现（§"最新复现"）发现的两个新根因也已修复。
+> PR：`codex/xira-external-worker-delegation`。配套 workspace 配置（code-agent 工具面收窄、
+> damning-agent per-target policy）已落地 `~/daming-xira`。
+
 ## 背景
 
 本次问题来自本地运行时 `~/daming-xira` 的 iLink 会话：
@@ -193,25 +198,48 @@ cd ~/work/wanghuan/ai-agent-platform && claude -p --permission-mode bypassPermis
 - wrapper 模型需要几分钟到几十分钟、主要等待 `claude -p`。
 - bounded LLM delegate 模型默认 30 秒/120 秒、需要快速 JSON 汇报。
 
+> `[已修复]` 引入 per-target delegation policy（`DelegationPolicy.Targets`），
+> external worker 可配独立 timeout（不被 caller 120s clamp）。工具面收窄归 target
+> 自己 PROFILE（code-agent 已改为只 shell.run + tool_output.read）。
+> 注意：原计划的 `worker_mode` 字段在实现中发现是空壳（无独立职责），已删除——
+> timeout 由 `MaxDurationMS`、可观测由 `ExposeProgress` 各自承载。
+
 ### P1：策略根因
 
 delegation policy 默认上限 120 秒，对代码审查/深度 repo 分析类任务不匹配。用户传入 `7200000ms` 也会被 clamp，但这个 clamp 不对用户可见。
+
+> `[已修复]` per-target `MaxDurationMS` 取代 caller 全局 ceiling；`agent.delegate.allowed`
+> 事件记录 `effective_max_duration_ms` + `target_policy_max_duration_ms`，clamp 决策可审计。
 
 ### P1：执行约束根因
 
 `code-agent` 的固定 workflow 没有被工具层 enforced。PROFILE 是软提示，工具暴露仍允许它自己做完整探索。
 
+> `[已修复]` code-agent PROFILE 的 `tools:` 收窄为 `shell.run` + `tool_output.read`
+> （workspace 配置已改）。registry 从 profile.Tools 过滤，是硬约束——model 即使想 inspect
+> 也没有 read_file/grep 等工具。
+
 ### P1：可观测性根因
 
 iLink 只看到 timeout 和 silence，不看到 allowed/started/effective timeout/fallback。执行路径被隐藏，用户只能从最终文本猜测。
+
+> `[已修复]` `ExposeProgress=true` 时 allowed/started/completed 投递 IM（显示 target + 真实 deadline）。
+> `agent.delegate.timeout` 文案改诚实版（显示 effective 上限，不再说「整理已获得的信息」）。
+> `delegateErrorOutput` 加 `fallback_hint`，提示 parent 披露是否自己接手。
 
 ### P2：文案根因
 
 `agent.delegate.timeout` 文案声称“整理已获得的信息”，但事件本身不保证有可整理的 child result。该文案在 timeout 场景下容易误导。
 
+> `[已修复]` timeout 文案改诚实版：`"子任务超时（上限 {effective}），未返回结构化结果。"`
+> （读 payload 的 effective_max_duration_ms，不再撒谎）。
+
 ### P2：路径根因
 
 file tools 不展开用户 path 的 `~`，shell tools 会由 shell 展开 `~`。这导致工具行为不一致，放大模型探索成本。
+
+> `[已修复]` `resolveWithin`（fs.go）在 IsAbs 判断前调 `expandHome`，
+> read_file/list_dir/search_file 现在和 shell.run 一致展开 `~`。
 
 ## 建议修复
 
@@ -299,3 +327,167 @@ code-agent 在 120 秒上限内超时，未返回结构化结果。以下是我�
 3. 修改 timeout progress 文案，避免“整理已获得的信息”的错误暗示。
 4. 最终回答中披露 fallback 来源。
 5. 后续再做 per-target delegation policy、专用 `claude_code.run` tool、`~` path 统一等结构性修复。
+
+## 2026-06-21 10:38 最新复现：失败事件被进度配额吞掉
+
+最新 iLink 输入：
+
+```text
+好像分支修改了，你用 code agent 来看下分支的情况
+```
+
+用户侧看到的进度是：
+
+```text
+已委派给 code-agent（最长 2 小时）。
+子任务已启动。
+以下是当前完整的分支情况：...
+```
+
+这次已经不是 120 秒 timeout 问题：
+
+- `daming-agent` 已经通过 per-target policy 给 `code-agent` 生效了 `7200000ms`。
+- `code-agent` 实际完成了子 run，耗时约 28 秒。
+- 失败发生在父 runtime 校验子 agent 最终输出时。
+
+### 事件事实
+
+父 run：
+
+```text
+/Users/yinwm/daming-xira/.xira/runs/20260621-103757-daming-agent
+```
+
+关键事件：
+
+```text
+10:38:02 agent.delegate.allowed
+  effective_max_duration_ms=7200000
+  expose_progress=true
+
+10:38:02 agent.delegate.started
+  expose_progress=true
+
+10:38:30 agent.delegate.failed
+  visibility.conversation=true
+  error=invalid_child_result
+  reason=result_parse_failed
+  raw_child_result_path=artifacts/delegate-result/rejected.json
+
+10:38:44 assistant.final
+10:38:44 run.finished status=completed
+```
+
+`agent.delegate.failed` 的真实错误：
+
+```text
+invalid_child_result: result_parse_failed: invalid character '`' looking for beginning of value
+```
+
+原因是 `code-agent` 的 final response 不是裸 JSON，而是 fenced Markdown：
+
+```markdown
+```json
+{ ... }
+```
+```
+
+因此 `validateDelegateAgentResult` 解析失败，父 agent 随后 fallback 到自己的 `shell.run`，并最终回答。
+
+### 为什么前端没看到“子任务失败”
+
+`agent.delegate.failed` 已经被 runtime 正确记录，并且 `visibility.conversation=true`。它没有显示到 iLink 的直接原因是 progress forwarder 的 per-turn 配额。
+
+当前默认策略：
+
+```go
+func DefaultPolicy() Policy {
+	return Policy{
+		InitialSilenceThreshold: 20 * time.Second,
+		MinInterval:             12 * time.Second,
+		MaxMessagesPerTurn:      2,
+		MaxChars:                180,
+	}
+}
+```
+
+当前 dispatch 逻辑：
+
+```go
+if !isWaiting && f.progressSent >= f.req.Policy.MaxMessagesPerTurn {
+	return
+}
+```
+
+这轮因为 `expose_progress=true`，以下两个 lifecycle 事件先被投递并计入 `progressSent`：
+
+1. `agent.delegate.allowed` -> “已委派给 code-agent（最长 2 小时）。”
+2. `agent.delegate.started` -> “子任务已启动。”
+
+两条消息正好占满 `MaxMessagesPerTurn=2`。随后真正重要的：
+
+```text
+agent.delegate.failed
+```
+
+到达时被 quota 直接丢弃，所以用户只看到“已委派/已启动”，看不到“子任务没有成功返回”。
+
+### 新根因
+
+这轮有两个新根因：
+
+1. `code-agent` 的最终输出协议仍不稳定：它返回了 Markdown fenced JSON，而不是 `delegate_result_v1` 要求的裸 JSON。
+   > `[已修复]` `validateDelegateAgentResult` 在解析前调 `stripMarkdownFence`，
+   > 剥离 ```` ```json...``` ```` / ```` ```...``` ```` 围栏。合法 JSON 即使被 fence 包裹也能解析。
+   > 回归测试：`TestDelegateAcceptsMarkdownFencedJSON`（4 种 fence 形态 + bare JSON + 纯文本拒绝）。
+
+2. progress forwarder 把 lifecycle 进度和失败进度放进同一个 `MaxMessagesPerTurn` 配额，导致 `allowed`/`started` 这类低价值进度占满 quota 后，`agent.delegate.failed` 这种高价值失败事实被静默压掉。
+   > `[已修复]` `dispatch` 把 `agent.delegate.failed`/`agent.delegate.timeout` 与
+   > `run.waiting_human` 同等对待为 high-value：绕过 `MaxMessagesPerTurn` quota、不计入
+   > `progressSent`、绕过 `MinInterval` 节流。
+   > 另外 `assistant.final` 不再同步 drain（改为入队 + dispatch 时 drain），
+   > 保证 final 之前入队的 failed/timeout 不会被 drain 吞掉。
+   > 回归测试：`TestDelegateFailedNotStarvedByLifecycleQuota`、
+   > `TestDelegateTimeoutNotStarvedByLifecycleQuota`、
+   > `TestDelegateFailedNotDroppedByFinalDrain`（全新测试文件
+   > `delegation_lifecycle_test.go`，基于本节真实 10:38 链路）。
+
+### 影响
+
+用户侧看到的是一个误导性链路：
+
+```text
+已委派 -> 已启动 -> 最终答案
+```
+
+真实链路是：
+
+```text
+已委派 -> 已启动 -> code-agent 输出格式错误 -> 父 agent fallback shell.run -> 最终答案
+```
+
+这会造成两个问题：
+
+- 用户误以为最终答案来自 code-agent。
+- 子任务失败和 fallback 路径被隐藏，最终答案的可信边界不清楚。
+
+这轮最终答案里还出现了业务判断风险：父 agent 建议删除
+`codex/issue-113-schema-drift-gate-p1`，理由是“#114 已合并”，但子 agent 的 merge-base 检查结果是
+`NO`，并且该分支相对 `main` 是 `16 ahead / 406 behind`。分支清理建议不能用 issue/PR 印象替代
+Git 事实检查。
+
+### 建议修复
+
+短期应做：
+
+1. `agent.delegate.failed` / `agent.delegate.timeout` 不应受普通 progress quota 限制，至少应高于 `allowed` / `started`。
+2. 如果 quota 已满，失败/超时事件应能驱逐低价值 lifecycle 事件，或者绕过 quota。
+3. `allowed` / `started` 可以计入单独 lifecycle quota，不能挤占失败/超时预算。
+4. 父 agent final 必须披露 delegate 失败和 fallback 来源。
+5. `code-agent` 的 profile/runtime prompt 必须要求裸 JSON；更稳妥的是对 fenced JSON 做一次明确的 retry/repair，并记录 warning，而不是静默接受。
+
+回归测试应覆盖：
+
+1. `expose_progress=true` 时，`allowed` + `started` 已投递后，后续 `agent.delegate.failed` 仍必须投递。
+2. `assistant.final` 到达时，已入队的失败/超时事件不能被 `drain()` 丢弃。
+3. `code-agent` 返回 fenced JSON 时，要么触发 retry，要么用户侧能看到 `invalid_child_result` 的失败进度。

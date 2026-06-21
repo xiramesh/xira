@@ -1276,6 +1276,44 @@ func TestDelegateRejectsChildResultWithRuntimeFields(t *testing.T) {
 	}
 }
 
+// TestDelegateAcceptsMarkdownFencedJSON: code-agent (running `claude -p
+// --output-format json`) frequently wraps its JSON in a Markdown fence. The
+// validator must strip the fence, not reject it as a parse failure. This is the
+// 2026-06-21 10:38 RCA: "invalid character '`' looking for beginning of value".
+func TestDelegateAcceptsMarkdownFencedJSON(t *testing.T) {
+	validInner := `{"summary":"branch review done","evidence_refs":[],"confidence":"high","followup_needed":false}`
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"```json fence", "```json\n" + validInner + "\n```"},
+		{"``` fence no lang", "```\n" + validInner + "\n```"},
+		{"fence with leading spaces", "  ```json\n" + validInner + "\n```  "},
+		{"fence with trailing newline", "```json\n" + validInner + "\n```\n\n"},
+		{"bare JSON still works", validInner},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := validateDelegateAgentResult(tc.raw, agents.ResearchAssistantAgentID, "child-run", nil, nil)
+			if err != nil {
+				t.Fatalf("fenced JSON should be accepted after stripping fence, got: %v", err)
+			}
+			if res.Summary != "branch review done" {
+				t.Fatalf("summary mismatch after fence strip: %q", res.Summary)
+			}
+		})
+	}
+}
+
+// TestDelegateRejectsNonJSONProse: pure prose (no JSON, no fence) still fails —
+// fence stripping must not mask genuinely malformed output.
+func TestDelegateRejectsNonJSONProse(t *testing.T) {
+	_, err := validateDelegateAgentResult("这是分析结果，分支情况如下：...", agents.ResearchAssistantAgentID, "child-run", nil, nil)
+	if err == nil {
+		t.Fatalf("pure prose (no JSON) should still be rejected")
+	}
+}
+
 func TestDelegateRejectsInvalidEvidenceRefs(t *testing.T) {
 	_, err := validateDelegateAgentResult(
 		`{"summary":"bad evidence","evidence_refs":["workspace://secret"],"confidence":"high","followup_needed":false}`,
