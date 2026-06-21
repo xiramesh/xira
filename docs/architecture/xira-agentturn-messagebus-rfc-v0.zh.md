@@ -57,12 +57,12 @@ Xira 已在用最新版 ADK v1.4.0（`go.mod` 已确认）。以下能力 ADK **
 | 能力 | ADK 实现 | Xira 现状 |
 |---|---|---|
 | 一个 model turn 内多 tool 并行执行 | `base_flow.go:1031` 默认开 goroutine | 用同步 `functiontool`，无并发 |
-| StreamingFunctionTool（fire-and-forget） | `base_flow.go:1066` return pending + 后台 goroutine | 无 |
-| HITL confirmation | `tool.go:199` `ctx.RequestConfirmation()` | 自建 `human.request` tool |
+| StreamingFunctionTool | `base_flow.go:1066` — ⚠️ fire-and-forget 仅 **Live API 路径**（`liveSess != nil`，即 `RunLive`）；Xira 走常规 `runner.Run()`（`liveSess == nil`），走的是 `base_flow.go:1108` 的 **else 分支：同步迭代 `RunStream` 直到结束**，不 fire-and-forget | 无 |
+| HITL confirmation | 定义在 `agent/callback_context.go:196` `RequestConfirmation()`（`tool.go:203` 的 `confirmationTool.Run` 只是调用点之一） | 自建 `human.request` tool |
 | Session 持久化 | `session/database/` Postgres/MySQL/Spanner | 自建 `runs/` 磁盘 |
 | Agent 树（SubAgents） | `agent.go:228` `FindSubAgent` | 用 `delegate_agent` 动态委派 |
 
-**结论**：PicoClaw 式异步子 agent，在 ADK v1.4.0 里 80% 已有原生支撑。真正要自建的是 **MessageBus** 和 **AgentTurn 类型**。
+**结论**：ADK v1.4.0 的**并行 tool 执行**（`base_flow.go:1031`）对 Xira 直接可用。但 **StreamingFunctionTool 的 fire-and-forget 只在 Live API 路径生效**——Xira 走常规 `runner.Run()`，StreamingFunctionTool 在这里被**同步迭代消费**（`base_flow.go:1108` 的 else 分支），不会 fire-and-forget。因此 `spawn_turn` 的"不阻塞父"**不能直接靠 StreamingFunctionTool 实现**，必须靠 tool 函数内部主动早关闭流 + detach goroutine（见 §2.4 修正后的实现说明）。真正要自建的是 **MessageBus**、**AgentTurn 类型**、以及**在常规 runner 路径上的异步 spawn 机制**。
 
 ### 1.3 ADK 不提供、必须我们补的
 
@@ -188,30 +188,54 @@ type Filter struct {
 
 ### 2.4 spawn_turn 替代 delegate_agent
 
-**决策**：用 `spawn_turn`（StreamingFunctionTool 实现）替代 `delegate_agent`（普通 FunctionTool 同步实现）。
+**决策**：用 `spawn_turn` 替代 `delegate_agent`（普通 FunctionTool 同步实现），让父 turn 不阻塞。
+
+**⚠️ 实现路径的关键约束（修正于 2026-06-22 PR review）**：
+
+RFC v0 初稿误以为可直接靠 ADK 的 StreamingFunctionTool "fire-and-forget"（`base_flow.go:1066`）。核实源码后发现：**fire-and-forget 只在 Live API 路径生效**（`liveSess != nil`，即 `RunLive`）。Xira 走常规 `runner.Run()`（`service_adk.go:89`），`liveSess == nil`，StreamingFunctionTool 在这里走的是 `base_flow.go:1108` 的 else 分支——**同步迭代 `RunStream` 直到流结束才 return**，不会 fire-and-forget。
+
+因此在 Xira 的常规 runner 路径上，`spawn_turn` 的"不阻塞父"**靠 tool 函数主动让迭代器早关闭 + detach goroutine**，而不是靠 ADK 的 fire-and-forget 分支：
 
 ```go
-// 伪代码
+// 伪代码 —— 常规 runner 路径上的异步 spawn
 spawnTurnTool := streamingtool.New("spawn_turn", func(ctx, args) iter.Seq[string] {
-    childTurnID := newAgentTurnID()
-    
-    bus.Publish(AgentTurnStarted{
-        AgentTurnID: childTurnID,
-        ParentAgentTurnID: ctx.ParentAgentTurnID(),
-        TargetAgent: args.AgentID,
-    })
-    
-    go func() {
-        result := runAgentTurn(ctx, childTurnID, args)
-        bus.Publish(AgentTurnCompleted{
-            AgentTurnID: childTurnID,
-            Result: result,
+    return func(yield func(string) bool) {
+        childTurnID := newAgentTurnID()
+
+        // 1. 先宣告子 turn 诞生（bus 可见）
+        bus.Publish(AgentTurnStarted{
+            AgentTurnID:        childTurnID,
+            ParentAgentTurnID:  ctx.ParentAgentTurnID(),
+            TargetAgent:        args.AgentID,
         })
-    }()
-    
-    yield fmt.Sprintf(`{"agent_turn_id":%q,"status":"spawned"}`, childTurnID)
+
+        // 2. 真正的子 turn 工作放进 detached goroutine
+        //    注意：不能继承 ctx（ctx 在 tool return 后被取消），
+        //    要用 context.WithoutCancel 或独立的新 ctx。
+        go func() {
+            childCtx := context.WithoutCancel(ctx) // 或独立 ctx
+            result := runAgentTurn(childCtx, childTurnID, args)
+            bus.Publish(AgentTurnCompleted{
+                AgentTurnID: childTurnID,
+                Result:      result,
+            })
+        }()
+
+        // 3. ★ 只 yield 一条 "spawned" 然后立即 return，结束流。
+        //    ADK 在 base_flow.go:1108 的 for-range 会因此立即退出，
+        //    把这条作为 tool result，推进下一个 model turn。
+        //    父 turn 不阻塞——这是"不阻塞"的真正来源。
+        yield fmt.Sprintf(`{"agent_turn_id":%q,"status":"spawned"}`, childTurnID)
+        // 不再 yield，迭代器结束
+    }
 })
 ```
+
+**要点**：
+- "不阻塞"来自**迭代器早关闭**（yield 一条后 return），不是 ADK 的 fire-and-forget。
+- 子 turn 的 goroutine 必须 detach（`context.WithoutCancel`），否则 tool return 后 ctx 被取消，子也会被杀。
+- 子结果不通过 tool return 回父，而是通过 `bus.Publish(AgentTurnCompleted)`；父在 Phase 4 的 checkpoint 消费（见 §4 Phase 4）。
+- 如果 Phase 4 checkpoint 未落地，父拿到 `spawned` 后只能靠下一个 model turn 主动调 `wait_turn(childID)` 阻塞等子（见下文"等不等子由 LLM 决定"）。
 
 **语义变化**：
 
@@ -430,9 +454,9 @@ Epic issue #22 + 6 个 Phase 子 issue，全部归入 milestone [AgentTurn + Mes
 
 | 能力 | 包路径 | 对我们的作用 |
 |---|---|---|
-| 多 tool 并行执行（默认 goroutine） | `internal/llminternal/base_flow.go:1031` | 一个 model turn 内并发 spawn |
-| StreamingFunctionTool | `internal/llminternal/base_flow.go:1066` | spawn_turn 的载体（fire-and-forget） |
-| HITL confirmation | `tool/tool.go:199` | 替代自建 human.request |
+| 多 tool 并行执行（默认 goroutine） | `internal/llminternal/base_flow.go:1031` | 一个 model turn 内并发 spawn（对 Xira 直接可用） |
+| StreamingFunctionTool | `internal/llminternal/base_flow.go:1066`（Live API）/ `:1108`（常规 runner） | ⚠️ fire-and-forget **仅 Live API 路径**；Xira 走常规 runner，在此路径上 StreamingFunctionTool 被**同步迭代消费**。spawn_turn 不靠 fire-and-forget，靠 tool 函数让迭代器早关闭 + detach goroutine（见 §2.4） |
+| HITL confirmation | 定义 `agent/callback_context.go:196` `RequestConfirmation()`；调用点之一 `tool/tool.go:203` | 替代自建 human.request |
 | Session 持久化 | `session/database/` | Phase 5 WAL 的底层 |
 | SubAgents 树 | `agent/agent.go:228` | 参考（但走动态 spawn 不走静态注册） |
 | IsLongRunning() 接口 | `tool/tool.go:45` | 长任务标记 |
@@ -458,3 +482,6 @@ Epic issue #22 + 6 个 Phase 子 issue，全部归入 milestone [AgentTurn + Mes
 ## 变更日志
 
 - **2026-06-21**：RFC v0 初稿，基于设计对话复盘创建。覆盖 6 个 Phase、11 个开放问题、ADK v1.4.0 能力盘点。
+- **2026-06-22**：修正两处事实性错误（PR #29 review 反馈）：
+  1. **StreamingFunctionTool 路径错位**：`base_flow.go:1066` 的 fire-and-forget 只对 Live API（`RunLive`）生效；Xira 走常规 `runner.Run()`（`service_adk.go:89`），StreamingFunctionTool 在此走 `base_flow.go:1108` else 分支的**同步迭代**。修正 §1.2、§1.3、§2.4、附录 A，并据此重写 spawn_turn 实现假设（靠迭代器早关闭 + detach goroutine，而非 fire-and-forget）。这也是对方法论 AGENTS.md §2"先核实再判断"的自审：把 Live API 专属行为当通用能力引用，恰恰是没核实到位。
+  2. **行号错**：`RequestConfirmation()` 定义在 `agent/callback_context.go:196`，`tool.go:199`（实际 203）只是调用点之一。修正附录 A。
