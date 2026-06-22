@@ -25,17 +25,31 @@ import (
 // Old Kind system → new Message type mapping (Phase 2 EventBus adapter).
 //
 // The old system (RuntimeEvent.Kind string, emitted via recordEvent in
-// service.go / delegation.go / llm_trace.go) has ~47 distinct kinds as of
+// service.go / delegation.go / llm_trace.go) has ~48 distinct kinds as of
 // this writing. Only a FEW have a direct new Message type today. This file
 // documents that subset and the fallback contract for the rest.
 //
-// To re-derive the full kind set, run:
-//   grep -rhoE 'recordEvent\("[^"]+"' apps/xira/internal/runtime/*.go | \
-//     grep -v _test.go | sed 's/recordEvent("//; s/"//' | sort -u
+// To re-derive the full kind set, run BOTH commands — kinds are published
+// two ways and a single grep misses the dynamic ones:
+//   # literal kinds:   recordEvent("<kind>", ...)
+//   grep -rhoE 'recordEvent\("[a-z][a-z0-9_.]*"' apps/xira/internal/runtime/*.go | \
+//     grep -v _test.go | sed -E 's/.*recordEvent\("//; s/".*//' | sort -u
+//   # dynamic kinds:   kind = "<kind>" (then recordEvent(kind, ...))
+//   grep -rhE 'kind[[:space:]]*=[[:space:]]*"[a-z][a-z0-9_.]*"' apps/xira/internal/runtime/*.go | \
+//     grep -v _test.go | sed -E 's/.*=[[:space:]]*"//; s/".*//' | sort -u
+// (The [a-z][a-z0-9_.]* anchor avoids matching the grep's own regex text,
+// which a naive [^"]+ would catch — PR #32 nit 1.)
 //
 //   OLD Kind                            → NEW Message type       Notes
 //   ──────────────────────────────────── ─────────────────────── ────────────────────────────
 //   "run.started"                       → AgentTurnStarted       TurnKind=agent (flow run uses its own)
+//   "run.finished"                      → (split per status)     the MULTI-STATUS event carrying
+//         "status":"completed"            → AgentTurnCompleted     resp.Status in its payload.
+//         "status":"failed"               → AgentTurnFailed       run.finished is the ONLY source
+//         "status":"canceled"             → AgentTurnCanceled     for Canceled — there is NO
+//         "status":"timeout"              → AgentTurnFailed       agent.delegate.canceled kind.
+//                                    (Error="timeout"; turn Status=timeout is the distinguishing
+//                                     state, so no AgentTurnTimeout message type. See W6-e.)
 //   "run.waiting_human"                 → HumanRequested         (parent pauses for HITL)
 //   "human.request.created"             → HumanRequested         (tool-initiated HITL; same semantic)
 //   "human.request.failed"              → (Phase 2: map to a failed-HumanRequested or skip)
@@ -45,16 +59,35 @@ import (
 //   "agent.delegate.completed"          → AgentTurnCompleted
 //   "agent.delegate.result_delivered"   → (metadata only; post-completion delivery to parent)
 //   "agent.delegate.failed"             → AgentTurnFailed        Error carries the reason
+//   "agent.delegate.timeout"            → AgentTurnFailed        DYNAMICALLY assigned (delegation.go:559,
+//                                                              kind = "agent.delegate.timeout" when
+//                                                              DeadlineExceeded, then recordEvent(kind,...)).
+//                                                              A literal-only grep MISSES this — see the
+//                                                              two-command re-derivation above. NOT a dead
+//                                                              reference despite not appearing in a
+//                                                              recordEvent("...") literal.
 //   "agent.delegate.rejected"           → (Phase 2: policy rejection — log/skip, not a turn-lifecycle event)
 //   "agent.delegate.waiting_human"      → HumanRequested         (child turn paused for HITL)
 //   "assistant.status"                  → AssistantStatus        progress heartbeat
 //   "tool.started"                      → ToolCalled             (NOT "tool.call" — that kind does not exist)
 //   "tool.completed" / "tool.finished"  → ToolResult             (NOT "tool.executed" — that kind does not exist)
 //
+// NEW Message types with NO old kind (Phase 2 publishes them fresh):
+//   InboundMessage / OutboundMessage — IM-boundary events. The old RuntimeEvent
+//     path NEVER carried these. Phase 2+ the ilink runner publishes
+//     InboundMessage on message receipt and OutboundMessage when sending a reply.
+//   HumanResponded — a human's reply to a HITL request. The old system has NO
+//     "human.responded" (or similar) kind: the resume path
+//     (human_request_resume.go / delegation_resume.go) re-enters the turn and
+//     lets it proceed to Running, expressing the response IMPLICITLY via the
+//     subsequent run.started / adk.event stream. Phase 2 must publish
+//     HumanResponded EXPLICITLY at the resume entry point (analogous to how
+//     InboundMessage is published at the IM-receipt entry point). See W6-d.
+//
 // Kinds with NO direct new Message yet (Phase 2 adapter must decide, MUST
 // NOT silently drop — log/skip decisions go in the adapter, not here):
-//   run.finished (split across Completed/Failed/Canceled per resp.Status),
-//   context.packet.* (context-build progress, ~6 kinds),
+//   context.packet.* (4: started/completed/failed/truncated),
+//   context.item.* (2: included/redacted),
 //   llm.* (request traces / usage, ~7 kinds),
 //   session.persisted / session.persist_failed,
 //   usage.ledger_appended / usage.ledger_failed,
@@ -63,12 +96,6 @@ import (
 //   capability_gap,
 //   tool.raw_output_persisted / tool.raw_output_failed / tool.failed,
 //   assistant.final (see below).
-//
-// InboundMessage / OutboundMessage: there is NO old recordEvent kind for
-// these — they are NEW in Phase 1, produced by the channel/IM boundary in
-// Phase 2+ (ilink runner publishes InboundMessage on message receipt;
-// runner publishes OutboundMessage when sending a reply). The old
-// RuntimeEvent path never carried IM-boundary events.
 //
 // GAP — assistant.final (Phase 2 TODO, semantics corrected 2026-06-22):
 //   assistant.final is published in service.go ONLY when
