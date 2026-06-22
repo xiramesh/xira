@@ -167,8 +167,12 @@ AGENTS.md §2 "缺口要补不要绕" 的典型场景。
     `ephemeral_worker:` 赋值在 `delegation.go:996`，实际 origin/main 上在 977）。**引用代码用符号名
     （函数名 / 字符串字面量），不用行号**——行号会漂移，符号名稳定
   - `grep` 的正则太宽（`[^"]+`）→ 匹配到 grep 自身的注释文本，产出伪命中
-- 反射动作：每次核实后追问一句"我的 grep/读法会不会漏？"，不满意就加一路（如双路 grep：
-  literal + dynamic）。
+  - **宣布修复 ≠ 实际提交** → commit message 写了"修了 types.go"，但 `git add` 漏了这个文件，
+    实际 staged set 不包含它（本 PR commit 7874b7e 栽在这：message 说修了 cross-package compile，
+    但 progress/types.go 没进 commit，推上去的 PR 会炸 main）。**提交后核实 `git show --stat HEAD`
+    真的包含修改的文件**，不只信 commit message 的描述。重要修改让 reviewer/CI 二次确认，不靠自查。
+- 反射动作：每次核实后追问两句——"我的 grep/读法会不会漏？" + "我宣布修的，实际提交了吗？"。
+  不满意就加一路（如双路 grep、`git show --stat HEAD`）。
 - **这条尤其适用于"自信的场景"**：写规则文档、固化经验、做架构总结时，人（和 agent）最容易
   跳过核实。本文件 §1 曾连续多处凭记忆写错（buffer 数、发布状态、case 数），栽在"禁止不核实"
   的规则文件本身上。详见 §2 的元教训。

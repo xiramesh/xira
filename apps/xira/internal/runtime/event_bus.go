@@ -12,30 +12,42 @@ import (
 // starve delivery of conversation-critical facts. See AGENTS.md §1.1.
 const subscriberBufferSize = 256
 
-// EventBus is a best-effort, per-Service singleton fan-out. Its correctness
-// contract (AGENTS.md §1.1) is NOT "never drops" — it is "when it must drop, it
-// drops by kind priority and logs Warn, never silently". Priority is explicit
-// and kind-based (see eventPriority): critical (run.waiting_human,
-// assistant.final) outranks important (agent.delegate.failed/timeout) outranks
-// droppable (everything else, including the assistant.status heartbeat). When a
-// subscriber buffer is full and a higher-priority event arrives, the oldest
-// strictly-lower-priority buffered event is evicted to make room; otherwise the
-// incoming event is dropped. Both cases log Warn. This is what makes critical
-// events reachable under a noise burst — the drop happens at the bus layer,
-// before the forwarder's internal queue can recover it. Note priority is a
-// distinct axis from Visibility.Conversation: that selects the *plane*
-// (conversation/inspector/audit), not whether dropping is tolerable.
-type EventBus struct {
+// eventBusImpl is the evolved form of the old EventBus struct (A2a #44).
+// It satisfies the EventBus interface (PublishEvent/SubscribeFiltered) while
+// keeping the validated fan-out + priority eviction + pump/deliver machinery
+// (AGENTS.md §1.1). The old Publish(RuntimeEvent) / Subscribe(ctx) are kept
+// deprecated until A2b (#45) migrates callers and deletes them.
+//
+// Its correctness contract (AGENTS.md §1.1) is NOT "never drops" — it is
+// "when it must drop, it drops by kind priority and logs Warn, never silently".
+// Priority is explicit and kind-based (see eventPriority): critical
+// (run.waiting_human, assistant.final) outranks droppable (everything else,
+// including the assistant.status heartbeat). When a subscriber buffer is full
+// and a higher-priority event arrives, the oldest strictly-lower-priority
+// buffered event is evicted to make room; otherwise the incoming event is
+// dropped. Both cases log Warn.
+type eventBusImpl struct {
 	mu     sync.RWMutex
-	subs   map[*subscriber]struct{}
+	subs   map[*subscriber]struct{}      // old RuntimeEvent subscribers (deprecated)
+	esubs  map[*eventSubscriber]struct{} // new Event subscribers (A2a)
 	closed bool
 }
 
-func NewEventBus() *EventBus {
-	return &EventBus{subs: make(map[*subscriber]struct{})}
+// EventBus is now an interface (message_bus.go). NewEventBus returns the
+// interface so cross-package callers hold the interface type. The interface
+// temporarily includes deprecated Publish(RuntimeEvent)/Subscribe(ctx) so
+// callers compile during the A2a→A2b transition; A2b (#45) removes them.
+func NewEventBus() EventBus {
+	return &eventBusImpl{
+		subs:  make(map[*subscriber]struct{}),
+		esubs: make(map[*eventSubscriber]struct{}),
+	}
 }
 
-func (b *EventBus) Publish(evt RuntimeEvent) {
+// Deprecated: Publish(RuntimeEvent) is the old API. A2b (#45) deletes it
+// after callers migrate to PublishEvent. Meanwhile it still works for
+// backward compatibility.
+func (b *eventBusImpl) Publish(evt RuntimeEvent) {
 	if b == nil {
 		return
 	}
@@ -52,7 +64,8 @@ func (b *EventBus) Publish(evt RuntimeEvent) {
 // Subscribe returns a read-only channel of events for this subscriber. The
 // channel is closed when ctx is canceled or the bus is closed. Consumers read
 // it with `for evt := range ch`.
-func (b *EventBus) Subscribe(ctx context.Context) <-chan RuntimeEvent {
+// Deprecated: Subscribe(ctx) is the old API. A2b (#45) deletes it.
+func (b *eventBusImpl) Subscribe(ctx context.Context) <-chan RuntimeEvent {
 	sub := newSubscriber()
 	b.mu.Lock()
 	if b.closed {
@@ -74,7 +87,7 @@ func (b *EventBus) Subscribe(ctx context.Context) <-chan RuntimeEvent {
 	return sub.out
 }
 
-func (b *EventBus) Close() {
+func (b *eventBusImpl) Close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
@@ -85,6 +98,165 @@ func (b *EventBus) Close() {
 		sub.shutdown()
 		delete(b.subs, sub)
 	}
+	for esub := range b.esubs {
+		esub.shutdown()
+		delete(b.esubs, esub)
+	}
+}
+
+// PublishEvent is the new Event-typed fan-out (A2a #44). Delivers evt to all
+// eventSubscribers whose Filter matches. Priority eviction uses Event.Priority()
+// directly (no Kind-string switch — the old eventPriority is for RuntimeEvent
+// only). Phase 2-B adds WAL persistence for Reliable()==true events.
+func (b *eventBusImpl) PublishEvent(evt Event) {
+	if b == nil || evt == nil {
+		return
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.closed {
+		return
+	}
+	for esub := range b.esubs {
+		if esub.filter.Match(evt) {
+			esub.enqueue(evt)
+		}
+	}
+}
+
+// SubscribeFiltered registers a filter and returns a channel of matching
+// Events (A2a #44). Replaces the old Subscribe(ctx) for Event consumers.
+func (b *eventBusImpl) SubscribeFiltered(filter Filter) <-chan Event {
+	esub := newEventSubscriber(filter)
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		close(esub.out)
+		return esub.out
+	}
+	b.esubs[esub] = struct{}{}
+	b.mu.Unlock()
+	return esub.out
+}
+
+// eventSubscriber is the Event-typed counterpart of subscriber. Same burst
+// absorber + pump/deliver pattern, but buf is []Event and priority comes from
+// Event.Priority() (not a Kind-string switch).
+type eventSubscriber struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	buf    []Event
+	out    chan Event
+	filter Filter
+	closed bool
+}
+
+func newEventSubscriber(filter Filter) *eventSubscriber {
+	s := &eventSubscriber{
+		buf:    make([]Event, 0, subscriberBufferSize),
+		out:    make(chan Event),
+		filter: filter,
+	}
+	s.cond = sync.NewCond(&s.mu)
+	go s.pump()
+	return s
+}
+
+func (s *eventSubscriber) enqueue(evt Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	if len(s.buf) < subscriberBufferSize {
+		s.appendLocked(evt)
+		return
+	}
+	// Buffer full — priority eviction using Event.Priority() directly.
+	incoming := evt.Priority()
+	if idx := eventOldestBelowLocked(s.buf, incoming); idx >= 0 {
+		evicted := s.buf[idx]
+		s.buf = append(s.buf[:idx], s.buf[idx+1:]...)
+		s.appendLocked(evt)
+		slog.Warn("event bus subscriber buffer full; evicted lower-priority event",
+			"evicted_kind", evicted.Kind(),
+			"evicted_event_id", evicted.ID(),
+			"kind", evt.Kind(),
+			"event_id", evt.ID())
+		return
+	}
+	slog.Warn("event bus subscriber buffer full; dropping event",
+		"kind", evt.Kind(), "event_id", evt.ID())
+}
+
+func (s *eventSubscriber) appendLocked(evt Event) {
+	s.buf = append(s.buf, evt)
+	s.cond.Signal()
+}
+
+// eventOldestBelowLocked finds the oldest buffered Event whose Priority() is
+// strictly below `level`. Same eviction logic as oldestBelowLocked but uses
+// Event.Priority() instead of eventPriority(RuntimeEvent).
+func eventOldestBelowLocked(buf []Event, level EventPriority) int {
+	for i, evt := range buf {
+		if evt.Priority() < level {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *eventSubscriber) pump() {
+	s.mu.Lock()
+	for {
+		if s.closed && len(s.buf) == 0 {
+			break
+		}
+		if len(s.buf) == 0 {
+			s.cond.Wait()
+			continue
+		}
+		evt := s.buf[0]
+		s.buf = s.buf[1:]
+		s.mu.Unlock()
+		if !s.deliver(evt) {
+			s.mu.Lock()
+			s.buf = s.buf[:0]
+			break
+		}
+		s.mu.Lock()
+	}
+	s.mu.Unlock()
+	close(s.out)
+}
+
+func (s *eventSubscriber) deliver(evt Event) bool {
+	const sendWait = 100 * time.Millisecond
+	for {
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if closed {
+			select {
+			case s.out <- evt:
+				return true
+			case <-time.After(currentDrainTimeout()):
+				return false
+			}
+		}
+		select {
+		case s.out <- evt:
+			return true
+		case <-time.After(sendWait):
+		}
+	}
+}
+
+func (s *eventSubscriber) shutdown() {
+	s.mu.Lock()
+	s.closed = true
+	s.cond.Signal()
+	s.mu.Unlock()
 }
 
 // subscriber is one subscription's buffered queue with priority eviction. It

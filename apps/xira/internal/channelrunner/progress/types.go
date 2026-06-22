@@ -69,7 +69,7 @@ func DefaultPolicy() Policy {
 // Request binds one forwarder instance to one inbound request (one RunAgent
 // turn).
 type Request struct {
-	EventBus *runtime.EventBus
+	EventBus runtime.EventBus
 	Inbound  channel.InboundContext
 	Policy   Policy
 	Sender   Sender

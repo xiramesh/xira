@@ -40,7 +40,7 @@ type Service struct {
 	agents         *agents.Manager
 	flows          *flow.FlowRegistry
 	skills         *skills.Manager
-	events         *EventBus
+	events         EventBus
 	runs           *RunStore
 	entrypoints    *entrypoints.Registry
 	sessions       *fsession.Manager
@@ -125,7 +125,7 @@ func (s *Service) Close() {
 	}
 }
 
-func (s *Service) EventBus() *EventBus {
+func (s *Service) EventBus() EventBus {
 	if s == nil {
 		return nil
 	}

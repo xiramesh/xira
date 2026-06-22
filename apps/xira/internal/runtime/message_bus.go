@@ -279,6 +279,30 @@ func (e ToolResult) Timestamp() time.Time           { return e.TimestampVal }
 func (ToolResult) Reliable() bool                   { return false }
 func (ToolResult) Priority() EventPriority          { return PriorityDroppable }
 
+// AssistantFinal is published when the agent's final reply is ready
+// (service.go:610, whitelist: final != "" && status == "completed"). It is
+// the forwarder's DRAIN control signal — NOT turn lifecycle (doesn't drive
+// the state machine), NOT progress (doesn't render). Third category:
+// control signal. Reliable=false (no WAL — it doesn't drive cross-process
+// state machine), Priority=PriorityCritical (drain must be timely, survives
+// eviction).
+type AssistantFinal struct {
+	MessageIDVal         string
+	AgentTurnIDVal       AgentTurnID
+	ParentAgentTurnIDVal AgentTurnID
+	TimestampVal         time.Time
+	FinalChars           int
+}
+
+func (AssistantFinal) isEvent()                         {}
+func (AssistantFinal) Kind() string                     { return "assistant.final" }
+func (e AssistantFinal) ID() string                     { return e.MessageIDVal }
+func (e AssistantFinal) AgentTurnID() AgentTurnID       { return e.AgentTurnIDVal }
+func (e AssistantFinal) ParentAgentTurnID() AgentTurnID { return e.ParentAgentTurnIDVal }
+func (e AssistantFinal) Timestamp() time.Time           { return e.TimestampVal }
+func (AssistantFinal) Reliable() bool                   { return false }
+func (AssistantFinal) Priority() EventPriority          { return PriorityCritical }
+
 // Filter selects which events a subscriber receives. All predicates are
 // AND-ed: an event matches only if every non-zero predicate matches.
 type Filter struct {
@@ -368,4 +392,32 @@ type MessageBus interface {
 	OutboundChan() <-chan OutboundMessage
 	// Close shuts the bus down.
 	Close() error
+}
+
+// EventBus is the signal bus interface (RFC §2.3.0b). Carries Event (sealed)
+// with Filter-based subscription. Multi-subscriber fan-out with priority
+// eviction (lifecycle blocking+WAL / progress droppable+Warn).
+//
+// Phase 2-A2a (#44) defines this interface and evolves the existing event_bus.go
+// struct (renamed eventBusImpl) to satisfy it. The old Publish(RuntimeEvent) /
+// Subscribe(ctx) are kept deprecated until A2b (#45) migrates callers and deletes them.
+type EventBus interface {
+	// PublishEvent delivers an Event to all matching subscribers. For
+	// Reliable()==true events (lifecycle), Phase 2-B will add WAL persistence
+	// before delivery; for Reliable()==false (progress), best-effort with
+	// priority eviction + Warn. Phase 2-A2a: in-memory only (no WAL yet).
+	PublishEvent(evt Event)
+	// SubscribeFiltered registers a filter and returns a channel of matching
+	// Events. The channel is closed when the bus is closed.
+	SubscribeFiltered(filter Filter) <-chan Event
+	// Close shuts the bus down, closing all subscriber channels.
+	Close()
+
+	// Deprecated: Publish(RuntimeEvent) is the old API, kept on the interface
+	// temporarily so cross-package callers (channelrunner/progress, api) compile
+	// during the A2a→A2b transition. A2b (#45) migrates callers to PublishEvent
+	// and removes this from the interface + eventBusImpl.
+	Publish(evt RuntimeEvent)
+	// Deprecated: Subscribe(ctx) is the old API. A2b (#45) removes it.
+	Subscribe(ctx context.Context) <-chan RuntimeEvent
 }

@@ -38,6 +38,7 @@ var expectedEventTypes = map[string]bool{
 	"HumanRequested":     true,
 	"HumanResponded":     true,
 	"AssistantStatus":    true,
+	"AssistantFinal":     true,
 	"ToolCalled":         true,
 	"ToolResult":         true,
 }
