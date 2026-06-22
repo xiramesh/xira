@@ -154,15 +154,22 @@ func (AgentPayload) isAgentTurnPayload() {}
 
 **决策**（2026-06-22 修订，原"单 MessageBus"废弃）：照搬 PicoClaw 验证过的**双 bus 结构**，按"内容 vs 信号"分界。
 
-**为什么改双 bus**（修订理由，已剔除之前编造的"消费者重叠"论据）：
-- PicoClaw（`pkg/bus` + `pkg/events`）已验证：IM 边界内容与运行时信号**消费者群不重叠**，分 bus 让各自实现简单、故障隔离、可靠性策略独立。
-- 核实（grep Xira `channelrunner/progress/forwarder.go` 的 `isDeliverableKind`）：Xira 现状也满足不重叠——Forwarder 只消费 lifecycle 几个 kind（`agent.delegate.failed/timeout` + `run.waiting_human` + `assistant.final`），不碰 progress（`assistant.status`）、不碰 IM 边界（`Inbound/Outbound`）。而 `assistant.status` 这类 progress **目前无消费者**。
-- 单 bus 的"统一 Message + Reliable/Priority 路由"虽可行，但 PicoClaw 的实践显示物理分离更诚实——避免单 bus 内部被迫分裂成两套路径。
+**为什么改双 bus**（修订理由，PR #41 review 后修正论据类型）：
 
-**对照 PicoClaw**（详见 #39 学习总结）：
+> ⚠️ 本节前一版用"Xira 现状消费者不重叠"作为主论据，PR #41 review (W-1/W-2) 核实后**该现状论据不成立**——`OutboundMessage` 在 runtime 层目前是孤儿类型（真出站走 `r.send` RPC return，不经 bus），`session history` 是 turn 结束后整批写（`AppendAgentMessages`，崩溃窗口 inbound 丢）。**撤回现状论据。** 但双 bus 方向不撤，论据换成下面的"设计原则"——架构决策不该靠易变的现状消费者论证。
+
+- **设计原则：内容 vs 信号是正交关注点。** "用户对话内容"（Inbound/Outbound，有业务载荷，频率低，不可丢）和"运行时事件信号"（turn 生命周期、tool 调用、progress，无业务载荷，频率差异大，可按优先级丢）是两个正交维度——可靠性策略、投递语义、消费者群都不同。把它们塞进一个 bus 要靠 `Reliable/Priority` 路由表强行分流，本质是单 bus 内部跑两套路径。物理分离让各自的实现简单、故障隔离、可靠性策略独立。
+- **PicoClaw 验证过这个原则**（`pkg/bus` MessageBus + `pkg/events` EventBus），不是验证"某个现状消费者结构"。
+- **现状会变，原则稳定。** 未来 Xira 可能有跨类消费者（如 CLI/WS 给用户看完整画面），但"内容 vs 信号正交"不因此改变——跨类消费者订阅两个 bus 比 single bus 内部分流更清晰。
+
+**诚实标注现状**（不作为论据，仅说明差距）：
+- `OutboundMessage` 在 runtime 层目前是孤儿（真出站走 RPC return）。Phase 2/3 要让它**真的进 MessageBus 被消费**——这是双 bus 落地的工作项，不是现状借口。
+- `session history` 是 turn 结束后整批写。如果 inbound 内容要扛崩溃，MessageBus 需要自己的 WAL（或确认 turn 级崩溃可接受重发）。**这是 Phase 2 的开放设计点，不是"靠 session history 搪塞"。**
+
+**对照 PicoClaw**（源码学习，独立于 #39——#39 是单 bus 立场，不背书双 bus；PicoClaw 的双 bus 是事实参考，非充分论据）：
 - PicoClaw MessageBus（`pkg/bus`）：InboundMessage / OutboundMessage / OutboundMediaMessage / AudioChunk / VoiceControl —— **typed channel API**（`PublishInbound(msg)` / `InboundChan() <-chan InboundMessage`），无 Filter，阻塞投递。
 - PicoClaw EventBus（`pkg/events`）：30+ kind（agent.turn.* / agent.llm.* / agent.tool.* / agent.subturn.* / channel.*）—— **统一 Event + ScopeFilter**，`Publish(ctx, Event)` / `PublishNonBlocking(Event)` 双 API。
-- **关键**：PicoClaw 的 spawn 父子结果传递**不走任何 bus**，走专用 `pendingResults` channel（`subturn.go:410`）——EventBus 只发 spawn 的 start/end 信号。这对我们 Phase 3 是个警示：spawn 结果是否走 EventBus 待 Phase 3 决策（见 §2.4 + #39 §3.2）。
+- **关键警示**（W-4）：PicoClaw 的 spawn 父子结果传递**不走任何 bus**，走专用 `pendingResults` channel（`subturn.go:410`）——EventBus 只发 spawn 的 start/end 信号。我们的 §2.4 设计 spawn 结果走 EventBus，**与"内容 vs 信号"分界自相矛盾**（spawn 结果载荷是内容性质）。Phase 3 必须决策：spawn 结果走 MessageBus（内容）还是专用 channel（PicoClaw 式），不能默认走 EventBus。
 
 #### 2.3.0a Bus-1：MessageBus（内容，typed API）
 
@@ -222,6 +229,15 @@ type Event interface {
 // HumanRequested/Responded, AssistantStatus, ToolCalled, ToolResult）
 // 各自带 Reliable()/Priority() 路由标记，同 Phase 1 原设计。
 
+// 特殊 Event（W-3，Phase 2 Step C 新增）：
+// AssistantFinal —— forwarder 的 drain 控制信号。它不是 turn lifecycle
+// （不驱动状态机），不是 progress（不渲染、不进 deliverable 队列、不发 IM），
+// 是纯控制信号（触发 forwarder.drain()，见 forwarder.go:139）。
+// 归 EventBus（信号），但 Reliable()=false, Priority()=Critical
+// （不落 WAL——它不驱动跨进程状态机；但优先级高——drain 必须及时）。
+// 这是"内容 vs 信号"分界下的第三类：控制信号。明确标注避免 Phase 2
+// 实现时误归 lifecycle 或 progress。
+
 // Filter 归 EventBus（MessageBus 不需要 Filter）。
 type Filter struct {
     AgentTurnID    *AgentTurnID
@@ -240,7 +256,12 @@ type Filter struct {
 
 #### 2.3.1 可靠性策略：EventBus 的 WAL（lifecycle 落盘）+ 优先级驱逐（内存 progress）
 
-**决策**（2026-06-22 确认，双 bus 修订后归属 EventBus）：**EventBus** 采用**级别 4（WAL 持久化）**可靠性，但**只对 `Reliable()==true` 的 Event（lifecycle 类）落盘**。进度类（`Reliable()==false`）永远 best-effort + log，不落盘。**MessageBus（内容）不涉及 WAL**——内容靠 session history 持久化，bus 层永远阻塞投递（timeout=0，永不丢）。
+**决策**（2026-06-22 确认，双 bus 修订后归属 EventBus；PR #41 review W-1 修正 MessageBus WAL 论据）：**EventBus** 采用**级别 4（WAL 持久化）**可靠性，但**只对 `Reliable()==true` 的 Event（lifecycle 类）落盘**。进度类（`Reliable()==false`）永远 best-effort + log，不落盘。
+
+**MessageBus（内容）的可靠性是 Phase 2 开放设计点**（W-1 修正：原"靠 session history 持久化"是假论据——`AppendAgentMessages` 只在 turn 结束后整批写，崩溃窗口 inbound 丢）。候选：
+- (a) MessageBus 也挂 WAL（跟 EventBus 同样的级别 4 可靠性，对称）
+- (b) 接受 turn 级崩溃丢 inbound（IM 层有重试/重发兜底，用户重发消息即可）
+- **Phase 2 Step A 决策**，不在本 RFC 预定。无论 (a)/(b)，MessageBus 投递语义都是**阻塞（timeout=0，永不丢）**——这里"永不丢"指内存投递不丢，不承诺抗进程崩溃。
 
 这同时满足两个诉求：
 - **抗进程崩溃 / 抗订阅者崩溃**：lifecycle 事件（AgentTurnStarted/Completed/Failed、HumanRequested/Responded）落 SQLite WAL，进程重启后重放恢复，父 turn 不会因为 bus 丢消息而永远等不到子。
@@ -741,9 +762,11 @@ DELETE FROM bus_messages WHERE turn_id = ? AND consumed >= (SELECT COUNT(*) FROM
   2. **CRITICAL 2：「lifecycle 天然幂等」断言偏强**。混淆了"数据层幂等"（重复收到 Completed 不改变状态）与"副作用层不幂等"（重复收到 Started 触发重复 spawn）。且崩溃恢复后内存去重集合为空，"靠 Message.ID() 去重"失效。修正附录 C.5：lifecycle 订阅者必须基于 turn 状态机做 CAS 转移（only-once spawn），owned 集合必须持久化，Message.ID() 只用于日志。
   3. **non-blocking**：seq 并发原子性（进程内 atomic + 同事务 INSERT）；C.6 清理策略修正（不能只按 turn_id 删，必须考虑慢订阅者崩溃 >TTL 场景，给出引用计数/终态确认两个候选）；SessionScope=nil 传播语义（§2.1 注释补充）；§2.3 类型清单补 `AssistantStatus` 声明；Phase 2 DoD 明确"WAL 清理策略"和"offset 崩溃恢复可测验收"。
   4. **行号订正**：上一轮回复误称"经核实 996 引用正确"，核实有误——本地工作树 `delegation.go` 有未提交改动导致行号偏移，我读到的 996 是偏移后的行号，不是 origin/main 的行号。origin/main 上 `AgentSessionID = "ephemeral_worker:"` 在 **977**（996 是 `StartedAt: time.Now()`，998 是 `delegation_mode`）。RFC §2.1 行号已从 996 改为 977。这是对 AGENTS.md §2"先核实再判断"的教训：核实必须锚定正确的 ref（origin/main），而不是带本地 diff 的脏工作树。
-- **2026-06-22**：**重大修订——单 MessageBus 改双 bus（内容 vs 信号）**。基于 PicoClaw 源码学习（#39 学习总结）：
-  1. **§2.3 重写**：原"统一 MessageBus + Reliable/Priority 路由"废弃。改为照搬 PicoClaw 的双 bus：**MessageBus**（内容，typed API：Inbound/Outbound，阻塞投递，无 WAL 无 Filter）+ **EventBus**（信号，Event sealed + Filter，lifecycle 阻塞+WAL / progress 驱逐）。
-  2. **修订理由**：核实（grep Xira forwarder）确认消费者不重叠——Forwarder 只看 lifecycle、IM adapter 只看边界、progress 无消费者。单 bus 的"统一路由"虽可行但物理分离更诚实（PicoClaw 验证）。**之前讨论中"消费者重叠"的论据经核实是编造的，已撤回**（详见 #39 学习总结 §3）。
-  3. **§2.3.1 调整**：WAL/驱逐归属 EventBus，MessageBus（内容）永远阻塞投递不涉及 WAL。
-  4. **§2.3.3 新增**：Phase 1 回头改清单——拆 `Message` sealed（删）→ Content（struct）+ `Event` sealed（9 类型）；拆 `MessageBus` interface → 新 MessageBus（typed）+ 新 EventBus（Event+Filter）；Filter 归 EventBus；`MessagePriority`→`EventPriority`；sealed 守卫 expected 集合 11→9；老 `event_bus.go` 改名 `LegacyEventBus`。W1-W4 bug 修复保留。
-  5. **Phase 3 警示**：PicoClaw 的 spawn 结果走专用 pendingResults channel 不走 bus（`subturn.go:410`），与我们"spawn 结果走 EventBus"设计不同。Phase 3 落地时重新审视。
+- **2026-06-22**：**重大修订——单 MessageBus 改双 bus（内容 vs 信号）**。
+  - **论据来源诚实声明**（PR #41 review 后修正）：本修订的论据是**设计原则**（"内容 vs 信号是正交关注点"），**不是** #39（#39 是单 bus 立场，TL;DR 明确肯定"统一 MessageBus"）、**不是** "Xira 现状消费者不重叠"（grep 核实后此现状论据不成立——OutboundMessage 是孤儿、session history 崩溃窗口丢 inbound，见 W-1/W-2）。PicoClaw 的双 bus 是**事实参考**，非充分论据（场景不同）。
+  1. **§2.3 重写**：原"统一 MessageBus + Reliable/Priority 路由"废弃。改为双 bus：**MessageBus**（内容，typed API：Inbound/Outbound）+ **EventBus**（信号，Event sealed + Filter，lifecycle 阻塞+WAL / progress 驱逐）。
+  2. **修订理由（清理编造后剩的真实论据）**：内容（有业务载荷、频率低、不可丢）与信号（无载荷、频率差异大、可按优先级丢）是**正交关注点**——可靠性策略、投递语义、消费者群都不同。塞进单 bus 要靠 Reliable/Priority 路由表强行分流，本质是单 bus 内部跑两套路径。物理分离让各自实现简单、故障隔离。**这是唯一论据，不叠加 PicoClaw/现状/#39 背书。**
+  3. **§2.3.1 调整**：EventBus 的 WAL/驱逐不变；MessageBus（内容）的可靠性是 Phase 2 开放设计点（W-1：原"靠 session history"假，已改），投递语义阻塞（永不内存丢）。
+  4. **§2.3.3 新增**：Phase 1 回头改清单——拆 `Message` sealed → Content structs + `Event` sealed；拆 `MessageBus` interface → 新 MessageBus + 新 EventBus；Filter 归 EventBus；老 `event_bus.go` 改名 `LegacyEventBus`。W1-W4 bug 修复保留。
+  5. **Phase 3 警示**（W-4）：spawn 结果载荷是内容性质（AgentPayload: LLMCalls/ToolCalls/FinalText），按"内容 vs 信号"分界应进 MessageBus 或专用 channel，**不应默认走 EventBus**。Phase 3 必须决策。
+  6. **W-3 待修**：assistant.final 是 forwarder 的 drain 控制信号（非 lifecycle 非 progress），归属 EventBus 但需明确标注特殊性。
