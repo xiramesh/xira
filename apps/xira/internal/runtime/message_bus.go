@@ -30,11 +30,14 @@ const (
 	// PriorityDroppable: under memory pressure, these are dropped first
 	// (with log.Warn). Never persisted to WAL.
 	PriorityDroppable EventPriority = iota
-	// PriorityImportant: user-facing, must reach IM, but not lifecycle.
-	// Evicted only if a Critical event needs the slot.
-	PriorityImportant
 	// PriorityCritical: lifecycle + interaction signals. Persisted to WAL
-	// and protected from eviction (can evict Important/Droppable).
+	// and protected from eviction.
+	//
+	// PR #42 review WARNING-2: the previous PriorityImportant tier (between
+	// Droppable and Critical) was removed — no Event returned it after the
+	// dual-bus split, and MessageBus (content) has no eviction per RFC
+	// §2.3.0a. If a future tier is needed, re-add here; the ordinal gap
+	// from removing the middle value is fine (iota just needs monotonic <).
 	PriorityCritical
 )
 
@@ -74,6 +77,14 @@ type Event interface {
 
 // InboundMessage is an IM → system content message (a user's chat message).
 // Plain struct: carried by MessageBus.PublishInbound, no interface methods.
+//
+// Phase 2 TODO (PR #42 review WARNING-4): the semantics of
+// ParentAgentTurnIDVal and TimestampVal are unsettled for content messages.
+// Content doesn't form a turn parent-child hierarchy the way Events do
+// (Inbound triggers a root turn; Outbound is its reply — there's no
+// "parent content message"). Phase 2 must decide: keep these fields (and
+// define what they mean for content), or drop them. Until then they're
+// carried through opaquely.
 type InboundMessage struct {
 	MessageIDVal         string
 	AgentTurnIDVal       AgentTurnID
@@ -84,6 +95,7 @@ type InboundMessage struct {
 
 // OutboundMessage is a system → IM content message (the agent's reply).
 // Plain struct: carried by MessageBus.PublishOutbound, no interface methods.
+// Same Phase 2 TODO as InboundMessage re: ParentAgentTurnIDVal/TimestampVal.
 type OutboundMessage struct {
 	MessageIDVal         string
 	AgentTurnIDVal       AgentTurnID
@@ -322,19 +334,37 @@ func (f Filter) Match(evt Event) bool {
 	return true
 }
 
-// MessageBus is the Phase 1 content bus interface (RFC §2.3.0a). Typed API:
-// each content type has its own Publish method and typed channel. No Filter
-// (type = filter). Phase 2 implements with in-memory channels + SQLite WAL
-// (RFC §2.3.0a D-1).
+// MessageBus is the content bus interface (RFC §2.3.0a). Typed API: each
+// content type has its own Publish method and typed channel. No Filter
+// (type = filter).
+//
+// Phase 1 defines the interface only — no struct implements it yet. Phase 2
+// adds the implementation with in-memory channels + SQLite WAL (D-1: persist
+// on receipt + dedup by composite key, never trust channel retransmit).
 type MessageBus interface {
-	// PublishInbound persists (D-1 WAL + dedup) and delivers an inbound
-	// content message. Blocking (timeout=0, never drops in-memory).
+	// PublishInbound delivers an inbound content message.
+	//
+	// Phase 2 contract (NOT yet implemented in Phase 1): persists to WAL
+	// (D-1) + dedups by (Channel, ChatID, MessageID), then delivers. Blocking
+	// (timeout=0, never drops in-memory). Phase 1 has no implementation —
+	// do not assume persistence works until Phase 2 lands.
 	PublishInbound(ctx context.Context, msg InboundMessage) error
-	// PublishOutbound persists and delivers an outbound content message.
+	// PublishOutbound delivers an outbound content message.
+	//
+	// Phase 2 contract (NOT yet implemented in Phase 1): persists + delivers,
+	// blocking. Same caveat as PublishInbound.
 	PublishOutbound(ctx context.Context, msg OutboundMessage) error
 	// InboundChan returns the typed channel for inbound content.
+	//
+	// Single-consumer semantics (RFC §2.3.0a): content is NOT fan-out —
+	// exactly one consumer drains this channel. Blocking backpressure: if
+	// the consumer is slow, Publish blocks (content must not be dropped or
+	// competing-consumed). Do NOT implement as fan-out like EventBus —
+	// fan-out would let two consumers race on the same inbound and trigger
+	// duplicate turns.
 	InboundChan() <-chan InboundMessage
 	// OutboundChan returns the typed channel for outbound content.
+	// Same single-consumer + blocking-backpressure semantics as InboundChan.
 	OutboundChan() <-chan OutboundMessage
 	// Close shuts the bus down.
 	Close() error

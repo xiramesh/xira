@@ -33,10 +33,12 @@ import (
 
 func TestEventPriorityOrdering(t *testing.T) {
 	// Renamed from MessagePriority (only Event uses it now). Ordering must hold
-	// so the bus can compare with < / >.
-	if !(PriorityDroppable < PriorityImportant && PriorityImportant < PriorityCritical) {
-		t.Errorf("priority ordering broken: Droppable=%d Important=%d Critical=%d",
-			PriorityDroppable, PriorityImportant, PriorityCritical)
+	// so the bus can compare with < / >. PriorityImportant was removed (PR #42
+	// review WARNING-2: no Event returned it post dual-bus split); only
+	// Droppable < Critical remains.
+	if !(PriorityDroppable < PriorityCritical) {
+		t.Errorf("priority ordering broken: Droppable=%d Critical=%d",
+			PriorityDroppable, PriorityCritical)
 	}
 }
 
