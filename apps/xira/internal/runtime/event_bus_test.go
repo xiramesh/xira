@@ -287,7 +287,7 @@ func TestEventBusDeadConsumerShutdownExitsPump(t *testing.T) {
 // (defensive — callers may hold a nil bus in some test/edge paths). Covers the
 // `if b == nil { return }` guard.
 func TestEventBusNilPublishIsSafe(t *testing.T) {
-	var bus *EventBus // nil
+	var bus *eventBusImpl                         // nil
 	bus.Publish(droppableEvent("adk.event", "x")) // must not panic
 }
 

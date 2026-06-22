@@ -369,3 +369,23 @@ type MessageBus interface {
 	// Close shuts the bus down.
 	Close() error
 }
+
+// EventBus is the signal bus interface (RFC §2.3.0b). Carries Event (sealed)
+// with Filter-based subscription. Multi-subscriber fan-out with priority
+// eviction (lifecycle blocking+WAL / progress droppable+Warn).
+//
+// Phase 2-A2a (#44) defines this interface and evolves the existing event_bus.go
+// struct (renamed eventBusImpl) to satisfy it. The old Publish(RuntimeEvent) /
+// Subscribe(ctx) are kept deprecated until A2b (#45) migrates callers and deletes them.
+type EventBus interface {
+	// PublishEvent delivers an Event to all matching subscribers. For
+	// Reliable()==true events (lifecycle), Phase 2-B will add WAL persistence
+	// before delivery; for Reliable()==false (progress), best-effort with
+	// priority eviction + Warn. Phase 2-A2a: in-memory only (no WAL yet).
+	PublishEvent(evt Event)
+	// SubscribeFiltered registers a filter and returns a channel of matching
+	// Events. The channel is closed when the bus is closed.
+	SubscribeFiltered(filter Filter) <-chan Event
+	// Close shuts the bus down, closing all subscriber channels.
+	Close()
+}

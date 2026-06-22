@@ -1,0 +1,195 @@
+package runtime
+
+import (
+	"fmt"
+	"testing"
+	"time"
+)
+
+// These tests define the A2 contract: evolve the existing EventBus struct
+// (event_bus.go) to carry Event (Phase 1 sealed) instead of RuntimeEvent,
+// plus the runtimeEventToEvent mapping function. TDD red: types don't exist
+// yet.
+//
+// A2 scope (#34, 2026-06-23):
+//   - EventBus interface: PublishEvent(Event) + SubscribeFiltered(Filter) <-chan Event
+//   - Old EventBus struct renamed eventBusImpl, satisfies the interface
+//   - Old Publish(RuntimeEvent) DELETED — compile-forces migration
+//   - runtimeEventToEvent(RuntimeEvent) (Event, bool): maps ~14 signal kinds
+//     to Event structs; non-signal kinds return ok=false (→ slog, stripped by #43)
+//   - recordEvent closure splits: mapped → PublishEvent, unmapped → slog.Debug
+
+// -----------------------------------------------------------------------------
+// EventBus interface shape (compile-time)
+// -----------------------------------------------------------------------------
+
+func TestEventBusInterfaceShape(t *testing.T) {
+	// The evolved EventBus interface. Old Publish(RuntimeEvent) is GONE.
+	// The old struct (renamed eventBusImpl) satisfies this interface.
+	var _ EventBus = (*eventBusImpl)(nil)
+}
+
+// -----------------------------------------------------------------------------
+// runtimeEventToEvent mapping (~14 signal kinds)
+// -----------------------------------------------------------------------------
+
+func TestRuntimeEventToEvent_TurnLifecycle(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		kind     string
+		wantType string // %T of expected Event
+	}{
+		{"run.started", "runtime.AgentTurnStarted"},
+		{"agent.delegate.started", "runtime.AgentTurnStarted"},
+		{"run.finished", ""}, // multi-status — tested separately below
+		{"agent.delegate.completed", "runtime.AgentTurnCompleted"},
+		{"agent.delegate.failed", "runtime.AgentTurnFailed"},
+		{"agent.delegate.timeout", "runtime.AgentTurnFailed"},
+		{"run.waiting_human", "runtime.HumanRequested"},
+		{"agent.delegate.waiting_human", "runtime.HumanRequested"},
+		{"human.request.created", "runtime.HumanRequested"},
+	}
+	for _, c := range cases {
+		t.Run(c.kind, func(t *testing.T) {
+			evt := RuntimeEvent{Kind: c.kind, ID: "e1", Time: now, RunID: "run_1"}
+			got, ok := runtimeEventToEvent(evt)
+			if c.kind == "run.finished" {
+				// run.finished depends on payload status — tested in its own test
+				return
+			}
+			if !ok {
+				t.Fatalf("runtimeEventToEvent(%q) ok=false, want true (signal kind)", c.kind)
+			}
+			if gotType := typeName(got); gotType != c.wantType {
+				t.Errorf("runtimeEventToEvent(%q) = %s, want %s", c.kind, gotType, c.wantType)
+			}
+		})
+	}
+}
+
+func TestRuntimeEventToEvent_RunFinishedMultiStatus(t *testing.T) {
+	// run.finished splits by payload["status"]: completed/failed/canceled/timeout
+	now := time.Now()
+	cases := []struct {
+		status   string
+		wantType string
+	}{
+		{"completed", "runtime.AgentTurnCompleted"},
+		{"failed", "runtime.AgentTurnFailed"},
+		{"canceled", "runtime.AgentTurnCanceled"},
+		{"timeout", "runtime.AgentTurnFailed"},
+	}
+	for _, c := range cases {
+		t.Run(c.status, func(t *testing.T) {
+			evt := RuntimeEvent{
+				Kind:    "run.finished",
+				ID:      "e1",
+				Time:    now,
+				RunID:   "run_1",
+				Payload: map[string]any{"status": c.status},
+			}
+			got, ok := runtimeEventToEvent(evt)
+			if !ok {
+				t.Fatalf("ok=false for run.finished status=%s", c.status)
+			}
+			if gotType := typeName(got); gotType != c.wantType {
+				t.Errorf("run.finished status=%s → %s, want %s", c.status, gotType, c.wantType)
+			}
+		})
+	}
+}
+
+func TestRuntimeEventToEvent_ProgressAndTools(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		kind     string
+		wantType string
+	}{
+		{"assistant.status", "runtime.AssistantStatus"},
+		{"assistant.final", "runtime.AssistantStatus"}, // AssistantFinal not yet a type; maps to status-ish
+		{"tool.started", "runtime.ToolCalled"},
+		{"tool.completed", "runtime.ToolResult"},
+		{"tool.finished", "runtime.ToolResult"},
+	}
+	for _, c := range cases {
+		t.Run(c.kind, func(t *testing.T) {
+			evt := RuntimeEvent{Kind: c.kind, ID: "e1", Time: now, RunID: "run_1"}
+			got, ok := runtimeEventToEvent(evt)
+			if !ok {
+				t.Fatalf("ok=false for %s", c.kind)
+			}
+			if gotType := typeName(got); gotType != c.wantType {
+				t.Errorf("%s → %s, want %s", c.kind, gotType, c.wantType)
+			}
+		})
+	}
+}
+
+func TestRuntimeEventToEvent_NonSignalKindsReturnFalse(t *testing.T) {
+	// These ~34 kinds are NOT signals — they're observability/audit/internal.
+	// runtimeEventToEvent returns ok=false for them (→ slog, stripped by #43).
+	nonSignal := []string{
+		"llm.request_traced", "llm.usage_summary", "llm.call_recorded",
+		"llm.raw_request_traced", "llm.raw_response_status_traced",
+		"llm.raw_trace_failed", "llm.trace_failed",
+		"context.packet.started", "context.packet.completed",
+		"context.packet.failed", "context.packet.truncated",
+		"context.item.included", "context.item.redacted",
+		"session.persisted", "session.persist_failed",
+		"usage.ledger_appended", "usage.ledger_failed",
+		"model.policy_resolved", "model.request", "model.suspended",
+		"adk.event", "adk.empty_final", "adk.session_hydrated",
+		"adk.session_hydrate_failed", "adk.suspended",
+		"agent.delegate.allowed", "agent.delegate.requested",
+		"agent.delegate.rejected", "agent.delegate.result_delivered",
+		"tool.failed", "tool.raw_output_persisted", "tool.raw_output_failed",
+		"capability_gap", "human.request.failed",
+	}
+	for _, kind := range nonSignal {
+		t.Run(kind, func(t *testing.T) {
+			evt := RuntimeEvent{Kind: kind, ID: "e1", RunID: "run_1"}
+			_, ok := runtimeEventToEvent(evt)
+			if ok {
+				t.Errorf("runtimeEventToEvent(%q) ok=true, want false (non-signal → slog/#43)", kind)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Identity fields carried through mapping
+// -----------------------------------------------------------------------------
+
+func TestRuntimeEventToEvent_CarriesIdentity(t *testing.T) {
+	now := time.Now()
+	evt := RuntimeEvent{
+		Kind:  "agent.delegate.started",
+		ID:    "evt_abc",
+		Time:  now,
+		RunID: "run_child",
+		Scope: &RuntimeEventScope{
+			MessageID: "msg_1",
+		},
+		Correlation: &RuntimeEventCorrelation{
+			ParentRunID: "run_parent",
+		},
+	}
+	got, ok := runtimeEventToEvent(evt)
+	if !ok {
+		t.Fatal("ok=false for signal kind")
+	}
+	if got.ID() != "evt_abc" {
+		t.Errorf("ID() = %q, want evt_abc", got.ID())
+	}
+	if !got.Timestamp().Equal(now) {
+		t.Errorf("Timestamp() mismatch")
+	}
+}
+
+// -----------------------------------------------------------------------------
+// helper
+// -----------------------------------------------------------------------------
+
+func typeName(e Event) string {
+	return fmt.Sprintf("%T", e)
+}
