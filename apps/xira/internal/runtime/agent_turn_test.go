@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -184,13 +185,31 @@ func TestIsValidTransition_IllegalTransitions(t *testing.T) {
 				t.Errorf("IsValidTransition(%s→%s) = nil, want error (illegal)", c.from, c.to)
 				return
 			}
-			// Exercise transitionError.Error() so it is covered, and assert
+			// Exercise TransitionError.Error() so it is covered, and assert
 			// the message names both states for debuggability.
 			msg := err.Error()
 			if !strings.Contains(msg, string(c.from)) || !strings.Contains(msg, string(c.to)) {
 				t.Errorf("error message %q must mention both from (%s) and to (%s)", msg, c.from, c.to)
 			}
 		})
+	}
+}
+
+func TestIsValidTransition_ExportedErrorType(t *testing.T) {
+	// W7: TransitionError is exported so Phase 2 bus/subscribers can
+	// type-assert to distinguish "illegal transition" (CAS retry / log) from
+	// a system error (fatal). Verify errors.As recognizes it and the From/To
+	// fields carry the states.
+	err := IsValidTransition(AgentTurnStatusCompleted, AgentTurnStatusRunning)
+	if err == nil {
+		t.Fatal("expected error for completed→running")
+	}
+	var te *TransitionError
+	if !errors.As(err, &te) {
+		t.Fatalf("error does not wrap *TransitionError (got %T): %v", err, err)
+	}
+	if te.From != AgentTurnStatusCompleted || te.To != AgentTurnStatusRunning {
+		t.Errorf("TransitionError fields = %s→%s, want completed→running", te.From, te.To)
 	}
 }
 

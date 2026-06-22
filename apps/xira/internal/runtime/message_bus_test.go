@@ -176,21 +176,22 @@ func TestAllMessageAccessors(t *testing.T) {
 	wantTurn := AgentTurnID("aturn_self")
 	wantParent := AgentTurnID("aturn_parent")
 
-	// build one populated instance per Message type. Each uses the shared
-	// field names (MessageIDVal / AgentTurnIDVal / ParentIDVal or
-	// ParentAgentTurnIDVal / TimestampVal).
+	// build one populated instance per Message type. All share the same
+	// backing-field names: MessageIDVal / AgentTurnIDVal /
+	// ParentAgentTurnIDVal / TimestampVal (W5 unified the old ParentIDVal
+	// short name to match the accessor semantics).
 	populated := []Message{
-		InboundMessage{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentIDVal: wantParent, TimestampVal: now},
-		OutboundMessage{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentIDVal: wantParent, TimestampVal: now},
+		InboundMessage{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
+		OutboundMessage{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 		AgentTurnStarted{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 		AgentTurnCompleted{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 		AgentTurnFailed{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 		AgentTurnCanceled{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 		HumanRequested{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 		HumanResponded{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
-		AssistantStatus{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentIDVal: wantParent, TimestampVal: now},
-		ToolCalled{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentIDVal: wantParent, TimestampVal: now},
-		ToolResult{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentIDVal: wantParent, TimestampVal: now},
+		AssistantStatus{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
+		ToolCalled{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
+		ToolResult{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 	}
 	for _, m := range populated {
 		t.Run(fmt.Sprintf("%T", m), func(t *testing.T) {
