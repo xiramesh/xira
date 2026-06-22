@@ -150,82 +150,110 @@ func (AgentPayload) isAgentTurnPayload() {}
 - 不需要"子 turn 特殊路径"。
 - 递归自然支持（子的子也是 `AgentTurn`，也有 `ParentAgentTurnID`）。
 
-### 2.3 MessageBus：强类型、多订阅者、全双工、WAL 持久化
+### 2.3 双 Bus：MessageBus（内容）+ EventBus（信号）
 
-**决策**：bus 消息用 sealed interface 强类型，每种 kind 一个 struct，编译期保证 switch 完备。每个 Message 类型自带 `Reliable()` 和 `Priority()` 标记，bus 据此决定是否落盘和满载时的驱逐顺序。
+**决策**（2026-06-22 修订，原"单 MessageBus"废弃）：照搬 PicoClaw 验证过的**双 bus 结构**，按"内容 vs 信号"分界。
 
-```go
-type Message interface {
-    isMessage()
-    ID()         string          // 消息唯一 ID
-    AgentTurnID() AgentTurnID    // 归属哪个 turn
-    Timestamp()  time.Time
-    Reliable()   bool            // 是否落盘 WAL（lifecycle = true）
-    Priority()   MessagePriority // 满载驱逐优先级（critical > important > droppable）
-}
+**为什么改双 bus**（修订理由，已剔除之前编造的"消费者重叠"论据）：
+- PicoClaw（`pkg/bus` + `pkg/events`）已验证：IM 边界内容与运行时信号**消费者群不重叠**，分 bus 让各自实现简单、故障隔离、可靠性策略独立。
+- 核实（grep Xira `channelrunner/progress/forwarder.go` 的 `isDeliverableKind`）：Xira 现状也满足不重叠——Forwarder 只消费 lifecycle 几个 kind（`agent.delegate.failed/timeout` + `run.waiting_human` + `assistant.final`），不碰 progress（`assistant.status`）、不碰 IM 边界（`Inbound/Outbound`）。而 `assistant.status` 这类 progress **目前无消费者**。
+- 单 bus 的"统一 Message + Reliable/Priority 路由"虽可行，但 PicoClaw 的实践显示物理分离更诚实——避免单 bus 内部被迫分裂成两套路径。
 
-type MessagePriority int
-const (
-    PriorityDroppable  MessagePriority = iota  // 满了直接丢（assistant.status / adk.event / tool 细节）
-    PriorityImportant                          // 满了驱逐 droppable（agent.delegate.failed/timeout）
-    PriorityCritical                           // 满了驱逐 important+droppable（run.waiting_human / assistant.final / turn lifecycle）
-)
+**对照 PicoClaw**（详见 #39 学习总结）：
+- PicoClaw MessageBus（`pkg/bus`）：InboundMessage / OutboundMessage / OutboundMediaMessage / AudioChunk / VoiceControl —— **typed channel API**（`PublishInbound(msg)` / `InboundChan() <-chan InboundMessage`），无 Filter，阻塞投递。
+- PicoClaw EventBus（`pkg/events`）：30+ kind（agent.turn.* / agent.llm.* / agent.tool.* / agent.subturn.* / channel.*）—— **统一 Event + ScopeFilter**，`Publish(ctx, Event)` / `PublishNonBlocking(Event)` 双 API。
+- **关键**：PicoClaw 的 spawn 父子结果传递**不走任何 bus**，走专用 `pendingResults` channel（`subturn.go:410`）——EventBus 只发 spawn 的 start/end 信号。这对我们 Phase 3 是个警示：spawn 结果是否走 EventBus 待 Phase 3 决策（见 §2.4 + #39 §3.2）。
 
-// 每种 kind 一个具体类型（初版）
-type InboundMessage struct{ ... }        // IM → 系统
-type OutboundMessage struct{ ... }       // 系统 → IM
-type AgentTurnStarted struct{ ... }      // turn 生命周期  ← Reliable()=true, Priority()=Critical
-type AgentTurnCompleted struct{ ... }    //                ← Reliable()=true, Priority()=Critical
-type AgentTurnFailed struct{ ... }       //                ← Reliable()=true, Priority()=Critical
-type AgentTurnCanceled struct{ ... }     //                ← Reliable()=true, Priority()=Critical
-type ToolCalled struct{ ... }
-type ToolResult struct{ ... }
-type AssistantStatus struct{ ... }       // 进度心跳      ← Reliable()=false, Priority()=Droppable
-type HumanRequested struct{ ... }        //                ← Reliable()=true, Priority()=Critical
-type HumanResponded struct{ ... }        //                ← Reliable()=true, Priority()=Critical
+#### 2.3.0a Bus-1：MessageBus（内容，typed API）
 
-func (AgentTurnStarted) Reliable() bool   { return true }
-func (AgentTurnStarted) Priority() MessagePriority { return PriorityCritical }
-func (AssistantStatus) Reliable() bool    { return false }
-func (AssistantStatus) Priority() MessagePriority { return PriorityDroppable }
-// ...
-```
-
-**为什么强类型**：当前 `RuntimeEvent.Kind = "run.waiting_human"` 是弱类型，AGENTS.md §1.4 的 visibility 陷阱根因就是 `Kind string` + switch 漏 case。强类型从编译期杜绝"忘了加 case"。`Reliable()` 和 `Priority()` 也借此从"按字符串 switch"升级为"按 sealed 类型方法"，编译期保证完备。
-
-**为什么 sealed**：加新 kind 时所有 type-switch 编译报错，强制显式决策每个新 kind 的语义、可靠性和优先级。
-
-**接口（初版）**：
+承载**有业务载荷的消息内容**（IM 边界）。类型少且固定，用 typed API（每类型一个 channel + Publish 方法），不用 sealed interface + Filter。
 
 ```go
+// MessageBus 是内容 bus：用户对话内容（IM 边界）。
+// typed API：每类型一个 Publish + channel，消费者按类型取。
+// 投递：阻塞（publishPolicy.timeout=0），永不丢——内容不可丢。
+// 无 WAL——内容靠 session history 持久化，不靠 bus。
+// 无 Filter——类型即过滤。
 type MessageBus interface {
-    Publish(ctx context.Context, msg Message) error
-    Subscribe(filter Filter) (SubID, <-chan Message)
-    Unsubscribe(SubID)
+    PublishInbound(ctx context.Context, msg InboundMessage) error
+    PublishOutbound(ctx context.Context, msg OutboundMessage) error
+    // 未来: PublishOutboundMedia / PublishAudioChunk / PublishVoiceControl
+    InboundChan()  <-chan InboundMessage
+    OutboundChan() <-chan OutboundMessage
+    Close() error
 }
 
+// InboundMessage / OutboundMessage 不再实现 sealed Message interface（Phase 1 改动）。
+// 它们是普通 struct，typed channel 承载。
+```
+
+**为什么 typed API 不用 sealed**：内容类型少（2 个，未来最多 5 个），typed channel 比 sealed interface + Filter 更直接、类型安全更强（编译期知道 channel 类型，不用 type switch）。PicoClaw 验证过。
+
+#### 2.3.0b Bus-2：EventBus（信号，统一 Event + Filter + WAL）
+
+承载**无业务载荷的运行时事件信号**（agent 生命周期、tool、steering、HITL）。类型多（9+），用 sealed interface + Filter。
+
+```go
+// EventBus 是信号 bus：运行时事件（turn 生命周期、progress、HITL）。
+// 统一 Event sealed interface + Filter（按 turn/parent 过滤）。
+// 投递：lifecycle 阻塞（timeout=0 + WAL 落盘）/ progress 超时驱逐（timeout>0 + Warn）。
+// WAL 只挂这里（lifecycle 信号落盘）。
+type EventBus interface {
+    Publish(ctx context.Context, evt Event) error          // lifecycle 阻塞 + WAL
+    PublishNonBlocking(evt Event) PublishResult            // progress 非阻塞 + 驱逐
+    Subscribe(filter Filter) (SubID, <-chan Event)
+    Unsubscribe(SubID)
+    Close() error
+}
+
+// Event 是 sealed interface（Phase 1 的 Message 改名 + 拆分后）。
+// 原 11 个 Message 类型里，9 个进 EventBus（Content 的 Inbound/Outbound 移到 MessageBus）。
+type Event interface {
+    isEvent()
+    ID()         string
+    AgentTurnID() AgentTurnID
+    ParentAgentTurnID() AgentTurnID
+    Timestamp()  time.Time
+    Reliable()   bool            // lifecycle = true（落 WAL + 阻塞）
+    Priority()   EventPriority   // Critical > Important > Droppable
+}
+
+// 9 个 Event 类型（AgentTurnStarted/Completed/Failed/Canceled,
+// HumanRequested/Responded, AssistantStatus, ToolCalled, ToolResult）
+// 各自带 Reliable()/Priority() 路由标记，同 Phase 1 原设计。
+
+// Filter 归 EventBus（MessageBus 不需要 Filter）。
 type Filter struct {
-    AgentTurnID    *AgentTurnID    // nil = 所有
-    Kinds          []MessageKind   // nil = 所有 kind
-    IncludeChildren bool           // 是否含子 turn 的事件
+    AgentTurnID    *AgentTurnID
+    Kinds          []string
+    IncludeChildren bool
 }
 ```
 
-#### 2.3.1 可靠性策略：WAL 持久化（lifecycle 落盘）+ 优先级驱逐（内存）
+**Phase 1 类型改动**（详见 §2.3 末尾"Phase 1 回头改"清单）：
+- `Message` sealed interface → **删除**。拆成：Inbound/Outbound（普通 struct，进 MessageBus）+ `Event` sealed（9 类型，进 EventBus）。
+- `MessageBus` interface → **拆**：新 `MessageBus`（内容，typed API）+ 新 `EventBus`（信号，Event + Filter）。
+- `Filter` → **归 EventBus**。
+- `MessagePriority` → **改名 `EventPriority`**（只有 Event 用）。
 
-**决策**（2026-06-22 确认）：bus 采用**级别 4（WAL 持久化）**可靠性，但**只对 `Reliable()==true` 的消息（lifecycle 类）落盘**。进度类（`Reliable()==false`）永远 best-effort + log，不落盘。
+**为什么 sealed 仍保留（在 EventBus）**：EventBus 的 9+ 类型多，加新 kind 要强制显式决策 Reliable/Priority。sealed + source-scan 守卫（Phase 1 的 `sealed_exhaustive_test.go`）继续适用，只是 expected 集合从 11 改成 9。
+
+#### 2.3.1 可靠性策略：EventBus 的 WAL（lifecycle 落盘）+ 优先级驱逐（内存 progress）
+
+**决策**（2026-06-22 确认，双 bus 修订后归属 EventBus）：**EventBus** 采用**级别 4（WAL 持久化）**可靠性，但**只对 `Reliable()==true` 的 Event（lifecycle 类）落盘**。进度类（`Reliable()==false`）永远 best-effort + log，不落盘。**MessageBus（内容）不涉及 WAL**——内容靠 session history 持久化，bus 层永远阻塞投递（timeout=0，永不丢）。
 
 这同时满足两个诉求：
 - **抗进程崩溃 / 抗订阅者崩溃**：lifecycle 事件（AgentTurnStarted/Completed/Failed、HumanRequested/Responded）落 SQLite WAL，进程重启后重放恢复，父 turn 不会因为 bus 丢消息而永远等不到子。
 - **不被高发量进度事件拖垮**：`assistant.status` / `adk.event` / `tool.*` 等低价值高频事件不落盘，磁盘 IO 只承担每 turn 几条的 lifecycle 事件。
 
-**不落盘的消息**仍然走优先级驱逐（critical 抢 important 抢 droppable 的位子），满载时 droppable 先丢 + log.Warn，从不在 bus 层静默。
+**不落盘的 Event**仍然走优先级驱逐（critical 抢 important 抢 droppable 的位子），满载时 droppable 先丢 + log.Warn，从不在 bus 层静默。
 
 **阻塞语义按消息类型分两档**（统一 §2.3.1 与附录 C.4，2026-06-22 PR #30 review 修正）：
-- **进度类（`Reliable()==false`）**：Publish **非阻塞**。内存投递满载时按优先级驱逐 + log.Warn，永不阻塞调用方。理由：这类消息高频低价值（`assistant.status` / `adk.event` / `tool.*`），阻塞会拖慢 model turn。
-- **lifecycle 类（`Reliable()==true`）**：Publish **同步落盘（SQLite WAL fsync）后返回**。落盘失败返回 error，调用方决策（不吞错、不假装投递成功）。理由：这类消息低频高价值（每 turn 几条），同步 fsync 的延迟可接受；且"宁可报错也不丢 lifecycle"是硬契约。
+- **进度类 Event（`Reliable()==false`）**：Publish **非阻塞**。内存投递满载时按优先级驱逐 + log.Warn，永不阻塞调用方。理由：这类消息高频低价值（`assistant.status` / `adk.event` / `tool.*`），阻塞会拖慢 model turn。
+- **lifecycle 类 Event（`Reliable()==true`）**：Publish **同步落盘（SQLite WAL fsync）后返回**。落盘失败返回 error，调用方决策（不吞错、不假装投递成功）。理由：这类消息低频高价值（每 turn 几条），同步 fsync 的延迟可接受；且"宁可报错也不丢 lifecycle"是硬契约。
+- **MessageBus（内容）**：`PublishInbound`/`PublishOutbound` **永远阻塞投递（timeout=0）**，无驱逐、无 WAL。内容不可丢，满了等消费者（IM adapter 不会慢到拖垮生产者，且内容频率远低于 progress）。
 
-**为什么不用背压**：背压（满了阻塞 Publish）会让慢消费者（IM HTTP 卡顿）拖垮快生产者（LLM 推理），一路阻塞回 `recordEvent`，卡住 model turn——这是反模式。所以进度类 Publish 永不阻塞。lifecycle 类的"阻塞"是**磁盘 IO 同步**（毫秒级、确定性），不是**消费者背压**（秒级、不可控）——两者性质不同，不能混为一谈。
+**为什么不用背压**：背压（满了阻塞 Publish）会让慢消费者（IM HTTP 卡顿）拖垮快生产者（LLM 推理），一路阻塞回 `recordEvent`，卡住 model turn——这是反模式。所以 EventBus 的进度类 Publish 永不阻塞。lifecycle 类的"阻塞"是**磁盘 IO 同步**（毫秒级、确定性），不是**消费者背压**（秒级、不可控）——两者性质不同，不能混为一谈。MessageBus 的阻塞是内容场景特有的（频率低、消费者快），不违反背压反模式。
 
 #### 2.3.2 WAL 形态：独立 SQLite（glebarez/sqlite，纯 Go 无 cgo）
 
@@ -262,6 +290,25 @@ bus_subscriber_offsets(subscriber_id, last_consumed_seq)
 - 子 turn **不能**订阅兄弟 turn（同父的其它子）的事件。
 - 父可订阅直接子 turn 的生命周期事件，但**不订阅子的内部 LLM token 流**。
 - 默认 filter 只收自己的事件 + 直接子的生命周期事件。
+
+#### 2.3.3 Phase 1 回头改清单（双 bus 修订引发）
+
+双 bus 修订（2026-06-22）使 Phase 1 的"单 MessageBus"契约失效。Phase 1 类型需回头改（**改成本最低的时机就是现在**——Phase 2 还没人在 Phase 1 契约上建东西）：
+
+| Phase 1 原设计 | 双 bus 后 |
+|---|---|
+| `Message` sealed interface（11 类型）| **删除**。拆成：Inbound/Outbound（普通 struct，进 MessageBus）+ `Event` sealed（9 类型，进 EventBus）|
+| `MessageBus` interface（`Publish(Message)` + `Subscribe(Filter)`）| **拆**：新 `MessageBus`（内容，typed API：`PublishInbound`/`PublishOutbound` + `InboundChan`/`OutboundChan`）+ 新 `EventBus`（信号，`Publish(Event)` + `PublishNonBlocking` + `Subscribe(Filter)`）|
+| `Filter` | **归 EventBus**（MessageBus 不需要 Filter，typed channel 即过滤）|
+| `MessagePriority` | **改名 `EventPriority`**（只有 Event 用）|
+| `sealed_exhaustive_test.go`（source-scan 守卫）| expected 集合从 11 改成 9（Inbound/Outbound 移出），扫 `isEvent()` 而非 `isMessage()`|
+| `agent_turn.go` | **不动**（AgentTurn/Payload/状态机/TransitionError 跟 bus 无关）|
+| `IsValidTransition`（W1 修过的状态机缺口）| **保留**，重写测试时重新覆盖 |
+| Filter.Match（W2 修过的空 turn 泄漏）| **保留**，归 EventBus 后重新覆盖 |
+
+**W1-W4 的 bug 修复要保留**（状态机缺口、Filter 空 turn 泄漏、sealed 假性穷尽、lifecycle TurnKind 字段）——重写测试时重新防范，不能丢。
+
+**老 `event_bus.go` 的 `EventBus` 改名 `LegacyEventBus`**，新 `EventBus` 占名（新设计是长期契约）。Phase 6 下线 LegacyEventBus。
 
 ### 2.4 spawn_turn 替代 delegate_agent
 
@@ -694,3 +741,9 @@ DELETE FROM bus_messages WHERE turn_id = ? AND consumed >= (SELECT COUNT(*) FROM
   2. **CRITICAL 2：「lifecycle 天然幂等」断言偏强**。混淆了"数据层幂等"（重复收到 Completed 不改变状态）与"副作用层不幂等"（重复收到 Started 触发重复 spawn）。且崩溃恢复后内存去重集合为空，"靠 Message.ID() 去重"失效。修正附录 C.5：lifecycle 订阅者必须基于 turn 状态机做 CAS 转移（only-once spawn），owned 集合必须持久化，Message.ID() 只用于日志。
   3. **non-blocking**：seq 并发原子性（进程内 atomic + 同事务 INSERT）；C.6 清理策略修正（不能只按 turn_id 删，必须考虑慢订阅者崩溃 >TTL 场景，给出引用计数/终态确认两个候选）；SessionScope=nil 传播语义（§2.1 注释补充）；§2.3 类型清单补 `AssistantStatus` 声明；Phase 2 DoD 明确"WAL 清理策略"和"offset 崩溃恢复可测验收"。
   4. **行号订正**：上一轮回复误称"经核实 996 引用正确"，核实有误——本地工作树 `delegation.go` 有未提交改动导致行号偏移，我读到的 996 是偏移后的行号，不是 origin/main 的行号。origin/main 上 `AgentSessionID = "ephemeral_worker:"` 在 **977**（996 是 `StartedAt: time.Now()`，998 是 `delegation_mode`）。RFC §2.1 行号已从 996 改为 977。这是对 AGENTS.md §2"先核实再判断"的教训：核实必须锚定正确的 ref（origin/main），而不是带本地 diff 的脏工作树。
+- **2026-06-22**：**重大修订——单 MessageBus 改双 bus（内容 vs 信号）**。基于 PicoClaw 源码学习（#39 学习总结）：
+  1. **§2.3 重写**：原"统一 MessageBus + Reliable/Priority 路由"废弃。改为照搬 PicoClaw 的双 bus：**MessageBus**（内容，typed API：Inbound/Outbound，阻塞投递，无 WAL 无 Filter）+ **EventBus**（信号，Event sealed + Filter，lifecycle 阻塞+WAL / progress 驱逐）。
+  2. **修订理由**：核实（grep Xira forwarder）确认消费者不重叠——Forwarder 只看 lifecycle、IM adapter 只看边界、progress 无消费者。单 bus 的"统一路由"虽可行但物理分离更诚实（PicoClaw 验证）。**之前讨论中"消费者重叠"的论据经核实是编造的，已撤回**（详见 #39 学习总结 §3）。
+  3. **§2.3.1 调整**：WAL/驱逐归属 EventBus，MessageBus（内容）永远阻塞投递不涉及 WAL。
+  4. **§2.3.3 新增**：Phase 1 回头改清单——拆 `Message` sealed（删）→ Content（struct）+ `Event` sealed（9 类型）；拆 `MessageBus` interface → 新 MessageBus（typed）+ 新 EventBus（Event+Filter）；Filter 归 EventBus；`MessagePriority`→`EventPriority`；sealed 守卫 expected 集合 11→9；老 `event_bus.go` 改名 `LegacyEventBus`。W1-W4 bug 修复保留。
+  5. **Phase 3 警示**：PicoClaw 的 spawn 结果走专用 pendingResults channel 不走 bus（`subturn.go:410`），与我们"spawn 结果走 EventBus"设计不同。Phase 3 落地时重新审视。
