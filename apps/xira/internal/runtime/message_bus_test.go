@@ -7,26 +7,32 @@ import (
 	"time"
 )
 
-// These tests define the Phase 1 MessageBus type contract BEFORE the types
-// exist (TDD red). Implementation in message_bus.go must make every test pass.
-// See RFC §2.3 (MessageBus interface + sealed Message + Filter).
+// These tests define the Phase 1 dual-bus type contract (RFC §2.3, revised
+// 2026-06-22 PR #41). The contract splits the old single Message into:
+//   - Content: InboundMessage / OutboundMessage as PLAIN structs (no interface
+//     methods) — carried by the typed MessageBus API.
+//   - Event: a sealed interface satisfied by 9 types — carried by EventBus.
 //
-// What is locked in here:
-//   - MessagePriority enum (Droppable < Important < Critical).
-//   - Every Message type implements the full interface (ID, AgentTurnID,
-//     Timestamp, Reliable, Priority, Kind, isMessage).
-//   - Reliable()/Priority() values match RFC §2.3 — lifecycle = Reliable &
-//     Critical, progress = not Reliable & Droppable. This is the bus's
-//     routing table; getting it wrong breaks WAL persistence and eviction.
-//   - Filter.Match is the one piece of real logic on the bus types: it
-//     decides which events a subscriber receives. Covered exhaustively.
+// What this file locks in:
+//   - InboundMessage / OutboundMessage are plain structs (no isMessage, no
+//     Kind/ID/AgentTurnID methods).
+//   - Event is a sealed interface; every kind declares isEvent() and its own
+//     Reliable()/Priority() routing tags. MessagePriority was renamed to
+//     EventPriority (only Event uses it).
+//   - Filter.Match takes an Event (not a Message). The W2 empty-turn leak
+//     guard and IncludeChildren semantics are preserved.
+//   - MessageBus is a typed API (PublishInbound / PublishOutbound +
+//     InboundChan / OutboundChan) — no Publish(Message), no Filter.
+//   - No EventBus interface here: Phase 2 evolves the existing event_bus.go
+//     EventBus struct to satisfy the future EventBus interface. Phase 1 only
+//     defines Event + Filter so the struct can be migrated later.
 
 // -----------------------------------------------------------------------------
-// MessagePriority enum
+// EventPriority enum
 // -----------------------------------------------------------------------------
 
-func TestMessagePriorityOrdering(t *testing.T) {
-	// RFC §2.3: Critical > Important > Droppable. Numeric ordering must match
+func TestEventPriorityOrdering(t *testing.T) {
+	// Renamed from MessagePriority (only Event uses it now). Ordering must hold
 	// so the bus can compare with < / >.
 	if !(PriorityDroppable < PriorityImportant && PriorityImportant < PriorityCritical) {
 		t.Errorf("priority ordering broken: Droppable=%d Important=%d Critical=%d",
@@ -34,17 +40,18 @@ func TestMessagePriorityOrdering(t *testing.T) {
 	}
 }
 
+// Compile-time: EventPriority is a distinct type (not a raw int).
+var _ EventPriority = PriorityCritical
+
 // -----------------------------------------------------------------------------
-// Message sealed interface — every kind declares itself and its routing tags
+// Event sealed interface — every kind declares itself and its routing tags
 // -----------------------------------------------------------------------------
 
-func TestMessageKindStrings(t *testing.T) {
+func TestEventKindStrings(t *testing.T) {
 	cases := []struct {
-		msg  Message
+		evt  Event
 		want string
 	}{
-		{InboundMessage{}, "inbound"},
-		{OutboundMessage{}, "outbound"},
 		{AgentTurnStarted{}, "agent_turn.started"},
 		{AgentTurnCompleted{}, "agent_turn.completed"},
 		{AgentTurnFailed{}, "agent_turn.failed"},
@@ -56,133 +63,50 @@ func TestMessageKindStrings(t *testing.T) {
 		{ToolResult{}, "tool.result"},
 	}
 	for _, c := range cases {
-		if got := c.msg.Kind(); got != c.want {
-			t.Errorf("%T.Kind() = %q, want %q", c.msg, got, c.want)
+		if got := c.evt.Kind(); got != c.want {
+			t.Errorf("%T.Kind() = %q, want %q", c.evt, got, c.want)
 		}
 	}
 }
 
-func TestMessagePriorityRouting(t *testing.T) {
+func TestEventPriorityRouting(t *testing.T) {
 	// RFC §2.3 routing table. This is the single source of truth for which
-	// messages get WAL-persisted and which get evicted under load. Asserting
-	// it here means a future contributor cannot flip a tag without breaking
-	// a test that names the RFC contract.
-	critical := []Message{
+	// events get WAL-persisted and which get evicted under load.
+	critical := []Event{
 		AgentTurnStarted{}, AgentTurnCompleted{}, AgentTurnFailed{}, AgentTurnCanceled{},
 		HumanRequested{}, HumanResponded{},
 	}
-	for _, m := range critical {
-		if !m.Reliable() {
-			t.Errorf("%T.Reliable() = false, want true (lifecycle must persist)", m)
+	for _, e := range critical {
+		if !e.Reliable() {
+			t.Errorf("%T.Reliable() = false, want true (lifecycle must persist)", e)
 		}
-		if m.Priority() != PriorityCritical {
-			t.Errorf("%T.Priority() = %d, want Critical", m, m.Priority())
+		if e.Priority() != PriorityCritical {
+			t.Errorf("%T.Priority() = %d, want Critical", e, e.Priority())
 		}
 	}
-	droppable := []Message{
+	droppable := []Event{
 		AssistantStatus{}, ToolCalled{}, ToolResult{},
 	}
-	for _, m := range droppable {
-		if m.Reliable() {
-			t.Errorf("%T.Reliable() = true, want false (progress does not persist)", m)
+	for _, e := range droppable {
+		if e.Reliable() {
+			t.Errorf("%T.Reliable() = true, want false (progress does not persist)", e)
 		}
-		if m.Priority() != PriorityDroppable {
-			t.Errorf("%T.Priority() = %d, want Droppable", m, m.Priority())
-		}
-	}
-}
-
-func TestMessagePriorityImportantTier(t *testing.T) {
-	// Inbound/Outbound are Important: user-facing, must reach IM, but not
-	// lifecycle events that drive the turn state machine. They are NOT
-	// Reliable (not persisted to WAL) — only lifecycle messages are.
-	for _, m := range []Message{InboundMessage{}, OutboundMessage{}} {
-		if m.Priority() != PriorityImportant {
-			t.Errorf("%T.Priority() = %d, want Important", m, m.Priority())
-		}
-		if m.Reliable() {
-			t.Errorf("%T.Reliable() = true, want false (IM boundary messages are not lifecycle-persisted)", m)
+		if e.Priority() != PriorityDroppable {
+			t.Errorf("%T.Priority() = %d, want Droppable", e, e.Priority())
 		}
 	}
 }
 
-// NOTE: the old TestMessageSealedExhaustive iterated a hand-written list and
-// therefore missed new types added to the package (PR #31 review W3). It is
-// replaced by TestMessageSealIsClosedAgainstSource in
-// sealed_exhaustive_test.go, which scans package SOURCE for isMessage()
-// receivers and compares against expectedMessageTypes.
-
-// Compile-time: every declared Message type satisfies the interface.
-var (
-	_ Message = InboundMessage{}
-	_ Message = OutboundMessage{}
-	_ Message = AgentTurnStarted{}
-	_ Message = AgentTurnCompleted{}
-	_ Message = AgentTurnFailed{}
-	_ Message = AgentTurnCanceled{}
-	_ Message = HumanRequested{}
-	_ Message = HumanResponded{}
-	_ Message = AssistantStatus{}
-	_ Message = ToolCalled{}
-	_ Message = ToolResult{}
-)
-
-// -----------------------------------------------------------------------------
-// Per-type field accessors (ID, AgentTurnID, Timestamp)
-// -----------------------------------------------------------------------------
-
-func TestAgentTurnStartedAccessors(t *testing.T) {
-	now := time.Now()
-	m := AgentTurnStarted{
-		MessageIDVal:   "m1",
-		AgentTurnIDVal: "aturn_1",
-		TimestampVal:   now,
-	}
-	if m.ID() != "m1" {
-		t.Errorf("ID() = %q", m.ID())
-	}
-	if m.AgentTurnID() != "aturn_1" {
-		t.Errorf("AgentTurnID() = %q", m.AgentTurnID())
-	}
-	if !m.Timestamp().Equal(now) {
-		t.Errorf("Timestamp() mismatch")
-	}
-}
-
-func TestAgentTurnCompletedAccessors(t *testing.T) {
-	now := time.Now()
-	m := AgentTurnCompleted{
-		MessageIDVal:         "m2",
-		AgentTurnIDVal:       "aturn_1",
-		ParentAgentTurnIDVal: "aturn_0",
-		TimestampVal:         now,
-		Summary:              "ok",
-	}
-	if m.ParentAgentTurnID() != "aturn_0" {
-		t.Errorf("ParentAgentTurnID() = %q", m.ParentAgentTurnID())
-	}
-	if m.Summary != "ok" {
-		t.Errorf("Summary = %q", m.Summary)
-	}
-}
-
-// TestAllMessageAccessors walks every Message type with a fully-populated
-// instance and asserts every accessor returns the populated value. This
-// drives ID()/AgentTurnID()/ParentAgentTurnID()/Timestamp() coverage on every
-// type (the routing-table tests above only exercise Kind/Reliable/Priority).
-func TestAllMessageAccessors(t *testing.T) {
+// TestAllEventAccessors walks every Event type with a fully-populated instance
+// and asserts every accessor returns the populated value. Also calls isEvent()
+// so the cover counter records the empty sealed-marker body.
+func TestAllEventAccessors(t *testing.T) {
 	now := time.Now()
 	wantID := "msg_x"
 	wantTurn := AgentTurnID("aturn_self")
 	wantParent := AgentTurnID("aturn_parent")
 
-	// build one populated instance per Message type. All share the same
-	// backing-field names: MessageIDVal / AgentTurnIDVal /
-	// ParentAgentTurnIDVal / TimestampVal (W5 unified the old ParentIDVal
-	// short name to match the accessor semantics).
-	populated := []Message{
-		InboundMessage{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
-		OutboundMessage{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
+	populated := []Event{
 		AgentTurnStarted{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 		AgentTurnCompleted{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 		AgentTurnFailed{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
@@ -193,38 +117,30 @@ func TestAllMessageAccessors(t *testing.T) {
 		ToolCalled{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 		ToolResult{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 	}
-	for _, m := range populated {
-		t.Run(fmt.Sprintf("%T", m), func(t *testing.T) {
-			// Call isMessage() so the cover counter records the (empty)
-			// sealed-marker method body. Without this, Go cover reports 0%
-			// on zero-statement methods even though they are exercised.
-			m.isMessage()
-			if m.ID() != wantID {
-				t.Errorf("%T.ID() = %q, want %q", m, m.ID(), wantID)
+	for _, e := range populated {
+		t.Run(fmt.Sprintf("%T", e), func(t *testing.T) {
+			e.isEvent()
+			if e.ID() != wantID {
+				t.Errorf("%T.ID() = %q, want %q", e, e.ID(), wantID)
 			}
-			if m.AgentTurnID() != wantTurn {
-				t.Errorf("%T.AgentTurnID() = %q, want %q", m, m.AgentTurnID(), wantTurn)
+			if e.AgentTurnID() != wantTurn {
+				t.Errorf("%T.AgentTurnID() = %q, want %q", e, e.AgentTurnID(), wantTurn)
 			}
-			if m.ParentAgentTurnID() != wantParent {
-				t.Errorf("%T.ParentAgentTurnID() = %q, want %q", m, m.ParentAgentTurnID(), wantParent)
+			if e.ParentAgentTurnID() != wantParent {
+				t.Errorf("%T.ParentAgentTurnID() = %q, want %q", e, e.ParentAgentTurnID(), wantParent)
 			}
-			if !m.Timestamp().Equal(now) {
-				t.Errorf("%T.Timestamp() = %v, want %v", m, m.Timestamp(), now)
+			if !e.Timestamp().Equal(now) {
+				t.Errorf("%T.Timestamp() = %v, want %v", e, e.Timestamp(), now)
 			}
 		})
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Lifecycle turn-kind field (PR #31 review W4)
-// -----------------------------------------------------------------------------
-
-func TestLifecycleMessagesCarryTurnKind(t *testing.T) {
-	// Every turn-lifecycle message carries TurnKind so a subscriber can tell
-	// flow-run events from agent-run events without loading the turn.
+// Lifecycle messages carry TurnKind (W4 from PR #31).
+func TestLifecycleEventsCarryTurnKind(t *testing.T) {
 	cases := []struct {
 		name string
-		msg  Message
+		evt  Event
 	}{
 		{"started", AgentTurnStarted{TurnKind: AgentTurnKindFlow}},
 		{"completed", AgentTurnCompleted{TurnKind: AgentTurnKindAgent}},
@@ -240,17 +156,17 @@ func TestLifecycleMessagesCarryTurnKind(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := AgentTurnKind("")
-			switch m := c.msg.(type) {
+			switch e := c.evt.(type) {
 			case AgentTurnStarted:
-				got = m.TurnKind
+				got = e.TurnKind
 			case AgentTurnCompleted:
-				got = m.TurnKind
+				got = e.TurnKind
 			case AgentTurnFailed:
-				got = m.TurnKind
+				got = e.TurnKind
 			case AgentTurnCanceled:
-				got = m.TurnKind
+				got = e.TurnKind
 			default:
-				t.Fatalf("%s is not a lifecycle message carrying TurnKind: %T", c.name, c.msg)
+				t.Fatalf("%s is not a lifecycle event carrying TurnKind: %T", c.name, c.evt)
 			}
 			if got != want[c.name] {
 				t.Errorf("%s.TurnKind = %q, want %q", c.name, got, want[c.name])
@@ -259,22 +175,98 @@ func TestLifecycleMessagesCarryTurnKind(t *testing.T) {
 	}
 }
 
+// Compile-time: every declared Event type satisfies the interface.
+var (
+	_ Event = AgentTurnStarted{}
+	_ Event = AgentTurnCompleted{}
+	_ Event = AgentTurnFailed{}
+	_ Event = AgentTurnCanceled{}
+	_ Event = HumanRequested{}
+	_ Event = HumanResponded{}
+	_ Event = AssistantStatus{}
+	_ Event = ToolCalled{}
+	_ Event = ToolResult{}
+)
+
 // -----------------------------------------------------------------------------
-// Filter.Match — the one piece of real logic
+// Content types are PLAIN structs (no interface methods)
+// -----------------------------------------------------------------------------
+
+func TestInboundMessageIsPlainStruct(t *testing.T) {
+	// InboundMessage is a plain struct carried by MessageBus's typed API. It
+	// must NOT satisfy the Event interface (no isEvent method). The
+	// "no isEvent method" property is enforced by sealed_exhaustive_test.go's
+	// TestEventSealIsClosedAgainstSource — if InboundMessage ever grew
+	// isEvent(), the source scan would find it and flag it as an undeclared
+	// Event type.
+	m := InboundMessage{
+		MessageIDVal:   "im_1",
+		AgentTurnIDVal: "aturn_root",
+		Body:           "hello",
+	}
+	if m.MessageIDVal != "im_1" {
+		t.Errorf("MessageIDVal = %q", m.MessageIDVal)
+	}
+	if m.Body != "hello" {
+		t.Errorf("Body = %q", m.Body)
+	}
+}
+
+func TestOutboundMessageIsPlainStruct(t *testing.T) {
+	m := OutboundMessage{
+		MessageIDVal: "om_1",
+		Body:         "reply",
+	}
+	if m.MessageIDVal != "om_1" {
+		t.Errorf("MessageIDVal = %q", m.MessageIDVal)
+	}
+	if m.Body != "reply" {
+		t.Errorf("Body = %q", m.Body)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// MessageBus typed API (compile-time interface shape)
+// -----------------------------------------------------------------------------
+
+func TestMessageBusTypedInterfaceShape(t *testing.T) {
+	// MessageBus is a typed API for content. No Publish(Message), no Filter —
+	// each content type has its own Publish method and typed channel.
+	var _ MessageBus = fakeMessageBus{}
+}
+
+type fakeMessageBus struct{}
+
+func (fakeMessageBus) PublishInbound(_ context.Context, _ InboundMessage) error   { return nil }
+func (fakeMessageBus) PublishOutbound(_ context.Context, _ OutboundMessage) error { return nil }
+func (fakeMessageBus) InboundChan() <-chan InboundMessage {
+	ch := make(chan InboundMessage)
+	close(ch)
+	return ch
+}
+func (fakeMessageBus) OutboundChan() <-chan OutboundMessage {
+	ch := make(chan OutboundMessage)
+	close(ch)
+	return ch
+}
+func (fakeMessageBus) Close() error { return nil }
+
+// -----------------------------------------------------------------------------
+// Filter.Match — takes an Event (not a Message). W2 empty-turn guard preserved.
 // -----------------------------------------------------------------------------
 
 func TestFilterMatch_EmptyFilterMatchesAll(t *testing.T) {
 	f := Filter{}
 	if !f.Match(AgentTurnStarted{AgentTurnIDVal: "a"}) {
-		t.Error("empty Filter should match any message")
+		t.Error("empty Filter should match any event")
 	}
 }
 
 func TestFilterMatch_ByAgentTurnID(t *testing.T) {
-	f := Filter{AgentTurnID: strPtr("aturn_1")}
+	f := Filter{AgentTurnID: turnPtr("aturn_1")}
 	cases := []struct {
 		name  string
-		msg   Message
+		evt   Event
 		match bool
 	}{
 		{"own turn", AgentTurnStarted{AgentTurnIDVal: "aturn_1"}, true},
@@ -282,7 +274,7 @@ func TestFilterMatch_ByAgentTurnID(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := f.Match(c.msg); got != c.match {
+			if got := f.Match(c.evt); got != c.match {
 				t.Errorf("Match = %v, want %v", got, c.match)
 			}
 		})
@@ -290,9 +282,7 @@ func TestFilterMatch_ByAgentTurnID(t *testing.T) {
 }
 
 func TestFilterMatch_IncludeChildren(t *testing.T) {
-	// A parent subscribes to its own turn AND its children's events. RFC §2.3
-	// subscription scope: parent must observe child lifecycle.
-	f := Filter{AgentTurnID: strPtr("aturn_parent"), IncludeChildren: true}
+	f := Filter{AgentTurnID: turnPtr("aturn_parent"), IncludeChildren: true}
 	childCompleted := AgentTurnCompleted{
 		AgentTurnIDVal:       "aturn_child",
 		ParentAgentTurnIDVal: "aturn_parent",
@@ -300,20 +290,14 @@ func TestFilterMatch_IncludeChildren(t *testing.T) {
 	if !f.Match(childCompleted) {
 		t.Error("parent filter with IncludeChildren must match child's event")
 	}
-
-	// Without IncludeChildren, child's event does NOT match a filter scoped
-	// to the parent turn.
-	fNoChildren := Filter{AgentTurnID: strPtr("aturn_parent"), IncludeChildren: false}
+	fNoChildren := Filter{AgentTurnID: turnPtr("aturn_parent"), IncludeChildren: false}
 	if fNoChildren.Match(childCompleted) {
 		t.Error("parent filter without IncludeChildren must not match child's event")
 	}
 }
 
 func TestFilterMatch_SiblingChildExcluded(t *testing.T) {
-	// RFC §2.3 scope/permission: a child must NOT subscribe to its sibling's
-	// events (information leak). Filter scoped to child A must not match an
-	// event from child B even though both share the same parent.
-	fChildA := Filter{AgentTurnID: strPtr("aturn_childA"), IncludeChildren: true}
+	fChildA := Filter{AgentTurnID: turnPtr("aturn_childA"), IncludeChildren: true}
 	siblingB := AgentTurnCompleted{
 		AgentTurnIDVal:       "aturn_childB",
 		ParentAgentTurnIDVal: "aturn_parent",
@@ -324,17 +308,13 @@ func TestFilterMatch_SiblingChildExcluded(t *testing.T) {
 }
 
 func TestFilterMatch_EmptyAgentTurnIDDoesNotLeakRoots(t *testing.T) {
-	// PR #31 review W2 regression: a filter whose AgentTurnID is "" (caller
-	// bug — turn ids are always non-empty) must NOT match anything, even
-	// with IncludeChildren=true. Previously it matched every root event
-	// (whose ParentAgentTurnID is also ""), leaking the whole root tier.
+	// W2 regression guard: filter with empty AgentTurnID must match nothing.
 	emptyTurn := AgentTurnID("")
 	f := Filter{AgentTurnID: &emptyTurn, IncludeChildren: true}
 	rootEvt := AgentTurnStarted{AgentTurnIDVal: "aturn_root", ParentAgentTurnIDVal: ""}
 	if f.Match(rootEvt) {
 		t.Error("filter with empty AgentTurnID must not match root event (W2 leak)")
 	}
-	// Also must not match a non-root event.
 	other := AgentTurnStarted{AgentTurnIDVal: "aturn_x", ParentAgentTurnIDVal: "aturn_p"}
 	if f.Match(other) {
 		t.Error("filter with empty AgentTurnID must not match any event")
@@ -345,7 +325,7 @@ func TestFilterMatch_ByKinds(t *testing.T) {
 	f := Filter{Kinds: []string{"agent_turn.completed", "agent_turn.failed"}}
 	cases := []struct {
 		name  string
-		msg   Message
+		evt   Event
 		match bool
 	}{
 		{"completed", AgentTurnCompleted{}, true},
@@ -355,7 +335,7 @@ func TestFilterMatch_ByKinds(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := f.Match(c.msg); got != c.match {
+			if got := f.Match(c.evt); got != c.match {
 				t.Errorf("Match = %v, want %v", got, c.match)
 			}
 		})
@@ -363,9 +343,8 @@ func TestFilterMatch_ByKinds(t *testing.T) {
 }
 
 func TestFilterMatch_KindsAndAgentTurnIDCombined(t *testing.T) {
-	// Both predicates must hold (AND semantics).
 	f := Filter{
-		AgentTurnID: strPtr("aturn_1"),
+		AgentTurnID: turnPtr("aturn_1"),
 		Kinds:       []string{"agent_turn.completed"},
 	}
 	if !f.Match(AgentTurnCompleted{AgentTurnIDVal: "aturn_1"}) {
@@ -379,39 +358,15 @@ func TestFilterMatch_KindsAndAgentTurnIDCombined(t *testing.T) {
 	}
 }
 
-func TestFilterMatch_NilAgentTurnIDMsgWithAgentTurnFilter(t *testing.T) {
-	// A message whose AgentTurnID accessor returns "" but the filter requires
-	// a specific turn must NOT match (defensive — should not happen in
-	// practice but the filter must be safe).
-	f := Filter{AgentTurnID: strPtr("aturn_1")}
+func TestFilterMatch_NilAgentTurnIDEventWithAgentTurnFilter(t *testing.T) {
+	f := Filter{AgentTurnID: turnPtr("aturn_1")}
 	if f.Match(AgentTurnStarted{AgentTurnIDVal: ""}) {
-		t.Error("empty AgentTurnID message must not match turn-scoped filter")
+		t.Error("empty AgentTurnID event must not match turn-scoped filter")
 	}
 }
-
-// -----------------------------------------------------------------------------
-// MessageBus interface (compile-time only — Phase 1 declares the interface,
-// Phase 2 implements it. We verify the interface shape via a fake.)
-// -----------------------------------------------------------------------------
-
-func TestMessageBusInterfaceShape(t *testing.T) {
-	// The interface must accept a minimal fake. If Publish/Subscribe/
-	// Unsubscribe signatures drift, this stops compiling.
-	var _ MessageBus = fakeBus{}
-}
-
-type fakeBus struct{}
-
-func (fakeBus) Publish(_ context.Context, _ Message) error { return nil }
-func (fakeBus) Subscribe(_ Filter) (SubID, <-chan Message) {
-	ch := make(chan Message)
-	close(ch)
-	return SubID(""), ch
-}
-func (fakeBus) Unsubscribe(_ SubID) {}
 
 // -----------------------------------------------------------------------------
 // helpers
 // -----------------------------------------------------------------------------
 
-func strPtr(s string) *AgentTurnID { id := AgentTurnID(s); return &id }
+func turnPtr(s string) *AgentTurnID { id := AgentTurnID(s); return &id }

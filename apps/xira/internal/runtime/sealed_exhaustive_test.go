@@ -20,17 +20,17 @@ import (
 // new members is not sealed.
 //
 // Approach: parse every non-test .go file in this package directory, collect
-// the receiver type names of every `isMessage()` and `isAgentTurnPayload()`
+// the receiver type names of every `isEvent()` and `isAgentTurnPayload()`
 // method, and compare against the expected closed set. Adding a new
 // implementor without declaring it in the expected set fails the test —
 // because the scanner sees it in source even though no hand-written list
 // mentions it.
 
-// expectedMessageTypes is the closed set of types implementing Message.
-// Add a type here WHEN you add a new Message implementation in message_bus.go.
-var expectedMessageTypes = map[string]bool{
-	"InboundMessage":     true,
-	"OutboundMessage":    true,
+// expectedEventTypes is the closed set of types implementing Event.
+// Add a type here WHEN you add a new Event implementation in message_bus.go.
+// InboundMessage / OutboundMessage are NOT here — they are plain structs
+// (content, carried by typed MessageBus), not Event (PR #41 dual-bus split).
+var expectedEventTypes = map[string]bool{
 	"AgentTurnStarted":   true,
 	"AgentTurnCompleted": true,
 	"AgentTurnFailed":    true,
@@ -101,13 +101,13 @@ func scanSealedReceivers(t *testing.T, dir, methodName string) map[string]bool {
 	return found
 }
 
-// TestMessageSealIsClosedAgainstSource scans the package source for every
-// type implementing isMessage() and asserts the set equals expectedMessageTypes.
-// A new Message type added to message_bus.go without updating
-// expectedMessageTypes fails here.
-func TestMessageSealIsClosedAgainstSource(t *testing.T) {
-	actual := scanSealedReceivers(t, packageDir(t), "isMessage")
-	assertClosedSet(t, "Message", expectedMessageTypes, actual)
+// TestEventSealIsClosedAgainstSource scans the package source for every
+// type implementing isEvent() and asserts the set equals expectedEventTypes.
+// A new Event type added to message_bus.go without updating
+// expectedEventTypes fails here.
+func TestEventSealIsClosedAgainstSource(t *testing.T) {
+	actual := scanSealedReceivers(t, packageDir(t), "isEvent")
+	assertClosedSet(t, "Event", expectedEventTypes, actual)
 }
 
 // TestPayloadSealIsClosedAgainstSource does the same for AgentTurnPayload.
@@ -138,7 +138,7 @@ func assertClosedSet(t *testing.T, ifaceName string, expected, actual map[string
 	sort.Strings(stale)
 	if len(undeclared) > 0 {
 		t.Errorf("NEW %s implementor(s) found in source but not declared expected: %v — "+
-			"add them to expected%sTypes if intentional, or remove the isMessage/isAgentTurnPayload "+
+			"add them to expected%sTypes if intentional, or remove the isEvent/isAgentTurnPayload "+
 			"method if stray (this is the PR #31 W3 sealed-leak guard)",
 			ifaceName, undeclared, ifaceName)
 	}
