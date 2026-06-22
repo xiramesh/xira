@@ -9,18 +9,58 @@ import (
 // is type-only: interface + sealed Message types + Filter. Phase 2 implements
 // in-memory bus + SQLite WAL.
 //
-// Contract locked by message_bus_test.go:
+// Contract locked by message_bus_test.go + sealed_exhaustive_test.go:
 //   - Message is a sealed interface; every kind declares its own struct and
 //     its own Reliable()/Priority() routing tags.
 //   - Routing table (RFC §2.3): lifecycle messages (AgentTurn*Started/
 //     Completed/Failed/Canceled, Human*) are Reliable + Critical (persisted
 //     to WAL, protected from eviction). Progress messages (AssistantStatus,
 //     Tool*) are not Reliable + Droppable (best-effort in memory).
-//     Inbound/Outbound are Important (user-facing, reach IM, but not
-//     lifecycle-persisted).
+//     Inbound/Outbound are Important: user-facing, must reach IM, but not
+//     lifecycle events that drive the turn state machine.
 //   - Filter.Match implements the AND semantics: AgentTurnID + Kinds +
 //     IncludeChildren all hold. IncludeChildren grants a parent visibility
 //     into its direct children's events but NOT siblings (RFC §2.3 scope).
+//
+// Old Kind system (RuntimeEvent.Kind string, events.go) → new Message type
+// mapping. This is the translation table the Phase 2 EventBus adapter will
+// use. Adding a Message type requires updating sealed_exhaustive_test.go's
+// expectedMessageTypes too.
+//
+//   OLD Kind                        → NEW Message type        Notes
+//   ──────────────────────────────── ──────────────────────── ───────────────────────────
+//   "inbound" (IM message)          → InboundMessage          IM → system
+//   "outbound" (reply to IM)        → OutboundMessage         system → IM
+//   "run.started"                   → AgentTurnStarted        TurnKind=agent|flow
+//   "run.finished"                  → (none directly)         split: see AgentTurnCompleted/
+//                                                              Failed/Canceled/Timeout below
+//   "run.waiting_human"             → HumanRequested          (waiting_human is the request;
+//                                                              HumanResponded is the resume)
+//   "agent.delegate.allowed"        → AgentTurnStarted        (with TurnKind=agent, parent set)
+//   "agent.delegate.started"        → AgentTurnStarted        (same — one Started per child)
+//   "agent.delegate.completed"      → AgentTurnCompleted
+//   "agent.delegate.failed"         → AgentTurnFailed
+//   "agent.delegate.timeout"        → AgentTurnFailed         (Failed carries Error="timeout";
+//                                                              no separate Timeout message —
+//                                                              the turn Status=timeout is the
+//                                                              distinguishing state)
+//   "assistant.status"              → AssistantStatus
+//   "tool.call"/"tool.executed"     → ToolCalled / ToolResult
+//
+// GAP — assistant.final (Phase 2 TODO):
+//   The old "assistant.final" event ("agent's final reply is ready", the
+//   drain signal for the progress forwarder, see assistant_final_emit_test.go)
+//   has NO direct new Message type yet. It is NOT the same as
+//   AgentTurnCompleted — AssistantFinal fires when the reply text is ready,
+//   which can be before the turn fully completes (e.g. HITL exit). Phase 2
+//   must add an AssistantFinal message type (Reliable=false,
+//   Priority=Critical — it drives the forwarder drain and must survive
+//   eviction, but it is not a turn-lifecycle event that drives the state
+//   machine, so it does not need WAL persistence). Adding it updates
+//   expectedMessageTypes in sealed_exhaustive_test.go.
+//   Until then, the EventBus adapter MUST handle "assistant.final"
+//   explicitly (translate to a synthetic AgentTurnCompleted or a dedicated
+//   internal signal) — see Phase 2 EventBus adapter work.
 
 // MessagePriority ranks how aggressively the bus protects a message under
 // load. Ordered: Droppable < Important < Critical (see
@@ -72,18 +112,18 @@ type Message interface {
 // the system). Important: user-facing, must reach IM consumers, but not a
 // lifecycle event driving the turn state machine.
 type InboundMessage struct {
-	MessageIDVal   string
-	AgentTurnIDVal AgentTurnID
-	ParentIDVal    AgentTurnID
-	TimestampVal   time.Time
-	Body           string
+	MessageIDVal         string
+	AgentTurnIDVal       AgentTurnID
+	ParentAgentTurnIDVal AgentTurnID
+	TimestampVal         time.Time
+	Body                 string
 }
 
 func (InboundMessage) isMessage()                       {}
 func (InboundMessage) Kind() string                     { return "inbound" }
 func (m InboundMessage) ID() string                     { return m.MessageIDVal }
 func (m InboundMessage) AgentTurnID() AgentTurnID       { return m.AgentTurnIDVal }
-func (m InboundMessage) ParentAgentTurnID() AgentTurnID { return m.ParentIDVal }
+func (m InboundMessage) ParentAgentTurnID() AgentTurnID { return m.ParentAgentTurnIDVal }
 func (m InboundMessage) Timestamp() time.Time           { return m.TimestampVal }
 func (InboundMessage) Reliable() bool                   { return false }
 func (InboundMessage) Priority() MessagePriority        { return PriorityImportant }
@@ -91,18 +131,18 @@ func (InboundMessage) Priority() MessagePriority        { return PriorityImporta
 // OutboundMessage is a system → IM message (the agent's reply back to the
 // chat). Same priority tier as InboundMessage.
 type OutboundMessage struct {
-	MessageIDVal   string
-	AgentTurnIDVal AgentTurnID
-	ParentIDVal    AgentTurnID
-	TimestampVal   time.Time
-	Body           string
+	MessageIDVal         string
+	AgentTurnIDVal       AgentTurnID
+	ParentAgentTurnIDVal AgentTurnID
+	TimestampVal         time.Time
+	Body                 string
 }
 
 func (OutboundMessage) isMessage()                       {}
 func (OutboundMessage) Kind() string                     { return "outbound" }
 func (m OutboundMessage) ID() string                     { return m.MessageIDVal }
 func (m OutboundMessage) AgentTurnID() AgentTurnID       { return m.AgentTurnIDVal }
-func (m OutboundMessage) ParentAgentTurnID() AgentTurnID { return m.ParentIDVal }
+func (m OutboundMessage) ParentAgentTurnID() AgentTurnID { return m.ParentAgentTurnIDVal }
 func (m OutboundMessage) Timestamp() time.Time           { return m.TimestampVal }
 func (OutboundMessage) Reliable() bool                   { return false }
 func (OutboundMessage) Priority() MessagePriority        { return PriorityImportant }
@@ -230,54 +270,54 @@ func (HumanResponded) Priority() MessagePriority        { return PriorityCritica
 
 // AssistantStatus is a progress heartbeat emitted during a turn.
 type AssistantStatus struct {
-	MessageIDVal   string
-	AgentTurnIDVal AgentTurnID
-	ParentIDVal    AgentTurnID
-	TimestampVal   time.Time
-	Text           string
+	MessageIDVal         string
+	AgentTurnIDVal       AgentTurnID
+	ParentAgentTurnIDVal AgentTurnID
+	TimestampVal         time.Time
+	Text                 string
 }
 
 func (AssistantStatus) isMessage()                       {}
 func (AssistantStatus) Kind() string                     { return "assistant.status" }
 func (m AssistantStatus) ID() string                     { return m.MessageIDVal }
 func (m AssistantStatus) AgentTurnID() AgentTurnID       { return m.AgentTurnIDVal }
-func (m AssistantStatus) ParentAgentTurnID() AgentTurnID { return m.ParentIDVal }
+func (m AssistantStatus) ParentAgentTurnID() AgentTurnID { return m.ParentAgentTurnIDVal }
 func (m AssistantStatus) Timestamp() time.Time           { return m.TimestampVal }
 func (AssistantStatus) Reliable() bool                   { return false }
 func (AssistantStatus) Priority() MessagePriority        { return PriorityDroppable }
 
 // ToolCalled is published when a tool is invoked during a turn.
 type ToolCalled struct {
-	MessageIDVal   string
-	AgentTurnIDVal AgentTurnID
-	ParentIDVal    AgentTurnID
-	TimestampVal   time.Time
-	ToolName       string
+	MessageIDVal         string
+	AgentTurnIDVal       AgentTurnID
+	ParentAgentTurnIDVal AgentTurnID
+	TimestampVal         time.Time
+	ToolName             string
 }
 
 func (ToolCalled) isMessage()                       {}
 func (ToolCalled) Kind() string                     { return "tool.called" }
 func (m ToolCalled) ID() string                     { return m.MessageIDVal }
 func (m ToolCalled) AgentTurnID() AgentTurnID       { return m.AgentTurnIDVal }
-func (m ToolCalled) ParentAgentTurnID() AgentTurnID { return m.ParentIDVal }
+func (m ToolCalled) ParentAgentTurnID() AgentTurnID { return m.ParentAgentTurnIDVal }
 func (m ToolCalled) Timestamp() time.Time           { return m.TimestampVal }
 func (ToolCalled) Reliable() bool                   { return false }
 func (ToolCalled) Priority() MessagePriority        { return PriorityDroppable }
 
 // ToolResult is published when a tool call completes.
 type ToolResult struct {
-	MessageIDVal   string
-	AgentTurnIDVal AgentTurnID
-	ParentIDVal    AgentTurnID
-	TimestampVal   time.Time
-	ToolName       string
+	MessageIDVal         string
+	AgentTurnIDVal       AgentTurnID
+	ParentAgentTurnIDVal AgentTurnID
+	TimestampVal         time.Time
+	ToolName             string
 }
 
 func (ToolResult) isMessage()                       {}
 func (ToolResult) Kind() string                     { return "tool.result" }
 func (m ToolResult) ID() string                     { return m.MessageIDVal }
 func (m ToolResult) AgentTurnID() AgentTurnID       { return m.AgentTurnIDVal }
-func (m ToolResult) ParentAgentTurnID() AgentTurnID { return m.ParentIDVal }
+func (m ToolResult) ParentAgentTurnID() AgentTurnID { return m.ParentAgentTurnIDVal }
 func (m ToolResult) Timestamp() time.Time           { return m.TimestampVal }
 func (ToolResult) Reliable() bool                   { return false }
 func (ToolResult) Priority() MessagePriority        { return PriorityDroppable }

@@ -20,7 +20,8 @@ import (
 //   - SessionScope is a pointer (nil allowed) + InheritSession flag —
 //     方案 Z (RFC §2.1). nil propagation: nil parent → nil child; non-nil
 //     parent + InheritSession=false → nil child (worker uses ephemeral
-//     session, aligns with delegation.go:977 ephemeral_worker semantics).
+//     session, aligns with the "ephemeral_worker:" AgentSessionID prefix
+//     assigned in delegation.go's RunChildAgent).
 //   - Status state machine: IsValidTransition enforces legal transitions
 //     AND makes terminal states idempotent (RFC Appendix C.5 CRITICAL 2:
 //     at-least-once delivery must be safe to re-apply).
@@ -78,15 +79,18 @@ func (s AgentTurnStatus) IsTerminal() bool {
 	}
 }
 
-// transitionError describes an illegal status transition. Returned by
-// IsValidTransition so callers can distinguish "illegal" from "system error".
-type transitionError struct {
-	from AgentTurnStatus
-	to   AgentTurnStatus
+// TransitionError describes an illegal status transition. Returned by
+// IsValidTransition so callers can distinguish a state-machine rejection
+// (retryable via CAS, loggable) from a system error (e.g. WAL failure).
+// Exported in Phase 1 debt cleanup (review W7): bus/subscribers in Phase 2
+// type-assert on this to decide CAS-retry vs fatal handling.
+type TransitionError struct {
+	From AgentTurnStatus
+	To   AgentTurnStatus
 }
 
-func (e *transitionError) Error() string {
-	return fmt.Sprintf("invalid agent turn transition: %s → %s", e.from, e.to)
+func (e *TransitionError) Error() string {
+	return fmt.Sprintf("invalid agent turn transition: %s → %s", e.From, e.To)
 }
 
 // IsValidTransition returns nil if `from → to` is a legal state-machine
@@ -106,7 +110,7 @@ func IsValidTransition(from, to AgentTurnStatus) error {
 	// No transitions out of a terminal state (other than the idempotent
 	// self-transition handled above).
 	if from.IsTerminal() {
-		return &transitionError{from: from, to: to}
+		return &TransitionError{From: from, To: to}
 	}
 	// Legal non-terminal transitions.
 	switch {
@@ -144,7 +148,7 @@ func IsValidTransition(from, to AgentTurnStatus) error {
 	case from == AgentTurnStatusWaitingHuman && to == AgentTurnStatusTimeout:
 		return nil
 	default:
-		return &transitionError{from: from, to: to}
+		return &TransitionError{From: from, To: to}
 	}
 }
 
@@ -176,7 +180,8 @@ type AgentTurn struct {
 	// InheritSession controls whether a child spawned from this turn
 	// inherits SessionScope. flow→agent defaults true (conversational
 	// continuity); agent→agent defaults false (ephemeral worker, aligns
-	// with delegation.go:977 ephemeral_worker).
+	// with the "ephemeral_worker:" AgentSessionID prefix assigned in
+	// delegation.go's RunChildAgent).
 	InheritSession bool
 	// Payload is the kind-specific content. Sealed: only FlowPayload and
 	// AgentPayload satisfy AgentTurnPayload.
