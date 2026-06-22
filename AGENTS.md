@@ -126,6 +126,9 @@ AGENTS.md §2 "缺口要补不要绕" 的典型场景。
 - **85% 是下限不是目标**——关键契约代码（状态机、sealed 穷尽、Filter 匹配等）
   应追求 100%。
 - 覆盖率不达标 = 该模块未完成，不得提交。
+- **Enforcement**：目前靠作者自测 + reviewer 核查（`go test -coverprofile` + 按语句精算）。
+  CI 自动卡控（coverage gate）是 TODO——在它落地前，PR 描述必须附覆盖率数字，reviewer 必须独立
+  复跑核实，不能只信描述。
 
 ### 5.3 用真 API key 跑 live 测试，不用 mock
 
@@ -151,8 +154,9 @@ AGENTS.md §2 "缺口要补不要绕" 的典型场景。
 - 核实代码契约时，先问"我的核实方法会不会漏"。典型盲区：
   - 只 `grep recordEvent("literal")` → 漏掉 `kind = "..."; recordEvent(kind, ...)` 动态形式（PR #32
     正是栽在这，`agent.delegate.timeout` 被字面量 grep 漏掉）
-  - 核实行号引用时读本地脏工作树 → 行号因未提交改动偏移（PR #30 栽在这，`delegation.go:996`
-    是本地偏移，origin/main 是 977）
+  - 核实行号引用时读本地脏工作树 → 行号因未提交改动偏移（PR #30 栽在这：读本地脏工作树以为
+    `ephemeral_worker:` 赋值在 `delegation.go:996`，实际 origin/main 上在 977）。**引用代码用符号名
+    （函数名 / 字符串字面量），不用行号**——行号会漂移，符号名稳定
   - `grep` 的正则太宽（`[^"]+`）→ 匹配到 grep 自身的注释文本，产出伪命中
 - 反射动作：每次核实后追问一句"我的 grep/读法会不会漏？"，不满意就加一路（如双路 grep：
   literal + dynamic）。
