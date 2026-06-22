@@ -34,11 +34,10 @@ type eventBusImpl struct {
 }
 
 // EventBus is now an interface (message_bus.go). NewEventBus returns the
-// concrete *eventBusImpl so callers that still use the deprecated
-// Publish(RuntimeEvent)/Subscribe(ctx) compile — those methods live on the
-// concrete type, not the interface. A2b (#45) migrates callers to the
-// interface methods and deletes the deprecated ones.
-func NewEventBus() *eventBusImpl {
+// interface so cross-package callers hold the interface type. The interface
+// temporarily includes deprecated Publish(RuntimeEvent)/Subscribe(ctx) so
+// callers compile during the A2a→A2b transition; A2b (#45) removes them.
+func NewEventBus() EventBus {
 	return &eventBusImpl{
 		subs:  make(map[*subscriber]struct{}),
 		esubs: make(map[*eventSubscriber]struct{}),

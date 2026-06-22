@@ -106,7 +106,7 @@ func TestRuntimeEventToEvent_ProgressAndTools(t *testing.T) {
 		wantType string
 	}{
 		{"assistant.status", "runtime.AssistantStatus"},
-		{"assistant.final", "runtime.AssistantStatus"}, // AssistantFinal not yet a type; maps to status-ish
+		{"assistant.final", "runtime.AssistantFinal"}, // now a real type (PR #46 review)
 		{"tool.started", "runtime.ToolCalled"},
 		{"tool.completed", "runtime.ToolResult"},
 		{"tool.finished", "runtime.ToolResult"},
@@ -183,6 +183,88 @@ func TestRuntimeEventToEvent_CarriesIdentity(t *testing.T) {
 	}
 	if !got.Timestamp().Equal(now) {
 		t.Errorf("Timestamp() mismatch")
+	}
+}
+
+func TestRuntimeEventToEvent_RunFinishedUnknownStatusWarns(t *testing.T) {
+	// 🟡 2 (PR #46 review): mapRunFinished default must not silently drop.
+	// Unknown status → ok=false + slog.Warn (not silent, not faking failed).
+	evt := RuntimeEvent{
+		Kind:    "run.finished",
+		ID:      "e1",
+		RunID:   "run_1",
+		Payload: map[string]any{"status": "bogus_status"},
+	}
+	_, ok := runtimeEventToEvent(evt)
+	if ok {
+		t.Error("unknown status should return ok=false, not a fake event")
+	}
+}
+
+func TestRuntimeEventToEvent_AssistantFinalFinalChars(t *testing.T) {
+	// AssistantFinal carries FinalChars from payload.
+	evt := RuntimeEvent{
+		Kind:    "assistant.final",
+		ID:      "e1",
+		RunID:   "run_1",
+		Payload: map[string]any{"final_chars": 42},
+	}
+	got, ok := runtimeEventToEvent(evt)
+	if !ok {
+		t.Fatal("ok=false for assistant.final")
+	}
+	af, isFinal := got.(AssistantFinal)
+	if !isFinal {
+		t.Fatalf("got %T, want AssistantFinal", got)
+	}
+	if af.FinalChars != 42 {
+		t.Errorf("FinalChars = %d, want 42", af.FinalChars)
+	}
+}
+
+func TestIntFieldVariants(t *testing.T) {
+	// intField handles int, int64, float64, missing, wrong-type.
+	cases := []struct {
+		name    string
+		payload map[string]any
+		want    int
+	}{
+		{"int", map[string]any{"n": 7}, 7},
+		{"int64", map[string]any{"n": int64(8)}, 8},
+		{"float64", map[string]any{"n": float64(9.7)}, 9},
+		{"missing", map[string]any{}, 0},
+		{"wrong_type", map[string]any{"n": "not a number"}, 0},
+		{"nil_payload", nil, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			evt := RuntimeEvent{Payload: c.payload}
+			if got := intField(evt, "n"); got != c.want {
+				t.Errorf("intField(%s) = %d, want %d", c.name, got, c.want)
+			}
+		})
+	}
+}
+
+func TestStringFieldVariants(t *testing.T) {
+	// stringField edge cases for coverage.
+	cases := []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{"present", map[string]any{"s": "hi"}, "hi"},
+		{"missing", map[string]any{}, ""},
+		{"wrong_type", map[string]any{"s": 123}, ""},
+		{"nil_payload", nil, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			evt := RuntimeEvent{Payload: c.payload}
+			if got := stringField(evt, "s"); got != c.want {
+				t.Errorf("stringField(%s) = %q, want %q", c.name, got, c.want)
+			}
+		})
 	}
 }
 

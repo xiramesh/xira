@@ -116,6 +116,7 @@ func TestAllEventAccessors(t *testing.T) {
 		HumanRequested{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 		HumanResponded{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 		AssistantStatus{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
+		AssistantFinal{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now, FinalChars: 42},
 		ToolCalled{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 		ToolResult{MessageIDVal: wantID, AgentTurnIDVal: wantTurn, ParentAgentTurnIDVal: wantParent, TimestampVal: now},
 	}
@@ -186,6 +187,7 @@ var (
 	_ Event = HumanRequested{}
 	_ Event = HumanResponded{}
 	_ Event = AssistantStatus{}
+	_ Event = AssistantFinal{}
 	_ Event = ToolCalled{}
 	_ Event = ToolResult{}
 )

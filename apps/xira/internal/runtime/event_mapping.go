@@ -1,6 +1,9 @@
 package runtime
 
-import "time"
+import (
+	"log/slog"
+	"time"
+)
 
 // event_mapping.go: runtimeEventToEvent maps the ~14 signal-kind RuntimeEvents
 // to typed Event structs (A2a #44). Non-signal kinds (observability/audit/
@@ -87,17 +90,15 @@ func runtimeEventToEvent(evt RuntimeEvent) (Event, bool) {
 		}, true
 
 	case "assistant.final":
-		// AssistantFinal is not yet a distinct Event type (Phase 2 TODO).
-		// Map to AssistantStatus with the final text — the forwarder's drain
-		// logic (forwarder.go) recognizes assistant.final by Kind, and A2b
-		// migration will carry that through SubscribeFiltered + rendering.
-		// A dedicated AssistantFinal type will replace this when added.
-		return AssistantStatus{
+		// AssistantFinal is the forwarder's drain control signal (PR #46
+		// review: added as a real Event type, no longer degraded to
+		// AssistantStatus). FinalChars from payload if present.
+		return AssistantFinal{
 			MessageIDVal:         base.id,
 			AgentTurnIDVal:       base.turnID,
 			ParentAgentTurnIDVal: base.parent,
 			TimestampVal:         base.ts,
-			Text:                 evt.Message,
+			FinalChars:           intField(evt, "final_chars"),
 		}, true
 
 	// --- tool lifecycle ---
@@ -169,7 +170,11 @@ func mapRunFinished(evt RuntimeEvent, base eventIdentity) (Event, bool) {
 			Error:                "timeout",
 		}, true
 	default:
-		// Unknown status — treat as non-signal (shouldn't happen, but safe).
+		// Unknown status — data anomaly (run.finished should always have a
+		// known status). Don't silently drop (PR #46 review 🟡 2), but don't
+		// fake a failed event either. Warn + ok=false → slog path.
+		slog.Warn("run.finished with unknown status, not mapped to Event",
+			"status", status, "event_id", evt.ID, "run_id", evt.RunID)
 		return nil, false
 	}
 }
@@ -214,4 +219,26 @@ func stringField(evt RuntimeEvent, key string) string {
 		return ""
 	}
 	return s
+}
+
+// intField extracts an int field from RuntimeEvent.Payload, returning 0 if
+// absent or not an int. Used for numeric payloads like final_chars.
+func intField(evt RuntimeEvent, key string) int {
+	if evt.Payload == nil {
+		return 0
+	}
+	v, ok := evt.Payload[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
 }
