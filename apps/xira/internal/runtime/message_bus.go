@@ -22,45 +22,71 @@ import (
 //     IncludeChildren all hold. IncludeChildren grants a parent visibility
 //     into its direct children's events but NOT siblings (RFC §2.3 scope).
 //
-// Old Kind system (RuntimeEvent.Kind string, events.go) → new Message type
-// mapping. This is the translation table the Phase 2 EventBus adapter will
-// use. Adding a Message type requires updating sealed_exhaustive_test.go's
-// expectedMessageTypes too.
+// Old Kind system → new Message type mapping (Phase 2 EventBus adapter).
 //
-//   OLD Kind                        → NEW Message type        Notes
-//   ──────────────────────────────── ──────────────────────── ───────────────────────────
-//   "inbound" (IM message)          → InboundMessage          IM → system
-//   "outbound" (reply to IM)        → OutboundMessage         system → IM
-//   "run.started"                   → AgentTurnStarted        TurnKind=agent|flow
-//   "run.finished"                  → (none directly)         split: see AgentTurnCompleted/
-//                                                              Failed/Canceled/Timeout below
-//   "run.waiting_human"             → HumanRequested          (waiting_human is the request;
-//                                                              HumanResponded is the resume)
-//   "agent.delegate.allowed"        → AgentTurnStarted        (with TurnKind=agent, parent set)
-//   "agent.delegate.started"        → AgentTurnStarted        (same — one Started per child)
-//   "agent.delegate.completed"      → AgentTurnCompleted
-//   "agent.delegate.failed"         → AgentTurnFailed
-//   "agent.delegate.timeout"        → AgentTurnFailed         (Failed carries Error="timeout";
-//                                                              no separate Timeout message —
-//                                                              the turn Status=timeout is the
-//                                                              distinguishing state)
-//   "assistant.status"              → AssistantStatus
-//   "tool.call"/"tool.executed"     → ToolCalled / ToolResult
+// The old system (RuntimeEvent.Kind string, emitted via recordEvent in
+// service.go / delegation.go / llm_trace.go) has ~47 distinct kinds as of
+// this writing. Only a FEW have a direct new Message type today. This file
+// documents that subset and the fallback contract for the rest.
 //
-// GAP — assistant.final (Phase 2 TODO):
-//   The old "assistant.final" event ("agent's final reply is ready", the
-//   drain signal for the progress forwarder, see assistant_final_emit_test.go)
-//   has NO direct new Message type yet. It is NOT the same as
-//   AgentTurnCompleted — AssistantFinal fires when the reply text is ready,
-//   which can be before the turn fully completes (e.g. HITL exit). Phase 2
+// To re-derive the full kind set, run:
+//   grep -rhoE 'recordEvent\("[^"]+"' apps/xira/internal/runtime/*.go | \
+//     grep -v _test.go | sed 's/recordEvent("//; s/"//' | sort -u
+//
+//   OLD Kind                            → NEW Message type       Notes
+//   ──────────────────────────────────── ─────────────────────── ────────────────────────────
+//   "run.started"                       → AgentTurnStarted       TurnKind=agent (flow run uses its own)
+//   "run.waiting_human"                 → HumanRequested         (parent pauses for HITL)
+//   "human.request.created"             → HumanRequested         (tool-initiated HITL; same semantic)
+//   "human.request.failed"              → (Phase 2: map to a failed-HumanRequested or skip)
+//   "agent.delegate.started"            → AgentTurnStarted       TurnKind=agent, ParentAgentTurnID set
+//   "agent.delegate.allowed"            → (metadata only; no new Message — it's a pre-start policy decision)
+//   "agent.delegate.requested"          → (metadata only; no new Message)
+//   "agent.delegate.completed"          → AgentTurnCompleted
+//   "agent.delegate.result_delivered"   → (metadata only; post-completion delivery to parent)
+//   "agent.delegate.failed"             → AgentTurnFailed        Error carries the reason
+//   "agent.delegate.rejected"           → (Phase 2: policy rejection — log/skip, not a turn-lifecycle event)
+//   "agent.delegate.waiting_human"      → HumanRequested         (child turn paused for HITL)
+//   "assistant.status"                  → AssistantStatus        progress heartbeat
+//   "tool.started"                      → ToolCalled             (NOT "tool.call" — that kind does not exist)
+//   "tool.completed" / "tool.finished"  → ToolResult             (NOT "tool.executed" — that kind does not exist)
+//
+// Kinds with NO direct new Message yet (Phase 2 adapter must decide, MUST
+// NOT silently drop — log/skip decisions go in the adapter, not here):
+//   run.finished (split across Completed/Failed/Canceled per resp.Status),
+//   context.packet.* (context-build progress, ~6 kinds),
+//   llm.* (request traces / usage, ~7 kinds),
+//   session.persisted / session.persist_failed,
+//   usage.ledger_appended / usage.ledger_failed,
+//   model.policy_resolved / model.request / model.suspended,
+//   adk.event / adk.empty_final / adk.session_hydrated / adk.session_hydrate_failed / adk.suspended,
+//   capability_gap,
+//   tool.raw_output_persisted / tool.raw_output_failed / tool.failed,
+//   assistant.final (see below).
+//
+// InboundMessage / OutboundMessage: there is NO old recordEvent kind for
+// these — they are NEW in Phase 1, produced by the channel/IM boundary in
+// Phase 2+ (ilink runner publishes InboundMessage on message receipt;
+// runner publishes OutboundMessage when sending a reply). The old
+// RuntimeEvent path never carried IM-boundary events.
+//
+// GAP — assistant.final (Phase 2 TODO, semantics corrected 2026-06-22):
+//   assistant.final is published in service.go ONLY when
+//     final != "" && resp.Status == "completed"
+//   i.e. it is a WHITELIST on success (status==completed), NOT a blacklist.
+//   It does NOT fire on HITL exit (no final answer ready) and does NOT fire
+//   on failed runs (even if final is non-empty — see the comment at
+//   service.go:600 and TestRunDoesNotEmitAssistantFinalOnFailed: draining on
+//   a failed run would discard the delegate.failed/timeout progress the user
+//   needs). It is the forwarder's DRAIN signal: when it fires, the forwarder
+//   flushes its queue and stops.
+//   It is NOT the same as AgentTurnCompleted (final = reply text ready and
+//   run succeeded; Completed = turn entered terminal success state). Phase 2
 //   must add an AssistantFinal message type (Reliable=false,
 //   Priority=Critical — it drives the forwarder drain and must survive
-//   eviction, but it is not a turn-lifecycle event that drives the state
-//   machine, so it does not need WAL persistence). Adding it updates
+//   eviction, but it is not a turn-lifecycle event driving the state machine,
+//   so it does not need WAL persistence). Adding it updates
 //   expectedMessageTypes in sealed_exhaustive_test.go.
-//   Until then, the EventBus adapter MUST handle "assistant.final"
-//   explicitly (translate to a synthetic AgentTurnCompleted or a dedicated
-//   internal signal) — see Phase 2 EventBus adapter work.
 
 // MessagePriority ranks how aggressively the bus protects a message under
 // load. Ordered: Droppable < Important < Critical (see
