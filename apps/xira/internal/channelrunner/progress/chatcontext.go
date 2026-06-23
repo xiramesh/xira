@@ -256,3 +256,51 @@ func (cc *ChatContext) Stop() {
 		cc.cancel()
 	})
 }
+
+// Reset clears ALL state for a steering retry: progress count, dedup keys,
+// drain flag, AND the async queue (PR #51 round 4 review: without clearing
+// the queue, residual progress from the first run continues delivering
+// during retry, causing dedup gaps and quota miscount).
+//
+// This is a synchronous reset: it stops the sendLoop, drains the queue,
+// clears state, then restarts the sendLoop. Safe to call between runs.
+//
+// PR #51 round 5 CRITICAL 1 fix: must signal queueCh + cancel ctx so
+// sendLoop's select unblocks. Without these, senderWg.Wait() hangs forever
+// (deterministic deadlock, reviewer reproduced 5/5).
+func (cc *ChatContext) Reset() {
+	// Signal sendLoop to exit: cancel ctx (dequeue's ctx.Done branch) AND
+	// signal queueCh (dequeue's queueCh branch). Both are needed because
+	// sendLoop may be blocked on either one.
+	cc.cancel() // unblock dequeue's <-ctx.Done()
+
+	cc.queueMu.Lock()
+	cc.queueClosed = true
+	cc.queue = nil
+	cc.queueMu.Unlock()
+	select {
+	case cc.queueCh <- struct{}{}: // unblock dequeue's <-queueCh
+	default:
+	}
+
+	cc.senderWg.Wait() // now safe — sendLoop WILL exit
+
+	// Clear throttle/dedupe/quota state.
+	cc.mu.Lock()
+	cc.progressSent = 0
+	cc.dedup = make(map[string]struct{})
+	cc.drained = false
+	cc.mu.Unlock()
+
+	// Restart for the next run.
+	cc.queueMu.Lock()
+	cc.queueClosed = false
+	cc.queue = make([]runtime.Event, 0, chatContextQueueCapacity)
+	cc.queueMu.Unlock()
+	cc.stopOnce = sync.Once{} // allow Stop() to work again
+	cc.ctx, cc.cancel = context.WithCancel(context.Background())
+	if cc.sender != nil {
+		cc.senderWg.Add(1)
+		go cc.sendLoop()
+	}
+}

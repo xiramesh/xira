@@ -131,6 +131,19 @@ func (s *Service) generateADK(
 			})
 			return final, toolRecords.snapshot(), nil
 		}
+		// Steering checkpoint (Phase 4, RFC #48 §5): if the user sent a
+		// message while this turn is running, signal the caller to restart
+		// with the interjection. PEEK only (HasPending) — the retry loop
+		// in the channel runner CONSUMES via TryDequeue. Do NOT consume
+		// here (PR #51 review: double-dequeue bug).
+		// Returns ErrSteered sentinel (NOT ctx.Err()) so the retry loop
+		// distinguishes "steered" from "real error".
+		if sink := SteeringSinkFromContext(ctx); sink != nil && sink.HasPending() {
+			recordEvent("adk.steered", "adk.runner", "turn steered by user interjection", map[string]any{
+				"agent_id": profile.ID,
+			})
+			return final, toolRecords.snapshot(), ErrSteered
+		}
 	}
 	if strings.TrimSpace(final) == "" {
 		recordEvent("adk.empty_final", "adk.runner", "final ADK event contained no response text", map[string]any{
@@ -190,7 +203,7 @@ func (s *Service) hydrateADKSession(ctx context.Context, userID, adkSessionID, a
 		// Skip messages from failed runs: their tool events must not leak into
 		// the next run's model context. Audit still keeps them on disk.
 		if msg.Metadata != nil {
-			if rs, _ := msg.Metadata["run_status"].(string); rs == "failed" {
+			if rs, _ := msg.Metadata["run_status"].(string); rs == "failed" || rs == "steered" {
 				continue
 			}
 		}
