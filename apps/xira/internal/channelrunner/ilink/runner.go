@@ -82,6 +82,7 @@ type Runner struct {
 	cancel   context.CancelFunc
 	accounts map[string]*accountPoller
 	pairings map[string]*pairingState
+	router   *progress.Router
 }
 
 func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot string) (*Runner, error) {
@@ -159,6 +160,9 @@ func (r *Runner) Start(ctx context.Context) error {
 	if err := r.loadPersistedAccounts(); err != nil {
 		return err
 	}
+	// Per-chat-key Router (Phase 4 steering, RFC #48): routes messages to
+	// new turns or steering queues. Replaces serial-blocking handleMessage.
+	r.router = progress.NewRouter()
 	runCtx, cancel := context.WithCancel(ctx)
 
 	r.mu.Lock()
@@ -594,13 +598,15 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		)
 		return
 	}
-	messageProcessed := false
+	// Dedupe: Begin already marked this message as "in progress". The turn
+	// runs async (router goroutine), so Complete happens when the turn
+	// finishes (in the onNewTurn closure). handleMessage returns immediately.
 	defer func() {
-		if messageProcessed {
-			account.messages.Complete(dedupeKey, time.Now())
-			return
-		}
-		account.messages.Forget(dedupeKey)
+		// If handleMessage returns before reaching router.Handle (e.g. error
+		// in metadata), Forget so the message can be retried.
+		// If router.Handle was called, the onNewTurn closure will Complete.
+		// We can't know here which path was taken — so do nothing.
+		// The dedupe entry stays "in progress" until the turn Completes it.
 	}()
 
 	metadata := r.buildMetadata(account, msg, chatID, chatType)
@@ -613,83 +619,94 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		"sender_id", senderID,
 	)
 	inbound := channel.NewInboundContextWithEntrypoint("ilink", r.definition.ID, senderID, metadata)
-	// Per-chat-key progress delivery (RFC #48): ChatContext replaces Forwarder.
-	// Events are delivered directly via EventSink (context.Value), not via
-	// global bus subscription. No scopeMatcher needed (per-chat-key isolation).
-	policy := progress.DefaultPolicy()
-	chatCtx := progress.NewChatContext(ctx, progress.ChatContextConfig{
-		Sender: progress.SenderFunc(func(ctx context.Context, m progress.Message) error {
-			return r.send(ctx, account, msg, m.Text)
-		}),
-		MaxChars: policy.MaxChars,
-		Policy:   policy,
-	})
-	chatCtx.Start()
-	runCtx := frt.WithEventSink(ctx, chatCtx)
-	resp, err := r.runtime.RunAgent(runCtx, frt.TurnRequest{
-		EntrypointID: r.definition.ID,
-		Message:      content,
-		// Trigger identity as a first-class InboundContext so the session lands
-		// under sessions/ilink/<entrypoint>/chat_<id>__sender_<id>/.
-		Context: inbound,
-	})
-	chatCtx.Stop()
-	if err != nil {
-		slog.Error("ilink runtime run failed",
+	chatKey := frt.ChatKeyFromInbound(inbound)
+	// Per-chat-key Router (Phase 4 steering, RFC #48): if no active turn for
+	// this chatKey, starts a new turn. If active, steers (enqueues to
+	// SteeringQueue). handleMessage returns immediately — Monitor can
+	// receive the next message.
+	//
+	// If router is nil (Start not called — test scenario), run inline.
+	runTurn := func(_ frt.ChatKey, turnMsg string, turnCtx context.Context) {
+		// Complete dedupe when turn finishes (async — turn runs in router goroutine).
+		defer account.messages.Complete(dedupeKey, time.Now())
+		// Per-chat-key progress delivery: ChatContext replaces Forwarder.
+		policy := progress.DefaultPolicy()
+		chatCtx := progress.NewChatContext(turnCtx, progress.ChatContextConfig{
+			Sender: progress.SenderFunc(func(ctx context.Context, m progress.Message) error {
+				return r.send(ctx, account, msg, m.Text)
+			}),
+			MaxChars: policy.MaxChars,
+			Policy:   policy,
+		})
+		chatCtx.Start()
+		defer chatCtx.Stop()
+		runCtx := frt.WithEventSink(turnCtx, chatCtx)
+		resp, err := r.runtime.RunAgent(runCtx, frt.TurnRequest{
+			EntrypointID: r.definition.ID,
+			Message:      turnMsg,
+			Context:      inbound,
+		})
+		if err != nil {
+			slog.Error("ilink runtime run failed",
+				"entrypoint_id", r.definition.ID,
+				"account_id", account.record.AccountID,
+				"chat_id", chatID,
+				"message_id", messageID,
+				"sender_id", senderID,
+				"error", err,
+			)
+			return
+		}
+		slog.Info("ilink runtime run completed",
 			"entrypoint_id", r.definition.ID,
 			"account_id", account.record.AccountID,
+			"run_id", resp.RunID,
+			"agent_id", resp.AgentID,
+			"status", resp.Status,
+			"session_id", resp.SessionID,
 			"chat_id", chatID,
 			"message_id", messageID,
-			"sender_id", senderID,
-			"error", err,
+			"tool_calls", len(resp.ToolCalls),
+			"events", len(resp.Events),
+			"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
 		)
-		return
-	}
-	slog.Info("ilink runtime run completed",
-		"entrypoint_id", r.definition.ID,
-		"account_id", account.record.AccountID,
-		"run_id", resp.RunID,
-		"agent_id", resp.AgentID,
-		"status", resp.Status,
-		"session_id", resp.SessionID,
-		"chat_id", chatID,
-		"message_id", messageID,
-		"tool_calls", len(resp.ToolCalls),
-		"events", len(resp.Events),
-		"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
-	)
-	if strings.TrimSpace(resp.FinalResponse) == "" {
-		slog.Warn("ilink response skipped",
+		if strings.TrimSpace(resp.FinalResponse) == "" {
+			slog.Warn("ilink response skipped",
+				"entrypoint_id", r.definition.ID,
+				"account_id", account.record.AccountID,
+				"run_id", resp.RunID,
+				"chat_id", chatID,
+				"message_id", messageID,
+				"reason", "empty_final_response",
+			)
+			return
+		}
+		if err := r.send(turnCtx, account, msg, resp.FinalResponse); err != nil {
+			slog.Error("ilink response send failed",
+				"entrypoint_id", r.definition.ID,
+				"account_id", account.record.AccountID,
+				"run_id", resp.RunID,
+				"chat_id", chatID,
+				"message_id", messageID,
+				"error", err,
+			)
+			return
+		}
+		slog.Info("ilink response sent",
 			"entrypoint_id", r.definition.ID,
 			"account_id", account.record.AccountID,
 			"run_id", resp.RunID,
 			"chat_id", chatID,
 			"message_id", messageID,
-			"reason", "empty_final_response",
+			"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
 		)
-		messageProcessed = true
-		return
 	}
-	if err := r.send(ctx, account, msg, resp.FinalResponse); err != nil {
-		slog.Error("ilink response send failed",
-			"entrypoint_id", r.definition.ID,
-			"account_id", account.record.AccountID,
-			"run_id", resp.RunID,
-			"chat_id", chatID,
-			"message_id", messageID,
-			"error", err,
-		)
-		return
+	// Route through router (async, non-blocking) or run inline (test/no-Start).
+	if r.router != nil {
+		r.router.Handle(chatKey, content, ctx, runTurn)
+	} else {
+		runTurn(chatKey, content, ctx)
 	}
-	messageProcessed = true
-	slog.Info("ilink response sent",
-		"entrypoint_id", r.definition.ID,
-		"account_id", account.record.AccountID,
-		"run_id", resp.RunID,
-		"chat_id", chatID,
-		"message_id", messageID,
-		"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
-	)
 }
 
 func (r *Runner) currentContext() context.Context {

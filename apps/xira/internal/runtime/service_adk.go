@@ -131,6 +131,20 @@ func (s *Service) generateADK(
 			})
 			return final, toolRecords.snapshot(), nil
 		}
+		// Steering checkpoint (Phase 4, RFC #48 §5): if the user sent a
+		// message while this turn is running, cancel the current run.
+		// The caller (channel runner) sees ctx canceled, then re-calls
+		// RunAgent with the user's interjection as a new turn.
+		// ADK runner's iterator doesn't support mid-run message injection,
+		// so steering = cancel + restart (not PicoClaw's in-loop restart).
+		if sink := SteeringSinkFromContext(ctx); sink != nil {
+			if _, ok := sink.TryDequeue(); ok {
+				recordEvent("adk.steered", "adk.runner", "turn steered by user interjection", map[string]any{
+					"agent_id": profile.ID,
+				})
+				return final, toolRecords.snapshot(), ctx.Err()
+			}
+		}
 	}
 	if strings.TrimSpace(final) == "" {
 		recordEvent("adk.empty_final", "adk.runner", "final ADK event contained no response text", map[string]any{

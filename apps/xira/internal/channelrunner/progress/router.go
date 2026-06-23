@@ -1,0 +1,108 @@
+package progress
+
+import (
+	"context"
+	"sync"
+
+	"github.com/xiramesh/xira/internal/runtime"
+)
+
+// router.go: Router is the per-chat-key turn router (Phase 4, RFC #48 §2.2).
+// It replaces the serial-blocking Monitor callback:
+//
+//   - Message arrives → Router.Handle(chatKey, msg, ctx)
+//   - No active turn for this chatKey → starts a new turn (OnNewTurn callback)
+//   - Active turn running → message enqueues to SteeringQueue (steering)
+//
+// The Router manages a map[ChatKey]*chatEntry. Each entry has an active flag
+// + a SteeringQueue. When the turn completes, the caller marks it inactive
+// (TurnComplete).
+
+// OnNewTurnFunc is called when a message should start a new turn.
+// The ctx carries SteeringSink for the new turn. The caller (channel
+// runner) wires up its own EventSink + Sender inside this callback.
+type OnNewTurnFunc func(key runtime.ChatKey, msg string, ctx context.Context)
+
+// Router routes incoming messages per ChatKey.
+type Router struct {
+	mu      sync.Mutex
+	entries map[runtime.ChatKey]*chatEntry
+}
+
+type chatEntry struct {
+	mu       sync.Mutex
+	active   bool
+	steering *SteeringQueue
+}
+
+// NewRouter creates a Router.
+func NewRouter() *Router {
+	return &Router{
+		entries: make(map[runtime.ChatKey]*chatEntry),
+	}
+}
+
+// Handle routes a message: starts a new turn (calls onNewTurn) or steers
+// an active one (enqueues to SteeringQueue). The onNewTurn callback is
+// per-call — the caller passes its own closure with per-message context
+// (account, sender, etc.) that Router's lifecycle can't know about.
+func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Context, onNewTurn OnNewTurnFunc) {
+	entry := r.getOrCreate(key)
+	entry.mu.Lock()
+	if entry.active {
+		entry.steering.Enqueue(msg)
+		entry.mu.Unlock()
+		return
+	}
+	entry.active = true
+	sq := entry.steering
+	entry.mu.Unlock()
+
+	// Wire SteeringSink into context for the new turn.
+	ctx := runtime.WithSteeringSink(parentCtx, sq)
+
+	// Run the turn in a goroutine so Handle returns immediately
+	// (non-blocking — Monitor can receive the next message).
+	go func() {
+		defer r.markComplete(key)
+		onNewTurn(key, msg, ctx)
+	}()
+}
+
+// markComplete marks the turn as inactive for this chatKey.
+func (r *Router) markComplete(key runtime.ChatKey) {
+	r.mu.Lock()
+	entry, ok := r.entries[key]
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	entry.mu.Lock()
+	entry.active = false
+	entry.mu.Unlock()
+}
+
+// SteeringQueue returns the SteeringQueue for a chatKey (for testing/inspection).
+func (r *Router) SteeringQueue(key runtime.ChatKey) *SteeringQueue {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[key]
+	if !ok {
+		return nil
+	}
+	return entry.steering
+}
+
+// getOrCreate returns the chatEntry for key, creating if absent.
+func (r *Router) getOrCreate(key runtime.ChatKey) *chatEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[key]
+	if !ok {
+		entry = &chatEntry{
+			steering: NewSteeringQueue(),
+		}
+		r.entries[key] = entry
+	}
+	return entry
+}
