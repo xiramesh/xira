@@ -656,8 +656,10 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 				Message:      currentMsg,
 				Context:      inbound,
 			})
-			// If canceled and SteeringQueue has interjections, retry.
-			if err != nil && errors.Is(err, context.Canceled) {
+			// If steered (checkpoint detected pending interjection), drain
+			// queue and re-run with the interjection. Uses ErrSteered sentinel
+			// (NOT context.Canceled — checkpoint doesn't cancel ctx).
+			if err != nil && errors.Is(err, frt.ErrSteered) {
 				if sink := frt.SteeringSinkFromContext(turnCtx); sink != nil {
 					if steered, ok := sink.TryDequeue(); ok {
 						slog.Info("ilink steering: restarting turn with user interjection",

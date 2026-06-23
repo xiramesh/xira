@@ -54,3 +54,12 @@ func (sq *SteeringQueue) DrainAll() []string {
 	sq.msgs = sq.msgs[:0]
 	return out
 }
+
+// HasPending reports whether the queue has any interjections, WITHOUT
+// consuming them. Used by the steering checkpoint (peek only — the retry
+// loop consumes via TryDequeue).
+func (sq *SteeringQueue) HasPending() bool {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+	return len(sq.msgs) > 0
+}
