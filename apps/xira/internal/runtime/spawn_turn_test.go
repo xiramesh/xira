@@ -545,25 +545,29 @@ func TestSpawnCoreChildContextIsolatedFromParent(t *testing.T) {
 // --- Tool-constraint inheritance (R3: allowlist regression) ---
 
 // TestSpawnCoreChildInheritsParentToolConstraints verifies the spawn child
-// inherits the parent's tool constraints (allowlist + native-tools-disabled),
-// matching delegate_agent. R2's C3 fix used context.Background() to isolate
-// the parent's sinks — which correctly stripped EventSink/SteeringSink but
-// also stripped the tool allowlist, letting a spawned child run under a
-// wider tool set than its parent (a flow-step allowlist bypass). The child
-// ctx must carry the tool constraints on a clean base.
+// inherits the parent's tool constraints (allowlist + inputAllowlist +
+// native-tools-disabled), matching delegate_agent. R2's C3 fix used
+// context.Background() to isolate the parent's sinks — which correctly
+// stripped EventSink/SteeringSink but also stripped the tool allowlist,
+// letting a spawned child run under a wider tool set than its parent (a
+// flow-step allowlist bypass). The child ctx must carry the tool constraints
+// on a clean base.
 func TestSpawnCoreChildInheritsParentToolConstraints(t *testing.T) {
 	target := &mockAssertCleanCtxTarget{done: make(chan struct{})}
 	sink := &mockSpawnSink{}
 
-	// Parent ctx: narrowed tool allowlist + native tools disabled + BOTH
-	// output sinks (the sinks must still be stripped, the tool constraints
-	// must survive).
+	// Parent ctx: narrowed tool allowlist + tool-input allowlist + native
+	// tools disabled + BOTH output sinks (the sinks must still be stripped,
+	// the tool constraints must survive).
 	parent := context.Background()
 	parent = WithSpawnSink(parent, sink)
 	parent = WithEventSink(parent, noopEventSink{})
 	parent = WithSteeringSink(parent, noopSteeringSink{})
 	parent = contextWithRuntimeToolAllowlist(parent, []string{"write_file"})
 	parent = contextWithRuntimeNativeToolsDisabled(parent)
+	parent = contextWithRuntimeToolInputAllowlist(parent, map[string]map[string][]string{
+		"write_file": {"path": {"/safe/dir"}},
+	})
 
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 	spawnCore(parent, spec, target, nil, 30000, nil)
@@ -577,6 +581,14 @@ func TestSpawnCoreChildInheritsParentToolConstraints(t *testing.T) {
 	}
 	if runtimeToolAllowedFromContext(child, "shell") {
 		t.Error("child tool allowlist is open: 'shell' should be rejected (not in parent allowlist)")
+	}
+
+	// Tool-input allowlist is inherited — a disallowed input value is rejected.
+	if err := validateRuntimeToolInputAllowlist(child, "write_file", map[string]any{"path": "/etc/passwd"}); err == nil {
+		t.Error("child lost parent tool-input allowlist: disallowed path was accepted")
+	}
+	if err := validateRuntimeToolInputAllowlist(child, "write_file", map[string]any{"path": "/safe/dir"}); err != nil {
+		t.Errorf("child tool-input allowlist rejected an allowed value: %v", err)
 	}
 
 	// Native-tools-disabled flag is inherited.
