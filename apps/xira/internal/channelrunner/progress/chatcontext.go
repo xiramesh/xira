@@ -264,13 +264,26 @@ func (cc *ChatContext) Stop() {
 //
 // This is a synchronous reset: it stops the sendLoop, drains the queue,
 // clears state, then restarts the sendLoop. Safe to call between runs.
+//
+// PR #51 round 5 CRITICAL 1 fix: must signal queueCh + cancel ctx so
+// sendLoop's select unblocks. Without these, senderWg.Wait() hangs forever
+// (deterministic deadlock, reviewer reproduced 5/5).
 func (cc *ChatContext) Reset() {
-	// Stop existing sendLoop and drain queue.
+	// Signal sendLoop to exit: cancel ctx (dequeue's ctx.Done branch) AND
+	// signal queueCh (dequeue's queueCh branch). Both are needed because
+	// sendLoop may be blocked on either one.
+	cc.cancel() // unblock dequeue's <-ctx.Done()
+
 	cc.queueMu.Lock()
 	cc.queueClosed = true
 	cc.queue = nil
 	cc.queueMu.Unlock()
-	cc.senderWg.Wait()
+	select {
+	case cc.queueCh <- struct{}{}: // unblock dequeue's <-queueCh
+	default:
+	}
+
+	cc.senderWg.Wait() // now safe — sendLoop WILL exit
 
 	// Clear throttle/dedupe/quota state.
 	cc.mu.Lock()
