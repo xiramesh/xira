@@ -3,6 +3,7 @@ package ilink
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -640,12 +641,37 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		})
 		chatCtx.Start()
 		defer chatCtx.Stop()
-		runCtx := frt.WithEventSink(turnCtx, chatCtx)
-		resp, err := r.runtime.RunAgent(runCtx, frt.TurnRequest{
-			EntrypointID: r.definition.ID,
-			Message:      turnMsg,
-			Context:      inbound,
-		})
+
+		// Steering retry loop: if RunAgent is canceled by steering checkpoint
+		// (user interjected mid-turn), drain the SteeringQueue and re-run
+		// with the interjection as the new message. Loop until RunAgent
+		// completes normally or errors non-steering.
+		currentMsg := turnMsg
+		var resp frt.TurnResponse
+		var err error
+		for {
+			runCtx := frt.WithEventSink(turnCtx, chatCtx)
+			resp, err = r.runtime.RunAgent(runCtx, frt.TurnRequest{
+				EntrypointID: r.definition.ID,
+				Message:      currentMsg,
+				Context:      inbound,
+			})
+			// If canceled and SteeringQueue has interjections, retry.
+			if err != nil && errors.Is(err, context.Canceled) {
+				if sink := frt.SteeringSinkFromContext(turnCtx); sink != nil {
+					if steered, ok := sink.TryDequeue(); ok {
+						slog.Info("ilink steering: restarting turn with user interjection",
+							"chat_id", chatID,
+							"message_id", messageID,
+							"interjection_chars", utf8.RuneCountInString(steered),
+						)
+						currentMsg = steered
+						continue // retry with interjection
+					}
+				}
+			}
+			break // normal completion, non-steering error, or no more interjections
+		}
 		if err != nil {
 			slog.Error("ilink runtime run failed",
 				"entrypoint_id", r.definition.ID,
