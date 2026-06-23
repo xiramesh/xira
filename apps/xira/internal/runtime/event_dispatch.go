@@ -6,8 +6,12 @@ import (
 )
 
 // event_dispatch.go: dispatchEvent is the event publication chokepoint.
-// Called from every recordEvent/recordChildEvent closure. Replaces the old
-// `s.events.Publish(evt)` with a three-way dispatch:
+// Called from ALL recordEvent/recordChildEvent closures (6 total: service.go,
+// delegation.go, delegation_resume.go×2, human_request_resume.go×2). Every
+// closure must call this — NOT s.events.Publish directly. Verified by grep:
+// zero residual `s.events.Publish(evt)` calls outside this function + the
+// method definition.
+// Replaces the old `s.events.Publish(evt)` with a three-way dispatch:
 //
 //  1. Map RuntimeEvent → Event (runtimeEventToEvent). If mappable (signal):
 //     a. Deliver to EventSink (per-chat-key, if present in ctx) — direct,

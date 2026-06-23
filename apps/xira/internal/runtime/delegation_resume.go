@@ -90,7 +90,7 @@ func (s *Service) resumeChildDelegationAfterAnswer(ctx context.Context, join *De
 			ToolCallID:  call.ParentToolCallID,
 		})
 		events = append(events, evt)
-		s.events.Publish(evt)
+		dispatchEvent(ctx, s.events, evt)
 	}
 	recordAudit := func(action, target string, allowed bool, reason string, meta map[string]any) {
 		audits = append(audits, AuditEvent{
@@ -308,7 +308,7 @@ func (s *Service) resumeParentAfterDelegationOutput(ctx context.Context, join *D
 	recordEvent := func(kind, source, message string, payload map[string]any) {
 		evt := newRuntimeEvent(base, kind, source, message, payload, nil)
 		events = append(events, evt)
-		s.events.Publish(evt)
+		dispatchEvent(ctx, s.events, evt)
 	}
 	recordAudit := func(action, target string, allowed bool, reason string, meta map[string]any) {
 		audits = append(audits, AuditEvent{
