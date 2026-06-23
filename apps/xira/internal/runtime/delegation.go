@@ -283,6 +283,20 @@ func (s *Service) runtimeADKTools(
 			recordTool(rec)
 			return rec.Output, nil
 		}
+		// Spawn guardrails: mirror delegate_agent's depth/outstanding/parallel
+		// limits so spawn cannot bypass them during grey-rollout. The slot is
+		// reserved here (synchronous) and released by spawnCore's goroutine
+		// (onChildDone) when the child finishes — covering the child's async
+		// lifetime. Rejections are visible to the LLM and reserve no slot.
+		spawnPolicy := profile.NormalizedDelegationPolicy()
+		releaseSlot, effectiveTimeoutMS, guardErr := evaluateSpawnGuardrails(s, spawnPolicy, exec.Base.RunID, exec.Base.DelegationDepth)
+		if guardErr != nil {
+			rec.Output = map[string]any{"status": "rejected", "error": guardErr.Error()}
+			rec.Error = guardErr.Error()
+			rec.EndedAt = time.Now()
+			recordTool(rec)
+			return rec.Output, nil
+		}
 		target := &serviceSpawnTarget{
 			service:     s,
 			caller:      profile,
@@ -290,9 +304,9 @@ func (s *Service) runtimeADKTools(
 			parentRunID: exec.Base.RunID,
 			toolCallID:  callID,
 			parentDepth: exec.Base.DelegationDepth,
-			sessionMode: profile.NormalizedDelegationPolicy().ChildSessionMode,
+			sessionMode: spawnPolicy.ChildSessionMode,
 		}
-		spawned := spawnCore(ctx, spec, target, s.events)
+		spawned := spawnCore(ctx, spec, target, s.events, effectiveTimeoutMS, releaseSlot)
 		rec.Output = spawnTurnOutput(spawned.TurnID, spawned.Status)
 		rec.EndedAt = time.Now()
 		recordTool(rec)

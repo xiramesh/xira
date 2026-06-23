@@ -78,7 +78,7 @@ func TestSpawnCoreReturnsTurnIDImmediately(t *testing.T) {
 		Task:    "do something",
 	}
 
-	result := spawnCore(ctx, spec, target, nil)
+	result := spawnCore(ctx, spec, target, nil, 30000, nil)
 
 	if result.TurnID == "" {
 		t.Error("spawnCore returned empty TurnID")
@@ -103,7 +103,7 @@ func TestSpawnCoreRunsChildInDetachedGoroutine(t *testing.T) {
 	}
 
 	// spawnCore returns immediately — the child runs in a goroutine.
-	_ = spawnCore(ctx, spec, target, nil)
+	_ = spawnCore(ctx, spec, target, nil, 30000, nil)
 
 	// Wait for the child goroutine to call the target.
 	done := make(chan struct{})
@@ -148,7 +148,7 @@ func TestSpawnCoreDeliversResultToSink(t *testing.T) {
 	ctx := WithSpawnSink(context.Background(), sink)
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
-	_ = spawnCore(ctx, spec, target, nil)
+	_ = spawnCore(ctx, spec, target, nil, 30000, nil)
 
 	waitFor(t, 2*time.Second, func() bool {
 		_, ok := sink.latest()
@@ -170,7 +170,7 @@ func TestSpawnCoreChildErrorDeliversError(t *testing.T) {
 	ctx := WithSpawnSink(context.Background(), sink)
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
-	_ = spawnCore(ctx, spec, target, nil)
+	_ = spawnCore(ctx, spec, target, nil, 30000, nil)
 
 	waitFor(t, 2*time.Second, func() bool {
 		_, ok := sink.latest()
@@ -200,7 +200,7 @@ func TestSpawnCoreChildUsesDetachedContext(t *testing.T) {
 	ctx = WithSpawnSink(ctx, sink)
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
-	_ = spawnCore(ctx, spec, target, nil)
+	_ = spawnCore(ctx, spec, target, nil, 30000, nil)
 	cancel() // cancel parent ctx
 
 	// Child goroutine should still run (detached) — it's blocked on `block`,
@@ -237,7 +237,7 @@ func TestSpawnCoreNoSinkDropsResultSafely(t *testing.T) {
 		}
 	}()
 
-	result := spawnCore(ctx, spec, target, nil)
+	result := spawnCore(ctx, spec, target, nil, 30000, nil)
 	if result.Status != "spawned" {
 		t.Errorf("Status = %q, want 'spawned'", result.Status)
 	}
@@ -264,7 +264,7 @@ func TestSpawnCorePublishesCompletionSignalOnBus(t *testing.T) {
 	ctx := WithSpawnSink(context.Background(), sink)
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
-	spawned := spawnCore(ctx, spec, target, bus)
+	spawned := spawnCore(ctx, spec, target, bus, 30000, nil)
 
 	select {
 	case got := <-ch:
@@ -395,6 +395,242 @@ type mockChildTarget struct {
 func (m *mockChildTarget) Run(ctx context.Context, agentID, task string) (DelegateAgentResult, error) {
 	<-m.block
 	return DelegateAgentResult{AgentID: agentID, Status: "completed", Summary: "done"}, nil
+}
+
+// --- Guards: panic / timeout / ctx isolation (C1-C3) ---
+
+// mockPanicTarget panics when Run is called. Used to verify the detached
+// goroutine recovers instead of crashing the process.
+type mockPanicTarget struct {
+	ran chan struct{}
+}
+
+func (m *mockPanicTarget) Run(ctx context.Context, agentID, task string) (DelegateAgentResult, error) {
+	if m.ran != nil {
+		close(m.ran)
+	}
+	panic("child boom")
+}
+
+// noopEventSink is a no-op EventSink used to seed a parent ctx and verify
+// the child does NOT inherit it.
+type noopEventSink struct{}
+
+func (noopEventSink) Deliver(evt Event) {}
+
+// noopSteeringSink is a no-op SteeringSink for the same purpose.
+type noopSteeringSink struct{}
+
+func (noopSteeringSink) Enqueue(string)               {}
+func (noopSteeringSink) TryDequeue() (string, bool)   { return "", false }
+func (noopSteeringSink) DrainAll() []string           { return nil }
+func (noopSteeringSink) HasPending() bool             { return false }
+
+// TestSpawnCoreChildPanicRecovered verifies C1: a panicking child turn is
+// recovered by the detached goroutine. spawnCore must return normally and
+// deliver an error result to the sink — NOT crash the test process.
+func TestSpawnCoreChildPanicRecovered(t *testing.T) {
+	target := &mockPanicTarget{ran: make(chan struct{})}
+	sink := &mockSpawnSink{}
+	ctx := WithSpawnSink(context.Background(), sink)
+	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
+
+	// If the goroutine's panic escapes unrecovered, the test binary crashes
+	// and this assertion is never reached — the failure is the crash itself.
+	result := spawnCore(ctx, spec, target, nil, 30000, nil)
+	if result.Status != "spawned" {
+		t.Fatalf("Status = %q, want 'spawned'", result.Status)
+	}
+
+	// Wait for the goroutine to have run (and panicked).
+	select {
+	case <-target.ran:
+	case <-time.After(2 * time.Second):
+		t.Fatal("child goroutine never ran")
+	}
+
+	// The panic must surface as a child-failed pendingResult in the sink,
+	// not be swallowed.
+	waitFor(t, 2*time.Second, func() bool {
+		_, ok := sink.latest()
+		return ok
+	})
+	got, ok := sink.latest()
+	if !ok {
+		t.Fatal("panic did not produce a pending result in the sink")
+	}
+	if got.Err == "" {
+		t.Error("expected non-empty Err in pending result after child panic")
+	}
+}
+
+// TestSpawnCoreChildTimeoutBoundsGoroutine verifies C2: the child ctx carries
+// a deadline so a hanging child cannot leak the goroutine forever. The mock
+// target blocks until its ctx is canceled, then records ctx.Err().
+type mockCtxInspectTarget struct {
+	gotCtx context.Context
+	done   chan struct{}
+}
+
+func (m *mockCtxInspectTarget) Run(ctx context.Context, agentID, task string) (DelegateAgentResult, error) {
+	m.gotCtx = ctx
+	<-ctx.Done() // block until the spawn timeout cancels the child ctx
+	close(m.done)
+	return DelegateAgentResult{AgentID: agentID, Status: "failed"}, ctx.Err()
+}
+
+func TestSpawnCoreChildTimeoutBoundsGoroutine(t *testing.T) {
+	target := &mockCtxInspectTarget{done: make(chan struct{})}
+	sink := &mockSpawnSink{}
+	ctx := WithSpawnSink(context.Background(), sink)
+	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
+
+	// 50ms timeout — the child must be canceled shortly after.
+	spawnCore(ctx, spec, target, nil, 50, nil)
+
+	select {
+	case <-target.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("child goroutine was not canceled by the spawn timeout within 2s")
+	}
+	if target.gotCtx == nil {
+		t.Fatal("child target was never invoked")
+	}
+	if err := target.gotCtx.Err(); err == nil {
+		t.Error("child ctx was not canceled after timeout")
+	}
+}
+
+// TestSpawnCoreChildContextIsolatedFromParent verifies C3: the child ctx must
+// NOT inherit the parent's EventSink or SteeringSink. WithoutCancel preserved
+// all Values (the bug); the child must start from a clean context so child
+// events don't pollute the parent's IM stream and parent steering doesn't
+// leak into the child.
+type mockAssertCleanCtxTarget struct {
+	gotCtx context.Context
+	done   chan struct{}
+}
+
+func (m *mockAssertCleanCtxTarget) Run(ctx context.Context, agentID, task string) (DelegateAgentResult, error) {
+	m.gotCtx = ctx
+	close(m.done)
+	return DelegateAgentResult{AgentID: agentID, Status: "completed", Summary: "done"}, nil
+}
+
+func TestSpawnCoreChildContextIsolatedFromParent(t *testing.T) {
+	target := &mockAssertCleanCtxTarget{done: make(chan struct{})}
+	sink := &mockSpawnSink{}
+
+	// Parent ctx carries BOTH sinks — exactly what an IM turn ctx carries.
+	parent := context.Background()
+	parent = WithSpawnSink(parent, sink)
+	parent = WithEventSink(parent, noopEventSink{})
+	parent = WithSteeringSink(parent, noopSteeringSink{})
+
+	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
+	spawnCore(parent, spec, target, nil, 30000, nil)
+
+	<-target.done
+	if EventSinkFromContext(target.gotCtx) != nil {
+		t.Error("child ctx inherited parent EventSink — child progress would pollute parent IM stream")
+	}
+	if SteeringSinkFromContext(target.gotCtx) != nil {
+		t.Error("child ctx inherited parent SteeringSink — parent interjections would steer the child")
+	}
+	// SpawnSink is consumed by spawnCore from the parent ctx (for result
+	// delivery), not by the child execution — so the child ctx need not
+	// carry it. We only assert the two output sinks are stripped.
+}
+
+// --- Guardrails: MaxDepth / MaxParallel / slot release ---
+
+// TestSpawnGuardrailsRejectExcessDepth verifies the spawn path enforces
+// policy.MaxDepth just like delegate_agent. With MaxDepth=1 (the normalized
+// default) and parentDepth=1, the requested depth (2) must be rejected.
+func TestSpawnGuardrailsRejectExcessDepth(t *testing.T) {
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
+	caller := agents.BuiltinXiraAssistant() // MaxDepth normalized to 1
+	policy := caller.NormalizedDelegationPolicy()
+
+	_, _, err := evaluateSpawnGuardrails(rt, policy, "parent-run-1", 1)
+	if err == nil {
+		t.Fatal("expected depth rejection, got nil error")
+	}
+	if !strings.Contains(err.Error(), "depth") {
+		t.Errorf("error = %q, want a depth-related rejection", err.Error())
+	}
+}
+
+// TestSpawnGuardrailsRejectExcessParallel verifies the spawn path enforces
+// MaxParallel (active concurrent children) like delegate_agent's
+// reserveChildSlot. Pre-reserve MaxParallel slots, then evaluate must reject.
+func TestSpawnGuardrailsRejectExcessParallel(t *testing.T) {
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
+	caller := agents.BuiltinXiraAssistant() // MaxParallel normalized to 1
+	policy := caller.NormalizedDelegationPolicy()
+	const parentRun = "parent-run-parallel"
+
+	// Saturate the parallel slots (MaxParallel=1 by default).
+	for i := 0; i < policy.MaxParallel; i++ {
+		if _, ok := rt.reserveChildSlot(parentRun, policy.MaxParallel); !ok {
+			t.Fatalf("setup reserve %d failed", i)
+		}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < policy.MaxParallel; i++ {
+			rt.releaseChildSlot(parentRun)
+		}
+	})
+
+	_, _, err := evaluateSpawnGuardrails(rt, policy, parentRun, 0)
+	if err == nil {
+		t.Fatal("expected parallel rejection, got nil error")
+	}
+	if !strings.Contains(err.Error(), "parallel") {
+		t.Errorf("error = %q, want a parallel-related rejection", err.Error())
+	}
+}
+
+// TestSpawnGuardrailsReserveAndRelease verifies that a successful evaluation
+// reserves a slot (visible via activeChildCount) and that calling the returned
+// release callback frees it.
+func TestSpawnGuardrailsReserveAndRelease(t *testing.T) {
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
+	caller := agents.BuiltinXiraAssistant()
+	policy := caller.NormalizedDelegationPolicy()
+	const parentRun = "parent-run-release"
+
+	before := rt.activeChildCount(parentRun)
+	if before != 0 {
+		t.Fatalf("precondition: activeChildCount = %d, want 0", before)
+	}
+
+	release, timeoutMS, err := evaluateSpawnGuardrails(rt, policy, parentRun, 0)
+	if err != nil {
+		t.Fatalf("evaluateSpawnGuardrails failed: %v", err)
+	}
+	if release == nil {
+		t.Fatal("expected non-nil release callback")
+	}
+	if timeoutMS <= 0 {
+		t.Errorf("effectiveTimeoutMS = %d, want > 0", timeoutMS)
+	}
+
+	// Slot is now reserved.
+	if got := rt.activeChildCount(parentRun); got != 1 {
+		t.Errorf("after reserve activeChildCount = %d, want 1", got)
+	}
+
+	// Releasing frees the slot (spawn child completed).
+	release()
+	if got := rt.activeChildCount(parentRun); got != 0 {
+		t.Errorf("after release activeChildCount = %d, want 0", got)
+	}
+
+	// releaseChildSlot is not idempotent — calling release twice would
+	// underflow. evaluateSpawnGuardrails must hand back a callback that is
+	// safe to call exactly once; we do not double-call here (the goroutine
+	// calls it once).
 }
 
 // waitFor polls cond until it returns true or the timeout elapses.
