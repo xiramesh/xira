@@ -78,12 +78,19 @@ per-chat-key 模型下：
 type ChatKey struct {
     Channel  string // "ilink" / "feishu" / "websocket" / "xiragarden"
     ChatID   string // 平台的会话 ID（飞书 chat_id / ilink chat_id / WS 补的 chat_id）
+    SenderID string // 发送者 ID（PR #48 review: 决策已定——含 SenderID）
 }
+
+// ChatKey 的多维度参考 PicoClaw InboundContext 的 dimensions（space/chat/topic/sender），
+// 但不照搬 PicoClaw 的全局 bus 拓扑——PicoClaw 的 MessageBus 是全局单例（NewMessageBus
+// 返回一个 struct 含 5 条全局 channel），恰好是本 RFC 要推翻的模型，不是 per-chat-key 先例。
 ```
 
-- 飞书/ilink：已有 `ChatID`（InboundContext.ChatID），直接用
-- WS channel：**需要补**——当前用 `requestID`，要改成按 `(Channel, ChatID)` 路由
+- 飞书/ilink：已有 `ChatID` + `SenderID`（InboundContext），直接用
+- WS channel：**需要补**——当前用 `requestID`，要改成按 `(Channel, ChatID, SenderID)` 路由
 - 群聊 vs 单聊：ChatType 区分（群聊 ChatID = 群 ID + 可能的 topic）
+- SenderID 的作用：群聊里区分不同发送者——但 steering 仍 route 到"这个 chat 的父 turn"
+  （用户视角是跟会话里的 agent 说话，不是跟某个 sender 的 agent）
 
 ### 2.2 per-chat-key 事件路由
 
@@ -182,19 +189,29 @@ per-chat-key 架构改变了 Phase 2 的核心，但 Phase 3-6 大部分不变�
 
 ### Phase 5（不变）：HITL resume + WAL
 
+### 过渡态：per-chat-key + steering 作为不可分上线单元
+
+per-chat-key 模型下，用户在 turn 跑着时插话**必须能 steering**（否则用户被阻塞，体验比现在更差）。
+因此 **Phase 2（ChatKey 路由）+ Phase 4（checkpoint + steering）是不可分的上线单元**——不能只上
+Phase 2 不上 Phase 4，否则用户插话无处可去。Phase 3（spawn_turn）可以夹在中间或跟 Phase 4 同期。
+
 ### Phase 6（不变）：迁移下线
 
 ---
 
 ## 6. 待决策清单
 
-1. **ChatKey 是否含 SenderID**？群聊里多人发消息，同一个 ChatID 但不同 sender——
-   steering 该 route 到"这个群的 turn"还是"这个 sender 的 turn"？
-2. **调试端点 `/api/v1/events` 怎么办**？per-chat-key 后没有全局 bus——是否保留一个
-   全局汇聚 channel（可选附加）？
+1. ✅ **已定（PR #48 review）**：ChatKey 含 SenderID。参考 PicoClaw InboundContext 的
+   dimensions。群聊里 steering 仍 route 到"这个 chat 的父 turn"（用户视角是跟会话里的 agent 说话）。
+2. **调试端点 `/api/v1/events` 怎么办**？核实（PR #48 review）：零真用户（README 未提，全仓
+   无消费者引用）。砍全局 bus = 砍这个裸调试端点，无兼容成本。可选保留全局汇聚（per-chat-key
+   的 fan-out），但不是架构核心。
 3. **per-chat-key 的 ChatContext 存在哪**？内存 map？要不要持久化（进程重启恢复）？
 4. **子 turn 事件怎么 route 到父的 chat key**？子 turn 知道父的 ChatKey 吗（继承）？
 5. **节流/去重/配额状态放哪**？ChatContext 还是 AgentTurn？
+6. **deprecated 桥接的退役路径**：PR #46 加的 deprecated `Publish(RuntimeEvent)`/
+   `Subscribe(ctx)` 不跟 per-chat-key 一起推翻——它是全局 bus 平滑退役的工具。per-chat-key
+   路由建好后，老消费者逐步切走，最后删全局 bus + deprecated 方法（Phase 6）。
 
 ---
 
