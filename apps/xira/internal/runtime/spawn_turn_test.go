@@ -542,6 +542,58 @@ func TestSpawnCoreChildContextIsolatedFromParent(t *testing.T) {
 	// carry it. We only assert the two output sinks are stripped.
 }
 
+// --- Tool-constraint inheritance (R3: allowlist regression) ---
+
+// TestSpawnCoreChildInheritsParentToolConstraints verifies the spawn child
+// inherits the parent's tool constraints (allowlist + native-tools-disabled),
+// matching delegate_agent. R2's C3 fix used context.Background() to isolate
+// the parent's sinks — which correctly stripped EventSink/SteeringSink but
+// also stripped the tool allowlist, letting a spawned child run under a
+// wider tool set than its parent (a flow-step allowlist bypass). The child
+// ctx must carry the tool constraints on a clean base.
+func TestSpawnCoreChildInheritsParentToolConstraints(t *testing.T) {
+	target := &mockAssertCleanCtxTarget{done: make(chan struct{})}
+	sink := &mockSpawnSink{}
+
+	// Parent ctx: narrowed tool allowlist + native tools disabled + BOTH
+	// output sinks (the sinks must still be stripped, the tool constraints
+	// must survive).
+	parent := context.Background()
+	parent = WithSpawnSink(parent, sink)
+	parent = WithEventSink(parent, noopEventSink{})
+	parent = WithSteeringSink(parent, noopSteeringSink{})
+	parent = contextWithRuntimeToolAllowlist(parent, []string{"write_file"})
+	parent = contextWithRuntimeNativeToolsDisabled(parent)
+
+	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
+	spawnCore(parent, spec, target, nil, 30000, nil)
+
+	<-target.done
+	child := target.gotCtx
+
+	// Tool allowlist is inherited — child is bound to the same narrowed set.
+	if !runtimeToolAllowedFromContext(child, "write_file") {
+		t.Error("child lost parent tool allowlist: 'write_file' should be allowed")
+	}
+	if runtimeToolAllowedFromContext(child, "shell") {
+		t.Error("child tool allowlist is open: 'shell' should be rejected (not in parent allowlist)")
+	}
+
+	// Native-tools-disabled flag is inherited.
+	if !runtimeNativeToolsDisabledFromContext(child) {
+		t.Error("child lost parent native-tools-disabled flag")
+	}
+
+	// Regression guard: sinks must STILL be stripped (C3 must not regress
+	// when we re-attach tool constraints).
+	if EventSinkFromContext(child) != nil {
+		t.Error("re-attaching tool constraints leaked parent EventSink back in")
+	}
+	if SteeringSinkFromContext(child) != nil {
+		t.Error("re-attaching tool constraints leaked parent SteeringSink back in")
+	}
+}
+
 // --- Guardrails: MaxDepth / MaxParallel / slot release ---
 
 // TestSpawnGuardrailsRejectExcessDepth verifies the spawn path enforces

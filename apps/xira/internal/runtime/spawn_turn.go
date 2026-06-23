@@ -102,10 +102,15 @@ func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, si
 	turnID := newSpawnTurnID()
 	sink := SpawnSinkFromContext(parentCtx)
 
-	// Fresh, timeout-bounded context. Background (not WithoutCancel(parentCtx))
-	// strips the parent's EventSink + SteeringSink (C3); the deadline bounds
-	// the goroutine (C2). RunChildAgent rebuilds execution-needed keys itself.
-	childCtx, cancel := context.WithTimeout(context.Background(), time.Duration(effectiveTimeoutMS)*time.Millisecond)
+	// Fresh, timeout-bounded context on a clean base. childToolConstraintCtx
+	// starts from Background (stripping the parent's EventSink + SteeringSink
+	// — C3: those are output channels whose inheritance would pollute the
+	// parent stream / leak steering) and re-attaches only the parent's tool
+	// constraints (allowlist / inputAllowlist / nativeToolsDisabled), so a
+	// spawned child under a narrowed flow-step tool set is bound by the same
+	// set as delegate_agent. The deadline bounds the goroutine (C2).
+	// RunChildAgent rebuilds execution-needed keys itself.
+	childCtx, cancel := context.WithTimeout(childToolConstraintCtx(parentCtx), time.Duration(effectiveTimeoutMS)*time.Millisecond)
 
 	go func() {
 		// onChildDone releases the parallel slot. It must run on every exit
@@ -276,6 +281,36 @@ func spawnTurnOutput(turnID, status string) map[string]any {
 		"agent_turn_id": turnID,
 		"status":        status,
 	}
+}
+
+// childToolConstraintCtx returns a context that carries the parent's tool
+// constraints on a clean context.Background base.
+//
+// Spawn's child must NOT inherit the parent's EventSink / SteeringSink (those
+// are output channels — inheritance would pollute the parent's IM stream with
+// child progress and leak parent interjections into the child). But the child
+// MUST inherit the parent's tool constraints (allowlist / inputAllowlist /
+// nativeToolsDisabled): under a narrowed flow-step tool set, a spawned child
+// is bound by the same set as delegate_agent (whose WithTimeout(ctx, ...)
+// inherits the parent ctx wholesale). Starting from Background strips
+// everything; we then re-attach only these three constraint keys so the
+// child's effective tool set matches its parent's.
+//
+// RunChildAgent re-establishes the remaining execution-needed keys
+// (toolFailureGuard / toolTrace / suspendCollector / runExecution / runDir /
+// LLM instrumentation) itself, so they need not be carried here.
+func childToolConstraintCtx(parent context.Context) context.Context {
+	ctx := context.Background()
+	if allowed, ok := parent.Value(runtimeToolAllowlistContextKey{}).(map[string]struct{}); ok && len(allowed) > 0 {
+		ctx = context.WithValue(ctx, runtimeToolAllowlistContextKey{}, allowed)
+	}
+	if in, ok := parent.Value(runtimeToolInputAllowlistContextKey{}).(map[string]map[string]map[string]struct{}); ok && len(in) > 0 {
+		ctx = context.WithValue(ctx, runtimeToolInputAllowlistContextKey{}, in)
+	}
+	if disabled, ok := parent.Value(runtimeNativeToolsDisabledContextKey{}).(bool); ok && disabled {
+		ctx = context.WithValue(ctx, runtimeNativeToolsDisabledContextKey{}, disabled)
+	}
+	return ctx
 }
 
 // evaluateSpawnGuardrails applies the same delegation guardrails delegate_agent
