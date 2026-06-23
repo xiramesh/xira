@@ -652,7 +652,7 @@ func TestRuntimeOwnedToolsAreInjectedByPolicyOnly(t *testing.T) {
 	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	defaultProfile := agents.BuiltinXiraAssistant()
 	researchProfile := agents.BuiltinResearchAssistant()
-	for _, name := range []string{"delegate_agent", "emit_status"} {
+	for _, name := range []string{"delegate_agent", "spawn_turn", "emit_status"} {
 		if rt.toolRegistry(defaultProfile).Has(name) {
 			t.Fatalf("%s should not be exposed by ordinary tool registry", name)
 		}
@@ -662,7 +662,7 @@ func TestRuntimeOwnedToolsAreInjectedByPolicyOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !adkToolNames(adkTools)["delegate_agent"] || !adkToolNames(adkTools)["emit_status"] {
+	if !adkToolNames(adkTools)["delegate_agent"] || !adkToolNames(adkTools)["spawn_turn"] || !adkToolNames(adkTools)["emit_status"] {
 		t.Fatalf("runtime-owned tools missing for delegated caller: %+v", adkToolNames(adkTools))
 	}
 
@@ -672,6 +672,9 @@ func TestRuntimeOwnedToolsAreInjectedByPolicyOnly(t *testing.T) {
 	}
 	if adkToolNames(adkTools)["delegate_agent"] {
 		t.Fatalf("delegate_agent should not be injected for non-delegating profile: %+v", adkToolNames(adkTools))
+	}
+	if adkToolNames(adkTools)["spawn_turn"] {
+		t.Fatalf("spawn_turn should not be injected for non-delegating profile: %+v", adkToolNames(adkTools))
 	}
 	if !adkToolNames(adkTools)["emit_status"] {
 		t.Fatalf("emit_status should be available as status producer: %+v", adkToolNames(adkTools))
