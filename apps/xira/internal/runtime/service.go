@@ -497,6 +497,13 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	resp.Status = "completed"
 	if resp.Interrupt != nil {
 		resp.Status = StatusWaitingHuman
+	} else if runErr != nil && errors.Is(runErr, ErrSteered) {
+		// Steering is NOT a failure — it's a normal user behavior (user
+		// interjected mid-turn). Don't set Status=failed, don't log ERROR,
+		// don't create EvolutionCandidate. The caller (retry loop) catches
+		// ErrSteered and re-runs. (PR #51 round 4 review: ErrSteered going
+		// through failed path polluted monitoring + evolution samples.)
+		resp.Status = "steered"
 	} else if runErr != nil || resp.VerificationResult.Status != "passed" {
 		resp.Status = "failed"
 		resp.EvolutionCandidate = s.evolution.CandidateForFailure(runID, "run_failure", resp.VerificationResult, runErr, resp.EndedAt)
@@ -522,7 +529,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	if resp.Usage.Cost != nil {
 		logAttrs = append(logAttrs, "cost", *resp.Usage.Cost, "currency", resp.Usage.Currency)
 	}
-	if runErr != nil {
+	if runErr != nil && !errors.Is(runErr, ErrSteered) {
 		logAttrs = append(logAttrs, "error", runErr)
 		slog.Error("agent run finished with error", logAttrs...)
 	} else {

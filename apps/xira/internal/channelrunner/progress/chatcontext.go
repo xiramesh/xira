@@ -257,14 +257,37 @@ func (cc *ChatContext) Stop() {
 	})
 }
 
-// Reset clears the throttle/dedupe/quota state for a steering retry. The
-// previous run's progress count and dedup keys are discarded so the retried
-// run gets a fresh quota (PR #51 review: without this, progress is silently
-// dropped after steer because progressSent already hit MaxMessagesPerTurn).
+// Reset clears ALL state for a steering retry: progress count, dedup keys,
+// drain flag, AND the async queue (PR #51 round 4 review: without clearing
+// the queue, residual progress from the first run continues delivering
+// during retry, causing dedup gaps and quota miscount).
+//
+// This is a synchronous reset: it stops the sendLoop, drains the queue,
+// clears state, then restarts the sendLoop. Safe to call between runs.
 func (cc *ChatContext) Reset() {
+	// Stop existing sendLoop and drain queue.
+	cc.queueMu.Lock()
+	cc.queueClosed = true
+	cc.queue = nil
+	cc.queueMu.Unlock()
+	cc.senderWg.Wait()
+
+	// Clear throttle/dedupe/quota state.
 	cc.mu.Lock()
 	cc.progressSent = 0
 	cc.dedup = make(map[string]struct{})
 	cc.drained = false
 	cc.mu.Unlock()
+
+	// Restart for the next run.
+	cc.queueMu.Lock()
+	cc.queueClosed = false
+	cc.queue = make([]runtime.Event, 0, chatContextQueueCapacity)
+	cc.queueMu.Unlock()
+	cc.stopOnce = sync.Once{} // allow Stop() to work again
+	cc.ctx, cc.cancel = context.WithCancel(context.Background())
+	if cc.sender != nil {
+		cc.senderWg.Add(1)
+		go cc.sendLoop()
+	}
 }
