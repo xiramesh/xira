@@ -56,10 +56,12 @@ type spawnResult struct {
 	Status string // always "spawned"
 }
 
-// pendingResult is what the detached goroutine delivers when the child
-// turn finishes. Consumed by the parent's retry/checkpoint loop (Phase 4
-// steering checkpoint + future wait_turn tool).
-type pendingResult struct {
+// PendingResult is what the detached goroutine delivers when the child
+// turn finishes. Consumed by the parent turn's wait_turn tool (which blocks
+// on the SpawnSink until a given child completes) and, in future, the Phase 4
+// checkpoint drain. Exported so the production SpawnSink implementation
+// (progress.SpawnCollector) can carry it across the package boundary.
+type PendingResult struct {
 	TurnID string
 	Result DelegateAgentResult
 	Err    string
@@ -125,7 +127,7 @@ func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, si
 		// Deferred BEFORE target.Run so a panic still produces a sink/signal
 		// delivery — recovering a panic but dropping the result would be a
 		// new silent-data-loss bug.
-		deliver := func(pr pendingResult) {
+		deliver := func(pr PendingResult) {
 			if sink != nil {
 				sink.Deliver(pr)
 			} else {
@@ -152,7 +154,7 @@ func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, si
 					"turn_id", turnID,
 					"agent_id", spec.AgentID,
 					"panic", r)
-				deliver(pendingResult{
+				deliver(PendingResult{
 					TurnID: turnID,
 					Err:    fmt.Sprintf("child agent panicked: %v", r),
 				})
@@ -161,7 +163,7 @@ func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, si
 
 		result, err := target.Run(childCtx, spec.AgentID, spec.Task)
 
-		pr := pendingResult{TurnID: turnID}
+		pr := PendingResult{TurnID: turnID}
 		if err != nil {
 			pr.Err = errString(err)
 			slog.Warn("spawn_turn child failed",

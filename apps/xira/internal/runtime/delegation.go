@@ -316,6 +316,51 @@ func (s *Service) runtimeADKTools(
 		return nil, err
 	}
 	out = append(out, spawnTool)
+
+	// wait_turn: parent LLM retrieves a spawned child's result (Phase 4,
+	// RFC §2.4 D-3). Coexists with spawn_turn under the same DelegationPolicy
+	// gate — only agents allowed to spawn are allowed to wait on children.
+	waitTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
+		Name:        waitTurnToolName,
+		Description: "Wait for a spawned child agent turn to complete and return its result. Pass the agent_turn_id returned by spawn_turn. Blocks until the child finishes (or times out). Use this when you need the child's output before continuing.",
+		InputSchema: waitTurnInputSchema(),
+		OutputSchema: objectSchema(),
+	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
+		start := time.Now()
+		callID := strings.TrimSpace(toolCtx.FunctionCallID())
+		if callID == "" {
+			callID = uuid.NewString()
+		}
+		spec, cleanInput, unsupported := sanitizeWaitTurnInput(args)
+		rec := ToolCallRecord{
+			ID:        callID,
+			Name:      waitTurnToolName,
+			Input:     cleanInput,
+			StartedAt: start,
+		}
+		if len(unsupported) > 0 {
+			rec.Input["unsupported_input_fields"] = unsupported
+		}
+		if err := spec.Validate(); err != nil {
+			rec.Output = map[string]any{"status": "rejected", "error": err.Error()}
+			rec.Error = err.Error()
+			rec.EndedAt = time.Now()
+			recordTool(rec)
+			return rec.Output, nil
+		}
+		// wait_turn uses the turn's ctx (which carries the SpawnSink injected
+		// by Router), NOT the tool ctx (which ADK cancels after the iterator
+		// step). The SpawnSink/SpawnResultWaiter is looked up from ctx.
+		rec.Output, _ = executeWaitTurn(ctx, spec.ChildTurnID)
+		rec.EndedAt = time.Now()
+		recordTool(rec)
+		return rec.Output, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, waitTool)
+
 	return out, nil
 }
 

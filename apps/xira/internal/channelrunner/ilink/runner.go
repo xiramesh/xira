@@ -666,6 +666,11 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 						// (PR #51 review: without this, progress is silently
 						// dropped because progressSent already hit cap).
 						chatCtx.Reset()
+						// Reset spawn results too: the retried turn must not
+						// surface the previous run's stale child results.
+						if collector := r.router.SpawnCollectorFor(chatKey); collector != nil {
+							collector.Reset()
+						}
 						slog.Info("ilink steering: restarting turn with user interjection",
 							"chat_id", chatID,
 							"message_id", messageID,
