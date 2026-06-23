@@ -613,27 +613,27 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		"sender_id", senderID,
 	)
 	inbound := channel.NewInboundContextWithEntrypoint("ilink", r.definition.ID, senderID, metadata)
-	// Conversation progress forwarder: projects allowlisted runtime facts
-	// (delegate failed/timeout, waiting_human) into this IM chat during the
-	// run, request-bound to this one RunAgent turn. Progress delivery failures
-	// only log a warning; they never fail the run. See
-	// docs/architecture/xira-conversation-progress-feed-v0.zh.md §13.
-	progressForwarder := progress.Start(ctx, progress.Request{
-		EventBus: r.runtime.EventBus(),
-		Inbound:  inbound,
-		Policy:   progress.DefaultPolicy(),
+	// Per-chat-key progress delivery (RFC #48): ChatContext replaces Forwarder.
+	// Events are delivered directly via EventSink (context.Value), not via
+	// global bus subscription. No scopeMatcher needed (per-chat-key isolation).
+	policy := progress.DefaultPolicy()
+	chatCtx := progress.NewChatContext(ctx, progress.ChatContextConfig{
 		Sender: progress.SenderFunc(func(ctx context.Context, m progress.Message) error {
 			return r.send(ctx, account, msg, m.Text)
 		}),
+		MaxChars: policy.MaxChars,
+		Policy:   policy,
 	})
-	resp, err := r.runtime.RunAgent(ctx, frt.TurnRequest{
+	chatCtx.Start()
+	runCtx := frt.WithEventSink(ctx, chatCtx)
+	resp, err := r.runtime.RunAgent(runCtx, frt.TurnRequest{
 		EntrypointID: r.definition.ID,
 		Message:      content,
 		// Trigger identity as a first-class InboundContext so the session lands
 		// under sessions/ilink/<entrypoint>/chat_<id>__sender_<id>/.
 		Context: inbound,
 	})
-	progressForwarder.Stop()
+	chatCtx.Stop()
 	if err != nil {
 		slog.Error("ilink runtime run failed",
 			"entrypoint_id", r.definition.ID,

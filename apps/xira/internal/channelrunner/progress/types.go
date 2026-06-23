@@ -21,9 +21,6 @@ package progress
 import (
 	"context"
 	"time"
-
-	"github.com/xiramesh/xira/internal/channel"
-	"github.com/xiramesh/xira/internal/runtime"
 )
 
 // Message is the channel-neutral progress payload handed to a Sender.
@@ -64,13 +61,4 @@ func DefaultPolicy() Policy {
 		MaxMessagesPerTurn:      2,
 		MaxChars:                180,
 	}
-}
-
-// Request binds one forwarder instance to one inbound request (one RunAgent
-// turn).
-type Request struct {
-	EventBus runtime.EventBus
-	Inbound  channel.InboundContext
-	Policy   Policy
-	Sender   Sender
 }

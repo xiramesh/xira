@@ -222,18 +222,18 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 	inbound := channel.NewInboundContextWithEntrypoint("feishu", r.definition.ID, senderID, metadata)
 	// Conversation progress forwarder: projects allowlisted runtime facts
 	// (delegate failed/timeout, waiting_human) into this IM chat during the
-	// run, request-bound to this one RunAgent turn. Progress delivery failures
-	// only log a warning; they never fail the run. See
-	// docs/architecture/xira-conversation-progress-feed-v0.zh.md §13.
-	progressForwarder := progress.Start(ctx, progress.Request{
-		EventBus: r.runtime.EventBus(),
-		Inbound:  inbound,
-		Policy:   progress.DefaultPolicy(),
+	// Per-chat-key progress delivery (RFC #48): ChatContext replaces Forwarder.
+	policy := progress.DefaultPolicy()
+	chatCtx := progress.NewChatContext(ctx, progress.ChatContextConfig{
 		Sender: progress.SenderFunc(func(ctx context.Context, m progress.Message) error {
 			return r.send(ctx, chatID, m.Text)
 		}),
+		MaxChars: policy.MaxChars,
+		Policy:   policy,
 	})
-	resp, err := r.runtime.RunAgent(ctx, frt.TurnRequest{
+	chatCtx.Start()
+	runCtx := frt.WithEventSink(ctx, chatCtx)
+	resp, err := r.runtime.RunAgent(runCtx, frt.TurnRequest{
 		EntrypointID: r.definition.ID,
 		Message:      content,
 		// Trigger identity travels as a first-class InboundContext: channel +
@@ -241,7 +241,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		// lands under sessions/feishu/<entrypoint>/chat_<id>__sender_<id>/.
 		Context: inbound,
 	})
-	progressForwarder.Stop()
+	chatCtx.Stop()
 	if err != nil {
 		slog.Error("feishu runtime run failed",
 			"entrypoint_id", r.definition.ID,

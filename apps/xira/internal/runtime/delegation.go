@@ -1003,7 +1003,7 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 	recordChildEvent := func(kind, source, message string, payload map[string]any) {
 		evt := newRuntimeEvent(childBase, kind, source, message, payload, correlation)
 		resp.Events = append(resp.Events, evt)
-		s.events.Publish(evt)
+		dispatchEvent(ctx, s.events, evt)
 	}
 	recordChildAudit := func(action, target string, allowed bool, reason string, meta map[string]any) {
 		resp.AuditEvents = append(resp.AuditEvents, AuditEvent{
