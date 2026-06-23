@@ -662,6 +662,10 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 			if err != nil && errors.Is(err, frt.ErrSteered) {
 				if sink := frt.SteeringSinkFromContext(turnCtx); sink != nil {
 					if steered, ok := sink.TryDequeue(); ok {
+						// Reset ChatContext quota/dedup for the retried run
+						// (PR #51 review: without this, progress is silently
+						// dropped because progressSent already hit cap).
+						chatCtx.Reset()
 						slog.Info("ilink steering: restarting turn with user interjection",
 							"chat_id", chatID,
 							"message_id", messageID,

@@ -256,3 +256,15 @@ func (cc *ChatContext) Stop() {
 		cc.cancel()
 	})
 }
+
+// Reset clears the throttle/dedupe/quota state for a steering retry. The
+// previous run's progress count and dedup keys are discarded so the retried
+// run gets a fresh quota (PR #51 review: without this, progress is silently
+// dropped after steer because progressSent already hit MaxMessagesPerTurn).
+func (cc *ChatContext) Reset() {
+	cc.mu.Lock()
+	cc.progressSent = 0
+	cc.dedup = make(map[string]struct{})
+	cc.drained = false
+	cc.mu.Unlock()
+}
