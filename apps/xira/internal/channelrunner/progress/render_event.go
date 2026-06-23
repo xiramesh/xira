@@ -7,6 +7,21 @@ import (
 	"github.com/xiramesh/xira/internal/runtime"
 )
 
+// truncateRunes truncates s to max runes, appending an ellipsis if truncated.
+func truncateRunes(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	out := make([]rune, 0, max)
+	for _, r := range s {
+		if len(out) >= max-1 {
+			break
+		}
+		out = append(out, r)
+	}
+	return string(out) + "…"
+}
+
 // render_event.go: RenderEvent is the Event-typed pure function renderer
 // (per-chat-key RFC #48). It replaces the old ProgressRenderer.Render which
 // consumed RuntimeEvent. This version type-switches on Event sealed structs.
