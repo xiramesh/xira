@@ -89,14 +89,15 @@ type ChatKey struct {
 - 飞书/ilink：已有 `ChatID` + `SenderID`（InboundContext），直接用
 - WS channel：**需要补**——当前用 `requestID`，要改成按 `(Channel, ChatID, SenderID)` 路由
 - 群聊 vs 单聊：ChatType 区分（群聊 ChatID = 群 ID + 可能的 topic）
-- SenderID 的作用：群聊里区分不同发送者——但 steering 仍 route 到"这个 chat 的父 turn"
-  （用户视角是跟会话里的 agent 说话，不是跟某个 sender 的 agent）
+- SenderID 的作用：群聊里区分不同发送者——每个 sender 跟**自己的** agent 说话，
+  steering 永远回到**自己**的父 turn（群里 A/B 各自独立 turn，互不 steering）
 
 ### 2.2 per-chat-key 事件路由
 
 ```
 消息进入 channel
-  → 解析 ChatKey (Channel, ChatID)
+  → @me / 提及过滤（群聊入站门：不 @me 的群消息不进 turn 处理）
+  → 解析 ChatKey (Channel, ChatID, SenderID)
   → 查 ChatKey 是否有活跃父 turn
     ├─ 没有 → 启动 turn
     │         turn 的事件 → route 到这个 ChatKey 的输出 → channel r.send → IM
@@ -105,6 +106,9 @@ type ChatKey struct {
              父 turn 决定：打断/取消子/让子完成后再处理
              （Phase 4 checkpoint + steering queue）
 ```
+
+> **@me 过滤 ≠ SenderID 归属**：两个正交维度。@me 是入站门（群消息是否触发 turn），
+> SenderID 是 turn 归属（触发的 turn 属于哪个 sender）。别把 @me 塞进 ChatKey 维度。
 
 ### 2.3 steering 永远 route 到父 turn
 
@@ -202,7 +206,8 @@ Phase 2 不上 Phase 4，否则用户插话无处可去。Phase 3（spawn_turn�
 ## 6. 待决策清单
 
 1. ✅ **已定（PR #48 review）**：ChatKey 含 SenderID。参考 PicoClaw InboundContext 的
-   dimensions。群聊里 steering 仍 route 到"这个 chat 的父 turn"（用户视角是跟会话里的 agent 说话）。
+   dimensions。每个 sender 跟自己的 agent 说话，steering 永远回到自己的父 turn
+   （群里 A/B 各自独立 turn，互不 steering）。
 2. **调试端点 `/api/v1/events` 怎么办**？核实（PR #48 review）：零真用户（README 未提，全仓
    无消费者引用）。砍全局 bus = 砍这个裸调试端点，无兼容成本。可选保留全局汇聚（per-chat-key
    的 fan-out），但不是架构核心。
