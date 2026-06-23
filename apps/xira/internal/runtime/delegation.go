@@ -242,6 +242,66 @@ func (s *Service) runtimeADKTools(
 		return nil, err
 	}
 	out = append(out, delegateTool)
+
+	// spawn_turn: async counterpart to delegate_agent (Phase 3, RFC §2.4).
+	// Coexists with delegate_agent under the same DelegationPolicy.Enabled
+	// gate for grey-rollout; delegate_agent is removed in Phase 6.
+	spawnTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
+		Name:        spawnTurnToolName,
+		Description: "Asynchronously spawn a child agent turn. Returns immediately with {agent_turn_id, status:spawned}; the child runs in the background. Use this instead of delegate_agent when you do not need to block on the child's result.",
+		InputSchema: spawnTurnInputSchema(),
+		OutputSchema: objectSchema(),
+	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
+		start := time.Now()
+		callID := strings.TrimSpace(toolCtx.FunctionCallID())
+		if callID == "" {
+			callID = uuid.NewString()
+		}
+		spec, cleanInput, unsupported := sanitizeSpawnTurnInput(args)
+		rec := ToolCallRecord{
+			ID:        callID,
+			Name:      spawnTurnToolName,
+			Input:     cleanInput,
+			StartedAt: start,
+		}
+		if len(unsupported) > 0 {
+			rec.Input["unsupported_input_fields"] = unsupported
+		}
+		exec, ok := runExecutionFromContext(ctx)
+		if !ok {
+			err := errors.New("spawn_turn requires runtime execution context")
+			rec.Output = map[string]any{"status": "rejected", "error": err.Error()}
+			rec.Error = err.Error()
+			rec.EndedAt = time.Now()
+			recordTool(rec)
+			return rec.Output, nil
+		}
+		if err := spec.Validate(); err != nil {
+			rec.Output = map[string]any{"status": "rejected", "error": err.Error()}
+			rec.Error = err.Error()
+			rec.EndedAt = time.Now()
+			recordTool(rec)
+			return rec.Output, nil
+		}
+		target := &serviceSpawnTarget{
+			service:     s,
+			caller:      profile,
+			parentBase:  exec.Base,
+			parentRunID: exec.Base.RunID,
+			toolCallID:  callID,
+			parentDepth: exec.Base.DelegationDepth,
+			sessionMode: profile.NormalizedDelegationPolicy().ChildSessionMode,
+		}
+		spawned := spawnCore(ctx, spec, target, s.events)
+		rec.Output = spawnTurnOutput(spawned.TurnID, spawned.Status)
+		rec.EndedAt = time.Now()
+		recordTool(rec)
+		return rec.Output, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, spawnTool)
 	return out, nil
 }
 

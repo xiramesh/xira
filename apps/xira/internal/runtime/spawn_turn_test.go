@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -246,6 +247,39 @@ func TestSpawnCoreNoSinkDropsResultSafely(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 }
 
+func TestSpawnCorePublishesCompletionSignalOnBus(t *testing.T) {
+	// D-3: when a signalBus is provided, spawnCore's detached goroutine
+	// publishes AgentTurnCompleted (no payload) on child completion.
+	bus := NewEventBus()
+	t.Cleanup(bus.Close)
+
+	ch := bus.SubscribeFiltered(Filter{})
+
+	target := &mockSpawnTarget{result: DelegateAgentResult{
+		AgentID: "code-agent",
+		Status:  "completed",
+		Summary: "done",
+	}}
+	sink := &mockSpawnSink{}
+	ctx := WithSpawnSink(context.Background(), sink)
+	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
+
+	spawned := spawnCore(ctx, spec, target, bus)
+
+	select {
+	case got := <-ch:
+		completed, ok := got.(AgentTurnCompleted)
+		if !ok {
+			t.Fatalf("expected AgentTurnCompleted, got %T", got)
+		}
+		if completed.AgentTurnIDVal != AgentTurnID(spawned.TurnID) {
+			t.Errorf("turn id = %q, want %q", completed.AgentTurnIDVal, spawned.TurnID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AgentTurnCompleted signal not published within 2s")
+	}
+}
+
 func TestSpawnSpecValidation(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -266,6 +300,91 @@ func TestSpawnSpecValidation(t *testing.T) {
 				t.Errorf("unexpected validation error: %v", err)
 			}
 		})
+	}
+}
+
+func TestSanitizeSpawnTurnInput(t *testing.T) {
+	// Valid input: only agent_id + task extracted, nothing else.
+	spec, clean, unsupported := sanitizeSpawnTurnInput(map[string]any{
+		"agent_id": "research-assistant",
+		"task":     "find evidence",
+	})
+	if spec.AgentID != "research-assistant" || spec.Task != "find evidence" {
+		t.Errorf("spec = %+v", spec)
+	}
+	if len(unsupported) != 0 {
+		t.Errorf("expected no unsupported fields, got %v", unsupported)
+	}
+	if clean["agent_id"] != "research-assistant" || clean["task"] != "find evidence" {
+		t.Errorf("clean = %+v", clean)
+	}
+
+	// Input with unsupported fields: reported but spec still extracted.
+	spec, clean, unsupported = sanitizeSpawnTurnInput(map[string]any{
+		"agent_id":    "research-assistant",
+		"task":        "find evidence",
+		"max_duration_ms": 5000, // not yet supported in Phase 3
+	})
+	if spec.AgentID != "research-assistant" {
+		t.Errorf("agent extraction broken by extra field: %+v", spec)
+	}
+	if len(unsupported) != 1 || unsupported[0] != "max_duration_ms" {
+		t.Errorf("unsupported = %v, want [max_duration_ms]", unsupported)
+	}
+	if _, ok := clean["max_duration_ms"]; ok {
+		t.Error("unsupported field should not appear in clean input")
+	}
+
+	// Missing fields: spec is zero-value, Validate() catches it.
+	spec, _, _ = sanitizeSpawnTurnInput(map[string]any{"task": "no agent"})
+	if err := spec.Validate(); err == nil {
+		t.Error("expected validation error for missing agent_id")
+	}
+}
+
+func TestSpawnTurnOutputShape(t *testing.T) {
+	out := spawnTurnOutput("spawn:abc123", "spawned")
+	if out["agent_turn_id"] != "spawn:abc123" {
+		t.Errorf("agent_turn_id = %v", out["agent_turn_id"])
+	}
+	if out["status"] != "spawned" {
+		t.Errorf("status = %v", out["status"])
+	}
+}
+
+func TestServiceSpawnTargetRejectsUnknownAgent(t *testing.T) {
+	// serviceSpawnTarget.Run must reject agents that aren't registered,
+	// without invoking RunChildAgent. Covers the first guard branch.
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
+	target := &serviceSpawnTarget{
+		service: rt,
+		caller:  agents.BuiltinXiraAssistant(),
+	}
+	_, err := target.Run(context.Background(), "nonexistent-agent", "task")
+	if err == nil {
+		t.Fatal("expected error for unknown agent")
+	}
+	if !strings.Contains(err.Error(), "not registered") {
+		t.Errorf("error = %q", err.Error())
+	}
+}
+
+func TestServiceSpawnTargetRejectsDisallowedAgent(t *testing.T) {
+	// serviceSpawnTarget.Run must reject agents not in the caller's
+	// delegation allow list, even if the agent is registered. Covers the
+	// policy guard branch. Uses ResearchAssistant as caller (delegation
+	// disabled by default) → reject regardless of target.
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
+	target := &serviceSpawnTarget{
+		service: rt,
+		caller:  agents.BuiltinResearchAssistant(), // delegation disabled
+	}
+	_, err := target.Run(context.Background(), agents.DefaultAgentID, "task")
+	if err == nil {
+		t.Fatal("expected error for disallowed agent")
+	}
+	if !strings.Contains(err.Error(), "not allowed to spawn") {
+		t.Errorf("error = %q", err.Error())
 	}
 }
 
