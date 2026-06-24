@@ -79,13 +79,14 @@ type spawnTarget interface {
 // The detached goroutine uses a fresh context.Background() with a timeout
 // (effectiveTimeoutMS) — NOT the parent ctx. Starting from Background()
 // (instead of WithoutCancel(parentCtx)) is deliberate: WithoutCancel copied
-// all parent Values, leaking the parent's EventBus (child progress polluted
-// the parent IM stream) and SteeringBus (parent interjections steered the
-// child). RunChildAgent re-establishes every execution-needed key itself
-// (toolFailureGuard, toolTrace, suspendCollector, runExecution, runDir, LLM
-// instrumentation), so a clean Background base is safe and isolates the
-// child's output sinks. The timeout bounds the detached goroutine so a
-// hanging child cannot leak forever / bill infinitely (C2).
+// all parent Values, leaking the parent's SteeringBus (parent interjections
+// steered the child). childToolConstraintCtx then selectively re-attaches the
+// parent's tool constraints AND EventBus (RFC #66: child progress routes to
+// the parent's chat key so users see what a spawned child is doing) while
+// keeping the SteeringBus stripped. RunChildAgent re-establishes every
+// execution-needed key itself (toolFailureGuard, toolTrace, suspendCollector,
+// runExecution, runDir, LLM instrumentation). The timeout bounds the detached
+// goroutine so a hanging child cannot leak forever / bill infinitely (C2).
 //
 // The child result goes to SpawnBus (looked up from parentCtx via
 // SpawnBusFromContext). When no sink is present, the result is dropped with
@@ -102,13 +103,14 @@ func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, ef
 	sink := SpawnBusFromContext(parentCtx)
 
 	// Fresh, timeout-bounded context on a clean base. childToolConstraintCtx
-	// starts from Background (stripping the parent's EventBus + SteeringBus
-	// — C3: those are output channels whose inheritance would pollute the
-	// parent stream / leak steering) and re-attaches only the parent's tool
-	// constraints (allowlist / inputAllowlist / nativeToolsDisabled), so a
-	// spawned child under a narrowed flow-step tool set is bound by the same
-	// set as delegate_agent. The deadline bounds the goroutine (C2).
-	// RunChildAgent rebuilds execution-needed keys itself.
+	// starts from Background (stripping the parent's SteeringBus — parent
+	// interjections must not steer a spawned child) and re-attaches the
+	// parent's tool constraints (allowlist / inputAllowlist /
+	// nativeToolsDisabled) AND the parent's EventBus (RFC #66: child progress
+	// routes to the parent's chat key), so a spawned child under a narrowed
+	// flow-step tool set is bound by the same set as delegate_agent. The
+	// deadline bounds the goroutine (C2). RunChildAgent rebuilds
+	// execution-needed keys itself.
 	childCtx, cancel := context.WithTimeout(childToolConstraintCtx(parentCtx), time.Duration(effectiveTimeoutMS)*time.Millisecond)
 
 	go func() {
@@ -280,21 +282,31 @@ func spawnTurnOutput(turnID, status string) map[string]any {
 }
 
 // childToolConstraintCtx returns a context that carries the parent's tool
-// constraints on a clean context.Background base.
+// constraints AND EventBus on a clean context.Background base.
 //
-// Spawn's child must NOT inherit the parent's EventBus / SteeringBus (those
-// are output channels — inheritance would pollute the parent's IM stream with
-// child progress and leak parent interjections into the child). But the child
-// MUST inherit the parent's tool constraints (allowlist / inputAllowlist /
-// nativeToolsDisabled): under a narrowed flow-step tool set, a spawned child
-// is bound by the same set as delegate_agent (whose WithTimeout(ctx, ...)
-// inherits the parent ctx wholesale). Starting from Background strips
-// everything; we then re-attach only these three constraint keys so the
-// child's effective tool set matches its parent's.
+// What the child inherits:
+//   - Tool constraints (allowlist / inputAllowlist / nativeToolsDisabled):
+//     under a narrowed flow-step tool set, a spawned child is bound by the
+//     same set as delegate_agent (whose WithTimeout(ctx, ...) inherits the
+//     parent ctx wholesale).
+//   - EventBus (RFC #66 / spawn-parent-child-comm-rfc §3): the child's
+//     progress events route to the parent's chat key so users can see what a
+//     spawned child is doing. This REVERSES the original C3 decision (full
+//     isolation cut off a legitimate parent-child link — a long-running child
+//     was completely invisible to the user). The child's events carry a
+//     distinct AgentTurnID + ParentAgentTurnID, so the renderer can attribute
+//     and prefix them by source.
 //
-// RunChildAgent re-establishes the remaining execution-needed keys
-// (toolFailureGuard / toolTrace / suspendCollector / runExecution / runDir /
-// LLM instrumentation) itself, so they need not be carried here.
+// What the child does NOT inherit:
+//   - SteeringBus: parent interjections must NOT steer a spawned child (the
+//     child isn't in direct conversation with the user). When the parent is
+//     steered, outstanding children are canceled separately (RFC §5 / #67),
+//     not steered.
+//
+// Starting from Background strips everything; we then re-attach only the
+// keys above. RunChildAgent re-establishes the remaining execution-needed
+// keys (toolFailureGuard / toolTrace / suspendCollector / runExecution /
+// runDir / LLM instrumentation) itself, so they need not be carried here.
 func childToolConstraintCtx(parent context.Context) context.Context {
 	ctx := context.Background()
 	if allowed, ok := parent.Value(runtimeToolAllowlistContextKey{}).(map[string]struct{}); ok && len(allowed) > 0 {
@@ -305,6 +317,11 @@ func childToolConstraintCtx(parent context.Context) context.Context {
 	}
 	if disabled, ok := parent.Value(runtimeNativeToolsDisabledContextKey{}).(bool); ok && disabled {
 		ctx = context.WithValue(ctx, runtimeNativeToolsDisabledContextKey{}, disabled)
+	}
+	// EventBus is inherited so child progress routes to the parent's chat key
+	// (RFC #66). SteeringBus stays stripped — see the doc comment above.
+	if bus := EventBusFromContext(parent); bus != nil {
+		ctx = WithEventBus(ctx, bus)
 	}
 	return ctx
 }

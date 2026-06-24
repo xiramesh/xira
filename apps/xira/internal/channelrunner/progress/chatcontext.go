@@ -215,8 +215,21 @@ func (cc *ChatContext) dispatch(evt runtime.Event) {
 	isWaiting := evt.Kind() == "human.requested"
 
 	// Quota: progress events limited, interaction bypasses.
+	//
+	// KNOWN LIMITATION: the quota is shared across the parent turn AND any
+	// spawned children (child events route to the same ChatContext, RFC #66).
+	// A chatty child can starve the parent's progress within the per-turn cap.
+	// This is acceptable for v0 (the cap is what prevents IM flooding), but a
+	// per-source quota split is a follow-up design. The Debug log below makes
+	// the drop observable for debugging rather than silent (AGENTS.md §2:
+	// silent data loss is the most expensive bug — even intentional drops
+	// deserve a trace).
 	if !isWaiting && cc.policy.MaxMessagesPerTurn > 0 && cc.progressSent >= cc.policy.MaxMessagesPerTurn {
 		cc.mu.Unlock()
+		slog.Debug("chat context progress quota reached; dropping event",
+			"kind", evt.Kind(), "event_id", evt.ID(),
+			"agent_turn", evt.AgentTurnID(), "parent_turn", evt.ParentAgentTurnID(),
+			"sent", cc.progressSent, "cap", cc.policy.MaxMessagesPerTurn)
 		return
 	}
 
