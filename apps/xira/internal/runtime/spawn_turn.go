@@ -324,13 +324,13 @@ func childToolConstraintCtx(parent context.Context) context.Context {
 // (tool-call) side so rejections are visible to the LLM and a slot is never
 // reserved for a rejected spawn.
 //
-// Guards checked (mirroring delegate_agent delegation.go):
+// Guards checked (mirroring the removed delegate_agent path):
 //  1. policy.MaxDepth      — requested depth (parentDepth+1) must not exceed it
-//  2. policy.MaxOutstanding — outstanding children (in-memory + persisted join
-//     state) must be below the cap
+//  2. policy.MaxOutstanding — outstanding children (in-memory active count)
+//     must be below the cap
 //  3. policy.MaxParallel    — reserves an active-child slot; the returned
 //     release callback frees it (spawn holds the slot for the child's async
-//     lifetime, delegate holds it for the tool-call lifetime)
+//     lifetime)
 //
 // On success it returns a release callback (call EXACTLY once when the child
 // goroutine finishes), the effective timeout in ms (policy.DefaultMaxDurationMS

@@ -102,3 +102,12 @@ func TestShortIDIsUniqueish(t *testing.T) {
 		t.Errorf("shortID collision: %q == %q", a, b)
 	}
 }
+
+// NOTE: RunChildAgent's waiting_human branch (child calls human.request →
+// interrupt collector → status flips) is the HITL-sensitive path the Phase 6a
+// resume-rewire depends on. It is NOT covered by a unit test here because
+// reproducing the ADK-loop interrupt timing with a stubbed LLM is flaky (the
+// stub keeps re-issuing the tool call, looping past any ctx deadline). This
+// path is covered by the live HITL tests (deepseek_hitl_live_test.go,
+// XIRA_DEEPSEEK_LIVE=1) which exercise the real LLM + real interrupt timing.
+// Tracking a deterministic unit test for it as a follow-up.
