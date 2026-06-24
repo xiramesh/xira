@@ -7,49 +7,6 @@ import (
 	"github.com/xiramesh/xira/internal/humanrequest"
 )
 
-// TestValidateDelegationJoinPathID covers the required / invalid / valid arms.
-func TestValidateDelegationJoinPathID(t *testing.T) {
-	if err := validateDelegationJoinPathID("", "id"); err == nil {
-		t.Fatalf("empty value should be invalid")
-	}
-	for _, bad := range []string{"a/b", `a\b`, "..", ".hidden", "/abs"} {
-		if err := validateDelegationJoinPathID(bad, "id"); err == nil {
-			t.Fatalf("value %q should be invalid", bad)
-		}
-	}
-	if err := validateDelegationJoinPathID("  ok-id  ", "id"); err != nil {
-		t.Fatalf("valid id should pass, got %v", err)
-	}
-}
-
-// TestFirstHumanRequestID covers first-non-empty / all-empty / empty-slice arms.
-func TestFirstHumanRequestID(t *testing.T) {
-	if got := firstHumanRequestID(nil); got != "" {
-		t.Fatalf("nil slice should be empty")
-	}
-	if got := firstHumanRequestID([]humanrequest.HumanRequest{{ID: ""}, {ID: "  "}}); got != "" {
-		t.Fatalf("all-blank ids should yield empty")
-	}
-	if got := firstHumanRequestID([]humanrequest.HumanRequest{{ID: ""}, {ID: " real "}}); got != "real" {
-		t.Fatalf("first non-blank should win, got %q", got)
-	}
-}
-
-// TestIsTerminalDelegateCallStatus covers terminal vs non-terminal statuses.
-func TestIsTerminalDelegateCallStatus(t *testing.T) {
-	for _, s := range []string{"completed", "failed", "timeout", "canceled", " completed "} {
-		if !isTerminalDelegateCallStatus(s) {
-			t.Errorf("%q should be terminal", s)
-		}
-	}
-	for _, s := range []string{"running", "", "pending"} {
-		if isTerminalDelegateCallStatus(s) {
-			t.Errorf("%q should NOT be terminal", s)
-		}
-	}
-}
-
-// TestAnyString covers string / Stringer / default arms.
 func TestAnyString(t *testing.T) {
 	if got := anyString("  hi  "); got != "hi" {
 		t.Fatalf("string: got %q", got)

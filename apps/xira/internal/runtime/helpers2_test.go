@@ -1,64 +1,21 @@
 package runtime
 
 import (
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/xiramesh/xira/internal/humanrequest"
 )
 
-// TestCleanChildArtifactPath covers the valid / absolute / traversal / empty arms.
-func TestCleanChildArtifactPath(t *testing.T) {
-	cases := []struct {
-		in     string
-		wantOK bool
-		want   string
-	}{
-		{"artifacts/tool-outputs/x.json", true, "artifacts/tool-outputs/x.json"},
-		{"  artifacts/a  ", true, "artifacts/a"},
-		{"", false, ""},
-		{"  ", false, ""},
-		{"/abs/path", false, ""},
-		{"..", false, ""},
-		{"../escape", false, ""},
-		{".", false, ""},
-	}
-	for _, tc := range cases {
-		got, ok := cleanChildArtifactPath(tc.in)
-		if ok != tc.wantOK || (ok && got != tc.want) {
-			t.Errorf("cleanChildArtifactPath(%q) = (%q,%v), want (%q,%v)", tc.in, got, ok, tc.want, tc.wantOK)
-		}
-	}
-}
-
-// TestChildToolArtifactEvidenceRef covers nil-service, missing path, wrong dir,
-// and the happy path (artifact exists on disk).
-func TestChildToolArtifactEvidenceRef(t *testing.T) {
-	svc := newTestService(t, Config{})
-	const runID = "run-art-1"
-	if err := svc.runs.InitRun(runID); err != nil {
-		t.Fatal(err)
-	}
-	// nil service -> "".
-	var nilSvc *Service
-	if got := nilSvc.childToolArtifactEvidenceRef(runID, nil); got != "" {
-		t.Fatalf("nil service should return empty, got %q", got)
-	}
-	// No raw_output_path -> "".
-	if got := svc.childToolArtifactEvidenceRef(runID, map[string]any{}); got != "" {
-		t.Fatalf("missing path should return empty, got %q", got)
-	}
-	// Path outside artifacts/tool-outputs -> "".
-	if got := svc.childToolArtifactEvidenceRef(runID, map[string]any{"raw_output_path": "other/x"}); got != "" {
-		t.Fatalf("wrong dir should return empty, got %q", got)
-	}
-	// Happy path: create the artifact, reference should resolve.
-	rel := "artifacts/tool-outputs/out.txt"
-	abs := svc.runs.RunDir(runID) + "/" + rel
-	writeFile(t, abs, "hello")
-	got := svc.childToolArtifactEvidenceRef(runID, map[string]any{"raw_output_path": rel})
-	want := "artifact://" + runID + "/" + rel
-	if got != want {
-		t.Fatalf("evidence ref = %q, want %q", got, want)
+// deepSeekHTTPResponse builds a fake DeepSeek HTTP response (relocated from
+// delegation_suspend_test.go when delegate_agent was retired, Phase 6a #55).
+func deepSeekHTTPResponse(body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
 	}
 }
 

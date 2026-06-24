@@ -64,7 +64,6 @@ type RunInterrupt struct {
 	HumanRequests      []humanrequest.HumanRequest `json:"human_requests,omitempty" yaml:"human_requests,omitempty"`
 	BlockedBy          []BlockedBy                 `json:"blocked_by,omitempty" yaml:"blocked_by,omitempty"`
 	SuspendedToolCalls []SuspendedToolCall         `json:"suspended_tool_calls,omitempty" yaml:"suspended_tool_calls,omitempty"`
-	DelegationJoinIDs  []string                    `json:"delegation_join_ids,omitempty" yaml:"delegation_join_ids,omitempty"`
 	Metadata           map[string]any              `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 

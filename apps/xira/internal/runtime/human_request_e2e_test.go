@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
@@ -274,107 +273,6 @@ func TestE2ERuntimeToolConfirmationCancel(t *testing.T) {
 	}
 	if confirmedToolCallStatus(run, "write-confirm-call") != "canceled" || run.Metadata["error_type"] != "canceled" {
 		t.Fatalf("canceled run = %+v", run)
-	}
-}
-
-func TestE2EDelegateCompleted(t *testing.T) {
-	var childRequestSeen bool
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		var req deepseek.ChatRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			return nil, err
-		}
-		system := ""
-		if len(req.Messages) > 0 {
-			system = deepseek.ContentText(req.Messages[0].Content)
-		}
-		switch {
-		case lastRole(req.Messages) == "tool":
-			return deepSeekHTTPResponse(deepSeekTextResponse("parent synthesized final from child result")), nil
-		case strings.Contains(system, "Current Xira agent: research-assistant"):
-			childRequestSeen = true
-			return deepSeekHTTPResponse(deepSeekTextResponse(`{"summary":"child completed","evidence_refs":[],"limitations":[],"confidence":"high","followup_needed":false}`)), nil
-		default:
-			return deepSeekHTTPResponse(deepSeekToolCallResponseWithArgs("delegate-e2e-completed", "delegate_agent", map[string]any{
-				"agent_id":               agents.ResearchAssistantAgentID,
-				"task":                   "Complete the delegated task.",
-				"expected_output_schema": delegateResultSchemaV1,
-			})), nil
-		}
-	})}
-	rt := newTestService(t, Config{
-		StateDir:       filepath.Join(t.TempDir(), "state"),
-		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
-	})
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate and complete", Context: channel.NewInboundContext("test", "user-1", nil)})
-	if err != nil {
-		t.Fatalf("RunAgent() error = %v", err)
-	}
-	if !childRequestSeen || resp.Status != "completed" || !strings.Contains(resp.FinalResponse, "parent synthesized final") {
-		t.Fatalf("delegate completed response = %+v child_seen=%v", resp, childRequestSeen)
-	}
-	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Output["status"] != "completed" {
-		t.Fatalf("delegate tool calls = %+v", resp.ToolCalls)
-	}
-}
-
-func TestE2EDelegateChildWaitingApproveResumeParent(t *testing.T) {
-	rt := newDelegationResumeTestService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate child approve e2e", Context: channel.NewInboundContext("test", "user-1", nil)})
-	if err != nil {
-		t.Fatalf("RunAgent() error = %v", err)
-	}
-	if resp.Status != StatusWaitingHuman || len(resp.HumanRequests) != 1 {
-		t.Fatalf("waiting response = %+v", resp)
-	}
-	if _, err := rt.ResolveHumanRequest(context.Background(), resp.HumanRequests[0].ID, humanrequest.ResolveRequest{
-		Kind:  humanrequest.ResponseApprove,
-		Actor: "tester",
-	}); err != nil {
-		t.Fatalf("ResolveHumanRequest approve: %v", err)
-	}
-	parentRun, err := rt.RunStore().Load(resp.RunID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if parentRun.Status != "completed" || !strings.Contains(parentRun.FinalResponse, "parent finalized from delegate output") {
-		t.Fatalf("parent after child approve resume = %+v", parentRun)
-	}
-	if status := delegateToolOutputStatus(parentRun, "delegate-child-wait"); status != "completed" {
-		t.Fatalf("delegate output status = %q, tool calls=%+v", status, parentRun.ToolCalls)
-	}
-}
-
-func TestE2EDelegateChildWaitingCancel(t *testing.T) {
-	rt := newDelegationResumeTestService(t)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "delegate child cancel e2e", Context: channel.NewInboundContext("test", "user-1", nil)})
-	if err != nil {
-		t.Fatalf("RunAgent() error = %v", err)
-	}
-	if _, err := rt.ResolveHumanRequest(context.Background(), resp.HumanRequests[0].ID, humanrequest.ResolveRequest{
-		Kind:    humanrequest.ResponseCancel,
-		Actor:   "tester",
-		Message: "cancel requested",
-	}); err != nil {
-		t.Fatalf("ResolveHumanRequest cancel: %v", err)
-	}
-	parentRun, err := rt.RunStore().Load(resp.RunID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if parentRun.Status != "completed" || delegateToolOutputStatus(parentRun, "delegate-child-wait") != "canceled" {
-		t.Fatalf("parent after child cancel = %+v", parentRun)
-	}
-	join, err := rt.loadDelegationJoinState(resp.RunID, resp.Interrupt.DelegationJoinIDs[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	childRun, err := rt.RunStore().Load(join.Calls[0].ChildRunID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if childRun.Status != "failed" || childRun.Metadata["error_type"] != "canceled" {
-		t.Fatalf("child run after cancel = %+v", childRun)
 	}
 }
 

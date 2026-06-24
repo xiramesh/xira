@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -316,4 +317,31 @@ func replaceRunHumanRequest(run *TurnResponse, req humanrequest.HumanRequest) {
 		}
 	}
 	run.HumanRequests = append(run.HumanRequests, req)
+}
+
+// childResumeMessage builds the resume message for a child run after a human
+// response, appending the human's verdict to the original message. Relocated
+// from delegation_resume.go (Phase 6a, #55).
+func childResumeMessage(original string, req *humanrequest.HumanRequest) string {
+	message := "Human response received."
+	if req != nil && req.Response != nil {
+		switch req.Response.Kind {
+		case humanrequest.ResponseApprove:
+			message = "Human approved the request."
+		case humanrequest.ResponseAnswer:
+			message = "Human response: " + strings.TrimSpace(req.Response.Message)
+		default:
+			message = "Human response: " + string(req.Response.Kind) + " " + strings.TrimSpace(req.Response.Message)
+		}
+	}
+	return strings.TrimSpace(original) + "\n\n" + message
+}
+
+// responseActor returns the actor name for a human response, defaulting to
+// "human". Relocated from delegation_resume.go (Phase 6a, #55).
+func responseActor(response *humanrequest.HumanResponse) string {
+	if response == nil || strings.TrimSpace(response.Actor) == "" {
+		return "human"
+	}
+	return strings.TrimSpace(response.Actor)
 }
