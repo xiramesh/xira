@@ -96,6 +96,24 @@ tasks:
       - go run ./apps/xira/cmd/xira --config {{.CONFIG}} agent run --message "please call command"
       - test -d workspace/.xira/runs
 
+  live-test:
+    desc: Run live LLM tests (requires DEEPSEEK_API_KEY file + sets XIRA_DEEPSEEK_LIVE=1). Fails if any test SKIPs — catches the "静默绿" hazard (AGENTS.md §5.3).
+    cmds:
+      - |
+        if [ ! -f DEEPSEEK_API_KEY ]; then
+          echo "ERROR: DEEPSEEK_API_KEY file not found in repo root (see AGENTS.md §5.3)"; exit 1
+        fi
+        export DEEPSEEK_API_KEY="$(cat DEEPSEEK_API_KEY)"
+        export XIRA_DEEPSEEK_LIVE=1
+        go test ./apps/xira/... -v -count=1 2>&1 | tee /tmp/xira-live-test.log
+        # Check for live-test skips specifically — a live test that SKIPped
+        # under the double-gate (key present + LIVE=1) means it didn't run.
+        # Platform-related skips (case-sensitive FS etc.) are NOT live-gated
+        # and are allowed.
+        if grep -q 'SKIP.*XIRA_DEEPSEEK_LIVE\|SKIP.*DEEPSEEK_API_KEY' /tmp/xira-live-test.log; then
+          echo "ERROR: live tests were SKIPPED despite double-gate being set — they did not run (AGENTS.md §5.3)"; exit 1
+        fi
+
   clean:
     desc: Remove local Xira run/cache output
     cmds:

@@ -161,6 +161,11 @@ AGENTS.md §2 "缺口要补不要绕" 的典型场景。
   export XIRA_DEEPSEEK_LIVE=1
   go test ./... -v 2>&1 | grep -E 'SKIP|FAIL|ok'   # 确认无 SKIP
   ```
+- **推荐用 `task live-test`**（Taskfile 已固化上述流程）：它自动设双门控 env、
+  `tee` 输出到 `/tmp/xira-live-test.log`、**检查有无 live test 的 SKIP 行**
+  （grep `XIRA_DEEPSEEK_LIVE` / `DEEPSEEK_API_KEY` 的 skip——平台相关的合理 skip
+  如大小写不敏感 FS 不算）。有 live skip 则 exit 1。
+  合并 / 发布前必跑，防"静默绿"。
 
 ### 5.4 核实方法本身也要核实（verify the verifier）
 
