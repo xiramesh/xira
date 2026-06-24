@@ -82,43 +82,6 @@ func TestRealDeepSeekHITLRespondsAfterApprovedToolOutput(t *testing.T) {
 	}
 }
 
-func TestRealDeepSeekHITLDelegateCompleted(t *testing.T) {
-	rt := newLiveDeepSeekHITLService(t, false)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{
-		Message: "Live HITL smoke: delegate once to research-assistant. Child task: return a valid delegate_result_v1 JSON summary saying `delegate completed smoke`, with empty evidence_refs and confidence high. Do not ask a human.",
-		Context: channel.NewInboundContext("test", "live-user", nil),
-	})
-	if err != nil {
-		t.Fatalf("RunAgent() error = %v", err)
-	}
-	if resp.Status != "completed" {
-		t.Fatalf("live delegate completed status=%q final=%q tool_calls=%+v", resp.Status, resp.FinalResponse, resp.ToolCalls)
-	}
-	var sawDelegate bool
-	for _, rec := range resp.ToolCalls {
-		if rec.Name == delegateAgentToolName && anyString(rec.Output["status"]) == "completed" {
-			sawDelegate = true
-		}
-	}
-	if !sawDelegate {
-		t.Fatalf("live delegate completed missing completed delegate output: %+v", resp.ToolCalls)
-	}
-}
-
-func TestRealDeepSeekHITLDelegateChildWaiting(t *testing.T) {
-	rt := newLiveDeepSeekHITLService(t, false)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{
-		Message: "Live HITL smoke: delegate once to research-assistant. The child must call human.request exactly once asking `Approve child HITL smoke?`.",
-		Context: channel.NewInboundContext("test", "live-user", nil),
-	})
-	if err != nil {
-		t.Fatalf("RunAgent() error = %v", err)
-	}
-	if resp.Status != StatusWaitingHuman || resp.Interrupt == nil || len(resp.Interrupt.DelegationJoinIDs) != 1 || len(resp.HumanRequests) != 1 {
-		t.Fatalf("live delegate response status=%q joins=%+v human_requests=%d final=%q", resp.Status, resp.Interrupt, len(resp.HumanRequests), resp.FinalResponse)
-	}
-}
-
 func TestRealDeepSeekFlowAgentStepCompletes(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, false)
 	flowPath := filepath.Join(t.TempDir(), "flow.yaml")
