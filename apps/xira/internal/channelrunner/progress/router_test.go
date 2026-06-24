@@ -157,3 +157,136 @@ func TestRouterInjectsSpawnSink(t *testing.T) {
 		t.Error("injected SpawnCollector != Router.SpawnCollectorFor(key) — Reset would miss the active collector")
 	}
 }
+
+// --- Router entry eviction (lazy prune, mirrors dedupe.MessageDeduper) ---
+
+// TestRouterEvictsIdleEntryAfterTTL verifies that an entry idle (no active
+// turn) longer than the TTL is pruned on the next Handle. Before this fix,
+// Router.entries grew unboundedly — one entry per distinct chatKey, each
+// holding a SteeringQueue + SpawnCollector, never freed (flagged by #51/#52/
+// #53 reviews as a cross-cutting follow-up).
+func TestRouterEvictsIdleEntryAfterTTL(t *testing.T) {
+	router := NewRouter()
+	keyA := runtime.ChatKey{Channel: "ilink", ChatID: "cA", SenderID: "u1"}
+
+	// Run a turn for keyA so it gets an entry, then let it complete (entry
+	// becomes idle with idleSince set).
+	runOneTurn(router, keyA)
+
+	// Sanity: entry exists after the turn.
+	if router.SteeringQueue(keyA) == nil {
+		t.Fatal("entry for keyA not present after turn")
+	}
+
+	// Simulate TTL elapsing: prune with a "now" past the TTL.
+	router.prune(time.Now().Add(routerEntryTTL + time.Second))
+
+	if router.SteeringQueue(keyA) != nil {
+		t.Error("idle entry survived prune past TTL — entries leak unboundedly")
+	}
+}
+
+// TestRouterKeepsEntryWithinTTL verifies an idle entry that is still within
+// its TTL is NOT pruned (so an active conversation isn't evicted mid-chat).
+func TestRouterKeepsEntryWithinTTL(t *testing.T) {
+	router := NewRouter()
+	key := runtime.ChatKey{Channel: "ilink", ChatID: "c1", SenderID: "u1"}
+	runOneTurn(router, key)
+
+	// Prune with "now" still within the TTL window.
+	router.prune(time.Now())
+
+	if router.SteeringQueue(key) == nil {
+		t.Error("idle entry was pruned within TTL — active conversation evicted")
+	}
+}
+
+// TestRouterDoesNotEvictActiveEntry verifies an entry whose turn is still
+// running is never pruned, even past the TTL. active==true must win over age.
+func TestRouterDoesNotEvictActiveEntry(t *testing.T) {
+	router := NewRouter()
+	key := runtime.ChatKey{Channel: "ilink", ChatID: "c1", SenderID: "u1"}
+
+	// Start a turn but don't let it complete — keep it active.
+	block := make(chan struct{})
+	router.Handle(key, "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+		<-block // hold the turn open
+	})
+	t.Cleanup(func() { close(block) })
+
+	// Give the goroutine a moment to set active=true.
+	time.Sleep(50 * time.Millisecond)
+
+	// Prune far in the future — the active entry must survive.
+	router.prune(time.Now().Add(2 * routerEntryTTL))
+
+	if router.SteeringQueue(key) == nil {
+		t.Error("active entry was pruned — running turn would lose its steering/spawn sinks")
+	}
+}
+
+// TestRouterHandleTriggersPrune verifies Handle itself triggers pruning
+// (lazy, on-access — the dedupe pattern), so entries are reaped without a
+// background goroutine. A Handle for keyB should evict an expired keyA.
+func TestRouterHandleTriggersPrune(t *testing.T) {
+	router := NewRouter()
+	keyA := runtime.ChatKey{Channel: "ilink", ChatID: "cA", SenderID: "u1"}
+	keyB := runtime.ChatKey{Channel: "ilink", ChatID: "cB", SenderID: "u1"}
+
+	runOneTurn(router, keyA)
+	// Warp keyA's idleSince into the past so it's past TTL on the next Handle.
+	router.warpIdleSince(keyA, time.Now().Add(-(routerEntryTTL + time.Second)))
+
+	// A new turn for a DIFFERENT key should prune keyA as a side effect.
+	runOneTurn(router, keyB)
+
+	if router.SteeringQueue(keyA) != nil {
+		t.Error("expired keyA survived a Handle that should have pruned it (lazy prune not wired)")
+	}
+}
+
+// TestRouterEvictedEntryRebuiltOnNextMessage verifies that after eviction, a
+// new message for the same key rebuilds the entry cleanly (fresh sinks, treated
+// as a new turn — not lost, not steered).
+func TestRouterEvictedEntryRebuiltOnNextMessage(t *testing.T) {
+	router := NewRouter()
+	key := runtime.ChatKey{Channel: "ilink", ChatID: "c1", SenderID: "u1"}
+
+	runOneTurn(router, key)
+	oldQueue := router.SteeringQueue(key)
+	router.prune(time.Now().Add(routerEntryTTL + time.Second))
+	if router.SteeringQueue(key) != nil {
+		t.Fatal("precondition: entry should be evicted")
+	}
+
+	// Next message rebuilds.
+	ran := make(chan string, 1)
+	router.Handle(key, "after-eviction", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+		ran <- msg
+	})
+	select {
+	case msg := <-ran:
+		if msg != "after-eviction" {
+			t.Errorf("rebuilt turn got msg %q, want 'after-eviction'", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("rebuilt entry did not start a new turn")
+	}
+	// Fresh queue (not the evicted one).
+	newQueue := router.SteeringQueue(key)
+	if newQueue == nil || newQueue == oldQueue {
+		t.Error("rebuilt entry did not get a fresh SteeringQueue")
+	}
+}
+
+// runOneTurn is a test helper: runs a Handle that completes immediately,
+// leaving the entry idle (active=false, idleSince set).
+func runOneTurn(router *Router, key runtime.ChatKey) {
+	done := make(chan struct{})
+	router.Handle(key, "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+		close(done)
+	})
+	<-done
+	// markComplete runs in the goroutine's defer; give it a moment.
+	time.Sleep(20 * time.Millisecond)
+}
