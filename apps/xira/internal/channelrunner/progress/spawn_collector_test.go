@@ -7,7 +7,7 @@ import (
 	"github.com/xiramesh/xira/internal/runtime"
 )
 
-// spawn_collector_test.go: tests SpawnCollector — the production SpawnSink.
+// spawn_collector_test.go: tests SpawnCollector — the production SpawnBus.
 // spawn_turn's detached goroutine delivers child-turn results here (Deliver);
 // the parent turn's poll_turn tool queries them non-blockingly (TryResult).
 //
@@ -16,7 +16,7 @@ import (
 // dead end: it blocked the ADK event loop, freezing the steering checkpoint
 // (PR #53 review CRITICAL). poll_turn pulls instead.
 //
-// Implements runtime.SpawnSink (Deliver) + runtime.SpawnSinkPeeper
+// Implements runtime.SpawnBus (Deliver) + runtime.SpawnBusPeeper
 // (TryResult/HasResult/DrainAll).
 
 func TestSpawnCollectorDeliverThenTryResult(t *testing.T) {
@@ -123,6 +123,6 @@ func TestSpawnCollectorConcurrentDeliverAndRead(t *testing.T) {
 	}
 }
 
-// Compile-time: SpawnCollector satisfies SpawnSink + SpawnSinkPeeper.
-var _ runtime.SpawnSink = (*SpawnCollector)(nil)
-var _ runtime.SpawnSinkPeeper = (*SpawnCollector)(nil)
+// Compile-time: SpawnCollector satisfies SpawnBus + SpawnBusPeeper.
+var _ runtime.SpawnBus = (*SpawnCollector)(nil)
+var _ runtime.SpawnBusPeeper = (*SpawnCollector)(nil)

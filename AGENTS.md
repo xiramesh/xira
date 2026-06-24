@@ -11,7 +11,7 @@
 ### 1.1 事件投递:per-chat-key Sink(无全局 bus)
 
 > **Phase 6b(#60)更新**:全局 per-Service `EventBus` 已删除。事件投递走
-> per-chat-key `EventSink`(`ChatContext`),通过 `context.Value` 注入,直接 `Deliver`。
+> per-chat-key `EventBus`(`ChatContext`),通过 `context.Value` 注入,直接 `Deliver`。
 > 原来的 `event_bus.go`(buffer 256 + 优先级驱逐)已删,本节描述的是**新投递模型**。
 
 事件相关代码在 `apps/xira/internal/runtime/`(`dispatchEvent`、`event_dispatch.go`、
@@ -19,16 +19,16 @@
 
 `dispatchEvent(ctx, evt)` 是事件投递的唯一入口(所有 `recordEvent`/`recordChildEvent`
 闭包都调它)。它把 `RuntimeEvent` 映射成 `Event`(sealed),然后投递到 `ctx` 里的
-`EventSink`(per-chat-key 的 `ChatContext`)。**没有全局 bus**——投递是点对点的
+`EventBus`(per-chat-key 的 `ChatContext`)。**没有全局 bus**——投递是点对点的
 (sink 在 ctx 里,`Deliver` 直接调)。
 
-- **per-chat-key 隔离**:每个 turn 的 ctx 携带自己的 `EventSink`(`Router.Handle` 注入)。
+- **per-chat-key 隔离**:每个 turn 的 ctx 携带自己的 `EventBus`(`Router.Handle` 注入)。
   不同 chatKey 的事件天然隔离,不需要 scope 匹配。
-- **sink==nil 时有 Debug log**:`dispatchEvent` 在 `EventSinkFromContext(ctx)` 为 nil 时,
+- **sink==nil 时有 Debug log**:`dispatchEvent` 在 `EventBusFromContext(ctx)` 为 nil 时,
   signal 类事件被丢 + `slog.Debug`(与 non-signal 路径对称)。排障时可查 Debug log 确认丢弃。
 - **历史持久化不受影响**:`recorder.appendEvent` 在闭包里**先于** `dispatchEvent` 执行,
   run history(session hydrate 用)不依赖 sink。
-- **spawn 子结果不走 sink signal**:`spawn_turn` 的子结果走 `SpawnSink`(`SpawnCollector`),
+- **spawn 子结果不走 sink signal**:`spawn_turn` 的子结果走 `SpawnBus`(`SpawnCollector`),
   `poll_turn` 拉取——和事件投递完全独立。
 
 ### 1.2 `assistant.final` —— 已发布，成功时的白名单信号

@@ -667,7 +667,7 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		var resp frt.TurnResponse
 		var err error
 		for {
-			runCtx := frt.WithEventSink(turnCtx, chatCtx)
+			runCtx := frt.WithEventBus(turnCtx, chatCtx)
 			resp, err = r.runtime.RunAgent(runCtx, frt.TurnRequest{
 				EntrypointID: r.definition.ID,
 				Message:      currentMsg,
@@ -677,7 +677,7 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 			// queue and re-run with the interjection. Uses ErrSteered sentinel
 			// (NOT context.Canceled — checkpoint doesn't cancel ctx).
 			if err != nil && errors.Is(err, frt.ErrSteered) {
-				if sink := frt.SteeringSinkFromContext(turnCtx); sink != nil {
+				if sink := frt.SteeringBusFromContext(turnCtx); sink != nil {
 					if steered, ok := sink.TryDequeue(); ok {
 						// Reset ChatContext quota/dedup for the retried run
 						// (PR #51 review: without this, progress is silently

@@ -8,7 +8,7 @@ import (
 )
 
 // steering_checkpoint_test.go: tests the steering checkpoint + ErrSteered
-// sentinel + SteeringSink lifecycle. These are the unit tests that PR #51
+// sentinel + SteeringBus lifecycle. These are the unit tests that PR #51
 // review demanded for 3 rounds — without them, the steering bugs (dead code,
 // double-dequeue) had no guard.
 
@@ -30,13 +30,13 @@ func TestErrSteeredWrapped(t *testing.T) {
 	}
 }
 
-// mockSteeringSink is a test double for SteeringSink.
-type mockSteeringSink struct {
+// mockSteeringBus is a test double for SteeringBus.
+type mockSteeringBus struct {
 	msgs []string
 }
 
-func (m *mockSteeringSink) Enqueue(msg string) { m.msgs = append(m.msgs, msg) }
-func (m *mockSteeringSink) TryDequeue() (string, bool) {
+func (m *mockSteeringBus) Enqueue(msg string) { m.msgs = append(m.msgs, msg) }
+func (m *mockSteeringBus) TryDequeue() (string, bool) {
 	if len(m.msgs) == 0 {
 		return "", false
 	}
@@ -44,21 +44,21 @@ func (m *mockSteeringSink) TryDequeue() (string, bool) {
 	m.msgs = m.msgs[1:]
 	return msg, true
 }
-func (m *mockSteeringSink) DrainAll() []string {
+func (m *mockSteeringBus) DrainAll() []string {
 	out := m.msgs
 	m.msgs = nil
 	return out
 }
-func (m *mockSteeringSink) HasPending() bool { return len(m.msgs) > 0 }
+func (m *mockSteeringBus) HasPending() bool { return len(m.msgs) > 0 }
 
-func TestSteeringSinkContextRoundTrip(t *testing.T) {
-	sink := &mockSteeringSink{}
-	ctx := WithSteeringSink(context.Background(), sink)
+func TestSteeringBusContextRoundTrip(t *testing.T) {
+	sink := &mockSteeringBus{}
+	ctx := WithSteeringBus(context.Background(), sink)
 
 	// Round-trip: put in context, get back.
-	got := SteeringSinkFromContext(ctx)
+	got := SteeringBusFromContext(ctx)
 	if got != sink {
-		t.Fatal("SteeringSinkFromContext did not return the same sink")
+		t.Fatal("SteeringBusFromContext did not return the same sink")
 	}
 
 	// Enqueue + HasPending + TryDequeue lifecycle.
@@ -78,11 +78,11 @@ func TestSteeringSinkContextRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSteeringSinkHasPendingDoesNotConsume(t *testing.T) {
+func TestSteeringBusHasPendingDoesNotConsume(t *testing.T) {
 	// PR #51 bug 2 guard: HasPending must NOT consume (checkpoint peeks,
 	// retry loop consumes). If HasPending consumed, the message would be
 	// lost before retry loop can TryDequeue it.
-	sink := &mockSteeringSink{}
+	sink := &mockSteeringBus{}
 	sink.Enqueue("msg1")
 
 	// HasPending twice — message must still be there.
@@ -100,8 +100,8 @@ func TestSteeringSinkHasPendingDoesNotConsume(t *testing.T) {
 	}
 }
 
-func TestSteeringSinkNilFromEmptyContext(t *testing.T) {
-	if SteeringSinkFromContext(context.Background()) != nil {
+func TestSteeringBusNilFromEmptyContext(t *testing.T) {
+	if SteeringBusFromContext(context.Background()) != nil {
 		t.Error("expected nil from empty context")
 	}
 }
@@ -110,14 +110,14 @@ func TestSteeringSinkNilFromEmptyContext(t *testing.T) {
 // lifecycle without ADK/DeepSeek: checkpoint → ErrSteered → retry →
 // TryDequeue → "restart". This is the end-to-end test the reviewer demanded.
 func TestSteeringLifecycleSimulatesRetryLoop(t *testing.T) {
-	sink := &mockSteeringSink{}
-	ctx := WithSteeringSink(context.Background(), sink)
+	sink := &mockSteeringBus{}
+	ctx := WithSteeringBus(context.Background(), sink)
 
 	// Simulate: turn is running, user interjects.
 	sink.Enqueue("换个思路")
 
 	// Simulate checkpoint: HasPending → return ErrSteered.
-	if !SteeringSinkFromContext(ctx).HasPending() {
+	if !SteeringBusFromContext(ctx).HasPending() {
 		t.Fatal("checkpoint: HasPending should be true")
 	}
 	checkpointErr := ErrSteered
@@ -143,7 +143,7 @@ func TestSteeringLifecycleSimulatesRetryLoop(t *testing.T) {
 // TestSteeringMultipleInterjectionsDrainedInOrder verifies FIFO order when
 // user sends multiple interjections before the checkpoint fires.
 func TestSteeringMultipleInterjectionsDrainedInOrder(t *testing.T) {
-	sink := &mockSteeringSink{}
+	sink := &mockSteeringBus{}
 	sink.Enqueue("first")
 	sink.Enqueue("second")
 	sink.Enqueue("third")
@@ -165,11 +165,11 @@ func TestSteeringMultipleInterjectionsDrainedInOrder(t *testing.T) {
 	}
 }
 
-// TestSteeringSinkContextCanceledNotTreatedAsSteered verifies that a
+// TestSteeringBusContextCanceledNotTreatedAsSteered verifies that a
 // genuine context.Canceled (not steering) is NOT caught by the retry loop.
 // This was bug 1: the old code checked context.Canceled, which conflated
 // steering with real cancellation.
-func TestSteeringSinkContextCanceledNotTreatedAsSteered(t *testing.T) {
+func TestSteeringBusContextCanceledNotTreatedAsSteered(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -183,8 +183,8 @@ func TestSteeringSinkContextCanceledNotTreatedAsSteered(t *testing.T) {
 	}
 }
 
-// Compile-time: mockSteeringSink satisfies SteeringSink.
-var _ SteeringSink = (*mockSteeringSink)(nil)
+// Compile-time: mockSteeringBus satisfies SteeringBus.
+var _ SteeringBus = (*mockSteeringBus)(nil)
 
 // Ensure the test doesn't hang if something goes wrong.
 var _ = time.After

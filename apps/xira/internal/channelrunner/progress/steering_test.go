@@ -16,8 +16,8 @@ import (
 // between iterations (checkpoint). If non-empty, the current run is
 // canceled and restarted with the user's interjection.
 //
-// SteeringQueue implements runtime.SteeringSink (context.Value, same
-// pattern as EventSink).
+// SteeringQueue implements runtime.SteeringBus (context.Value, same
+// pattern as EventBus).
 
 func TestSteeringQueueEmpty(t *testing.T) {
 	sq := NewSteeringQueue()
@@ -85,25 +85,25 @@ func TestSteeringQueueConcurrentSafe(t *testing.T) {
 	}
 }
 
-func TestSteeringQueueImplementsSteeringSink(t *testing.T) {
-	// Compile-time: SteeringQueue satisfies runtime.SteeringSink.
-	var _ runtime.SteeringSink = NewSteeringQueue()
+func TestSteeringQueueImplementsSteeringBus(t *testing.T) {
+	// Compile-time: SteeringQueue satisfies runtime.SteeringBus.
+	var _ runtime.SteeringBus = NewSteeringQueue()
 }
 
 func TestSteeringQueueWithContext(t *testing.T) {
-	// WithSteeringSink / SteeringSinkFromContext round-trip.
+	// WithSteeringBus / SteeringBusFromContext round-trip.
 	sq := NewSteeringQueue()
-	ctx := runtime.WithSteeringSink(context.Background(), sq)
-	got := runtime.SteeringSinkFromContext(ctx)
+	ctx := runtime.WithSteeringBus(context.Background(), sq)
+	got := runtime.SteeringBusFromContext(ctx)
 	if got != sq {
-		t.Error("SteeringSinkFromContext did not return the same sink")
+		t.Error("SteeringBusFromContext did not return the same sink")
 	}
 }
 
 func TestSteeringQueueNilSinkFromContext(t *testing.T) {
 	// No sink in context → nil.
-	got := runtime.SteeringSinkFromContext(context.Background())
+	got := runtime.SteeringBusFromContext(context.Background())
 	if got != nil {
-		t.Error("expected nil SteeringSink from empty context")
+		t.Error("expected nil SteeringBus from empty context")
 	}
 }

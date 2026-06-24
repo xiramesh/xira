@@ -10,7 +10,7 @@ import "sync"
 // If non-empty, the current run is canceled and restarted with the
 // user's interjection as a new message.
 //
-// Implements runtime.SteeringSink.
+// Implements runtime.SteeringBus.
 
 // SteeringQueue is a thread-safe FIFO queue of user interjections.
 type SteeringQueue struct {

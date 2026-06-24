@@ -21,7 +21,7 @@ import (
 // goroutine". The parent LLM sees {"agent_turn_id":"...", "status":"spawned"}
 // as the tool result and continues reasoning.
 //
-// D-3 (RFC): spawn result payload goes via SpawnSink (polled by poll_turn).
+// D-3 (RFC): spawn result payload goes via SpawnBus (polled by poll_turn).
 // The old AgentTurnCompleted EventBus signal was removed (Phase 6b, #56).
 //
 // The ADK tool wrapper (registered in runtimeADKTools via functiontool.New)
@@ -58,8 +58,8 @@ type spawnResult struct {
 
 // PendingResult is what the detached goroutine delivers when the child
 // turn finishes. Consumed by the parent turn's wait_turn tool (which blocks
-// on the SpawnSink until a given child completes) and, in future, the Phase 4
-// checkpoint drain. Exported so the production SpawnSink implementation
+// on the SpawnBus until a given child completes) and, in future, the Phase 4
+// checkpoint drain. Exported so the production SpawnBus implementation
 // (progress.SpawnCollector) can carry it across the package boundary.
 type PendingResult struct {
 	TurnID string
@@ -79,17 +79,17 @@ type spawnTarget interface {
 // The detached goroutine uses a fresh context.Background() with a timeout
 // (effectiveTimeoutMS) — NOT the parent ctx. Starting from Background()
 // (instead of WithoutCancel(parentCtx)) is deliberate: WithoutCancel copied
-// all parent Values, leaking the parent's EventSink (child progress polluted
-// the parent IM stream) and SteeringSink (parent interjections steered the
+// all parent Values, leaking the parent's EventBus (child progress polluted
+// the parent IM stream) and SteeringBus (parent interjections steered the
 // child). RunChildAgent re-establishes every execution-needed key itself
 // (toolFailureGuard, toolTrace, suspendCollector, runExecution, runDir, LLM
 // instrumentation), so a clean Background base is safe and isolates the
 // child's output sinks. The timeout bounds the detached goroutine so a
 // hanging child cannot leak forever / bill infinitely (C2).
 //
-// The child result goes to SpawnSink (looked up from parentCtx via
-// SpawnSinkFromContext). When no sink is present, the result is dropped with
-// a Warn log. poll_turn pulls results from the SpawnSink.
+// The child result goes to SpawnBus (looked up from parentCtx via
+// SpawnBusFromContext). When no sink is present, the result is dropped with
+// a Warn log. poll_turn pulls results from the SpawnBus.
 //
 // onChildDone is invoked exactly once when the goroutine finishes (success,
 // failure, OR panic) — used to release the parallel slot reserved by
@@ -99,10 +99,10 @@ type spawnTarget interface {
 // evaluateSpawnGuardrails). Must be > 0.
 func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, effectiveTimeoutMS int, onChildDone func()) spawnResult {
 	turnID := newSpawnTurnID()
-	sink := SpawnSinkFromContext(parentCtx)
+	sink := SpawnBusFromContext(parentCtx)
 
 	// Fresh, timeout-bounded context on a clean base. childToolConstraintCtx
-	// starts from Background (stripping the parent's EventSink + SteeringSink
+	// starts from Background (stripping the parent's EventBus + SteeringBus
 	// — C3: those are output channels whose inheritance would pollute the
 	// parent stream / leak steering) and re-attaches only the parent's tool
 	// constraints (allowlist / inputAllowlist / nativeToolsDisabled), so a
@@ -120,17 +120,17 @@ func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, ef
 		}
 		defer cancel()
 
-		// Deliver the (possibly panic-derived) pending result to the SpawnSink.
+		// Deliver the (possibly panic-derived) pending result to the SpawnBus.
 		// Deferred BEFORE target.Run so a panic still produces a sink delivery —
 		// recovering a panic but dropping the result would be a silent-data-loss
 		// bug. (The old AgentTurnCompleted EventBus signal was removed in Phase 6b
 		// #56 — it was fire-and-nobody-listens; poll_turn pulls results directly
-		// from the SpawnSink.)
+		// from the SpawnBus.)
 		deliver := func(pr PendingResult) {
 			if sink != nil {
 				sink.Deliver(pr)
 			} else {
-				slog.Warn("spawn_turn child result dropped (no SpawnSink in context)",
+				slog.Warn("spawn_turn child result dropped (no SpawnBus in context)",
 					"turn_id", turnID,
 					"agent_id", spec.AgentID)
 			}
@@ -223,7 +223,7 @@ func sanitizeSpawnTurnInput(args map[string]any) (spawnSpec, map[string]any, []s
 // serviceSpawnTarget is the production spawnTarget: it runs a child turn via
 // s.RunChildAgent. Phase 3 does minimal policy validation (agent exists +
 // delegation policy allows the target); depth / outstanding accounting
-// arrive in Phase 4/5 when SpawnSink consumers do.
+// arrive in Phase 4/5 when SpawnBus consumers do.
 type serviceSpawnTarget struct {
 	service     *Service
 	caller      agents.Profile
@@ -261,7 +261,7 @@ func (t *serviceSpawnTarget) Run(ctx context.Context, agentID, task string) (Del
 		return DelegateAgentResult{AgentID: agentID, RunID: childRunID, Status: "failed"}, err
 	}
 	// Phase 3: surface Status + raw FinalResponse as Summary. Structured
-	// parsing (evidence/limitations/confidence) is the SpawnSink consumer's
+	// parsing (evidence/limitations/confidence) is the SpawnBus consumer's
 	// job (Phase 4/5), not spawn's — spawn is fire-and-forget.
 	return DelegateAgentResult{
 		AgentID: agentID,
@@ -282,7 +282,7 @@ func spawnTurnOutput(turnID, status string) map[string]any {
 // childToolConstraintCtx returns a context that carries the parent's tool
 // constraints on a clean context.Background base.
 //
-// Spawn's child must NOT inherit the parent's EventSink / SteeringSink (those
+// Spawn's child must NOT inherit the parent's EventBus / SteeringBus (those
 // are output channels — inheritance would pollute the parent's IM stream with
 // child progress and leak parent interjections into the child). But the child
 // MUST inherit the parent's tool constraints (allowlist / inputAllowlist /

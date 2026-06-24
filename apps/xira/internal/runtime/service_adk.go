@@ -138,7 +138,7 @@ func (s *Service) generateADK(
 		// here (PR #51 review: double-dequeue bug).
 		// Returns ErrSteered sentinel (NOT ctx.Err()) so the retry loop
 		// distinguishes "steered" from "real error".
-		if sink := SteeringSinkFromContext(ctx); sink != nil && sink.HasPending() {
+		if sink := SteeringBusFromContext(ctx); sink != nil && sink.HasPending() {
 			recordEvent("adk.steered", "adk.runner", "turn steered by user interjection", map[string]any{
 				"agent_id": profile.ID,
 			})
