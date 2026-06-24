@@ -9,7 +9,7 @@ import (
 // These tests cover the runtimeEventToEvent mapping function (RuntimeEvent →
 // sealed Event). The EventBus struct + interface were removed in Phase 6b (#60);
 // only the mapping remains (used by dispatchEvent to deliver Events to the
-// per-chat-key EventSink).
+// per-chat-key EventBus).
 //   - Old EventBus struct renamed eventBusImpl, satisfies the interface
 //   - Old Publish(RuntimeEvent) DELETED — compile-forces migration
 //   - runtimeEventToEvent(RuntimeEvent) (Event, bool): maps ~14 signal kinds

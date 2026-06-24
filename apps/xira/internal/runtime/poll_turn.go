@@ -22,9 +22,9 @@ import (
 // pulls (TryResult, non-blocking) so the event loop keeps iterating and
 // steering stays responsive.
 //
-// Delivery model: the child's PendingResult lands in the SpawnSink (injected
+// Delivery model: the child's PendingResult lands in the SpawnBus (injected
 // by Router as a progress.SpawnCollector) when the child finishes. poll_turn
-// uses the SpawnSinkPeeper capability (optional SpawnSink method) to peek
+// uses the SpawnBusPeeper capability (optional SpawnBus method) to peek
 // non-blockingly.
 
 const pollTurnToolName = "poll_turn"
@@ -74,17 +74,17 @@ func sanitizePollTurnInput(args map[string]any) (pollTurnInput, map[string]any, 
 }
 
 // executePollTurn is the core logic, separable from the ADK tool wrapper for
-// testing. It resolves the SpawnSinkPeeper from ctx and peeks (non-blocking)
+// testing. It resolves the SpawnBusPeeper from ctx and peeks (non-blocking)
 // for the child's result.
 //
 // Returns:
 //   - {"status":"<child status>","child_turn_id":...,"result_summary":...} when done
 //   - {"status":"pending","child_turn_id":...} when the child is still running
-//   - {"status":"unavailable",...} when no SpawnSink / sink can't peek
+//   - {"status":"unavailable",...} when no SpawnBus / sink can't peek
 //
 // Never blocks, never returns an error (every outcome is a status in the map).
 func executePollTurn(ctx context.Context, childID string) map[string]any {
-	sink := SpawnSinkFromContext(ctx)
+	sink := SpawnBusFromContext(ctx)
 	if sink == nil {
 		return map[string]any{
 			"status":         "unavailable",
@@ -92,7 +92,7 @@ func executePollTurn(ctx context.Context, childID string) map[string]any {
 			"error":          "no spawn result sink in context (spawn results not collectable on this turn)",
 		}
 	}
-	peeper, ok := sink.(SpawnSinkPeeper)
+	peeper, ok := sink.(SpawnBusPeeper)
 	if !ok {
 		return map[string]any{
 			"status":         "unavailable",

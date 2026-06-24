@@ -5,9 +5,9 @@
 
 进仓库后至少记住这两条（最容易踩、本次花代价才搞清的）：
 
-1. **事件投递走 per-chat-key Sink（无全局 bus）**（Phase 6b 删了 EventBus；`dispatchEvent`
-   把 Event 直接 Deliver 到 ctx 里的 `EventSink`/`ChatContext`，per-chat-key 隔离）。
-   sink==nil 时 signal 会被丢（有 Debug log）。详见 AGENTS.md §1.1。
+1. **事件投递走 per-chat-key EventBus（无全局 bus）**（Phase 6b 删了全局 EventBus；
+   `dispatchEvent` 把 Event 直接 Deliver 到 ctx 里的 per-chat-key `EventBus`/`ChatContext`，
+   per-chat-key 隔离）。bus==nil 时 signal 会被丢（有 Debug log）。详见 AGENTS.md §1.1。
 2. **`assistant.final` 已发布，是成功时的白名单信号**（`final != "" && status == "completed"` 才发，
    不是 blacklist；HITL/failed 不发）。`run.finished` ≠ final 就绪信号（HITL/failed 也发）。
    详见 AGENTS.md §1.2 / §1.3。

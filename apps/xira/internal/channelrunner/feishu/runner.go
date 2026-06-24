@@ -232,7 +232,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		Policy:   policy,
 	})
 	chatCtx.Start()
-	runCtx := frt.WithEventSink(ctx, chatCtx)
+	runCtx := frt.WithEventBus(ctx, chatCtx)
 	resp, err := r.runtime.RunAgent(runCtx, frt.TurnRequest{
 		EntrypointID: r.definition.ID,
 		Message:      content,

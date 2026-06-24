@@ -376,7 +376,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	recordEvent := func(kind, source, message string, payload map[string]any) {
 		evt := newRuntimeEvent(eventBase, kind, source, message, payload, nil)
 		recorder.appendEvent(evt)
-		// Per-chat-key delivery (RFC #48): if an EventSink is in the context,
+		// Per-chat-key delivery (RFC #48): if an EventBus is in the context,
 		// deliver mapped Events directly to it (bypasses global bus for
 		// per-chat-key progress). Falls back to global bus Publish when no sink.
 		dispatchEvent(ctx, evt)

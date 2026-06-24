@@ -207,8 +207,8 @@ func (s *Service) runtimeADKTools(
 			recordTool(rec)
 			return rec.Output, nil
 		}
-		// poll_turn uses the turn's ctx (which carries the SpawnSink injected
-		// by Router), NOT the tool ctx. Non-blocking peek via SpawnSinkPeeper.
+		// poll_turn uses the turn's ctx (which carries the SpawnBus injected
+		// by Router), NOT the tool ctx. Non-blocking peek via SpawnBusPeeper.
 		rec.Output = executePollTurn(ctx, spec.ChildTurnID)
 		rec.EndedAt = time.Now()
 		recordTool(rec)

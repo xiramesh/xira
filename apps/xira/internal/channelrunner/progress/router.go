@@ -20,8 +20,8 @@ import (
 // (TurnComplete).
 
 // OnNewTurnFunc is called when a message should start a new turn.
-// The ctx carries SteeringSink for the new turn. The caller (channel
-// runner) wires up its own EventSink + Sender inside this callback.
+// The ctx carries SteeringBus for the new turn. The caller (channel
+// runner) wires up its own EventBus + Sender inside this callback.
 type OnNewTurnFunc func(key runtime.ChatKey, msg string, ctx context.Context)
 
 // Router routes incoming messages per ChatKey.
@@ -71,12 +71,12 @@ func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Conte
 	sq := entry.steering
 	entry.mu.Unlock()
 
-	// Wire SteeringSink + SpawnSink into context for the new turn. Both are
-	// per-chat-key sinks: SteeringSink carries user interjections (steering
-	// checkpoint), SpawnSink carries spawned child results (wait_turn). Every
+	// Wire SteeringBus + SpawnBus into context for the new turn. Both are
+	// per-chat-key sinks: SteeringBus carries user interjections (steering
+	// checkpoint), SpawnBus carries spawned child results (wait_turn). Every
 	// channel that uses the Router gets both for free.
-	ctx := runtime.WithSteeringSink(parentCtx, sq)
-	ctx = runtime.WithSpawnSink(ctx, entry.spawn)
+	ctx := runtime.WithSteeringBus(parentCtx, sq)
+	ctx = runtime.WithSpawnBus(ctx, entry.spawn)
 
 	// Run the turn in a goroutine so Handle returns immediately
 	// (non-blocking — Monitor can receive the next message).

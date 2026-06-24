@@ -17,7 +17,7 @@ import (
 // run child turn, deliver signal + result.
 //
 // RFC §2.4 (corrected): spawn_turn = yield "spawned" + detached goroutine.
-// D-3: result payload via SpawnSink, signal via EventBus.
+// D-3: result payload via SpawnBus, signal via EventBus.
 
 // mockSpawnTarget is a test double for the child turn executor.
 type mockSpawnTarget struct {
@@ -40,19 +40,19 @@ func (m *mockSpawnTarget) Run(ctx context.Context, agentID, task string) (Delega
 	return result, err
 }
 
-// mockSpawnSink is a test double for SpawnSink.
-type mockSpawnSink struct {
+// mockSpawnBus is a test double for SpawnBus.
+type mockSpawnBus struct {
 	mu      sync.Mutex
 	results []PendingResult
 }
 
-func (m *mockSpawnSink) Deliver(pr PendingResult) {
+func (m *mockSpawnBus) Deliver(pr PendingResult) {
 	m.mu.Lock()
 	m.results = append(m.results, pr)
 	m.mu.Unlock()
 }
 
-func (m *mockSpawnSink) latest() (PendingResult, bool) {
+func (m *mockSpawnBus) latest() (PendingResult, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.results) == 0 {
@@ -71,8 +71,8 @@ func TestSpawnCoreReturnsTurnIDImmediately(t *testing.T) {
 
 	// spawnCore should return a turn ID + spawned status immediately,
 	// without waiting for the child turn to complete.
-	sink := &mockSpawnSink{}
-	ctx := WithSpawnSink(context.Background(), sink)
+	sink := &mockSpawnBus{}
+	ctx := WithSpawnBus(context.Background(), sink)
 	spec := spawnSpec{
 		AgentID: "code-agent",
 		Task:    "do something",
@@ -95,8 +95,8 @@ func TestSpawnCoreRunsChildInDetachedGoroutine(t *testing.T) {
 		Summary: "done",
 	}}
 
-	sink := &mockSpawnSink{}
-	ctx := WithSpawnSink(context.Background(), sink)
+	sink := &mockSpawnBus{}
+	ctx := WithSpawnBus(context.Background(), sink)
 	spec := spawnSpec{
 		AgentID: "code-agent",
 		Task:    "do something async",
@@ -144,8 +144,8 @@ func TestSpawnCoreDeliversResultToSink(t *testing.T) {
 	}
 	target := &mockSpawnTarget{result: expected}
 
-	sink := &mockSpawnSink{}
-	ctx := WithSpawnSink(context.Background(), sink)
+	sink := &mockSpawnBus{}
+	ctx := WithSpawnBus(context.Background(), sink)
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
 	_ = spawnCore(ctx, spec, target, 30000, nil)
@@ -166,8 +166,8 @@ func TestSpawnCoreDeliversResultToSink(t *testing.T) {
 
 func TestSpawnCoreChildErrorDeliversError(t *testing.T) {
 	target := &mockSpawnTarget{err: errors.New("child crashed")}
-	sink := &mockSpawnSink{}
-	ctx := WithSpawnSink(context.Background(), sink)
+	sink := &mockSpawnBus{}
+	ctx := WithSpawnBus(context.Background(), sink)
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
 	_ = spawnCore(ctx, spec, target, 30000, nil)
@@ -196,8 +196,8 @@ func TestSpawnCoreChildUsesDetachedContext(t *testing.T) {
 
 	block := make(chan struct{})
 	target := &mockChildTarget{block: block}
-	sink := &mockSpawnSink{}
-	ctx = WithSpawnSink(ctx, sink)
+	sink := &mockSpawnBus{}
+	ctx = WithSpawnBus(ctx, sink)
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
 	_ = spawnCore(ctx, spec, target, 30000, nil)
@@ -218,7 +218,7 @@ func TestSpawnCoreChildUsesDetachedContext(t *testing.T) {
 }
 
 func TestSpawnCoreNoSinkDropsResultSafely(t *testing.T) {
-	// Phase 3 fire-and-forget: when no SpawnSink is in the context, the
+	// Phase 3 fire-and-forget: when no SpawnBus is in the context, the
 	// child result is dropped + Warn-logged, NOT a panic. This is the
 	// documented Phase 3 limitation (sink consumers arrive in Phase 4/5).
 	target := &mockSpawnTarget{result: DelegateAgentResult{
@@ -226,7 +226,7 @@ func TestSpawnCoreNoSinkDropsResultSafely(t *testing.T) {
 		Status:  "completed",
 		Summary: "ignored",
 	}}
-	// No WithSpawnSink — ctx carries no sink.
+	// No WithSpawnBus — ctx carries no sink.
 	ctx := context.Background()
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
@@ -379,27 +379,27 @@ func (m *mockPanicTarget) Run(ctx context.Context, agentID, task string) (Delega
 	panic("child boom")
 }
 
-// noopEventSink is a no-op EventSink used to seed a parent ctx and verify
+// noopEventBus is a no-op EventBus used to seed a parent ctx and verify
 // the child does NOT inherit it.
-type noopEventSink struct{}
+type noopEventBus struct{}
 
-func (noopEventSink) Deliver(evt Event) {}
+func (noopEventBus) Deliver(evt Event) {}
 
-// noopSteeringSink is a no-op SteeringSink for the same purpose.
-type noopSteeringSink struct{}
+// noopSteeringBus is a no-op SteeringBus for the same purpose.
+type noopSteeringBus struct{}
 
-func (noopSteeringSink) Enqueue(string)               {}
-func (noopSteeringSink) TryDequeue() (string, bool)   { return "", false }
-func (noopSteeringSink) DrainAll() []string           { return nil }
-func (noopSteeringSink) HasPending() bool             { return false }
+func (noopSteeringBus) Enqueue(string)               {}
+func (noopSteeringBus) TryDequeue() (string, bool)   { return "", false }
+func (noopSteeringBus) DrainAll() []string           { return nil }
+func (noopSteeringBus) HasPending() bool             { return false }
 
 // TestSpawnCoreChildPanicRecovered verifies C1: a panicking child turn is
 // recovered by the detached goroutine. spawnCore must return normally and
 // deliver an error result to the sink — NOT crash the test process.
 func TestSpawnCoreChildPanicRecovered(t *testing.T) {
 	target := &mockPanicTarget{ran: make(chan struct{})}
-	sink := &mockSpawnSink{}
-	ctx := WithSpawnSink(context.Background(), sink)
+	sink := &mockSpawnBus{}
+	ctx := WithSpawnBus(context.Background(), sink)
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
 	// If the goroutine's panic escapes unrecovered, the test binary crashes
@@ -448,8 +448,8 @@ func (m *mockCtxInspectTarget) Run(ctx context.Context, agentID, task string) (D
 
 func TestSpawnCoreChildTimeoutBoundsGoroutine(t *testing.T) {
 	target := &mockCtxInspectTarget{done: make(chan struct{})}
-	sink := &mockSpawnSink{}
-	ctx := WithSpawnSink(context.Background(), sink)
+	sink := &mockSpawnBus{}
+	ctx := WithSpawnBus(context.Background(), sink)
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
 	// 50ms timeout — the child must be canceled shortly after.
@@ -469,7 +469,7 @@ func TestSpawnCoreChildTimeoutBoundsGoroutine(t *testing.T) {
 }
 
 // TestSpawnCoreChildContextIsolatedFromParent verifies C3: the child ctx must
-// NOT inherit the parent's EventSink or SteeringSink. WithoutCancel preserved
+// NOT inherit the parent's EventBus or SteeringBus. WithoutCancel preserved
 // all Values (the bug); the child must start from a clean context so child
 // events don't pollute the parent's IM stream and parent steering doesn't
 // leak into the child.
@@ -486,25 +486,25 @@ func (m *mockAssertCleanCtxTarget) Run(ctx context.Context, agentID, task string
 
 func TestSpawnCoreChildContextIsolatedFromParent(t *testing.T) {
 	target := &mockAssertCleanCtxTarget{done: make(chan struct{})}
-	sink := &mockSpawnSink{}
+	sink := &mockSpawnBus{}
 
 	// Parent ctx carries BOTH sinks — exactly what an IM turn ctx carries.
 	parent := context.Background()
-	parent = WithSpawnSink(parent, sink)
-	parent = WithEventSink(parent, noopEventSink{})
-	parent = WithSteeringSink(parent, noopSteeringSink{})
+	parent = WithSpawnBus(parent, sink)
+	parent = WithEventBus(parent, noopEventBus{})
+	parent = WithSteeringBus(parent, noopSteeringBus{})
 
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 	spawnCore(parent, spec, target, 30000, nil)
 
 	<-target.done
-	if EventSinkFromContext(target.gotCtx) != nil {
-		t.Error("child ctx inherited parent EventSink — child progress would pollute parent IM stream")
+	if EventBusFromContext(target.gotCtx) != nil {
+		t.Error("child ctx inherited parent EventBus — child progress would pollute parent IM stream")
 	}
-	if SteeringSinkFromContext(target.gotCtx) != nil {
-		t.Error("child ctx inherited parent SteeringSink — parent interjections would steer the child")
+	if SteeringBusFromContext(target.gotCtx) != nil {
+		t.Error("child ctx inherited parent SteeringBus — parent interjections would steer the child")
 	}
-	// SpawnSink is consumed by spawnCore from the parent ctx (for result
+	// SpawnBus is consumed by spawnCore from the parent ctx (for result
 	// delivery), not by the child execution — so the child ctx need not
 	// carry it. We only assert the two output sinks are stripped.
 }
@@ -515,21 +515,21 @@ func TestSpawnCoreChildContextIsolatedFromParent(t *testing.T) {
 // inherits the parent's tool constraints (allowlist + inputAllowlist +
 // native-tools-disabled), matching delegate_agent. R2's C3 fix used
 // context.Background() to isolate the parent's sinks — which correctly
-// stripped EventSink/SteeringSink but also stripped the tool allowlist,
+// stripped EventBus/SteeringBus but also stripped the tool allowlist,
 // letting a spawned child run under a wider tool set than its parent (a
 // flow-step allowlist bypass). The child ctx must carry the tool constraints
 // on a clean base.
 func TestSpawnCoreChildInheritsParentToolConstraints(t *testing.T) {
 	target := &mockAssertCleanCtxTarget{done: make(chan struct{})}
-	sink := &mockSpawnSink{}
+	sink := &mockSpawnBus{}
 
 	// Parent ctx: narrowed tool allowlist + tool-input allowlist + native
 	// tools disabled + BOTH output sinks (the sinks must still be stripped,
 	// the tool constraints must survive).
 	parent := context.Background()
-	parent = WithSpawnSink(parent, sink)
-	parent = WithEventSink(parent, noopEventSink{})
-	parent = WithSteeringSink(parent, noopSteeringSink{})
+	parent = WithSpawnBus(parent, sink)
+	parent = WithEventBus(parent, noopEventBus{})
+	parent = WithSteeringBus(parent, noopSteeringBus{})
 	parent = contextWithRuntimeToolAllowlist(parent, []string{"write_file"})
 	parent = contextWithRuntimeNativeToolsDisabled(parent)
 	parent = contextWithRuntimeToolInputAllowlist(parent, map[string]map[string][]string{
@@ -565,11 +565,11 @@ func TestSpawnCoreChildInheritsParentToolConstraints(t *testing.T) {
 
 	// Regression guard: sinks must STILL be stripped (C3 must not regress
 	// when we re-attach tool constraints).
-	if EventSinkFromContext(child) != nil {
-		t.Error("re-attaching tool constraints leaked parent EventSink back in")
+	if EventBusFromContext(child) != nil {
+		t.Error("re-attaching tool constraints leaked parent EventBus back in")
 	}
-	if SteeringSinkFromContext(child) != nil {
-		t.Error("re-attaching tool constraints leaked parent SteeringSink back in")
+	if SteeringBusFromContext(child) != nil {
+		t.Error("re-attaching tool constraints leaked parent SteeringBus back in")
 	}
 }
 
@@ -680,7 +680,7 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 // Compile-time: mockSpawnTarget satisfies spawnTarget interface.
 var _ spawnTarget = (*mockSpawnTarget)(nil)
 var _ spawnTarget = (*mockChildTarget)(nil)
-var _ SpawnSink = (*mockSpawnSink)(nil)
+var _ SpawnBus = (*mockSpawnBus)(nil)
 
 // Ensure agents package is referenced (for spawnSpec fields if needed).
 var _ agents.Profile

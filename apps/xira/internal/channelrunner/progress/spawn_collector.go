@@ -6,13 +6,13 @@ import (
 	"github.com/xiramesh/xira/internal/runtime"
 )
 
-// spawn_collector.go: SpawnCollector is the production SpawnSink — the
+// spawn_collector.go: SpawnCollector is the production SpawnBus — the
 // per-chat-key store for spawned child-turn results (Phase 4, RFC §2.4 D-3).
 // spawn_turn's detached goroutine delivers each child's PendingResult here via
 // Deliver; the parent turn's poll_turn tool queries it NON-BLOCKINGLY via
 // TryResult.
 //
-// Injected by Router.Handle alongside SteeringSink (router.go), so every
+// Injected by Router.Handle alongside SteeringBus (router.go), so every
 // channel that uses the Router gets spawn-result collection for free.
 //
 // Design (R2, PR #53 review): SpawnCollector is a NON-BLOCKING store, mirroring
@@ -42,7 +42,7 @@ func NewSpawnCollector() *SpawnCollector {
 }
 
 // Deliver stores a child-turn result, keyed by its TurnID. Non-blocking
-// (SpawnSink contract): the only work is a map write under the lock.
+// (SpawnBus contract): the only work is a map write under the lock.
 func (c *SpawnCollector) Deliver(pr runtime.PendingResult) {
 	c.mu.Lock()
 	c.results[pr.TurnID] = pr
@@ -60,7 +60,7 @@ func (c *SpawnCollector) TryResult(childID string) (runtime.PendingResult, bool)
 }
 
 // HasResult reports whether ANY child result is available. Mirrors
-// SteeringSink.HasPending — the checkpoint peek shape.
+// SteeringBus.HasPending — the checkpoint peek shape.
 func (c *SpawnCollector) HasResult() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

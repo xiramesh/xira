@@ -5,11 +5,11 @@ import (
 	"errors"
 )
 
-// steering_sink.go: SteeringSink is the per-chat-key steering queue interface
+// steering_sink.go: SteeringBus is the per-chat-key steering queue interface
 // (Phase 4, RFC #48 §5). Channel runner enqueues user interjections;
 // generateADK's event loop checks the queue between iterations (checkpoint).
 //
-// Same context.Value pattern as EventSink — runtime defines interface,
+// Same context.Value pattern as EventBus — runtime defines interface,
 // progress implements (SteeringQueue), runner passes via context.
 
 // ErrSteered is returned by generateADK when the steering checkpoint detects
@@ -19,9 +19,9 @@ import (
 // sentinel so the retry loop can distinguish "steered" from "real error".
 var ErrSteered = errors.New("turn steered by user interjection")
 
-// SteeringSink collects user messages sent while a turn is running.
+// SteeringBus collects user messages sent while a turn is running.
 // Implemented by progress.SteeringQueue.
-type SteeringSink interface {
+type SteeringBus interface {
 	// Enqueue adds a user interjection to the steering queue.
 	Enqueue(message string)
 	// TryDequeue removes and returns the oldest interjection, or ok=false
@@ -35,15 +35,15 @@ type SteeringSink interface {
 	HasPending() bool
 }
 
-type steeringSinkKey struct{}
+type steeringBusKey struct{}
 
-// WithSteeringSink returns a context carrying the SteeringSink.
-func WithSteeringSink(ctx context.Context, sink SteeringSink) context.Context {
-	return context.WithValue(ctx, steeringSinkKey{}, sink)
+// WithSteeringBus returns a context carrying the SteeringBus.
+func WithSteeringBus(ctx context.Context, sink SteeringBus) context.Context {
+	return context.WithValue(ctx, steeringBusKey{}, sink)
 }
 
-// SteeringSinkFromContext extracts the SteeringSink, or nil if absent.
-func SteeringSinkFromContext(ctx context.Context) SteeringSink {
-	sink, _ := ctx.Value(steeringSinkKey{}).(SteeringSink)
+// SteeringBusFromContext extracts the SteeringBus, or nil if absent.
+func SteeringBusFromContext(ctx context.Context) SteeringBus {
+	sink, _ := ctx.Value(steeringBusKey{}).(SteeringBus)
 	return sink
 }

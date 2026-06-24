@@ -14,41 +14,41 @@ import (
 // finished returns "pending" immediately. This is what keeps the steering
 // checkpoint alive (PR #53 review CRITICAL).
 
-// mockPeeperSink implements both SpawnSink and SpawnSinkPeeper, returning a
+// mockPeeperBus implements both SpawnBus and SpawnBusPeeper, returning a
 // canned result for a given child ID (or nothing, to simulate pending).
-type mockPeeperSink struct {
+type mockPeeperBus struct {
 	results map[string]PendingResult
 }
 
-func (m *mockPeeperSink) Deliver(pr PendingResult) {
+func (m *mockPeeperBus) Deliver(pr PendingResult) {
 	if m.results == nil {
 		m.results = map[string]PendingResult{}
 	}
 	m.results[pr.TurnID] = pr
 }
 
-func (m *mockPeeperSink) TryResult(childID string) (PendingResult, bool) {
+func (m *mockPeeperBus) TryResult(childID string) (PendingResult, bool) {
 	pr, ok := m.results[childID]
 	return pr, ok
 }
 
-func (m *mockPeeperSink) HasResult() bool {
+func (m *mockPeeperBus) HasResult() bool {
 	return len(m.results) > 0
 }
 
-// mockSinkNoPeek implements SpawnSink but NOT SpawnSinkPeeper.
-type mockSinkNoPeek struct{}
+// mockBusNoPeek implements SpawnBus but NOT SpawnBusPeeper.
+type mockBusNoPeek struct{}
 
-func (mockSinkNoPeek) Deliver(PendingResult) {}
+func (mockBusNoPeek) Deliver(PendingResult) {}
 
 func TestExecutePollTurnSuccess(t *testing.T) {
-	sink := &mockPeeperSink{results: map[string]PendingResult{
+	sink := &mockPeeperBus{results: map[string]PendingResult{
 		"spawn:abc": {
 			TurnID: "spawn:abc",
 			Result: DelegateAgentResult{AgentID: "code", Status: "completed", Summary: "the child did the thing"},
 		},
 	}}
-	ctx := WithSpawnSink(context.Background(), sink)
+	ctx := WithSpawnBus(context.Background(), sink)
 
 	out := executePollTurn(ctx, "spawn:abc")
 	if out["status"] != "completed" {
@@ -63,14 +63,14 @@ func TestExecutePollTurnSuccess(t *testing.T) {
 }
 
 func TestExecutePollTurnChildFailed(t *testing.T) {
-	sink := &mockPeeperSink{results: map[string]PendingResult{
+	sink := &mockPeeperBus{results: map[string]PendingResult{
 		"spawn:fail": {
 			TurnID: "spawn:fail",
 			Result: DelegateAgentResult{Status: "failed"},
 			Err:    "child agent error",
 		},
 	}}
-	ctx := WithSpawnSink(context.Background(), sink)
+	ctx := WithSpawnBus(context.Background(), sink)
 
 	out := executePollTurn(ctx, "spawn:fail")
 	if out["status"] != "failed" {
@@ -84,8 +84,8 @@ func TestExecutePollTurnChildFailed(t *testing.T) {
 func TestExecutePollTurnPending(t *testing.T) {
 	// The CRITICAL case: child hasn't finished. poll_turn MUST return pending
 	// immediately, NOT block. (The old wait_turn would block here for 5 min.)
-	sink := &mockPeeperSink{results: map[string]PendingResult{}}
-	ctx := WithSpawnSink(context.Background(), sink)
+	sink := &mockPeeperBus{results: map[string]PendingResult{}}
+	ctx := WithSpawnBus(context.Background(), sink)
 
 	out := executePollTurn(ctx, "spawn:running")
 	if out["status"] != "pending" {
@@ -97,7 +97,7 @@ func TestExecutePollTurnPending(t *testing.T) {
 }
 
 func TestExecutePollTurnNoSink(t *testing.T) {
-	// No SpawnSink in context — poll_turn reports unavailable, not panic.
+	// No SpawnBus in context — poll_turn reports unavailable, not panic.
 	out := executePollTurn(context.Background(), "spawn:abc")
 	if out["status"] != "unavailable" {
 		t.Errorf("status = %v, want 'unavailable'", out["status"])
@@ -105,8 +105,8 @@ func TestExecutePollTurnNoSink(t *testing.T) {
 }
 
 func TestExecutePollTurnSinkNotPeeper(t *testing.T) {
-	// Sink present but doesn't implement SpawnSinkPeeper.
-	ctx := WithSpawnSink(context.Background(), mockSinkNoPeek{})
+	// Sink present but doesn't implement SpawnBusPeeper.
+	ctx := WithSpawnBus(context.Background(), mockBusNoPeek{})
 	out := executePollTurn(ctx, "spawn:abc")
 	if out["status"] != "unavailable" {
 		t.Errorf("status = %v, want 'unavailable'", out["status"])
@@ -147,6 +147,6 @@ func TestPollTurnInputValidate(t *testing.T) {
 }
 
 // Compile-time: mocks satisfy the interfaces.
-var _ SpawnSink = (*mockPeeperSink)(nil)
-var _ SpawnSinkPeeper = (*mockPeeperSink)(nil)
-var _ SpawnSink = mockSinkNoPeek{}
+var _ SpawnBus = (*mockPeeperBus)(nil)
+var _ SpawnBusPeeper = (*mockPeeperBus)(nil)
+var _ SpawnBus = mockBusNoPeek{}

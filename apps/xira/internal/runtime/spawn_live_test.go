@@ -28,10 +28,10 @@ import (
 func TestLiveSpawnTurnChildCompletes(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, false)
 
-	// Inject a SpawnSink so spawn_turn results have a home + poll_turn can
+	// Inject a SpawnBus so spawn_turn results have a home + poll_turn can
 	// query. The Router does this in production; here we inject directly.
 	collector := &liveTestSpawnCollector{}
-	ctx := WithSpawnSink(context.Background(), collector)
+	ctx := WithSpawnBus(context.Background(), collector)
 
 	resp, err := rt.RunAgent(ctx, TurnRequest{
 		Message: "Use spawn_turn to spawn the research-assistant with the task: 'In one sentence, explain what an LLM agent is.' Then use poll_turn to check if it finished. Report the child's result.",
@@ -74,7 +74,7 @@ func TestLiveSpawnTurnNonBlocking(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, false)
 
 	collector := &liveTestSpawnCollector{}
-	ctx := WithSpawnSink(context.Background(), collector)
+	ctx := WithSpawnBus(context.Background(), collector)
 
 	// Bound the turn — if spawn_turn blocked (regression), the turn would hang.
 	done := make(chan struct{})
@@ -106,9 +106,9 @@ func TestLiveSpawnTurnNonBlocking(t *testing.T) {
 
 // --- test double ---
 
-// liveTestSpawnCollector is a minimal SpawnSink for live tests. It records
-// results so assertions can check delivery. Implements SpawnSink (Deliver) +
-// SpawnSinkPeeper (TryResult/HasResult).
+// liveTestSpawnCollector is a minimal SpawnBus for live tests. It records
+// results so assertions can check delivery. Implements SpawnBus (Deliver) +
+// SpawnBusPeeper (TryResult/HasResult).
 type liveTestSpawnCollector struct {
 	results []PendingResult
 }
@@ -138,6 +138,6 @@ func (c *liveTestSpawnCollector) latest() (PendingResult, bool) {
 	return c.results[len(c.results)-1], true
 }
 
-// Compile-time: satisfies SpawnSink + SpawnSinkPeeper.
-var _ SpawnSink = (*liveTestSpawnCollector)(nil)
-var _ SpawnSinkPeeper = (*liveTestSpawnCollector)(nil)
+// Compile-time: satisfies SpawnBus + SpawnBusPeeper.
+var _ SpawnBus = (*liveTestSpawnCollector)(nil)
+var _ SpawnBusPeeper = (*liveTestSpawnCollector)(nil)
