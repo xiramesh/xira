@@ -24,9 +24,8 @@
 
 - **per-chat-key 隔离**:每个 turn 的 ctx 携带自己的 `EventSink`(`Router.Handle` 注入)。
   不同 chatKey 的事件天然隔离,不需要 scope 匹配。
-- **sink==nil 时 signal 静默**:`dispatchEvent` 在 `EventSinkFromContext(ctx)` 为 nil 时,
-  signal 类事件被丢(无 log),non-signal 类有 `slog.Debug`。这是当前的不对称——
-  排障时注意:signal 丢失无 log 痕迹。
+- **sink==nil 时有 Debug log**:`dispatchEvent` 在 `EventSinkFromContext(ctx)` 为 nil 时,
+  signal 类事件被丢 + `slog.Debug`(与 non-signal 路径对称)。排障时可查 Debug log 确认丢弃。
 - **历史持久化不受影响**:`recorder.appendEvent` 在闭包里**先于** `dispatchEvent` 执行,
   run history(session hydrate 用)不依赖 sink。
 - **spawn 子结果不走 sink signal**:`spawn_turn` 的子结果走 `SpawnSink`(`SpawnCollector`),
