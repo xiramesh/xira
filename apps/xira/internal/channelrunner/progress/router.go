@@ -33,6 +33,7 @@ type chatEntry struct {
 	mu       sync.Mutex
 	active   bool
 	steering *SteeringQueue
+	spawn    *SpawnCollector
 }
 
 // NewRouter creates a Router.
@@ -58,8 +59,12 @@ func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Conte
 	sq := entry.steering
 	entry.mu.Unlock()
 
-	// Wire SteeringSink into context for the new turn.
+	// Wire SteeringSink + SpawnSink into context for the new turn. Both are
+	// per-chat-key sinks: SteeringSink carries user interjections (steering
+	// checkpoint), SpawnSink carries spawned child results (wait_turn). Every
+	// channel that uses the Router gets both for free.
 	ctx := runtime.WithSteeringSink(parentCtx, sq)
+	ctx = runtime.WithSpawnSink(ctx, entry.spawn)
 
 	// Run the turn in a goroutine so Handle returns immediately
 	// (non-blocking — Monitor can receive the next message).
@@ -93,6 +98,19 @@ func (r *Router) SteeringQueue(key runtime.ChatKey) *SteeringQueue {
 	return entry.steering
 }
 
+// SpawnCollectorFor returns the SpawnCollector for a chatKey. The channel
+// runner uses it on steering retry to Reset stale spawn results (mirrors
+// ChatContext.Reset). Returns nil if the chatKey has no entry.
+func (r *Router) SpawnCollectorFor(key runtime.ChatKey) *SpawnCollector {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[key]
+	if !ok {
+		return nil
+	}
+	return entry.spawn
+}
+
 // getOrCreate returns the chatEntry for key, creating if absent.
 func (r *Router) getOrCreate(key runtime.ChatKey) *chatEntry {
 	r.mu.Lock()
@@ -101,6 +119,7 @@ func (r *Router) getOrCreate(key runtime.ChatKey) *chatEntry {
 	if !ok {
 		entry = &chatEntry{
 			steering: NewSteeringQueue(),
+			spawn:    NewSpawnCollector(),
 		}
 		r.entries[key] = entry
 	}

@@ -43,20 +43,20 @@ func (m *mockSpawnTarget) Run(ctx context.Context, agentID, task string) (Delega
 // mockSpawnSink is a test double for SpawnSink.
 type mockSpawnSink struct {
 	mu      sync.Mutex
-	results []pendingResult
+	results []PendingResult
 }
 
-func (m *mockSpawnSink) Deliver(pr pendingResult) {
+func (m *mockSpawnSink) Deliver(pr PendingResult) {
 	m.mu.Lock()
 	m.results = append(m.results, pr)
 	m.mu.Unlock()
 }
 
-func (m *mockSpawnSink) latest() (pendingResult, bool) {
+func (m *mockSpawnSink) latest() (PendingResult, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.results) == 0 {
-		return pendingResult{}, false
+		return PendingResult{}, false
 	}
 	return m.results[len(m.results)-1], true
 }

@@ -641,6 +641,23 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		})
 		chatCtx.Start()
 		defer chatCtx.Stop()
+		// Clear spawn results when the turn ends (PR #53 R2 review WARNING):
+		// SpawnCollector is per-chatKey (router reuses the entry across turns),
+		// and the only other cleanup point is steering-retry Reset. Without
+		// this, every spawned child's PendingResult (incl. full FinalResponse)
+		// accumulates in the map forever — a real memory leak in long chats.
+		// A late Deliver after Reset (detached child goroutine) is harmless:
+		// it lands in an empty map that the NEXT turn reads, which is correct
+		// (the next turn shouldn't see the prior turn's results anyway).
+		defer func() {
+			// r.router may be nil in unit tests that construct a Runner
+			// without the full wiring; guard against that.
+			if r.router != nil {
+				if collector := r.router.SpawnCollectorFor(chatKey); collector != nil {
+					collector.Reset()
+				}
+			}
+		}()
 
 		// Steering retry loop: if RunAgent is canceled by steering checkpoint
 		// (user interjected mid-turn), drain the SteeringQueue and re-run
@@ -666,6 +683,11 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 						// (PR #51 review: without this, progress is silently
 						// dropped because progressSent already hit cap).
 						chatCtx.Reset()
+						// Reset spawn results too: the retried turn must not
+						// surface the previous run's stale child results.
+						if collector := r.router.SpawnCollectorFor(chatKey); collector != nil {
+							collector.Reset()
+						}
 						slog.Info("ilink steering: restarting turn with user interjection",
 							"chat_id", chatID,
 							"message_id", messageID,

@@ -127,3 +127,33 @@ func TestRouterDifferentChatKeysIndependent(t *testing.T) {
 	close(block)
 	turns.Wait()
 }
+
+// TestRouterInjectsSpawnSink verifies Handle wires SpawnSink (the
+// SpawnCollector) into the turn ctx alongside SteeringSink, so every channel
+// using the Router gets spawn-result collection for free. Without this,
+// wait_turn reports "unavailable" and spawned results are dropped.
+func TestRouterInjectsSpawnSink(t *testing.T) {
+	key := runtime.ChatKey{Channel: "ilink", ChatID: "c1", SenderID: "u1"}
+	router := NewRouter()
+
+	var gotSink runtime.SpawnSink
+	done := make(chan struct{})
+	router.Handle(key, "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+		gotSink = runtime.SpawnSinkFromContext(ctx)
+		close(done)
+	})
+	<-done
+
+	if gotSink == nil {
+		t.Fatal("SpawnSink not injected into turn ctx — wait_turn would report unavailable")
+	}
+	collector, ok := gotSink.(*SpawnCollector)
+	if !ok {
+		t.Fatalf("SpawnSink is %T, want *SpawnCollector", gotSink)
+	}
+	// The injected collector must be the same instance the Router exposes
+	// (so the runner's SpawnCollectorFor(key).Reset() clears the same one).
+	if router.SpawnCollectorFor(key) != collector {
+		t.Error("injected SpawnCollector != Router.SpawnCollectorFor(key) — Reset would miss the active collector")
+	}
+}

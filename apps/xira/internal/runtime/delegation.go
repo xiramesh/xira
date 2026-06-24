@@ -316,6 +316,56 @@ func (s *Service) runtimeADKTools(
 		return nil, err
 	}
 	out = append(out, spawnTool)
+
+	// poll_turn: parent LLM checks a spawned child's result NON-BLOCKINGLY
+	// (Phase 4, RFC §2.4 D-3). Returns the result if the child finished, or
+	// {status:"pending"} if still running — never blocks. Coexists with
+	// spawn_turn under the same DelegationPolicy gate.
+	//
+	// CRITICAL: must NOT block. ADK runs tools synchronously (base_flow.go
+	// wg.Wait); a blocking tool freezes the event loop and disables the
+	// steering checkpoint. The previous wait_turn blocked → broke steering
+	// (PR #53 review). poll_turn peeks instead.
+	pollTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
+		Name:        pollTurnToolName,
+		Description: "Check whether a spawned child agent turn has finished and return its result if so. Pass the agent_turn_id from spawn_turn. Returns immediately: {status:completed/failed, result_summary} when done, or {status:pending} when the child is still running. If pending, do other work and poll again later — do NOT block waiting.",
+		InputSchema: pollTurnInputSchema(),
+		OutputSchema: objectSchema(),
+	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
+		start := time.Now()
+		callID := strings.TrimSpace(toolCtx.FunctionCallID())
+		if callID == "" {
+			callID = uuid.NewString()
+		}
+		spec, cleanInput, unsupported := sanitizePollTurnInput(args)
+		rec := ToolCallRecord{
+			ID:        callID,
+			Name:      pollTurnToolName,
+			Input:     cleanInput,
+			StartedAt: start,
+		}
+		if len(unsupported) > 0 {
+			rec.Input["unsupported_input_fields"] = unsupported
+		}
+		if err := spec.Validate(); err != nil {
+			rec.Output = map[string]any{"status": "rejected", "error": err.Error()}
+			rec.Error = err.Error()
+			rec.EndedAt = time.Now()
+			recordTool(rec)
+			return rec.Output, nil
+		}
+		// poll_turn uses the turn's ctx (which carries the SpawnSink injected
+		// by Router), NOT the tool ctx. Non-blocking peek via SpawnSinkPeeper.
+		rec.Output = executePollTurn(ctx, spec.ChildTurnID)
+		rec.EndedAt = time.Now()
+		recordTool(rec)
+		return rec.Output, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, pollTool)
+
 	return out, nil
 }
 

@@ -17,14 +17,37 @@ import "context"
 // This breaks the same dependency shape as EventSink: runtime defines the
 // interface, a downstream package implements it, the runner injects it.
 
-// SpawnSink receives a pendingResult from a spawned child turn.
-// Implementations (future): a per-turn buffered collector, a WAL writer,
-// a steering-aware join point.
+// SpawnSink receives a PendingResult from a spawned child turn.
+// Production implementor: progress.SpawnCollector (per-chat-key, injected via
+// Router). Test doubles: mockSpawnSink in spawn_turn_test.go.
 type SpawnSink interface {
-	// Deliver hands off a pendingResult. Must be non-blocking (same contract
+	// Deliver hands off a PendingResult. Must be non-blocking (same contract
 	// as EventBus.Publish / EventSink.Deliver): if the sink is full, drop +
 	// handle logging on the implementation side, not the caller.
-	Deliver(pr pendingResult)
+	Deliver(pr PendingResult)
+}
+
+// SpawnResultWaiter was a blocking-Wait capability on SpawnSink. REMOVED in R2
+// (PR #53 review): blocking wait inside an ADK tool handler froze the event
+// loop, disabling the steering checkpoint. Spawn result delivery is now
+// non-blocking: the parent uses poll_turn (SpawnSinkPeeper.TryResult) to pull,
+// never blocking. Kept as a comment marker so greppers find the rationale.
+
+// SpawnSinkPeeper is optionally implemented by SpawnSink implementations that
+// support non-blocking result queries (e.g. progress.SpawnCollector). poll_turn
+// uses it; plain SpawnSink test doubles need not implement it.
+//
+// Kept separate from SpawnSink so the core sink contract stays "deliver only"
+// (mirroring EventSink/SteeringSink). This is the NON-BLOCKING sibling of the
+// deleted SpawnResultWaiter — pull, never block.
+type SpawnSinkPeeper interface {
+	// TryResult returns the child's result if it has completed. Non-blocking:
+	// returns (zero, false) immediately if the child is still running or
+	// unknown. poll_turn maps false → "pending".
+	TryResult(childID string) (PendingResult, bool)
+	// HasResult reports whether ANY child result is available (checkpoint
+	// peek, mirrors SteeringSink.HasPending).
+	HasResult() bool
 }
 
 type spawnSinkKey struct{}
