@@ -78,10 +78,8 @@ func (s *Service) ResolveHumanRequest(ctx context.Context, requestID string, inp
 			return nil, err
 		}
 	}
-	// Resume the run after the human response. Phase 6a (#55): the delegate
-	// delegation-join resume path was removed; only the direct human-request
-	// resume remains. (Mirrors the old ResumeRunAfterHumanResponse no-join
-	// fallback: only agent-request-sourced interrupts trigger a direct resume.)
+	// Resume the run after the human response. Only agent-request-sourced
+	// interrupts trigger a direct resume (others no-op).
 	if resolved.Source == "agent_request" {
 		if err := s.resumeDirectHumanRequest(ctx, resolved); err != nil {
 			return nil, err
