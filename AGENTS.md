@@ -8,22 +8,28 @@
 事件相关代码在 `apps/xira/internal/runtime/`。设计背景见
 `docs/architecture/xira-conversation-progress-feed-v0.zh.md`。
 
-### 1.1 `EventBus` 是 best-effort，不是可靠队列
+### 1.1 事件投递:per-chat-key Sink(无全局 bus)
 
-`event_bus.go` 的 `Publish` 对每个订阅者**非阻塞投递**：缓冲满时按 kind 优先级**驱逐 +
-`log.Warn`，从不静默**（`subscriber.enqueue` + `oldestBelowLocked`，`subscriberBufferSize = 256`）。
+> **Phase 6b(#60)更新**:全局 per-Service `EventBus` 已删除。事件投递走
+> per-chat-key `EventSink`(`ChatContext`),通过 `context.Value` 注入,直接 `Deliver`。
+> 原来的 `event_bus.go`(buffer 256 + 优先级驱逐)已删,本节描述的是**新投递模型**。
 
-- per-Service **单例**（非 per-run），所有并发 run 的事件挤在同一个订阅者的 buffered 切片上，
-  容量 **256**（`const subscriberBufferSize = 256`，event_bus.go:13）。
-- 优先级三档（`eventPriority`，event_bus.go:138）：`critical`（`run.waiting_human` /
-  `assistant.final`）> `important`（`agent.delegate.failed` / `agent.delegate.timeout`）>
-  `droppable`（其余）。满载时新事件可驱逐严格更低优先级的最老事件；同级或更低的新事件被丢。
-  **两种情况都 `slog.Warn`，不静默**（`enqueue` 内）。
-- 因此 **任何订阅者（progress forwarder、XiraGarden feed、未来消费者）必须读写解耦**：
-  bus 消费 goroutine 只做「读 channel + 入内部队列 + scope 过滤」，**绝不**在消费 goroutine 里
-  做同步 IO（HTTP 发送、磁盘写入）。发送由独立 goroutine + 内部队列承担。
-- 凡是「靠 bus 事件触发的停止/drain」，都必须有非 bus 的兜底路径（如 `Stop()`），因为停止信号
-  本身也可能在满载时被驱逐/丢弃。
+事件相关代码在 `apps/xira/internal/runtime/`(`dispatchEvent`、`event_dispatch.go`、
+`event_sink.go`)。设计背景见 `docs/architecture/xira-per-chat-key-architecture-rfc-v0.zh.md`。
+
+`dispatchEvent(ctx, evt)` 是事件投递的唯一入口(所有 `recordEvent`/`recordChildEvent`
+闭包都调它)。它把 `RuntimeEvent` 映射成 `Event`(sealed),然后投递到 `ctx` 里的
+`EventSink`(per-chat-key 的 `ChatContext`)。**没有全局 bus**——投递是点对点的
+(sink 在 ctx 里,`Deliver` 直接调)。
+
+- **per-chat-key 隔离**:每个 turn 的 ctx 携带自己的 `EventSink`(`Router.Handle` 注入)。
+  不同 chatKey 的事件天然隔离,不需要 scope 匹配。
+- **sink==nil 时有 Debug log**:`dispatchEvent` 在 `EventSinkFromContext(ctx)` 为 nil 时,
+  signal 类事件被丢 + `slog.Debug`(与 non-signal 路径对称)。排障时可查 Debug log 确认丢弃。
+- **历史持久化不受影响**:`recorder.appendEvent` 在闭包里**先于** `dispatchEvent` 执行,
+  run history(session hydrate 用)不依赖 sink。
+- **spawn 子结果不走 sink signal**:`spawn_turn` 的子结果走 `SpawnSink`(`SpawnCollector`),
+  `poll_turn` 拉取——和事件投递完全独立。
 
 ### 1.2 `assistant.final` —— 已发布，成功时的白名单信号
 
@@ -35,18 +41,18 @@
   `TestRunDoesNotEmitAssistantFinalOnFailed`。
 - HITL（`waiting_human`）不发：没有 final 就绪。
 - payload 只放 `final_chars`（rune 数），final 全文不进事件。
-- 语义：`assistant.final` = 「agent 的最终回复已就绪」。它是下游（forwarder、XiraGarden 收尾、
-  未来 CLI/WS）判断「final 来了，该收尾」的**契约化信号**。
+- 语义：`assistant.final` = 「agent 的最终回复已就绪」。它是下游（ChatContext 渲染收尾、
+  未来消费者）判断「final 来了，该收尾」的**契约化信号**。
 - visibility：`events.go` 已定义 `conversation=true, activity=false, inspector=true, audit=false`。
 
 ### 1.3 `run.finished` ≠ final 就绪信号
 
 `service.go` 的 `run.finished` 是**无条件**发的：`completed` / `failed` / `waiting_human` 都发。
 
-- request-bound 模型下，无论哪种状态 `RunAgent` 都会返回、forwarder 都会随之 stop；HITL 时停掉、
-  resume 另起新 forwarder 是模型本身，不是「误停」。所以 `run.finished` 用来「停 forwarder」没有错。
+- request-bound 模型下，无论哪种状态 `RunAgent` 都会返回、ChatContext 都会随之 stop；HITL 时停掉、
+  resume 另起是新模型本身，不是「误停」。所以 `run.finished` 用来「停 sink」没有错。
 - 但 **`run.finished` 不代表「final 已就绪」**——它在 HITL/纯失败时也发，而那些情况没有 final。
-  需要「final 已就绪」语义时（如 forwarder 提前 drain、避免 progress 与 final 乱序），用
+  需要「final 已就绪」语义时（如 sink 提前 drain、避免 progress 与 final 乱序），用
   `assistant.final`（见 1.2）。两者职责不同：`run.finished` = run 结束；`assistant.final` =
   final 回复就绪。
 

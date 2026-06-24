@@ -5,9 +5,9 @@
 
 进仓库后至少记住这两条（最容易踩、本次花代价才搞清的）：
 
-1. **`EventBus` 是 best-effort**（`event_bus.go` 满载时按优先级驱逐 + `log.Warn`，从不静默；
-   per-Service 单例，buffer 256）。任何订阅者必须读写解耦，不能在消费 goroutine 里做同步 IO。
-   详见 AGENTS.md §1.1。
+1. **事件投递走 per-chat-key Sink（无全局 bus）**（Phase 6b 删了 EventBus；`dispatchEvent`
+   把 Event 直接 Deliver 到 ctx 里的 `EventSink`/`ChatContext`，per-chat-key 隔离）。
+   sink==nil 时 signal 会被丢（有 Debug log）。详见 AGENTS.md §1.1。
 2. **`assistant.final` 已发布，是成功时的白名单信号**（`final != "" && status == "completed"` 才发，
    不是 blacklist；HITL/failed 不发）。`run.finished` ≠ final 就绪信号（HITL/failed 也发）。
    详见 AGENTS.md §1.2 / §1.3。

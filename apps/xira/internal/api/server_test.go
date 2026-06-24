@@ -11,10 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/coder/websocket"
-	"github.com/coder/websocket/wsjson"
 
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/channel"
@@ -155,116 +151,6 @@ func TestAgentsAPIUsesWorkspaceDiscoveredAgents(t *testing.T) {
 	}
 	if profiles[0].ID != "xira-assistant" || profiles[1].ID != "research-assistant" {
 		t.Fatalf("profiles = %+v", profiles)
-	}
-}
-
-func TestEventsWebSocketReceivesRunEvents(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	server := NewServer(rt, "127.0.0.1:0")
-	if err := server.StartAsync(ctx); err != nil {
-		t.Fatal(err)
-	}
-	wsURL := "ws" + server.URL()[4:] + "/api/v1/events"
-	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer readCancel()
-	conn, _, err := websocket.Dial(readCtx, wsURL, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.CloseNow()
-
-	body, _ := json.Marshal(frt.TurnRequest{Message: "hello", Context: channel.NewInboundContext("test", "", nil)})
-	resp, err := http.Post(server.URL()+"/api/v1/agent-runs", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp.Body.Close()
-
-	var evt frt.RuntimeEvent
-	if err := wsjson.Read(readCtx, conn, &evt); err != nil {
-		t.Fatal(err)
-	}
-	if evt.Kind != "run.started" {
-		t.Fatalf("event kind = %q", evt.Kind)
-	}
-}
-
-func TestXiraGardenEventsWebSocketReceivesChannelEvents(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	server := NewServer(rt, "127.0.0.1:0")
-	if err := server.StartAsync(ctx); err != nil {
-		t.Fatal(err)
-	}
-	wsURL := "ws" + server.URL()[4:] + "/api/v1/channels/xiragarden/events"
-	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer readCancel()
-	conn, _, err := websocket.Dial(readCtx, wsURL, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.CloseNow()
-
-	body, _ := json.Marshal(frt.TurnRequest{Message: "hello garden"})
-	resp, err := http.Post(server.URL()+"/api/v1/channels/xiragarden/messages", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp.Body.Close()
-
-	var evt frt.RuntimeEvent
-	if err := wsjson.Read(readCtx, conn, &evt); err != nil {
-		t.Fatal(err)
-	}
-	if evt.Kind != "run.started" {
-		t.Fatalf("event kind = %q", evt.Kind)
-	}
-	if got := evt.Payload["channel"]; got != "xiragarden" {
-		t.Fatalf("event channel = %q", got)
-	}
-}
-
-func TestChannelEventFilterKeepsChildRunCompatibility(t *testing.T) {
-	runIDs := map[string]struct{}{"parent-run": {}}
-	child := frt.RuntimeEvent{
-		RunID:  "child-run",
-		Kind:   "agent.delegate.started",
-		Source: "runtime",
-		Payload: map[string]any{
-			"channel":       "xiragarden",
-			"entrypoint_id": "xiragarden-default",
-			"parent_run_id": "parent-run",
-			"child_run_id":  "child-run",
-		},
-		Correlation: &frt.RuntimeEventCorrelation{
-			ParentRunID: "parent-run",
-			ChildRunID:  "child-run",
-		},
-	}
-	if !eventBelongsToChannel(child, "xiragarden", runIDs) {
-		t.Fatalf("child event should belong to channel")
-	}
-	if _, ok := runIDs["child-run"]; !ok {
-		t.Fatalf("child run id was not remembered: %+v", runIDs)
-	}
-
-	scoped := frt.RuntimeEvent{
-		RunID:  "scoped-child-run",
-		Kind:   "agent.delegate.completed",
-		Source: "runtime",
-		Scope:  &frt.RuntimeEventScope{Channel: "xiragarden"},
-		Payload: map[string]any{
-			"channel": "evil-channel",
-		},
-	}
-	if !eventBelongsToChannel(scoped, "xiragarden", runIDs) {
-		t.Fatalf("scoped child event should belong to channel")
-	}
-	if eventBelongsToChannel(scoped, "evil-channel", map[string]struct{}{}) {
-		t.Fatalf("payload channel should not override scoped channel")
 	}
 }
 

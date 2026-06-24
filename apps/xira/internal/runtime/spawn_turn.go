@@ -21,8 +21,8 @@ import (
 // goroutine". The parent LLM sees {"agent_turn_id":"...", "status":"spawned"}
 // as the tool result and continues reasoning.
 //
-// D-3 (RFC): spawn result payload goes via SpawnSink (not EventBus).
-// EventBus only gets AgentTurnCompleted signal (no payload).
+// D-3 (RFC): spawn result payload goes via SpawnSink (polled by poll_turn).
+// The old AgentTurnCompleted EventBus signal was removed (Phase 6b, #56).
 //
 // The ADK tool wrapper (registered in runtimeADKTools via functiontool.New)
 // is thin: it builds a spawnSpec + serviceSpawnTarget, calls spawnCore, and
@@ -89,10 +89,7 @@ type spawnTarget interface {
 //
 // The child result goes to SpawnSink (looked up from parentCtx via
 // SpawnSinkFromContext). When no sink is present, the result is dropped with
-// a Warn log (Phase 3 fire-and-forget — sink consumers arrive in Phase 4/5).
-//
-// signalBus is optional (nil = no signal published). When present,
-// AgentTurnCompleted signal is published on child completion.
+// a Warn log. poll_turn pulls results from the SpawnSink.
 //
 // onChildDone is invoked exactly once when the goroutine finishes (success,
 // failure, OR panic) — used to release the parallel slot reserved by
@@ -100,7 +97,7 @@ type spawnTarget interface {
 //
 // effectiveTimeoutMS is the child deadline in milliseconds (from
 // evaluateSpawnGuardrails). Must be > 0.
-func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, signalBus EventBus, effectiveTimeoutMS int, onChildDone func()) spawnResult {
+func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, effectiveTimeoutMS int, onChildDone func()) spawnResult {
 	turnID := newSpawnTurnID()
 	sink := SpawnSinkFromContext(parentCtx)
 
@@ -123,10 +120,12 @@ func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, si
 		}
 		defer cancel()
 
-		// Deliver the (possibly panic-derived) pending result + signal.
-		// Deferred BEFORE target.Run so a panic still produces a sink/signal
-		// delivery — recovering a panic but dropping the result would be a
-		// new silent-data-loss bug.
+		// Deliver the (possibly panic-derived) pending result to the SpawnSink.
+		// Deferred BEFORE target.Run so a panic still produces a sink delivery —
+		// recovering a panic but dropping the result would be a silent-data-loss
+		// bug. (The old AgentTurnCompleted EventBus signal was removed in Phase 6b
+		// #56 — it was fire-and-nobody-listens; poll_turn pulls results directly
+		// from the SpawnSink.)
 		deliver := func(pr PendingResult) {
 			if sink != nil {
 				sink.Deliver(pr)
@@ -134,14 +133,6 @@ func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, si
 				slog.Warn("spawn_turn child result dropped (no SpawnSink in context)",
 					"turn_id", turnID,
 					"agent_id", spec.AgentID)
-			}
-			if signalBus != nil {
-				signalBus.PublishEvent(AgentTurnCompleted{
-					MessageIDVal:   "spawn_complete_" + turnID,
-					AgentTurnIDVal: AgentTurnID(turnID),
-					TimestampVal:   time.Now(),
-					TurnKind:       AgentTurnKindAgent,
-				})
 			}
 		}
 

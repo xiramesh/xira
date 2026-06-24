@@ -7,7 +7,7 @@ import (
 )
 
 // TestServiceAccessors covers the nil-safe + normal paths of the trivial
-// Service accessors (Close, EventBus, StateDir/StateRoot, RunStore, Entrypoints).
+// Service accessors (Close, StateDir/StateRoot, RunStore, Entrypoints).
 func TestServiceAccessors(t *testing.T) {
 	// Nil receivers must be safe (defensive guards).
 	var nilSvc *Service
@@ -19,9 +19,6 @@ func TestServiceAccessors(t *testing.T) {
 	if nilSvc.Entrypoints() != nil {
 		t.Fatalf("nil Entrypoints should be nil")
 	}
-	if nilSvc.EventBus() != nil {
-		t.Fatalf("nil EventBus should be nil")
-	}
 
 	// Real service: accessors return the constructed fields.
 	svc := newTestService(t, Config{})
@@ -31,9 +28,6 @@ func TestServiceAccessors(t *testing.T) {
 	}
 	if svc.StateRoot() != dir {
 		t.Fatalf("StateRoot should equal StateDir")
-	}
-	if svc.EventBus() == nil {
-		t.Fatalf("EventBus should be set")
 	}
 	if svc.RunStore() == nil {
 		t.Fatalf("RunStore should be set")
