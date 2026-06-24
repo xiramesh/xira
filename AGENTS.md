@@ -24,7 +24,7 @@
 
 - **per-chat-key 隔离**:每个 turn 的 ctx 携带自己的 `EventBus`(`Router.Handle` 注入)。
   不同 chatKey 的事件天然隔离,不需要 scope 匹配。
-- **sink==nil 时有 Debug log**:`dispatchEvent` 在 `EventBusFromContext(ctx)` 为 nil 时,
+- **bus==nil 时有 Debug log**:`dispatchEvent` 在 `EventBusFromContext(ctx)` 为 nil 时,
   signal 类事件被丢 + `slog.Debug`(与 non-signal 路径对称)。排障时可查 Debug log 确认丢弃。
 - **历史持久化不受影响**:`recorder.appendEvent` 在闭包里**先于** `dispatchEvent` 执行,
   run history(session hydrate 用)不依赖 sink。

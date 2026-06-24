@@ -35,15 +35,15 @@ type SteeringBus interface {
 	HasPending() bool
 }
 
-type steeringSinkKey struct{}
+type steeringBusKey struct{}
 
 // WithSteeringBus returns a context carrying the SteeringBus.
 func WithSteeringBus(ctx context.Context, sink SteeringBus) context.Context {
-	return context.WithValue(ctx, steeringSinkKey{}, sink)
+	return context.WithValue(ctx, steeringBusKey{}, sink)
 }
 
 // SteeringBusFromContext extracts the SteeringBus, or nil if absent.
 func SteeringBusFromContext(ctx context.Context) SteeringBus {
-	sink, _ := ctx.Value(steeringSinkKey{}).(SteeringBus)
+	sink, _ := ctx.Value(steeringBusKey{}).(SteeringBus)
 	return sink
 }

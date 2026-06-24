@@ -2,7 +2,7 @@ package runtime
 
 import "context"
 
-// event_sink.go: EventBus is the interface for per-chat-key event delivery
+// event_bus.go: EventBus is the interface for per-chat-key event delivery
 // (per-chat-key RFC #48). ChatContext (in channelrunner/progress) implements
 // it. The recordEvent closure delivers mapped Events to the sink via
 // context.Value — no global bus subscription needed.
@@ -16,17 +16,18 @@ type EventBus interface {
 	Deliver(evt Event)
 }
 
-type eventSinkKey struct{}
+type eventBusKey struct{}
 
 // WithEventBus returns a context carrying the EventBus. The recordEvent
 // closure retrieves it via EventBusFromContext and delivers mapped Events
-// directly — bypassing the global EventBus for per-chat-key progress.
-func WithEventBus(ctx context.Context, sink EventBus) context.Context {
-	return context.WithValue(ctx, eventSinkKey{}, sink)
+// to the per-chat-key ChatContext (the only delivery path — the global
+// per-Service EventBus was removed in Phase 6b, #60).
+func WithEventBus(ctx context.Context, bus EventBus) context.Context {
+	return context.WithValue(ctx, eventBusKey{}, bus)
 }
 
 // EventBusFromContext extracts the EventBus, or nil if absent.
 func EventBusFromContext(ctx context.Context) EventBus {
-	sink, _ := ctx.Value(eventSinkKey{}).(EventBus)
-	return sink
+	bus, _ := ctx.Value(eventBusKey{}).(EventBus)
+	return bus
 }

@@ -50,15 +50,15 @@ type SpawnBusPeeper interface {
 	HasResult() bool
 }
 
-type spawnSinkKey struct{}
+type spawnBusKey struct{}
 
 // WithSpawnBus returns a context carrying the SpawnBus.
 func WithSpawnBus(ctx context.Context, sink SpawnBus) context.Context {
-	return context.WithValue(ctx, spawnSinkKey{}, sink)
+	return context.WithValue(ctx, spawnBusKey{}, sink)
 }
 
 // SpawnBusFromContext extracts the SpawnBus, or nil if absent.
 func SpawnBusFromContext(ctx context.Context) SpawnBus {
-	sink, _ := ctx.Value(spawnSinkKey{}).(SpawnBus)
+	sink, _ := ctx.Value(spawnBusKey{}).(SpawnBus)
 	return sink
 }
