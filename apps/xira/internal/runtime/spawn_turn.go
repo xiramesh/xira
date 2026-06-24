@@ -32,6 +32,35 @@ import (
 // spawnTurnToolName is the ADK tool name.
 const spawnTurnToolName = "spawn_turn"
 
+// --- child cancel registry (RFC #67: steer cancels outstanding children) ---
+//
+// ChildCancelRegistry is implemented by the progress package's concrete type
+// and injected via ctx. Defining the interface here (in runtime) avoids a
+// runtime→progress import cycle (progress imports runtime). When a spawned
+// child is registered, spawnCore adds its cancel func so the channel runner
+// can cancel all outstanding children when the parent turn is steered.
+
+// ChildCancelRegistry tracks spawned-child cancel funcs by chatKey so a
+// steering retry can cancel outstanding children (RFC #67).
+type ChildCancelRegistry interface {
+	Register(key ChatKey, cancel context.CancelFunc) (unregister func())
+	CancelAll(key ChatKey) int
+	Reset(key ChatKey)
+}
+
+type childCancelRegistryContextKey struct{}
+
+// WithChildCancelRegistry returns a ctx carrying the registry.
+func WithChildCancelRegistry(ctx context.Context, reg ChildCancelRegistry) context.Context {
+	return context.WithValue(ctx, childCancelRegistryContextKey{}, reg)
+}
+
+// ChildCancelRegistryFromContext returns the registry carried in ctx, if any.
+func ChildCancelRegistryFromContext(ctx context.Context) (ChildCancelRegistry, bool) {
+	reg, ok := ctx.Value(childCancelRegistryContextKey{}).(ChildCancelRegistry)
+	return reg, ok
+}
+
 // spawnSpec is the validated input for a spawn operation.
 type spawnSpec struct {
 	AgentID string
@@ -113,6 +142,18 @@ func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, ef
 	// execution-needed keys itself.
 	childCtx, cancel := context.WithTimeout(childToolConstraintCtx(parentCtx), time.Duration(effectiveTimeoutMS)*time.Millisecond)
 
+	// Register the child's cancel with the per-chat-key registry so that when
+	// the parent turn is steered, the channel runner can cancel this child
+	// (RFC #67). Registered BEFORE the goroutine starts so a steer racing with
+	// goroutine startup still sees this child. The goroutine unregisters on
+	// exit to prevent the registry slice from growing unboundedly.
+	var unregister context.CancelFunc
+	if reg, ok := ChildCancelRegistryFromContext(parentCtx); ok {
+		if key, ok := ChatKeyFromContext(parentCtx); ok {
+			unregister = reg.Register(key, cancel)
+		}
+	}
+
 	go func() {
 		// onChildDone releases the parallel slot. It must run on every exit
 		// path including panic, so it is deferred FIRST (outermost), after
@@ -121,6 +162,12 @@ func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, ef
 			defer onChildDone()
 		}
 		defer cancel()
+		// Unregister the child from the steer-cancel registry on every exit
+		// path (RFC #67). Without this, the per-key slice would accumulate
+		// cancel funcs for every child ever spawned in the conversation.
+		if unregister != nil {
+			defer unregister()
+		}
 
 		// Deliver the (possibly panic-derived) pending result to the SpawnBus.
 		// Deferred BEFORE target.Run so a panic still produces a sink delivery —
@@ -296,6 +343,8 @@ func spawnTurnOutput(turnID, status string) map[string]any {
 //     was completely invisible to the user). The child's events carry a
 //     distinct AgentTurnID + ParentAgentTurnID, so the renderer can attribute
 //     and prefix them by source.
+//   - ChatKey + ChildCancelRegistry (RFC #67): so the child can register its
+//     cancel func and be canceled when the parent turn is steered.
 //
 // What the child does NOT inherit:
 //   - SteeringBus: parent interjections must NOT steer a spawned child (the
@@ -322,6 +371,14 @@ func childToolConstraintCtx(parent context.Context) context.Context {
 	// (RFC #66). SteeringBus stays stripped — see the doc comment above.
 	if bus := EventBusFromContext(parent); bus != nil {
 		ctx = WithEventBus(ctx, bus)
+	}
+	// ChatKey + ChildCancelRegistry are inherited (RFC #67) so the child can
+	// register its cancel func and be canceled on parent steer.
+	if key, ok := ChatKeyFromContext(parent); ok {
+		ctx = WithChatKey(ctx, key)
+	}
+	if reg, ok := ChildCancelRegistryFromContext(parent); ok {
+		ctx = WithChildCancelRegistry(ctx, reg)
 	}
 	return ctx
 }

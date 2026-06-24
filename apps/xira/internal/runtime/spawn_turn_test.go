@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -797,3 +799,197 @@ var _ SpawnBus = (*mockSpawnBus)(nil)
 
 // Ensure agents package is referenced (for spawnSpec fields if needed).
 var _ agents.Profile
+
+// --- RFC #67: steer cancels outstanding children ---
+
+// memCancelRegistry is an in-memory ChildCancelRegistry for tests (runtime
+// package cannot import progress, so it implements the interface directly).
+type memCancelRegistry struct {
+	mu       sync.Mutex
+	cancels  map[ChatKey][]context.CancelFunc
+	canceled int
+}
+
+func newMemCancelRegistry() *memCancelRegistry {
+	return &memCancelRegistry{cancels: map[ChatKey][]context.CancelFunc{}}
+}
+
+func (r *memCancelRegistry) Register(key ChatKey, cancel context.CancelFunc) (unregister func()) {
+	r.mu.Lock()
+	r.cancels[key] = append(r.cancels[key], cancel)
+	r.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { r.remove(key, cancel) }) }
+}
+
+func (r *memCancelRegistry) remove(key ChatKey, target context.CancelFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.cancels[key]
+	for i, c := range s {
+		if isSameCtxCancel(c, target) {
+			r.cancels[key] = append(s[:i], s[i+1:]...)
+			break
+		}
+	}
+	if len(r.cancels[key]) == 0 {
+		delete(r.cancels, key)
+	}
+}
+
+func (r *memCancelRegistry) CancelAll(key ChatKey) int {
+	r.mu.Lock()
+	funcs := r.cancels[key]
+	cp := make([]context.CancelFunc, len(funcs))
+	copy(cp, funcs)
+	r.mu.Unlock()
+	for _, c := range cp {
+		c()
+		r.mu.Lock()
+		r.canceled++
+		r.mu.Unlock()
+	}
+	return len(cp)
+}
+
+func (r *memCancelRegistry) Reset(key ChatKey) {
+	r.mu.Lock()
+	delete(r.cancels, key)
+	r.mu.Unlock()
+}
+
+func (r *memCancelRegistry) count(key ChatKey) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.cancels[key])
+}
+
+// isSameCtxCancel compares two context.CancelFunc by wrapping them in
+// comparable sentinel closures. context.WithCancel returns a func closing
+// over *cancelCtx; we compare the underlying ctx via a cancel-time marker.
+// Simpler: wrap each registration so we tag identity ourselves. But the
+// production registry uses tokens; this test registry is only used where we
+// control all registrations, so we compare by having Register tag the func.
+// To keep it minimal here, compare by pointer-equality of the wrapped func
+// via a per-call sentinel — implemented below using a unique *int.
+func isSameCtxCancel(a, b context.CancelFunc) bool {
+	// We don't actually need precise identity here — the test registry is
+	// single-goroutine register/unregister per child. Compare via sentinel
+	// markers added in Register would require changing the stored type; for
+	// the test's purposes unregister is best-effort (the goroutine exits and
+	// unregister removes its entry). We approximate by pointer of the
+	// *cancelCtx the func closes over using reflect.ValueOf Pointer.
+	return cancelFuncPtr(a) == cancelFuncPtr(b)
+}
+
+func cancelFuncPtr(f context.CancelFunc) uintptr {
+	return reflect.ValueOf(f).Pointer()
+}
+
+// Compile-time: memCancelRegistry satisfies ChildCancelRegistry.
+var _ ChildCancelRegistry = (*memCancelRegistry)(nil)
+
+// blockingSpawnTarget blocks Run until its ctx is Done, then returns a
+// "canceled" error. Used to simulate a long-running spawned child that gets
+// canceled by a steer.
+type blockingSpawnTarget struct {
+	started chan struct{}
+	doneErr error
+}
+
+func (b *blockingSpawnTarget) Run(ctx context.Context, agentID, task string) (DelegateAgentResult, error) {
+	close(b.started)
+	<-ctx.Done()
+	b.doneErr = ctx.Err()
+	return DelegateAgentResult{AgentID: agentID, Status: "failed"}, ctx.Err()
+}
+
+// TestSpawnCoreRegistersChildCancelForSteer verifies spawnCore registers the
+// child's cancel func with the per-chat-key registry (RFC #67), so a steer
+// can cancel the child.
+func TestSpawnCoreRegistersChildCancelForSteer(t *testing.T) {
+	reg := newMemCancelRegistry()
+	key := ChatKey{Channel: "ilink", ChatID: "c1", SenderID: "u1"}
+	target := &blockingSpawnTarget{started: make(chan struct{})}
+	sink := &mockSpawnBus{}
+	slotReleased := make(chan struct{})
+
+	ctx := WithSpawnBus(context.Background(), sink)
+	ctx = WithChatKey(ctx, key)
+	ctx = WithChildCancelRegistry(ctx, reg)
+
+	spawnCore(ctx, spawnSpec{AgentID: "code-agent", Task: "long task"}, target, 30000, func() {
+		close(slotReleased)
+	})
+
+	// Child goroutine registers its cancel before/at startup.
+	<-target.started
+	if n := reg.count(key); n != 1 {
+		t.Fatalf("registry has %d cancel funcs after spawn, want 1", n)
+	}
+
+	// Simulate a steer: CancelAll cancels the child.
+	if n := reg.CancelAll(key); n != 1 {
+		t.Fatalf("CancelAll returned %d, want 1", n)
+	}
+
+	// The child goroutine's ctx is Done → it exits → unregisters → releases slot.
+	select {
+	case <-slotReleased:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slot not released after cancel — onChildDone did not run")
+	}
+	// After exit, the registry no longer holds the (now-finished) child.
+	if n := reg.count(key); n != 0 {
+		t.Errorf("registry has %d cancel funcs after child exit, want 0 (unregister on exit)", n)
+	}
+}
+
+// TestSpawnCoreChildCancelReleasesSlot verifies that when a child is canceled
+// via the registry, the parallel slot (onChildDone) is released — so a steer
+// doesn't leak slots.
+func TestSpawnCoreChildCancelReleasesSlot(t *testing.T) {
+	reg := newMemCancelRegistry()
+	key := ChatKey{Channel: "ilink", ChatID: "c1", SenderID: "u1"}
+	target := &blockingSpawnTarget{started: make(chan struct{})}
+	sink := &mockSpawnBus{}
+	slotReleased := make(chan struct{})
+	releaseCount := int32(0)
+
+	ctx := WithSpawnBus(context.Background(), sink)
+	ctx = WithChatKey(ctx, key)
+	ctx = WithChildCancelRegistry(ctx, reg)
+
+	spawnCore(ctx, spawnSpec{AgentID: "code-agent", Task: "task"}, target, 30000, func() {
+		atomic.AddInt32(&releaseCount, 1)
+		close(slotReleased)
+	})
+
+	<-target.started
+	reg.CancelAll(key)
+
+	<-slotReleased
+	if atomic.LoadInt32(&releaseCount) != 1 {
+		t.Errorf("slot released %d times, want exactly 1 (sync.Once)", releaseCount)
+	}
+}
+
+// TestSpawnCoreChildCancelWithoutRegistry verifies spawnCore still works when
+// no registry is in ctx (e.g. unit tests, legacy paths) — registration is a
+// no-op, child runs normally.
+func TestSpawnCoreChildCancelWithoutRegistry(t *testing.T) {
+	target := &mockSpawnTarget{result: DelegateAgentResult{AgentID: "a", Status: "completed"}}
+	sink := &mockSpawnBus{}
+	ctx := WithSpawnBus(context.Background(), sink)
+	// No ChildCancelRegistry, no ChatKey — must not panic.
+	spawnCore(ctx, spawnSpec{AgentID: "a", Task: "t"}, target, 30000, nil)
+
+	// spawnCore returns immediately; wait for the detached goroutine to deliver.
+	waitFor(t, 2*time.Second, func() bool {
+		_, ok := sink.latest()
+		return ok
+	})
+	if _, ok := sink.latest(); !ok {
+		t.Error("child did not deliver result without registry in ctx")
+	}
+}

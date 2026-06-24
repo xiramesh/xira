@@ -641,6 +641,12 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		})
 		chatCtx.Start()
 		defer chatCtx.Stop()
+		// Per-chat-key registry of spawned-child cancel funcs (RFC #67): when
+		// this turn is steered, CancelAll(chatKey) cancels every outstanding
+		// child so they stop burning tokens. Created per turn (same lifetime as
+		// chatCtx); Reset on turn-end prevents leaks across turns.
+		childCancels := progress.NewChildCancelRegistry()
+		defer childCancels.Reset(chatKey)
 		// Clear spawn results when the turn ends (PR #53 R2 review WARNING):
 		// SpawnCollector is per-chatKey (router reuses the entry across turns),
 		// and the only other cleanup point is steering-retry Reset. Without
@@ -668,6 +674,9 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		var err error
 		for {
 			runCtx := frt.WithEventBus(turnCtx, chatCtx)
+			// Inject the per-chat-key child cancel registry so spawned children
+			// register their cancel funcs and can be canceled on steer (RFC #67).
+			runCtx = frt.WithChildCancelRegistry(runCtx, childCancels)
 			resp, err = r.runtime.RunAgent(runCtx, frt.TurnRequest{
 				EntrypointID: r.definition.ID,
 				Message:      currentMsg,
@@ -679,6 +688,16 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 			if err != nil && errors.Is(err, frt.ErrSteered) {
 				if sink := frt.SteeringBusFromContext(turnCtx); sink != nil {
 					if steered, ok := sink.TryDequeue(); ok {
+						// Cancel every outstanding spawned child for this
+						// conversation (RFC #67): the user interjected, so the
+						// children of the interrupted run should stop rather
+						// than keep burning tokens. Their results land in the
+						// (reset) SpawnCollector and are read by the next turn.
+						if n := childCancels.CancelAll(chatKey); n > 0 {
+							slog.Info("ilink steering: canceled outstanding spawned children",
+								"chat_id", chatID,
+								"children", n)
+						}
 						// Reset ChatContext quota/dedup for the retried run
 						// (PR #51 review: without this, progress is silently
 						// dropped because progressSent already hit cap).
