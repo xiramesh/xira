@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
@@ -54,11 +52,9 @@ func NewServer(rt *frt.Service, addr string, controls ...ChannelControls) *Serve
 	mux.HandleFunc("/api/v1/agents", s.agents)
 	mux.HandleFunc("/api/v1/agent-registry", s.agentRegistry)
 	mux.HandleFunc("/api/v1/agent-runs", s.agentRuns)
-	mux.HandleFunc("/api/v1/events", s.events)
 	mux.HandleFunc("/api/v1/human-requests", s.humanRequests)
 	mux.HandleFunc("/api/v1/human-requests/", s.humanRequestByID)
 	mux.HandleFunc("/api/v1/channels/xiragarden/messages", s.xiragardenMessages)
-	mux.HandleFunc("/api/v1/channels/xiragarden/events", s.xiragardenEvents)
 	mux.HandleFunc("/api/v1/channels/websocket/messages", s.websocketMessages)
 	mux.HandleFunc("/api/v1/entrypoints/", s.entrypointControls)
 	mux.HandleFunc("/api/v1/runs", s.runs)
@@ -202,22 +198,6 @@ func (s *Server) runByID(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, resp)
 }
-
-func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-	if err != nil {
-		return
-	}
-	defer conn.CloseNow()
-	ctx := conn.CloseRead(r.Context())
-	events := s.runtime.EventBus().Subscribe(ctx)
-	for evt := range events {
-		if err := writeWebSocketJSON(ctx, conn, evt); err != nil {
-			return
-		}
-	}
-}
-
 func (s *Server) humanRequestByID(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/human-requests/")
 	requestID, resource, ok := parseHumanRequestPath(path)
@@ -315,11 +295,6 @@ func (s *Server) humanRequests(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, list)
 }
-
-func (s *Server) xiragardenEvents(w http.ResponseWriter, r *http.Request) {
-	s.channelEvents(w, r, xiragardenChannel)
-}
-
 func (s *Server) entrypointControls(w http.ResponseWriter, r *http.Request) {
 	if s.channelControls == nil {
 		http.Error(w, "channel controls are not available", http.StatusNotFound)
@@ -381,72 +356,6 @@ func (s *Server) entrypointAccounts(w http.ResponseWriter, r *http.Request, entr
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
-
-func (s *Server) channelEvents(w http.ResponseWriter, r *http.Request, channelName string) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-	if err != nil {
-		return
-	}
-	defer conn.CloseNow()
-	ctx := conn.CloseRead(r.Context())
-	runIDs := map[string]struct{}{}
-	events := s.runtime.EventBus().Subscribe(ctx)
-	for evt := range events {
-		if !eventBelongsToChannel(evt, channelName, runIDs) {
-			continue
-		}
-		if err := writeWebSocketJSON(ctx, conn, evt); err != nil {
-			return
-		}
-	}
-}
-
-func eventBelongsToChannel(evt frt.RuntimeEvent, channelName string, runIDs map[string]struct{}) bool {
-	if evt.RunID != "" {
-		if _, ok := runIDs[evt.RunID]; ok {
-			return true
-		}
-	}
-	if evt.Correlation != nil {
-		if _, ok := runIDs[evt.Correlation.ParentRunID]; ok {
-			if evt.RunID != "" {
-				runIDs[evt.RunID] = struct{}{}
-			}
-			if evt.Correlation.ChildRunID != "" {
-				runIDs[evt.Correlation.ChildRunID] = struct{}{}
-			}
-			return true
-		}
-		if _, ok := runIDs[evt.Correlation.ChildRunID]; ok {
-			if evt.RunID != "" {
-				runIDs[evt.RunID] = struct{}{}
-			}
-			return true
-		}
-	}
-	var eventChannel string
-	if evt.Scope != nil {
-		eventChannel = evt.Scope.Channel
-	}
-	if eventChannel == "" {
-		eventChannel = payloadString(evt.Payload, "channel")
-	}
-	if normalizeChannel(eventChannel) != channelName {
-		return false
-	}
-	if evt.RunID != "" {
-		runIDs[evt.RunID] = struct{}{}
-	}
-	if evt.Correlation != nil && evt.Correlation.ChildRunID != "" {
-		runIDs[evt.Correlation.ChildRunID] = struct{}{}
-	}
-	return true
-}
-
 func payloadString(payload map[string]any, key string) string {
 	if len(payload) == 0 {
 		return ""

@@ -78,7 +78,7 @@ func TestSpawnCoreReturnsTurnIDImmediately(t *testing.T) {
 		Task:    "do something",
 	}
 
-	result := spawnCore(ctx, spec, target, nil, 30000, nil)
+	result := spawnCore(ctx, spec, target, 30000, nil)
 
 	if result.TurnID == "" {
 		t.Error("spawnCore returned empty TurnID")
@@ -103,7 +103,7 @@ func TestSpawnCoreRunsChildInDetachedGoroutine(t *testing.T) {
 	}
 
 	// spawnCore returns immediately — the child runs in a goroutine.
-	_ = spawnCore(ctx, spec, target, nil, 30000, nil)
+	_ = spawnCore(ctx, spec, target, 30000, nil)
 
 	// Wait for the child goroutine to call the target.
 	done := make(chan struct{})
@@ -148,7 +148,7 @@ func TestSpawnCoreDeliversResultToSink(t *testing.T) {
 	ctx := WithSpawnSink(context.Background(), sink)
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
-	_ = spawnCore(ctx, spec, target, nil, 30000, nil)
+	_ = spawnCore(ctx, spec, target, 30000, nil)
 
 	waitFor(t, 2*time.Second, func() bool {
 		_, ok := sink.latest()
@@ -170,7 +170,7 @@ func TestSpawnCoreChildErrorDeliversError(t *testing.T) {
 	ctx := WithSpawnSink(context.Background(), sink)
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
-	_ = spawnCore(ctx, spec, target, nil, 30000, nil)
+	_ = spawnCore(ctx, spec, target, 30000, nil)
 
 	waitFor(t, 2*time.Second, func() bool {
 		_, ok := sink.latest()
@@ -200,7 +200,7 @@ func TestSpawnCoreChildUsesDetachedContext(t *testing.T) {
 	ctx = WithSpawnSink(ctx, sink)
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
-	_ = spawnCore(ctx, spec, target, nil, 30000, nil)
+	_ = spawnCore(ctx, spec, target, 30000, nil)
 	cancel() // cancel parent ctx
 
 	// Child goroutine should still run (detached) — it's blocked on `block`,
@@ -237,7 +237,7 @@ func TestSpawnCoreNoSinkDropsResultSafely(t *testing.T) {
 		}
 	}()
 
-	result := spawnCore(ctx, spec, target, nil, 30000, nil)
+	result := spawnCore(ctx, spec, target, 30000, nil)
 	if result.Status != "spawned" {
 		t.Errorf("Status = %q, want 'spawned'", result.Status)
 	}
@@ -245,39 +245,6 @@ func TestSpawnCoreNoSinkDropsResultSafely(t *testing.T) {
 	// Give the detached goroutine a moment to complete; the only contract
 	// here is "no panic, no hang".
 	time.Sleep(50 * time.Millisecond)
-}
-
-func TestSpawnCorePublishesCompletionSignalOnBus(t *testing.T) {
-	// D-3: when a signalBus is provided, spawnCore's detached goroutine
-	// publishes AgentTurnCompleted (no payload) on child completion.
-	bus := NewEventBus()
-	t.Cleanup(bus.Close)
-
-	ch := bus.SubscribeFiltered(Filter{})
-
-	target := &mockSpawnTarget{result: DelegateAgentResult{
-		AgentID: "code-agent",
-		Status:  "completed",
-		Summary: "done",
-	}}
-	sink := &mockSpawnSink{}
-	ctx := WithSpawnSink(context.Background(), sink)
-	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
-
-	spawned := spawnCore(ctx, spec, target, bus, 30000, nil)
-
-	select {
-	case got := <-ch:
-		completed, ok := got.(AgentTurnCompleted)
-		if !ok {
-			t.Fatalf("expected AgentTurnCompleted, got %T", got)
-		}
-		if completed.AgentTurnIDVal != AgentTurnID(spawned.TurnID) {
-			t.Errorf("turn id = %q, want %q", completed.AgentTurnIDVal, spawned.TurnID)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("AgentTurnCompleted signal not published within 2s")
-	}
 }
 
 func TestSpawnSpecValidation(t *testing.T) {
@@ -437,7 +404,7 @@ func TestSpawnCoreChildPanicRecovered(t *testing.T) {
 
 	// If the goroutine's panic escapes unrecovered, the test binary crashes
 	// and this assertion is never reached — the failure is the crash itself.
-	result := spawnCore(ctx, spec, target, nil, 30000, nil)
+	result := spawnCore(ctx, spec, target, 30000, nil)
 	if result.Status != "spawned" {
 		t.Fatalf("Status = %q, want 'spawned'", result.Status)
 	}
@@ -486,7 +453,7 @@ func TestSpawnCoreChildTimeoutBoundsGoroutine(t *testing.T) {
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 
 	// 50ms timeout — the child must be canceled shortly after.
-	spawnCore(ctx, spec, target, nil, 50, nil)
+	spawnCore(ctx, spec, target, 50, nil)
 
 	select {
 	case <-target.done:
@@ -528,7 +495,7 @@ func TestSpawnCoreChildContextIsolatedFromParent(t *testing.T) {
 	parent = WithSteeringSink(parent, noopSteeringSink{})
 
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
-	spawnCore(parent, spec, target, nil, 30000, nil)
+	spawnCore(parent, spec, target, 30000, nil)
 
 	<-target.done
 	if EventSinkFromContext(target.gotCtx) != nil {
@@ -570,7 +537,7 @@ func TestSpawnCoreChildInheritsParentToolConstraints(t *testing.T) {
 	})
 
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
-	spawnCore(parent, spec, target, nil, 30000, nil)
+	spawnCore(parent, spec, target, 30000, nil)
 
 	<-target.done
 	child := target.gotCtx

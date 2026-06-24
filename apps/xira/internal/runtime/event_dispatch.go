@@ -5,45 +5,27 @@ import (
 	"log/slog"
 )
 
-// event_dispatch.go: dispatchEvent is the event publication chokepoint.
-// Called from ALL recordEvent/recordChildEvent closures (6 total: service.go,
-// delegation.go, delegation_resume.go×2, human_request_resume.go×2). Every
-// closure must call this — NOT s.events.Publish directly. Verified by grep:
-// zero residual `s.events.Publish(evt)` calls outside this function + the
-// method definition.
-// Replaces the old `s.events.Publish(evt)` with a three-way dispatch:
+// event_dispatch.go: dispatchEvent is the event delivery chokepoint. Called
+// from ALL recordEvent/recordChildEvent closures. Maps a RuntimeEvent to a
+// typed Event and delivers to the per-chat-key EventSink (ChatContext) via
+// context.Value. The global EventBus was removed (Phase 6b, #56) —
+// per-chat-key routing is the only delivery path.
 //
-//  1. Map RuntimeEvent → Event (runtimeEventToEvent). If mappable (signal):
-//     a. Deliver to EventSink (per-chat-key, if present in ctx) — direct,
-//        no global bus needed.
-//     b. Also Publish on the global EventBus (for WS observers / deprecated
-//        bridge) — until global bus is retired in Phase 6.
-//  2. If NOT mappable (observability/audit, ~34 kinds): slog.Debug.
-//     Temporary until #43 extracts them formally.
-//
-// recorder.appendEvent still happens in the closure BEFORE this function —
-// run history (for session hydrate) is unaffected.
+// Non-signal kinds (observability/audit, ~34 kinds) are slog.Debug'd until #43
+// extracts them formally. recorder.appendEvent still happens in the closure
+// BEFORE this function — run history (for session hydrate) is unaffected.
 
-func dispatchEvent(ctx context.Context, bus EventBus, evt RuntimeEvent) {
+func dispatchEvent(ctx context.Context, evt RuntimeEvent) {
 	event, ok := runtimeEventToEvent(evt)
 	if !ok {
-		// Non-signal kind — temporary slog path (#43 extracts formally).
-		slog.Debug("runtime event (non-signal, not on bus)",
+		slog.Debug("runtime event (non-signal, not delivered to sink)",
 			"kind", evt.Kind,
 			"event_id", evt.ID,
 			"run_id", evt.RunID,
 			"source", evt.Source)
 		return
 	}
-
-	// Per-chat-key delivery: direct to EventSink if present.
 	if sink := EventSinkFromContext(ctx); sink != nil {
 		sink.Deliver(event)
 	}
-
-	// Global bus: dual publish for backward compat during migration.
-	// PublishEvent (new Event-typed) for esubs + Publish (deprecated RuntimeEvent)
-	// for old subscribers (WS observers, tests). Phase 6 removes the old Publish.
-	bus.PublishEvent(event)
-	bus.Publish(evt) // deprecated bridge — keeps WS observers working
 }

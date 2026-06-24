@@ -40,7 +40,6 @@ type Service struct {
 	agents         *agents.Manager
 	flows          *flow.FlowRegistry
 	skills         *skills.Manager
-	events         EventBus
 	runs           *RunStore
 	entrypoints    *entrypoints.Registry
 	sessions       *fsession.Manager
@@ -99,7 +98,6 @@ func NewService(cfg Config) (*Service, error) {
 		agents:         manager,
 		flows:          flowRegistry,
 		skills:         skillManager,
-		events:         NewEventBus(),
 		runs:           NewRunStore(resolved.RunRoot),
 		entrypoints:    entrypoints.NewRegistry(resolved.DefaultAgentID, resolved.Entrypoints),
 		sessions:       sessionManager,
@@ -120,16 +118,6 @@ func NewService(cfg Config) (*Service, error) {
 }
 
 func (s *Service) Close() {
-	if s != nil && s.events != nil {
-		s.events.Close()
-	}
-}
-
-func (s *Service) EventBus() EventBus {
-	if s == nil {
-		return nil
-	}
-	return s.events
 }
 
 func (s *Service) RunStore() *RunStore {
@@ -391,7 +379,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		// Per-chat-key delivery (RFC #48): if an EventSink is in the context,
 		// deliver mapped Events directly to it (bypasses global bus for
 		// per-chat-key progress). Falls back to global bus Publish when no sink.
-		dispatchEvent(ctx, s.events, evt)
+		dispatchEvent(ctx, evt)
 	}
 	recordAudit := func(action, target string, allowed bool, reason string, meta map[string]any) {
 		recorder.appendAudit(AuditEvent{

@@ -102,7 +102,7 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 	recordEvent := func(kind, source, message string, payload map[string]any) {
 		evt := newRuntimeEvent(base, kind, source, message, payload, nil)
 		events = append(events, evt)
-		dispatchEvent(ctx, s.events, evt)
+		dispatchEvent(ctx, evt)
 	}
 	recordAudit := func(action, target string, allowed bool, reason string, meta map[string]any) {
 		audits = append(audits, AuditEvent{
@@ -233,7 +233,7 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 	recordEvent := func(kind, source, message string, payload map[string]any) {
 		evt := newRuntimeEvent(base, kind, source, message, payload, nil)
 		events = append(events, evt)
-		dispatchEvent(ctx, s.events, evt)
+		dispatchEvent(ctx, evt)
 	}
 	recordAudit := func(action, target string, allowed bool, reason string, meta map[string]any) {
 		audits = append(audits, AuditEvent{

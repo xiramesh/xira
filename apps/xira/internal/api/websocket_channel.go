@@ -118,17 +118,6 @@ func (s *Server) websocketMessages(w http.ResponseWriter, r *http.Request) {
 		defer activeMu.Unlock()
 		delete(active, requestID)
 	}
-	snapshotActive := func() []*websocketActiveRequest {
-		activeMu.Lock()
-		defer activeMu.Unlock()
-		out := make([]*websocketActiveRequest, 0, len(active))
-		for _, req := range active {
-			out = append(out, req)
-		}
-		return out
-	}
-
-	go s.pumpWebSocketEvents(ctx, writeFrame, snapshotActive)
 
 	for {
 		frame, err := readWebSocketInboundFrame(ctx, conn)
@@ -215,28 +204,6 @@ func readWebSocketInboundFrame(ctx context.Context, conn *websocket.Conn) (webso
 		return websocketInboundFrame{}, websocketBadJSONError{err: err}
 	}
 	return frame, nil
-}
-
-func (s *Server) pumpWebSocketEvents(ctx context.Context, writeFrame func(websocketOutboundFrame) error, snapshotActive func() []*websocketActiveRequest) {
-	events := s.runtime.EventBus().Subscribe(ctx)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case evt, ok := <-events:
-			if !ok {
-				return
-			}
-			for _, req := range snapshotActive() {
-				if !req.acceptEvent(evt) {
-					continue
-				}
-				if err := writeFrame(websocketRuntimeEventFrame(req.requestID, evt)); err != nil {
-					return
-				}
-			}
-		}
-	}
 }
 
 func (s *Server) handleWebSocketMessage(

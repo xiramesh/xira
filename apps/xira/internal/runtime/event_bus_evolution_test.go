@@ -20,18 +20,6 @@ import (
 //   - recordEvent closure splits: mapped → PublishEvent, unmapped → slog.Debug
 
 // -----------------------------------------------------------------------------
-// EventBus interface shape (compile-time)
-// -----------------------------------------------------------------------------
-
-func TestEventBusInterfaceShape(t *testing.T) {
-	// The evolved EventBus interface. Old Publish(RuntimeEvent) is GONE.
-	// The old struct (renamed eventBusImpl) satisfies this interface.
-	var _ EventBus = (*eventBusImpl)(nil)
-}
-
-// -----------------------------------------------------------------------------
-// runtimeEventToEvent mapping (~14 signal kinds)
-// -----------------------------------------------------------------------------
 
 func TestRuntimeEventToEvent_TurnLifecycle(t *testing.T) {
 	now := time.Now()

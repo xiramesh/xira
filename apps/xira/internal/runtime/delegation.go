@@ -159,7 +159,7 @@ func (s *Service) runtimeADKTools(
 			parentDepth: exec.Base.DelegationDepth,
 			sessionMode: spawnPolicy.ChildSessionMode,
 		}
-		spawned := spawnCore(ctx, spec, target, s.events, effectiveTimeoutMS, releaseSlot)
+		spawned := spawnCore(ctx, spec, target, effectiveTimeoutMS, releaseSlot)
 		rec.Output = spawnTurnOutput(spawned.TurnID, spawned.Status)
 		rec.EndedAt = time.Now()
 		recordTool(rec)
@@ -299,7 +299,7 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 	recordChildEvent := func(kind, source, message string, payload map[string]any) {
 		evt := newRuntimeEvent(childBase, kind, source, message, payload, correlation)
 		resp.Events = append(resp.Events, evt)
-		dispatchEvent(ctx, s.events, evt)
+		dispatchEvent(ctx, evt)
 	}
 	recordChildAudit := func(action, target string, allowed bool, reason string, meta map[string]any) {
 		resp.AuditEvents = append(resp.AuditEvents, AuditEvent{
