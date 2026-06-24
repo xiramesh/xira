@@ -6,13 +6,10 @@ import (
 	"time"
 )
 
-// These tests define the A2 contract: evolve the existing EventBus struct
-// (event_bus.go) to carry Event (Phase 1 sealed) instead of RuntimeEvent,
-// plus the runtimeEventToEvent mapping function. TDD red: types don't exist
-// yet.
-//
-// A2 scope (#34, 2026-06-23):
-//   - EventBus interface: PublishEvent(Event) + SubscribeFiltered(Filter) <-chan Event
+// These tests cover the runtimeEventToEvent mapping function (RuntimeEvent →
+// sealed Event). The EventBus struct + interface were removed in Phase 6b (#60);
+// only the mapping remains (used by dispatchEvent to deliver Events to the
+// per-chat-key EventSink).
 //   - Old EventBus struct renamed eventBusImpl, satisfies the interface
 //   - Old Publish(RuntimeEvent) DELETED — compile-forces migration
 //   - runtimeEventToEvent(RuntimeEvent) (Event, bool): maps ~14 signal kinds

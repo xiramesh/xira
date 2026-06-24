@@ -27,5 +27,14 @@ func dispatchEvent(ctx context.Context, evt RuntimeEvent) {
 	}
 	if sink := EventSinkFromContext(ctx); sink != nil {
 		sink.Deliver(event)
+	} else {
+		// No per-chat-key sink in ctx (e.g. detached child turn, or a path
+		// that doesn't wire EventSink). Symmetric with the non-signal Debug
+		// log above — never silently drop a signal without a trace.
+		slog.Debug("signal event dropped (no EventSink in context)",
+			"kind", evt.Kind,
+			"event_id", evt.ID,
+			"run_id", evt.RunID,
+			"source", evt.Source)
 	}
 }
