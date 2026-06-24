@@ -26,19 +26,40 @@ func truncateRunes(s string, max int) string {
 // (per-chat-key RFC #48). It replaces the old ProgressRenderer.Render which
 // consumed RuntimeEvent. This version type-switches on Event sealed structs.
 //
-// Text templates are EXACTLY the same as the old renderText (zero behavior
-// change for users). The only difference: input type (Event vs RuntimeEvent)
-// and field access (typed struct fields vs Payload map).
+// RFC #66 (spawn-parent-child-comm-rfc §3): AssistantStatus + ToolCalled are
+// rendered to IM so users see a spawned child's progress (and the parent's).
+// Child events — those with a ParentAgentTurnID distinct from AgentTurnID —
+// get a "（子任务）" source prefix so users can attribute them.
+
+// childSourcePrefix marks an event as coming from a spawned child turn (not
+// the agent the user is directly talking to). Applied when
+// ParentAgentTurnID is set and differs from AgentTurnID.
+const childSourcePrefix = "（子任务）"
+
+// isChildEvent reports whether evt originates from a spawned child turn: its
+// ParentAgentTurnID is set and distinct from its own AgentTurnID. Root turns
+// have an empty ParentAgentTurnID; a child carries the parent's turn id.
+func isChildEvent(evt runtime.Event) bool {
+	parent := string(evt.ParentAgentTurnID())
+	self := string(evt.AgentTurnID())
+	return parent != "" && parent != self
+}
 
 // RenderEvent renders an Event into a channel-neutral progress Message.
-// Returns ok=false for events that are not delivered to IM (progress
-// heartbeats, lifecycle signals, AssistantFinal drain-only).
+// Returns ok=false for events that are not delivered to IM (lifecycle signals,
+// AssistantFinal drain-only, ToolResult).
 //
 // maxChars > 0 truncates the text to that many runes (with ellipsis).
 func RenderEvent(evt runtime.Event, maxChars int) (Message, bool) {
 	text, kind, ok := renderEventText(evt)
 	if !ok {
 		return Message{}, false
+	}
+	// Child events get a source-attribution prefix so the user can tell they
+	// came from a spawned child, not the agent they're talking to. Applied
+	// after rendering so it prefixes the final text exactly once.
+	if isChildEvent(evt) {
+		text = childSourcePrefix + text
 	}
 	if maxChars > 0 && utf8.RuneCountInString(text) > maxChars {
 		text = truncateRunes(text, maxChars)
@@ -68,15 +89,35 @@ func renderEventText(evt runtime.Event) (string, string, bool) {
 		}
 		return "这里需要你确认后才能继续：" + question, "run.waiting_human", true
 
+	case runtime.AssistantStatus:
+		// Progress heartbeat (RFC #66): surface what the agent — parent or
+		// spawned child — is doing. Empty text is skipped (no heartbeat to show).
+		text := strings.TrimSpace(e.Text)
+		if text == "" {
+			return "", "", false
+		}
+		return text, "assistant.status", true
+
+	case runtime.ToolCalled:
+		// Tool invocation (RFC #66): surface the tool name. ToolResult (the
+		// completion) is NOT rendered — it pairs 1:1 with ToolCalled and
+		// rendering both would double the noise.
+		name := strings.TrimSpace(e.ToolName)
+		if name == "" {
+			return "", "", false
+		}
+		return "调用工具：" + name, "tool.called", true
+
 	case runtime.AssistantFinal:
 		// Drain-only — not rendered as text. The caller uses it as a signal
 		// to stop delivering (like the old forwarder.drain()).
 		return "", "", false
 
 	default:
-		// All other Event types (AssistantStatus, ToolCalled, ToolResult,
-		// AgentTurnStarted, AgentTurnCompleted, AgentTurnCanceled,
-		// HumanResponded) are not delivered to IM in the v0 progress feed.
+		// Turn lifecycle (AgentTurnStarted/Completed/Canceled) and
+		// HumanResponded are not delivered to IM in the v0 progress feed —
+		// they're lifecycle signals, not user-facing progress. ToolResult is
+		// handled above (not rendered); the rest fall through here.
 		return "", "", false
 	}
 }

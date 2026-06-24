@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -468,11 +469,15 @@ func TestSpawnCoreChildTimeoutBoundsGoroutine(t *testing.T) {
 	}
 }
 
-// TestSpawnCoreChildContextIsolatedFromParent verifies C3: the child ctx must
-// NOT inherit the parent's EventBus or SteeringBus. WithoutCancel preserved
-// all Values (the bug); the child must start from a clean context so child
-// events don't pollute the parent's IM stream and parent steering doesn't
-// leak into the child.
+// TestSpawnCoreChildInheritsParentEventBus verifies the spawn child INHERITS
+// the parent's EventBus (RFC #66 / spawn-parent-child-comm-rfc §3): child turn
+// progress events route to the parent's chat key so users see what a spawned
+// child is doing. This REVERSES the original C3 "isolate EventBus" decision —
+// full isolation was too extreme, cutting off a legitimate parent-child link.
+//
+// The SteeringBus stays isolated: parent interjections must NOT steer a spawned
+// child (the child isn't in a direct conversation with the user). Steering
+// cancellation of outstanding children is a separate mechanism (RFC §5 / #67).
 type mockAssertCleanCtxTarget struct {
 	gotCtx context.Context
 	done   chan struct{}
@@ -484,29 +489,139 @@ func (m *mockAssertCleanCtxTarget) Run(ctx context.Context, agentID, task string
 	return DelegateAgentResult{AgentID: agentID, Status: "completed", Summary: "done"}, nil
 }
 
-func TestSpawnCoreChildContextIsolatedFromParent(t *testing.T) {
+func TestSpawnCoreChildInheritsParentEventBus(t *testing.T) {
 	target := &mockAssertCleanCtxTarget{done: make(chan struct{})}
 	sink := &mockSpawnBus{}
+	parentBus := noopEventBus{}
 
 	// Parent ctx carries BOTH sinks — exactly what an IM turn ctx carries.
 	parent := context.Background()
 	parent = WithSpawnBus(parent, sink)
-	parent = WithEventBus(parent, noopEventBus{})
+	parent = WithEventBus(parent, parentBus)
 	parent = WithSteeringBus(parent, noopSteeringBus{})
 
 	spec := spawnSpec{AgentID: "code-agent", Task: "task"}
 	spawnCore(parent, spec, target, 30000, nil)
 
 	<-target.done
-	if EventBusFromContext(target.gotCtx) != nil {
-		t.Error("child ctx inherited parent EventBus — child progress would pollute parent IM stream")
+	// EventBus IS inherited — child progress routes to the parent's chat key.
+	if got := EventBusFromContext(target.gotCtx); got == nil {
+		t.Error("child ctx did NOT inherit parent EventBus — child progress is invisible to the parent (RFC #66)")
+	} else if got != any(parentBus).(EventBus) && fmt.Sprintf("%p", got) != fmt.Sprintf("%p", parentBus) {
+		// noopEventBus is a distinct value type; the child must carry the
+		// SAME bus instance the parent set. Compare by pointer to be strict.
+		t.Error("child ctx carries a different EventBus instance than the parent")
 	}
+	// SteeringBus is STILL isolated — parent interjections must not steer a
+	// spawned child.
 	if SteeringBusFromContext(target.gotCtx) != nil {
 		t.Error("child ctx inherited parent SteeringBus — parent interjections would steer the child")
 	}
 	// SpawnBus is consumed by spawnCore from the parent ctx (for result
 	// delivery), not by the child execution — so the child ctx need not
-	// carry it. We only assert the two output sinks are stripped.
+	// carry it.
+}
+
+// recordingEventBus captures every delivered Event. Used to prove that a
+// spawned child's dispatchEvent reaches the parent's EventBus instance.
+type recordingEventBus struct {
+	mu     sync.Mutex
+	events []Event
+}
+
+func (r *recordingEventBus) Deliver(evt Event) {
+	r.mu.Lock()
+	r.events = append(r.events, evt)
+	r.mu.Unlock()
+}
+
+func (r *recordingEventBus) snapshot() []Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]Event, len(r.events))
+	copy(out, r.events)
+	return out
+}
+
+// mockEventDispatchTarget is a spawnTarget that, inside Run, dispatches a
+// signal event (run.started) through the child ctx — exactly what a real
+// RunChildAgent does via recordChildEvent. It proves the child's dispatched
+// events reach the parent's EventBus (RFC #66).
+type mockEventDispatchTarget struct {
+	done chan struct{}
+}
+
+func (m *mockEventDispatchTarget) Run(ctx context.Context, agentID, task string) (DelegateAgentResult, error) {
+	defer close(m.done)
+	// Construct a signal event the way RunChildAgent does and dispatch it
+	// through the child ctx. If the ctx inherited the parent's EventBus, this
+	// reaches the parent bus; otherwise it's dropped (Debug log only).
+	const childRun = "child-run-research"
+	base := runtimeEventBase{
+		RunID:   childRun,
+		AgentID: agentID,
+	}
+	corr := &runtimeEventCorrelationInput{
+		ParentRunID: "parent-run-xyz",
+		ChildRunID:  childRun,
+	}
+	evt := newRuntimeEvent(base, "run.started", "runtime", "child agent run started", map[string]any{
+		"agent_id": agentID,
+	}, corr)
+	dispatchEvent(ctx, evt)
+	return DelegateAgentResult{AgentID: agentID, Status: "completed", Summary: "done"}, nil
+}
+
+// TestSpawnCoreChildEventsReachParentBus is the end-to-end contract test for
+// RFC #66: a spawned child's dispatched signal events MUST reach the parent's
+// EventBus. Before this change, the child ctx started from context.Background()
+// and dispatchEvent found no sink → child progress was silently dropped.
+func TestSpawnCoreChildEventsReachParentBus(t *testing.T) {
+	bus := &recordingEventBus{}
+	target := &mockEventDispatchTarget{done: make(chan struct{})}
+	sink := &mockSpawnBus{}
+
+	parent := context.Background()
+	parent = WithSpawnBus(parent, sink)
+	parent = WithEventBus(parent, bus)
+
+	spec := spawnSpec{AgentID: "research-assistant", Task: "research LLM agents"}
+	spawnCore(parent, spec, target, 30000, nil)
+
+	// Wait for the child goroutine to dispatch its event.
+	select {
+	case <-target.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("child goroutine never ran")
+	}
+
+	// The dispatched run.started must be in the parent bus, mapped to the
+	// AgentTurnStarted Event type.
+	events := bus.snapshot()
+	var got AgentTurnStarted
+	count := 0
+	for _, e := range events {
+		if s, ok := e.(AgentTurnStarted); ok && s.Kind() == "agent_turn.started" {
+			got = s
+			count++
+		}
+	}
+	if count == 0 {
+		t.Fatalf("child's run.started event did not reach parent EventBus; got %d events: %v", len(events), events)
+	}
+	// Correlation: the child event carries the child's turn ID and the parent
+	// turn ID, so the renderer can attribute it to the child (and link it to
+	// the parent). This is the data the progress renderer needs to prefix
+	// child events with their source agent.
+	if got.AgentTurnID() == "" {
+		t.Error("child event missing AgentTurnID — renderer cannot attribute it to the child turn")
+	}
+	if string(got.ParentAgentTurnID()) == "" {
+		t.Error("child event missing ParentAgentTurnID — renderer cannot link it to the parent turn")
+	}
+	if string(got.AgentTurnID()) == string(got.ParentAgentTurnID()) {
+		t.Error("child AgentTurnID equals ParentAgentTurnID — child event would be indistinguishable from a parent event")
+	}
 }
 
 // --- Tool-constraint inheritance (R3: allowlist regression) ---
@@ -563,11 +678,9 @@ func TestSpawnCoreChildInheritsParentToolConstraints(t *testing.T) {
 		t.Error("child lost parent native-tools-disabled flag")
 	}
 
-	// Regression guard: sinks must STILL be stripped (C3 must not regress
-	// when we re-attach tool constraints).
-	if EventBusFromContext(child) != nil {
-		t.Error("re-attaching tool constraints leaked parent EventBus back in")
-	}
+	// Regression guard: the SteeringBus must STILL be stripped (re-attaching
+	// tool constraints must not leak it back in). The EventBus is intentionally
+	// inherited now (RFC #66) — verified by TestSpawnCoreChildInheritsParentEventBus.
 	if SteeringBusFromContext(child) != nil {
 		t.Error("re-attaching tool constraints leaked parent SteeringBus back in")
 	}
