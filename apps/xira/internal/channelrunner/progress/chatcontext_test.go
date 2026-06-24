@@ -1,7 +1,10 @@
 package progress
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,7 +59,7 @@ func TestChatContextDeliversRenderedEvent(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("delivered %d messages, want 1", len(msgs))
 	}
-	want := "子任务没有成功返回，我会改用当前上下文继续处理。"
+	want := "任务没有成功完成，我会改用当前上下文继续处理。"
 	if msgs[0].Text != want {
 		t.Errorf("Text = %q, want %q", msgs[0].Text, want)
 	}
@@ -251,4 +254,69 @@ func TestChatContextStopWithoutStart(t *testing.T) {
 	// Stop before Start should not panic.
 	cc := NewChatContext(context.Background(), ChatContextConfig{Sender: nil})
 	cc.Stop()
+}
+
+// TestChatContextQuotaSharedParentChild pins the KNOWN LIMITATION that parent
+// and spawned-child progress share a single per-turn quota (RFC #66 review §1).
+//
+// A chatty child can starve the parent's progress within MaxMessagesPerTurn.
+// This test pins the CURRENT behavior (shared quota, child dropped when full)
+// so a future change to per-source quota is a deliberate contract change, not
+// an accidental regression. The drop is logged at Debug (not silent).
+//
+// This is NOT a bug to fix here — per-source quota is a follow-up design.
+func TestChatContextQuotaSharedParentChild(t *testing.T) {
+	// Capture Debug logs to assert the quota drop is observable.
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prevLogger)
+
+	sender := &testSender{}
+	cc := NewChatContext(context.Background(), ChatContextConfig{
+		Sender: sender,
+		Policy: Policy{
+			MaxMessagesPerTurn: 2,
+			MinInterval:        0,
+		},
+	})
+	cc.Start()
+
+	// Two PARENT progress events fill the shared quota (distinct text → no dedup).
+	cc.Deliver(runtime.AssistantStatus{
+		MessageIDVal:   "p1",
+		AgentTurnIDVal: "aturn_parent",
+		Text:           "父：分析需求",
+	})
+	cc.Deliver(runtime.AssistantStatus{
+		MessageIDVal:   "p2",
+		AgentTurnIDVal: "aturn_parent",
+		Text:           "父：编写方案",
+	})
+	// Third event is a CHILD progress event — shared quota is full → dropped.
+	cc.Deliver(runtime.AssistantStatus{
+		MessageIDVal:         "c1",
+		AgentTurnIDVal:       "aturn_child",
+		ParentAgentTurnIDVal: "aturn_parent",
+		Text:                 "子：搜索资料",
+	})
+	time.Sleep(50 * time.Millisecond)
+	cc.Stop()
+
+	msgs := sender.getMessages()
+	// Known limitation: only 2 delivered (parent filled the shared quota);
+	// the child event is dropped.
+	if len(msgs) != 2 {
+		t.Errorf("delivered %d, want 2 (shared quota: child dropped when parent fills it)", len(msgs))
+	}
+
+	// The drop MUST be observable — not silent (AGENTS.md §2).
+	logs := logBuf.String()
+	if !strings.Contains(logs, "quota reached") {
+		t.Errorf("quota drop not logged; logs:\n%s", logs)
+	}
+	// The dropped event is attributable (child turn id present in the log).
+	if !strings.Contains(logs, "aturn_child") {
+		t.Errorf("dropped child turn id missing from quota-drop log; logs:\n%s", logs)
+	}
 }

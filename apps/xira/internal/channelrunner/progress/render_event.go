@@ -77,10 +77,15 @@ func RenderEvent(evt runtime.Event, maxChars int) (Message, bool) {
 func renderEventText(evt runtime.Event) (string, string, bool) {
 	switch e := evt.(type) {
 	case runtime.AgentTurnFailed:
+		// Base text is source-neutral; the （子任务） prefix (applied in
+		// RenderEvent for child turns) marks a spawned-child failure. The old
+		// Phase-2 text "子任务没有成功返回" was wrong for root turns (the root
+		// turn IS the task) and duplicated the prefix for child turns
+		// ("（子任务）子任务没有成功返回") — review #69 §2.
 		if strings.Contains(strings.ToLower(e.Error), "timeout") {
-			return "子任务超时，我会继续整理已获得的信息。", "agent.delegate.timeout", true
+			return "任务超时，我会继续整理已获得的信息。", "agent.delegate.timeout", true
 		}
-		return "子任务没有成功返回，我会改用当前上下文继续处理。", "agent.delegate.failed", true
+		return "任务没有成功完成，我会改用当前上下文继续处理。", "agent.delegate.failed", true
 
 	case runtime.HumanRequested:
 		question := strings.TrimSpace(e.Question)
