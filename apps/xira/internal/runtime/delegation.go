@@ -461,9 +461,8 @@ func (s *Service) activeChildCount(parentRunID string) int {
 }
 
 // outstandingChildCount returns the number of outstanding (in-flight) child
-// runs for a parent. Phase 6a (#55): the persisted delegation-join scan was
-// removed (delegate_agent retired); only the in-memory active-children count
-// remains. Kept as the spawn-guardrails entry point (evaluateSpawnGuardrails).
+// runs for a parent (in-memory active-children count). Entry point for
+// spawn guardrails (evaluateSpawnGuardrails).
 func (s *Service) outstandingChildCount(parentRunID string) (int, error) {
 	return s.activeChildCount(parentRunID), nil
 }
