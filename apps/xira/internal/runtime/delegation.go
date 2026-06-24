@@ -317,13 +317,19 @@ func (s *Service) runtimeADKTools(
 	}
 	out = append(out, spawnTool)
 
-	// wait_turn: parent LLM retrieves a spawned child's result (Phase 4,
-	// RFC §2.4 D-3). Coexists with spawn_turn under the same DelegationPolicy
-	// gate — only agents allowed to spawn are allowed to wait on children.
-	waitTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
-		Name:        waitTurnToolName,
-		Description: "Wait for a spawned child agent turn to complete and return its result. Pass the agent_turn_id returned by spawn_turn. Blocks until the child finishes (or times out). Use this when you need the child's output before continuing.",
-		InputSchema: waitTurnInputSchema(),
+	// poll_turn: parent LLM checks a spawned child's result NON-BLOCKINGLY
+	// (Phase 4, RFC §2.4 D-3). Returns the result if the child finished, or
+	// {status:"pending"} if still running — never blocks. Coexists with
+	// spawn_turn under the same DelegationPolicy gate.
+	//
+	// CRITICAL: must NOT block. ADK runs tools synchronously (base_flow.go
+	// wg.Wait); a blocking tool freezes the event loop and disables the
+	// steering checkpoint. The previous wait_turn blocked → broke steering
+	// (PR #53 review). poll_turn peeks instead.
+	pollTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
+		Name:        pollTurnToolName,
+		Description: "Check whether a spawned child agent turn has finished and return its result if so. Pass the agent_turn_id from spawn_turn. Returns immediately: {status:completed/failed, result_summary} when done, or {status:pending} when the child is still running. If pending, do other work and poll again later — do NOT block waiting.",
+		InputSchema: pollTurnInputSchema(),
 		OutputSchema: objectSchema(),
 	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
 		start := time.Now()
@@ -331,10 +337,10 @@ func (s *Service) runtimeADKTools(
 		if callID == "" {
 			callID = uuid.NewString()
 		}
-		spec, cleanInput, unsupported := sanitizeWaitTurnInput(args)
+		spec, cleanInput, unsupported := sanitizePollTurnInput(args)
 		rec := ToolCallRecord{
 			ID:        callID,
-			Name:      waitTurnToolName,
+			Name:      pollTurnToolName,
 			Input:     cleanInput,
 			StartedAt: start,
 		}
@@ -348,10 +354,9 @@ func (s *Service) runtimeADKTools(
 			recordTool(rec)
 			return rec.Output, nil
 		}
-		// wait_turn uses the turn's ctx (which carries the SpawnSink injected
-		// by Router), NOT the tool ctx (which ADK cancels after the iterator
-		// step). The SpawnSink/SpawnResultWaiter is looked up from ctx.
-		rec.Output, _ = executeWaitTurn(ctx, spec.ChildTurnID)
+		// poll_turn uses the turn's ctx (which carries the SpawnSink injected
+		// by Router), NOT the tool ctx. Non-blocking peek via SpawnSinkPeeper.
+		rec.Output = executePollTurn(ctx, spec.ChildTurnID)
 		rec.EndedAt = time.Now()
 		recordTool(rec)
 		return rec.Output, nil
@@ -359,7 +364,7 @@ func (s *Service) runtimeADKTools(
 	if err != nil {
 		return nil, err
 	}
-	out = append(out, waitTool)
+	out = append(out, pollTool)
 
 	return out, nil
 }

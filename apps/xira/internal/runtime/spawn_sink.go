@@ -27,30 +27,27 @@ type SpawnSink interface {
 	Deliver(pr PendingResult)
 }
 
-// SpawnResultWaiter is optionally implemented by SpawnSink implementations
-// that support blocking wait for a specific child's result (e.g. the
-// progress.SpawnCollector). wait_turn uses it to block until a spawned child
-// completes; plain SpawnSink test doubles need not implement it.
+// SpawnResultWaiter was a blocking-Wait capability on SpawnSink. REMOVED in R2
+// (PR #53 review): blocking wait inside an ADK tool handler froze the event
+// loop, disabling the steering checkpoint. Spawn result delivery is now
+// non-blocking: the parent uses poll_turn (SpawnSinkPeeper.TryResult) to pull,
+// never blocking. Kept as a comment marker so greppers find the rationale.
+
+// SpawnSinkPeeper is optionally implemented by SpawnSink implementations that
+// support non-blocking result queries (e.g. progress.SpawnCollector). poll_turn
+// uses it; plain SpawnSink test doubles need not implement it.
 //
 // Kept separate from SpawnSink so the core sink contract stays "deliver only"
-// (mirroring EventSink/SteeringSink) — the blocking-wait capability is an
-// implementation detail that lives on the production sink, not the contract.
-type SpawnResultWaiter interface {
-	// Wait blocks until the child identified by childID has delivered its
-	// result, or ctx expires. Returns the result, or an error wrapping
-	// ctx.Err() if it expired first (never blocks forever).
-	Wait(ctx context.Context, childID string) (PendingResult, error)
-}
-
-// ShortSpawnID formats a child index into a 4-hex suffix used to synthesize
-// spawn turn IDs in tests. Exported for tests that need IDs matching the
-// collector's keys deterministically.
-func ShortSpawnID(i int) string {
-	const hex = "0123456789abcdef"
-	if i < 0 {
-		i = 0
-	}
-	return string([]byte{hex[(i>>12)&0xf], hex[(i>>8)&0xf], hex[(i>>4)&0xf], hex[i&0xf]})
+// (mirroring EventSink/SteeringSink). This is the NON-BLOCKING sibling of the
+// deleted SpawnResultWaiter — pull, never block.
+type SpawnSinkPeeper interface {
+	// TryResult returns the child's result if it has completed. Non-blocking:
+	// returns (zero, false) immediately if the child is still running or
+	// unknown. poll_turn maps false → "pending".
+	TryResult(childID string) (PendingResult, bool)
+	// HasResult reports whether ANY child result is available (checkpoint
+	// peek, mirrors SteeringSink.HasPending).
+	HasResult() bool
 }
 
 type spawnSinkKey struct{}

@@ -184,8 +184,11 @@ func spawnCore(parentCtx context.Context, spec spawnSpec, target spawnTarget, si
 }
 
 // newSpawnTurnID generates a unique turn ID for a spawned child.
+// Uses the FULL uuid — not uuid[:8] — because the ID is the SpawnCollector
+// key (poll_turn looks up by it). A truncated id (65k → 50% collision) would
+// cross-link child results (PR #53 review WARNING). Full uuid collides ~never.
 func newSpawnTurnID() string {
-	return "spawn:" + uuid.NewString()[:8]
+	return "spawn:" + uuid.NewString()
 }
 
 // spawnTurnInputSchema is the ADK input schema for spawn_turn. Phase 3 only

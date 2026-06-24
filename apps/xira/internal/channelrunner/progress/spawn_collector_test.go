@@ -1,88 +1,76 @@
 package progress
 
 import (
-	"context"
-	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/xiramesh/xira/internal/runtime"
 )
 
-// spawn_collector_test.go: tests SpawnCollector — the production SpawnSink
-// implementation. spawn_turn's detached goroutine delivers child-turn
-// results here (Deliver); the parent turn's wait_turn tool blocks on Wait
-// until a given child completes (Phase 4, RFC §2.4 D-3).
+// spawn_collector_test.go: tests SpawnCollector — the production SpawnSink.
+// spawn_turn's detached goroutine delivers child-turn results here (Deliver);
+// the parent turn's poll_turn tool queries them non-blockingly (TryResult).
 //
-// SpawnCollector implements runtime.SpawnSink (Deliver) and
-// runtime.SpawnResultWaiter (Wait).
+// Design (R2): SpawnCollector is a NON-BLOCKING store, mirroring
+// SteeringQueue (HasPending/TryDequeue). The previous Wait (blocking) was a
+// dead end: it blocked the ADK event loop, freezing the steering checkpoint
+// (PR #53 review CRITICAL). poll_turn pulls instead.
+//
+// Implements runtime.SpawnSink (Deliver) + runtime.SpawnSinkPeeper
+// (TryResult/HasResult/DrainAll).
 
-func TestSpawnCollectorDeliverThenWait(t *testing.T) {
-	// Fast path: result is delivered BEFORE Wait is called. Wait must
-	// return it immediately without blocking.
+func TestSpawnCollectorDeliverThenTryResult(t *testing.T) {
+	// Deliver stores; TryResult retrieves. The core store/retrieve contract.
 	c := NewSpawnCollector()
-	want := runtime.PendingResult{TurnID: "spawn:abc", Result: runtime.DelegateAgentResult{AgentID: "code", Status: "completed", Summary: "done"}}
+	want := runtime.PendingResult{
+		TurnID: "spawn:full-uuid-1",
+		Result: runtime.DelegateAgentResult{AgentID: "code", Status: "completed", Summary: "done"},
+	}
 	c.Deliver(want)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	got, err := c.Wait(ctx, "spawn:abc")
-	if err != nil {
-		t.Fatalf("Wait returned error: %v", err)
+	got, ok := c.TryResult("spawn:full-uuid-1")
+	if !ok {
+		t.Fatal("TryResult returned ok=false after Deliver")
 	}
 	if got.TurnID != want.TurnID || got.Result.Summary != want.Result.Summary {
-		t.Errorf("Wait = %+v, want %+v", got, want)
+		t.Errorf("TryResult = %+v, want %+v", got, want)
 	}
 }
 
-func TestSpawnCollectorWaitThenDeliver(t *testing.T) {
-	// Slow path: Wait is called BEFORE the result arrives. Wait must
-	// block until Deliver wakes it. This is the core producer-consumer
-	// contract — without it, wait_turn would busy-poll or miss results.
+func TestSpawnCollectorTryResultMissing(t *testing.T) {
+	// A child that hasn't completed yet (or a bogus ID) returns ok=false,
+	// not a zero result. poll_turn uses this to report "pending".
 	c := NewSpawnCollector()
-
-	gotCh := make(chan runtime.PendingResult, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		got, err := c.Wait(ctx, "spawn:late")
-		if err != nil {
-			t.Errorf("Wait errored: %v", err)
-			gotCh <- runtime.PendingResult{}
-			return
-		}
-		gotCh <- got
-	}()
-
-	// Give the goroutine a moment to enter Wait.
-	time.Sleep(50 * time.Millisecond)
-
-	c.Deliver(runtime.PendingResult{TurnID: "spawn:late", Result: runtime.DelegateAgentResult{AgentID: "code", Status: "completed", Summary: "late result"}})
-
-	select {
-	case got := <-gotCh:
-		if got.Result.Summary != "late result" {
-			t.Errorf("got summary %q, want 'late result'", got.Result.Summary)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Wait did not return after Deliver within 1s — blocked or missed the result")
+	if _, ok := c.TryResult("spawn:never"); ok {
+		t.Error("TryResult returned ok=true for a never-delivered child")
 	}
 }
 
-func TestSpawnCollectorWaitTimeout(t *testing.T) {
-	// When the child never completes, Wait must respect ctx and return —
-	// never block forever. wait_turn relies on this (tool ctx deadline).
+func TestSpawnCollectorHasResult(t *testing.T) {
+	// HasResult is the checkpoint peek — "any child done?" without consuming.
 	c := NewSpawnCollector()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	_, err := c.Wait(ctx, "spawn:never")
-	if err == nil {
-		t.Fatal("Wait returned nil error on timeout, want non-nil")
+	if c.HasResult() {
+		t.Error("HasResult=true on empty collector")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("Wait error = %v, want context.DeadlineExceeded", err)
+	c.Deliver(runtime.PendingResult{TurnID: "spawn:1", Result: runtime.DelegateAgentResult{Status: "completed"}})
+	if !c.HasResult() {
+		t.Error("HasResult=false after Deliver")
+	}
+}
+
+func TestSpawnCollectorDrainAll(t *testing.T) {
+	// DrainAll returns every completed result and clears the store (for a
+	// future checkpoint batch-drain). After drain, HasResult is false.
+	c := NewSpawnCollector()
+	c.Deliver(runtime.PendingResult{TurnID: "spawn:1", Result: runtime.DelegateAgentResult{Status: "completed", Summary: "a"}})
+	c.Deliver(runtime.PendingResult{TurnID: "spawn:2", Result: runtime.DelegateAgentResult{Status: "completed", Summary: "b"}})
+
+	all := c.DrainAll()
+	if len(all) != 2 {
+		t.Fatalf("DrainAll returned %d results, want 2", len(all))
+	}
+	if c.HasResult() {
+		t.Error("HasResult=true after DrainAll — store not cleared")
 	}
 }
 
@@ -94,70 +82,47 @@ func TestSpawnCollectorResetClearsResults(t *testing.T) {
 
 	c.Reset()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	_, err := c.Wait(ctx, "spawn:stale")
-	if err == nil {
-		t.Error("Wait returned a result after Reset — stale results survived")
+	if _, ok := c.TryResult("spawn:stale"); ok {
+		t.Error("TryResult returned a result after Reset — stale results survived")
+	}
+	if c.HasResult() {
+		t.Error("HasResult=true after Reset")
 	}
 }
 
-func TestSpawnCollectorResetWakesWaiters(t *testing.T) {
-	// Reset must unblock goroutines currently in Wait (no Deliver yet) —
-	// otherwise steering retry leaks the blocked wait_turn goroutine. The
-	// woken waiter re-checks results (empty after Reset) and returns its
-	// ctx error.
-	c := NewSpawnCollector()
-	woken := make(chan error, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_, err := c.Wait(ctx, "spawn:pending")
-		woken <- err
-	}()
-
-	time.Sleep(50 * time.Millisecond) // let the goroutine enter Wait
-	c.Reset()
-
-	select {
-	case err := <-woken:
-		if !errors.Is(err, ErrSpawnCollectorReset) {
-			t.Errorf("woken Wait error = %v, want ErrSpawnCollectorReset", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Wait was not woken by Reset within 1s — goroutine leaked")
-	}
-}
-
-func TestSpawnCollectorConcurrentDeliver(t *testing.T) {
-	// Multiple detached goroutines (multiple concurrent spawns) may Deliver
-	// simultaneously. Must be race-free. Run with -race.
+func TestSpawnCollectorConcurrentDeliverAndRead(t *testing.T) {
+	// Multiple detached goroutines (concurrent spawns) Deliver while the
+	// parent polls (TryResult/HasResult). Must be race-free. Run with -race.
 	c := NewSpawnCollector()
 	const n = 20
 	var wg sync.WaitGroup
 	wg.Add(n)
 	for i := 0; i < n; i++ {
-		go func(i int) {
+		go func(id string) {
 			defer wg.Done()
 			c.Deliver(runtime.PendingResult{
-				TurnID: "spawn:" + runtime.ShortSpawnID(i),
+				TurnID: id,
 				Result: runtime.DelegateAgentResult{Status: "completed", Summary: "ok"},
 			})
-		}(i)
+		}("spawn:child-" + string(rune('a'+i%26)) + string(rune('0'+i)))
 	}
-	wg.Wait()
-
-	// All n results should be retrievable.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	for i := 0; i < n; i++ {
-		id := "spawn:" + runtime.ShortSpawnID(i)
-		if _, err := c.Wait(ctx, id); err != nil {
-			t.Errorf("Wait(%q) error after concurrent Deliver: %v", id, err)
+	// Reader goroutine polls concurrently.
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 100; i++ {
+			_ = c.HasResult()
 		}
+		close(done)
+	}()
+	wg.Wait()
+	<-done
+
+	all := c.DrainAll()
+	if len(all) != n {
+		t.Errorf("DrainAll returned %d, want %d after concurrent Deliver", len(all), n)
 	}
 }
 
-// Compile-time: SpawnCollector satisfies SpawnSink + SpawnResultWaiter.
+// Compile-time: SpawnCollector satisfies SpawnSink + SpawnSinkPeeper.
 var _ runtime.SpawnSink = (*SpawnCollector)(nil)
-var _ runtime.SpawnResultWaiter = (*SpawnCollector)(nil)
+var _ runtime.SpawnSinkPeeper = (*SpawnCollector)(nil)
