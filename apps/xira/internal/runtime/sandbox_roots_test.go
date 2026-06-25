@@ -91,8 +91,10 @@ func TestEditFileConfirmationGateInAllowRoot(t *testing.T) {
 }
 
 // TestRunSnapshotRecordsSandboxRoots guards B2: the per-run ModelPolicySnapshot
-// and the model.policy_resolved event must carry the authorized roots so a run
-// artifact answers "which out-of-workspace roots was this run allowed to reach".
+// must carry the authorized roots so a run artifact answers "which
+// out-of-workspace roots was this run allowed to reach". (The
+// model.policy_resolved runtime event was removed in #43 — roots are read from
+// resp.ModelPolicy, the authoritative source persisted in run.yaml.)
 func TestRunSnapshotRecordsSandboxRoots(t *testing.T) {
 	workspace := t.TempDir()
 	allowDir := t.TempDir()
@@ -117,37 +119,4 @@ func TestRunSnapshotRecordsSandboxRoots(t *testing.T) {
 	if !containsString(resp.ModelPolicy.ReadonlyRoots, readonlyDir) {
 		t.Fatalf("run snapshot readonly_roots = %+v, want %q", resp.ModelPolicy.ReadonlyRoots, readonlyDir)
 	}
-
-	var policyEvt *RuntimeEvent
-	for i := range resp.Events {
-		if resp.Events[i].Kind == "model.policy_resolved" {
-			policyEvt = &resp.Events[i]
-			break
-		}
-	}
-	if policyEvt == nil {
-		t.Fatalf("no model.policy_resolved event in run events")
-	}
-	if !containsString(toStringSlice(policyEvt.Payload["allow_roots"]), allowDir) {
-		t.Fatalf("policy_resolved allow_roots = %+v", policyEvt.Payload["allow_roots"])
-	}
-	if !containsString(toStringSlice(policyEvt.Payload["readonly_roots"]), readonlyDir) {
-		t.Fatalf("policy_resolved readonly_roots = %+v", policyEvt.Payload["readonly_roots"])
-	}
-}
-
-func toStringSlice(v any) []string {
-	switch x := v.(type) {
-	case []string:
-		return x
-	case []any:
-		out := make([]string, 0, len(x))
-		for _, item := range x {
-			if s, ok := item.(string); ok {
-				out = append(out, s)
-			}
-		}
-		return out
-	}
-	return nil
 }

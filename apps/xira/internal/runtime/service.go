@@ -454,19 +454,8 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"matched_by":    entrypointDecision.MatchedBy,
 		"entrypoint_id": inbound.Context.EntrypointID,
 	})
-	recordEvent("model.policy_resolved", "runtime", "model policy resolved", map[string]any{
-		"provider":         resp.ModelPolicy.Provider,
-		"model":            resp.ModelPolicy.Model,
-		"stream":           resp.ModelPolicy.Stream,
-		"temperature":      resp.ModelPolicy.Temperature,
-		"thinking_type":    resp.ModelPolicy.ThinkingType,
-		"tools":            resp.ModelPolicy.Tools,
-		"skills":           resp.ModelPolicy.Skills,
-		"allow_roots":      resp.ModelPolicy.AllowRoots,
-		"readonly_roots":   resp.ModelPolicy.ReadonlyRoots,
-		"profile_source":   resp.ModelPolicy.ProfileSource,
-		"instruction_hash": resp.ModelPolicy.InstructionHash,
-	})
+	// model.policy_resolved removed (#43): ModelPolicy is persisted in run.yaml;
+	// the runtime event was a redundant notification.
 
 	agentReq := req
 	// Runtime-internal correlation keys live on Context.Raw (the InboundContext
@@ -595,11 +584,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 			"agent_session_id", agentSessionID,
 			"error", err,
 		)
-		recordEvent("session.persist_failed", "runtime", "session history persistence failed", map[string]any{
-			"session_id":       req.SessionID,
-			"agent_session_id": agentSessionID,
-			"error":            err.Error(),
-		})
+		// session.persist_failed removed (#43): covered by the slog.Warn above.
 	} else {
 		messagesPath := s.sessions.AgentMessagesPath(sessionTurn)
 		slog.Info("session history persisted",
@@ -610,38 +595,18 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 			"messages_path", messagesPath,
 			"run_status", resp.Status,
 		)
-		recordEvent("session.persisted", "runtime", "session history persisted", map[string]any{
-			"session_id":       req.SessionID,
-			"agent_session_id": agentSessionID,
-			"messages_path":    messagesPath,
-			"run_status":       resp.Status,
-		})
+		// session.persisted removed (#43): covered by the slog.Info above.
 	}
 	if len(resp.LLMCalls) > 0 {
-		payload := map[string]any{
-			"call_count":        resp.Usage.CallCount,
-			"completed_calls":   resp.Usage.CompletedCalls,
-			"failed_calls":      resp.Usage.FailedCalls,
-			"prompt_tokens":     resp.Usage.PromptTokens,
-			"completion_tokens": resp.Usage.CompletionTokens,
-			"total_tokens":      resp.Usage.TotalTokens,
-			"usage_sources":     resp.Usage.UsageSources,
-		}
-		if resp.Usage.Cost != nil {
-			payload["cost"] = *resp.Usage.Cost
-			payload["currency"] = resp.Usage.Currency
-		}
-		recordEvent("llm.usage_summary", "runtime", "llm usage summarized", payload)
+		// llm.usage_summary removed (#43): Usage is persisted in run.yaml's
+		// Usage field; summary tokens/cost already logged at run end.
 		if s.usage != nil {
 			if err := s.usage.AppendCalls(resp.LLMCalls); err != nil {
+				// usage.ledger_failed removed (#43): covered by the slog.Warn.
 				slog.Warn("usage ledger append failed", "run_id", runID, "error", err)
-				recordEvent("usage.ledger_failed", "runtime", "usage ledger append failed", map[string]any{"error": err.Error()})
-			} else {
-				recordEvent("usage.ledger_appended", "runtime", "usage ledger appended", map[string]any{
-					"calls": len(resp.LLMCalls),
-					"path":  filepathJoinSlash(s.usage.Root(), "usage-ledger.jsonl"),
-				})
 			}
+			// usage.ledger_appended removed (#43): success path, already written
+			// to usage-ledger.jsonl by AppendCalls — redundant notification.
 		}
 	}
 	// assistant.final: a live "final answer ready" signal. Published only when a
