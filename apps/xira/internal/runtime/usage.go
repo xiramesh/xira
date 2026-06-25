@@ -18,6 +18,20 @@ import (
 	"github.com/xiramesh/xira/internal/model/deepseek"
 )
 
+// llmTraceEnv toggles raw LLM request/response trace persistence (#43: moved
+// here from the deleted llm_trace.go, whose withLLMRequestTrace was dead code
+// superseded by withLLMInstrumentation in this file).
+const llmTraceEnv = "XIRA_TRACE_LLM"
+
+func llmTraceEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(llmTraceEnv))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 type UsagePricing struct {
 	Currency string                       `json:"currency,omitempty" yaml:"currency,omitempty"`
 	Models   map[string]ModelUsagePricing `json:"models,omitempty" yaml:"models,omitempty"`

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -397,28 +398,13 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 		resp.Status = "failed"
 	}
 	if len(resp.LLMCalls) > 0 {
-		payload := map[string]any{
-			"call_count":        resp.Usage.CallCount,
-			"completed_calls":   resp.Usage.CompletedCalls,
-			"failed_calls":      resp.Usage.FailedCalls,
-			"prompt_tokens":     resp.Usage.PromptTokens,
-			"completion_tokens": resp.Usage.CompletionTokens,
-			"total_tokens":      resp.Usage.TotalTokens,
-			"usage_sources":     resp.Usage.UsageSources,
-		}
-		if resp.Usage.Cost != nil {
-			payload["cost"] = *resp.Usage.Cost
-			payload["currency"] = resp.Usage.Currency
-		}
-		recordChildEvent("llm.usage_summary", "runtime", "child llm usage summarized", payload)
+		// llm.usage_summary / usage.ledger_failed / usage.ledger_appended removed
+		// (#43): child-turn mirrors of the parent events dropped in service.go.
+		// Usage is persisted in run.yaml; AppendCalls writes usage-ledger.jsonl;
+		// the slog.Warn below covers the failure path. Mirrors service.go:600-611.
 		if s.usage != nil {
 			if err := s.usage.AppendCalls(resp.LLMCalls); err != nil {
-				recordChildEvent("usage.ledger_failed", "runtime", "child usage ledger append failed", map[string]any{"error": err.Error()})
-			} else {
-				recordChildEvent("usage.ledger_appended", "runtime", "child usage ledger appended", map[string]any{
-					"calls": len(resp.LLMCalls),
-					"path":  filepathJoinSlash(s.usage.Root(), "usage-ledger.jsonl"),
-				})
+				slog.Warn("usage ledger append failed", "run_id", req.ChildRunID, "error", err)
 			}
 		}
 	}
