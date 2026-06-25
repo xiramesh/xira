@@ -347,17 +347,17 @@ func TestPostHumanRequestResponseWrongWorkspaceDoesNotLeak(t *testing.T) {
 	}
 }
 
-func TestPostHumanRequestResponseTriggersResumeHookButDoesNotRequireReplayYet(t *testing.T) {
+// TestPostHumanRequestResponseResolvesWithFreeform verifies a POST .../responses
+// for a freeform (non-replay) request resolves successfully. Resume delivery for
+// agent_request-sourced HITL is tested in runtime/resume_delivery_test.go
+// (RFC #27 — stateless HITL resume via OutboundEmitter, replacing the deleted
+// SetHumanRequestResumeHook).
+func TestPostHumanRequestResponseResolvesWithFreeform(t *testing.T) {
 	rt := newAPITestService(t, frt.Config{StateDir: filepath.Join(t.TempDir(), "state")})
 	req := seedAPIHumanRequest(t, rt, humanrequest.CreateRequest{
 		ID:       "hrq_api_hook",
 		Kind:     humanrequest.RequestFreeform,
-		Question: "Trigger hook?",
-	})
-	var resumed []string
-	rt.SetHumanRequestResumeHook(func(_ context.Context, resolved humanrequest.HumanRequest) error {
-		resumed = append(resumed, resolved.ID)
-		return nil
+		Question: "Resolve?",
 	})
 	server := NewServer(rt, "127.0.0.1:0")
 
@@ -369,8 +369,12 @@ func TestPostHumanRequestResponseTriggersResumeHookButDoesNotRequireReplayYet(t 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
 	}
-	if len(resumed) != 1 || resumed[0] != req.ID {
-		t.Fatalf("resume hook calls = %+v", resumed)
+	stored, err := rt.GetHumanRequest(context.Background(), req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != humanrequest.StatusResolved {
+		t.Fatalf("request status = %q, want resolved", stored.Status)
 	}
 }
 

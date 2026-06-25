@@ -85,19 +85,7 @@ func (s *Service) ResolveHumanRequest(ctx context.Context, requestID string, inp
 			return nil, err
 		}
 	}
-	if s.humanResume != nil {
-		if err := s.humanResume(ctx, *resolved); err != nil {
-			return nil, err
-		}
-	}
 	return resolved, nil
-}
-
-func (s *Service) SetHumanRequestResumeHook(hook func(context.Context, humanrequest.HumanRequest) error) {
-	if s == nil {
-		return
-	}
-	s.humanResume = hook
 }
 
 func (s *Service) createAgentHumanRequest(ctx context.Context, callID string, args map[string]any) (*humanrequest.HumanRequest, error) {

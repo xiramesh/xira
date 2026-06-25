@@ -109,6 +109,10 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 				return err
 			}
 			slog.Info("channel runners started", "count", channelRunners.Count())
+			// Inject the channel manager as the outbound emitter so resumed runs
+			// (HITL resume via HTTP/CLI) can deliver their final response back to
+			// the originating IM channel (RFC #27 — stateless HITL resume).
+			rt.SetOutboundEmitter(channelRunners)
 			defer func() {
 				stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel()

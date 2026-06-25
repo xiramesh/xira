@@ -344,6 +344,51 @@ func (r *Runner) buildMetadata(message *larkim.EventMessage, sender *larkim.Even
 	return metadata
 }
 
+// Capabilities advertises what this channel can do. feishu supports proactive
+// outbound (resume delivery) + interactive human response (cards, future).
+func (r *Runner) Capabilities() channel.CapabilitySet {
+	return channel.CapabilitySet{
+		channel.CapabilityProactiveOutbound,
+		channel.CapabilityInteractiveHumanResponse,
+	}
+}
+
+// Emit delivers an OutboundEnvelope to the originating feishu chat. It is the
+// unified outbound surface used by the resume path (RFC #27 — stateless HITL
+// resume): when a run resumed via HTTP/CLI produces a final, the runtime calls
+// Manager.Emit, which routes here by Target.Channel == "feishu".
+//
+// Supported types: assistant_final / proactive_message → send content to
+// Target.ChatID. Unknown types return an error (do not silently drop — caller
+// logs it).
+func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
+	if env.Target == nil {
+		return fmt.Errorf("feishu Emit: envelope has no target")
+	}
+	chatID := strings.TrimSpace(env.Target.ChatID)
+	if chatID == "" {
+		return fmt.Errorf("feishu Emit: target has no chat_id")
+	}
+	content := ""
+	if env.Data != nil {
+		if v, ok := env.Data["content"].(string); ok {
+			content = v
+		}
+	}
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("feishu Emit: envelope has no content")
+	}
+	switch env.Type {
+	case channel.OutboundAssistantFinal, channel.OutboundProactiveMessage:
+		return r.send(ctx, chatID, content)
+	default:
+		return fmt.Errorf("feishu Emit: unsupported outbound type %q", env.Type)
+	}
+}
+
+// Compile-time: *Runner implements channel.OutboundEmitter.
+var _ channel.OutboundEmitter = (*Runner)(nil)
+
 func (r *Runner) send(ctx context.Context, chatID, content string) error {
 	cardContent, err := buildMarkdownCard(content)
 	if err == nil {
