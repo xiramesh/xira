@@ -84,7 +84,12 @@ func inboundContextFromScope(scope *fsession.SessionScope, raw map[string]string
 	ctx.SpaceID = scopeValueID(scope.Values["space"])
 	ctx.SpaceType = scopeValueType(scope.Values["space"])
 	ctx.TopicID = scopeValueID(scope.Values["topic"])
-	ctx.SenderID = scope.Values["sender"]
+	// Sender is stored canonical ("<channel>:<id>", see session/manager.go
+	// canonicalSenderID). Strip the prefix symmetrically with chat/space/topic
+	// — otherwise the resumed run's Target.SenderID carries the canonical prefix
+	// and outbound delivery addresses a non-existent user (e.g. ilink resume
+	// delivering to ToUserID="ilink:wxid_abc"). PR #71 review CRITICAL.
+	ctx.SenderID = scopeValueID(scope.Values["sender"])
 	return channel.NormalizeInboundContext(ctx)
 }
 
