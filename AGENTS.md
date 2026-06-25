@@ -186,8 +186,22 @@ AGENTS.md §2 "缺口要补不要绕" 的典型场景。
     实际 staged set 不包含它（本 PR commit 7874b7e 栽在这：message 说修了 cross-package compile，
     但 progress/types.go 没进 commit，推上去的 PR 会炸 main）。**提交后核实 `git show --stat HEAD`
     真的包含修改的文件**，不只信 commit message 的描述。重要修改让 reviewer/CI 二次确认，不靠自查。
-- 反射动作：每次核实后追问三句——"我的 grep/读法会不会漏？" + "我的验证范围够不够？" + "我宣布修的，实际提交了吗？"。
-  不满意就加一路（如双路 grep、`go build ./... && go test ./...`、`git show --stat HEAD`）。
+  - **恢复链只核显眼字段 + 测试数据形态 ≠ 生产形态**（PR #71 栽在这）：核实 serialize→persist→
+    deserialize 的恢复链时（如 `run.SessionScope/Metadata → inboundContextFromScope → target →
+    channel Emit`），只盯一个显眼字段（context_token）完整 ≠ 整条链完整。PR #71 核了 context_token
+    恢复对就倾向 approve，漏了 **sender 字段断了**：`canonicalSenderID` 给 sender 加 `"ilink:"` 前缀，
+    scope 存带前缀值，但 `inboundContextFromScope` 对 chat/space 用 `scopeValueID` 剥前缀、**唯独
+    sender 直接取不剥** → ilink resume 把 final 投到 `ToUserID="ilink:wxid_abc"`（不存在）。**警惕
+    对称性破坏**：一个函数处理多个同类字段（chat/space/sender），其中一个走不同代码路径（剥前缀
+    vs 不剥）= bug 高发点。更隐蔽的是**测试盲区**：`emit_test`/`resume_delivery_test` 都手搓干净
+    `SenderID:"user-9"` / `scopeWith sender:"user-1"`，**绕过了 `canonicalSenderID` 的加前缀逻辑**，
+    所以全绿但没覆盖真实前缀形态——"测试全绿"和"运行时生效"之间隔着"测试数据形态 ≠ 生产数据形态"。
+    - 对策：核实恢复链时**逐字段**核 round-trip——问"这条链有几个字段？我核了几个？没核的那些有
+      没有不对称处理？"；测试用**真实变换产物**（走 `canonicalSenderID`/`BuildScope` 的真实 scope）
+      而非手搓干净值——问"测试构造的数据，是不是生产路径里变换函数的真实输出？还是我图省事手搓的？"。
+- 反射动作：每次核实后追问四句——"我的 grep/读法会不会漏？" + "我的验证范围够不够？" + "我宣布修的，实际提交了吗？" + "恢复链我逐字段核了吗？测试数据是真实变换产物还是手搓干净值？"。
+  不满意就加一路（如双路 grep、`go build ./... && go test ./...`、`git show --stat HEAD`、用真实
+  scope 产物重跑恢复链测试）。
 - **flaky 测试不能搪塞**：全量跑 FAIL 时，不能"大概是 flaky"跳过。必须用 isolation 重跑 + `-race`
   证实。如果是真 flaky（已有 live LLM 测试），标注来源 + 开 issue 跟踪治理，不默默忽略。
 - **这条尤其适用于"自信的场景"**：写规则文档、固化经验、做架构总结时，人（和 agent）最容易
