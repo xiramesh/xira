@@ -99,7 +99,7 @@ func NewService(cfg Config) (*Service, error) {
 		dsClient = deepseek.New()
 	}
 	warnIfSplitStateDirs(resolved)
-	return &Service{
+	svc := &Service{
 		agents:         manager,
 		flows:          flowRegistry,
 		skills:         skillManager,
@@ -119,7 +119,36 @@ func NewService(cfg Config) (*Service, error) {
 		profileSource:  profileSource,
 		pricing:        resolved.Pricing,
 		activeChildren: map[string]int{},
-	}, nil
+	}
+	// Operational visibility (#72 item 3): log pending HumanRequests at startup
+	// so an operator restarting the process sees unresolved HITL. Best-effort —
+	// a scan failure is warned, never blocks startup. No notify/timeout cleanup
+	// here (those are bigger product decisions); HITL resume itself is
+	// request-driven and works without this scan (run + request persist to disk).
+	svc.logPendingHumanRequestsAtStartup()
+	return svc, nil
+}
+
+// logPendingHumanRequestsAtStartup scans the HumanRequest store for pending
+// requests and logs the count. Operational visibility only — does NOT notify
+// users or auto-resolve. Safe to call once during NewService.
+func (s *Service) logPendingHumanRequestsAtStartup() {
+	if s == nil || s.humanRequests == nil {
+		return
+	}
+	pending, err := s.humanRequests.List(context.Background(), humanrequest.ListQuery{
+		WorkspaceKey: s.WorkspaceKey(),
+		Status:       humanrequest.StatusPending,
+	})
+	if err != nil {
+		slog.Warn("startup human request scan failed (non-fatal)", "error", err)
+		return
+	}
+	if len(pending) == 0 {
+		return
+	}
+	slog.Info("human requests pending at startup (waiting for resolution)",
+		"count", len(pending))
 }
 
 // SetOutboundEmitter injects the channel outbound emitter (the channel Manager).
