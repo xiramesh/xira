@@ -836,6 +836,69 @@ func (r *Runner) buildMetadata(account *accountPoller, msg openilink.WeixinMessa
 	return compactMetadata(metadata)
 }
 
+// Capabilities advertises what this channel can do. ilink supports proactive
+// outbound (resume delivery). Interactive human response (in-IM approve/deny)
+// is not yet available — HITL is surfaced as text via progress events.
+func (r *Runner) Capabilities() channel.CapabilitySet {
+	return channel.CapabilitySet{
+		channel.CapabilityProactiveOutbound,
+	}
+}
+
+// Emit delivers an OutboundEnvelope to the originating ilink user. Unified
+// outbound surface for the resume path (RFC #27 — stateless HITL resume):
+// runtime calls Manager.Emit → routes here by Target.Channel == "ilink".
+//
+// ilink addressing: Target.Account → r.accounts[accountID] (the poller holds
+// the client); Target.SenderID → recipient (FromUserID); Target.Raw
+// ["context_token"] → reply token (if the original message carried one, reply
+// via SendText; otherwise Push). These survive HITL pause because they live in
+// InboundContext.Raw → run metadata → SessionScope (persisted), and are
+// reconstructed by inboundContextFromScope on resume.
+func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
+	if env.Target == nil {
+		return fmt.Errorf("ilink Emit: envelope has no target")
+	}
+	accountID := strings.TrimSpace(env.Target.Account)
+	if accountID == "" {
+		return fmt.Errorf("ilink Emit: target has no account (cannot find ilink client)")
+	}
+	r.mu.Lock()
+	account, ok := r.accounts[accountID]
+	r.mu.Unlock()
+	if !ok || account == nil {
+		return fmt.Errorf("ilink Emit: no account %q registered (runner may have been reconfigured)", accountID)
+	}
+	recipient := strings.TrimSpace(env.Target.SenderID)
+	if recipient == "" {
+		return fmt.Errorf("ilink Emit: target has no sender_id (recipient)")
+	}
+	content := ""
+	if env.Data != nil {
+		if v, ok := env.Data["content"].(string); ok {
+			content = v
+		}
+	}
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("ilink Emit: envelope has no content")
+	}
+	switch env.Type {
+	case channel.OutboundAssistantFinal, channel.OutboundProactiveMessage:
+		// Reconstruct the minimal WeixinMessage the send path needs: the
+		// recipient and (optionally) the context_token for reply-vs-push.
+		msg := openilink.WeixinMessage{
+			FromUserID:    recipient,
+			ContextToken:  strings.TrimSpace(env.Target.Raw["context_token"]),
+		}
+		return r.send(ctx, account, msg, content)
+	default:
+		return fmt.Errorf("ilink Emit: unsupported outbound type %q", env.Type)
+	}
+}
+
+// Compile-time: *Runner implements channel.OutboundEmitter.
+var _ channel.OutboundEmitter = (*Runner)(nil)
+
 func (r *Runner) send(ctx context.Context, account *accountPoller, msg openilink.WeixinMessage, content string) error {
 	to := strings.TrimSpace(msg.FromUserID)
 	if to == "" {

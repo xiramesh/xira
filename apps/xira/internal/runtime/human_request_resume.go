@@ -3,11 +3,13 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	rtools "github.com/xiramesh/xira/internal/tools"
 )
@@ -53,6 +55,57 @@ func (s *Service) materializeApprovedActionSnapshotOutput(req *humanrequest.Huma
 	}
 	replaceRunHumanRequest(&run, *req)
 	return s.runs.SaveRun(run)
+}
+
+// deliverResumeFinal pushes a resumed run's final response back to the
+// originating IM channel via the outbound emitter (RFC #27 — stateless HITL
+// resume). This is the fix for the resume→IM delivery gap: previously a
+// resumed run's final was persisted but never reached the user's IM because
+// the resume ran in an HTTP/CLI context with no EventBus/ChatContext.
+//
+// Now the runtime holds an OutboundEmitter (the channel Manager, injected by
+// main.go); resume reconstructs the target (channel/chat/sender) from the
+// run's persisted SessionScope and routes the final through the Manager to the
+// right channel runner.
+//
+// Best-effort: if the emitter is absent (no channels — CLI/tests) or delivery
+// fails, the run is still persisted correctly (delivery is logged, not fatal).
+// Skipped when: outbound nil, empty final, run re-entered waiting_human, or
+// no SessionScope (cannot route).
+func (s *Service) deliverResumeFinal(ctx context.Context, run TurnResponse) {
+	if s == nil || s.outbound == nil {
+		return
+	}
+	if strings.TrimSpace(run.FinalResponse) == "" {
+		return
+	}
+	if run.Status == StatusWaitingHuman {
+		// Resumed into another HITL round — no final for the user yet.
+		return
+	}
+	if run.SessionScope == nil {
+		slog.Warn("resume final delivery skipped: run has no session scope (cannot route)",
+			"run_id", run.RunID)
+		return
+	}
+	target := inboundContextFromScope(run.SessionScope, run.Metadata)
+	if strings.TrimSpace(target.Channel) == "" {
+		slog.Warn("resume final delivery skipped: session scope has no channel",
+			"run_id", run.RunID)
+		return
+	}
+	env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)
+	env.RunID = run.RunID
+	env.Target = &target
+	env.Data = map[string]any{"content": run.FinalResponse}
+	if err := s.outbound.Emit(ctx, env); err != nil {
+		// Delivery failure does NOT fail the resume — the run is already
+		// persisted; the user can retry or inspect history. Log and move on.
+		slog.Error("resume final delivery failed",
+			"run_id", run.RunID,
+			"channel", target.Channel,
+			"error", err)
+	}
 }
 
 func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *humanrequest.HumanRequest, output map[string]any) error {
@@ -173,7 +226,11 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 	run.EndedAt = time.Now()
 	run.Usage = summarizeUsage(run)
 	s.persistResumeSessionMessages(run, req, resumeMessage)
-	return s.runs.SaveRun(run)
+	if err := s.runs.SaveRun(run); err != nil {
+		return err
+	}
+	s.deliverResumeFinal(ctx, run)
+	return nil
 }
 
 func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanrequest.HumanRequest) error {
@@ -303,7 +360,11 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 	run.EndedAt = time.Now()
 	run.Usage = summarizeUsage(run)
 	s.persistResumeSessionMessages(run, req, resumeMessage)
-	return s.runs.SaveRun(run)
+	if err := s.runs.SaveRun(run); err != nil {
+		return err
+	}
+	s.deliverResumeFinal(ctx, run)
+	return nil
 }
 
 func replaceRunHumanRequest(run *TurnResponse, req humanrequest.HumanRequest) {

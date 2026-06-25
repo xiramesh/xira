@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/channelrunner/feishu"
 	"github.com/xiramesh/xira/internal/channelrunner/ilink"
@@ -138,6 +139,68 @@ func (m *Manager) pairingController(entrypointID string) (channelcontrol.Pairing
 	}
 	return nil, fmt.Errorf("entrypoint %q is not running", entrypointID)
 }
+
+// Emit routes an OutboundEnvelope to the runner whose Channel() matches
+// envelope.Target.Channel and delegates to its Emit. This makes Manager an
+// OutboundEmitter so the runtime (resume path) can deliver final responses
+// back to the originating IM channel without knowing about individual runners
+// (RFC #27 — stateless HITL resume).
+//
+// Manager.Emit is the unified outbound surface: callers (resume, future
+// proactive messaging) construct an envelope with Target.Channel/ChatID, and
+// Manager finds the right channel runner to actually send. Runners must
+// implement channel.OutboundEmitter for their channel to be reachable.
+func (m *Manager) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
+	if m == nil {
+		return fmt.Errorf("channel manager is not configured (no runners)")
+	}
+	target := ""
+	if env.Target != nil {
+		target = strings.TrimSpace(env.Target.Channel)
+	}
+	if target == "" {
+		return fmt.Errorf("outbound envelope has no target channel")
+	}
+	for _, runner := range m.runners {
+		if !strings.EqualFold(runner.Channel(), target) {
+			continue
+		}
+		emitter, ok := runner.(channel.OutboundEmitter)
+		if !ok {
+			return fmt.Errorf("runner %q (channel %q) does not implement OutboundEmitter", runner.ID(), runner.Channel())
+		}
+		return emitter.Emit(ctx, env)
+	}
+	return fmt.Errorf("no runner registered for channel %q", target)
+}
+
+// Capabilities returns the union of all runners' capabilities. Manager
+// satisfies channel.OutboundEmitter; Capabilities advertises what the fleet
+// can do (e.g. proactive_outbound for resume delivery).
+func (m *Manager) Capabilities() channel.CapabilitySet {
+	if m == nil {
+		return nil
+	}
+	seen := map[channel.Capability]struct{}{}
+	out := make(channel.CapabilitySet, 0)
+	for _, runner := range m.runners {
+		emitter, ok := runner.(channel.OutboundEmitter)
+		if !ok {
+			continue
+		}
+		for _, cap := range emitter.Capabilities() {
+			if _, exists := seen[cap]; exists {
+				continue
+			}
+			seen[cap] = struct{}{}
+			out = append(out, cap)
+		}
+	}
+	return out
+}
+
+// Compile-time: *Manager implements channel.OutboundEmitter.
+var _ channel.OutboundEmitter = (*Manager)(nil)
 
 func stopRunners(ctx context.Context, runners []Runner) error {
 	var firstErr error

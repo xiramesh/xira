@@ -8,7 +8,7 @@ import (
 )
 
 // TestHumanRequestAccessorsNilSafe covers the nil-receiver guards on the
-// human-request accessors (WorkspaceKey, Get/List/Resolve, SetHumanRequestResumeHook).
+// human-request accessors (WorkspaceKey, Get/List/Resolve).
 func TestHumanRequestAccessorsNilSafe(t *testing.T) {
 	var nilSvc *Service
 	if nilSvc.WorkspaceKey() != "" {
@@ -24,8 +24,6 @@ func TestHumanRequestAccessorsNilSafe(t *testing.T) {
 	if _, err := nilSvc.ResolveHumanRequest(ctx, "r", humanrequest.ResolveRequest{}); err == nil {
 		t.Fatalf("nil ResolveHumanRequest should error")
 	}
-	// SetHumanRequestResumeHook on nil must be a safe no-op.
-	nilSvc.SetHumanRequestResumeHook(nil)
 }
 
 // TestHumanRequestCreateGetList covers the happy path of Create/Get/List +
@@ -84,7 +82,4 @@ func TestHumanRequestCreateGetList(t *testing.T) {
 	if !found {
 		t.Fatalf("created request not in pending list (%d items)", len(list))
 	}
-
-	// SetHumanRequestResumeHook installs a hook (no-op assertion: must not panic).
-	svc.SetHumanRequestResumeHook(func(context.Context, humanrequest.HumanRequest) error { return nil })
 }
