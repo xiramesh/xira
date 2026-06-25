@@ -644,9 +644,20 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		// Per-chat-key registry of spawned-child cancel funcs (RFC #67): when
 		// this turn is steered, CancelAll(chatKey) cancels every outstanding
 		// child so they stop burning tokens. Created per turn (same lifetime as
-		// chatCtx); Reset on turn-end prevents leaks across turns.
+		// chatCtx). On turn-end (ANY exit path — steer, normal completion, or
+		// error) we CancelAll outstanding children so a parent that finishes
+		// (or fails) without polling its children does not leave them burning
+		// tokens to timeout. Then Reset clears the registry to prevent leaks
+		// across turns (PR #70 review WARNING).
 		childCancels := progress.NewChildCancelRegistry()
-		defer childCancels.Reset(chatKey)
+		defer func() {
+			if n := childCancels.CancelAll(chatKey); n > 0 {
+				slog.Info("ilink turn end: canceled outstanding spawned children",
+					"chat_id", chatID,
+					"children", n)
+			}
+			childCancels.Reset(chatKey)
+		}()
 		// Clear spawn results when the turn ends (PR #53 R2 review WARNING):
 		// SpawnCollector is per-chatKey (router reuses the entry across turns),
 		// and the only other cleanup point is steering-retry Reset. Without
@@ -691,8 +702,12 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 						// Cancel every outstanding spawned child for this
 						// conversation (RFC #67): the user interjected, so the
 						// children of the interrupted run should stop rather
-						// than keep burning tokens. Their results land in the
-						// (reset) SpawnCollector and are read by the next turn.
+						// than keep burning tokens. A canceled child's deferred
+						// Deliver lands in the SpawnCollector, but the retried
+						// turn spawns NEW children (new TurnIDs) and won't poll
+						// the stale TurnIDs — so those results are never read
+						// and are discarded on the next Reset. Harmless, but
+						// they do NOT feed the retry (PR #70 review INFO).
 						if n := childCancels.CancelAll(chatKey); n > 0 {
 							slog.Info("ilink steering: canceled outstanding spawned children",
 								"chat_id", chatID,
