@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/xiramesh/xira/internal/channel"
@@ -42,4 +43,24 @@ func ChatKeyFromInbound(ic channel.InboundContext) ChatKey {
 // String returns a stable, human-readable representation for logging/debugging.
 func (k ChatKey) String() string {
 	return fmt.Sprintf("%s/%s/%s", k.Channel, k.ChatID, k.SenderID)
+}
+
+// --- chatKey context propagation ---
+
+// chatKeyContextKey carries the ChatKey for the current turn through ctx.
+// Injected at RunAgent entry (service.go) so spawned children (spawn_turn.go)
+// can read it and register themselves with the per-chat-key cancel registry
+// (RFC #67). childToolConstraintCtx re-attaches it (like EventBus) since it
+// starts from context.Background().
+type chatKeyContextKey struct{}
+
+// WithChatKey returns a ctx carrying the chatKey.
+func WithChatKey(ctx context.Context, key ChatKey) context.Context {
+	return context.WithValue(ctx, chatKeyContextKey{}, key)
+}
+
+// ChatKeyFromContext returns the chatKey carried in ctx, if any.
+func ChatKeyFromContext(ctx context.Context) (ChatKey, bool) {
+	k, ok := ctx.Value(chatKeyContextKey{}).(ChatKey)
+	return k, ok
 }

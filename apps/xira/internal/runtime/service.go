@@ -451,6 +451,10 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		Request:     req,
 		UserMessage: req.Message,
 	})
+	// Carry the chatKey through ctx so spawned children (spawn_turn.go) can
+	// register themselves with the per-chat-key cancel registry and be
+	// canceled when this turn is steered (RFC #67).
+	ctx = WithChatKey(ctx, ChatKeyFromInbound(req.Context))
 	ctx = rtools.WithRunDir(ctx, s.runs.RunDir(runID))
 	ctx = s.withLLMInstrumentation(ctx, llmInstrumentationInput{
 		RunID:          runID,
