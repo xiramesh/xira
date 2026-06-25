@@ -28,8 +28,9 @@ import (
 
 // expectedEventTypes is the closed set of types implementing Event.
 // Add a type here WHEN you add a new Event implementation in message_bus.go.
-// InboundMessage / OutboundMessage are NOT here — they are plain structs
-// (content, carried by typed MessageBus), not Event (PR #41 dual-bus split).
+// (Content types InboundMessage/OutboundMessage and the MessageBus interface
+// from earlier Phase 1/2 drafts have been removed — per-chat-key routing
+// replaced the content bus. Only signal Events remain in this set.)
 var expectedEventTypes = map[string]bool{
 	"AgentTurnStarted":   true,
 	"AgentTurnCompleted": true,
