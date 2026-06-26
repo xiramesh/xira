@@ -16,6 +16,8 @@ import (
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
+	"github.com/xiramesh/xira/internal/routing"
+	fsession "github.com/xiramesh/xira/internal/session"
 	rtools "github.com/xiramesh/xira/internal/tools"
 )
 
@@ -220,6 +222,48 @@ func (s *Service) runtimeADKTools(
 	}
 	out = append(out, pollTool)
 
+	// answer_child (#68): parent LLM answers a spawned child's HITL question
+	// on the child's behalf. The child's HumanRequestID is surfaced by
+	// poll_turn when the child is waiting_human. Resolving is asynchronous
+	// (heavy child resume runs in a detached goroutine) so this tool never
+	// blocks the parent's event loop / steering checkpoint.
+	answerTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
+		Name:        answerChildToolName,
+		Description: "Answer a spawned child agent's question on its behalf. Pass the human_request_id that poll_turn surfaced when the child was waiting_human, plus your answer. The child turn resumes in the background with your answer as the human response, and its result routes back to this chat when done. Use this when a child asks a question you can answer yourself; if you want the user to answer instead, simply do nothing (the child's question escalates to the user in this chat).",
+		InputSchema: answerChildInputSchema(),
+		OutputSchema: objectSchema(),
+	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
+		callID := strings.TrimSpace(toolCtx.FunctionCallID())
+		if callID == "" {
+			callID = newAnswerChildCallID()
+		}
+		spec, cleanInput, unsupported := sanitizeAnswerChildInput(args)
+		rec := ToolCallRecord{
+			ID:        callID,
+			Name:      answerChildToolName,
+			Input:     cleanInput,
+			StartedAt: time.Now(),
+		}
+		if len(unsupported) > 0 {
+			rec.Input["unsupported_input_fields"] = unsupported
+		}
+		rec.Output = executeAnswerChild(ctx, s, spec)
+		rec.EndedAt = time.Now()
+		// Capture async-resolve rejections (bad input / unknown id) as tool
+		// errors; {status:answering} is a clean success.
+		if rec.Output["status"] == "rejected" {
+			if e, ok := rec.Output["error"].(string); ok {
+				rec.Error = e
+			}
+		}
+		recordTool(rec)
+		return rec.Output, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, answerTool)
+
 	return out, nil
 }
 
@@ -343,6 +387,15 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 			MessageID:    childBase.MessageID,
 		}),
 	}
+	// Build the child run's SessionScope from the SAME trigger identity as the
+	// parent (per-chat-key RFC §2.3: a spawned child belongs to the parent's
+	// chat tree — users never talk to the child directly). This is断裂 A fix
+	// (issue #68): without a persisted scope, a spawned child that enters HITL
+	// can never route its resumed final back to IM — deliverResumeFinal hits the
+	// nil-scope branch and silently drops the final. Built from childReq.Context
+	// (the normalized parent trigger identity) + the target's session policy.
+	childScope := fsession.BuildScope(childReq.Context, sessionPolicyForProfile(req.Target, routing.SessionPolicy{}))
+	resp.SessionScope = &childScope
 	childCtx := contextWithToolFailureGuard(ctx)
 	childCtx = contextWithToolTrace(childCtx, req.ChildRunID)
 	childSuspendCollector := newRuntimeSuspendCollector()

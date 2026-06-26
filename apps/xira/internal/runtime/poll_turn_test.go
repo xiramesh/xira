@@ -146,6 +146,44 @@ func TestPollTurnInputValidate(t *testing.T) {
 	}
 }
 
+// TestExecutePollTurnChildWaitingHumanSurfacesQuestion is the #68 core test:
+// when a spawned child enters HITL (human.request), poll_turn MUST surface the
+// child's question + the HumanRequestID to the parent LLM. The parent LLM then
+// decides: answer itself (answer_child tool, #68-2.3) or stay silent (the
+// question escalates to the user in IM via the parent's chat key).
+//
+// Without surfacing the question, the parent LLM only sees status=waiting_human
+// with no context — it cannot decide whether to answer or escalate.
+func TestExecutePollTurnChildWaitingHumanSurfacesQuestion(t *testing.T) {
+	sink := &mockPeeperBus{results: map[string]PendingResult{
+		"spawn:asking": {
+			TurnID: "spawn:asking",
+			Result: DelegateAgentResult{
+				AgentID:        "research",
+				Status:         StatusWaitingHuman,
+				Summary:        "child needs input",
+				Question:       "Which deployment window should I target?",
+				HumanRequestID: "hr-ask-001",
+			},
+		},
+	}}
+	ctx := WithSpawnBus(context.Background(), sink)
+
+	out := executePollTurn(ctx, "spawn:asking")
+	if out["status"] != StatusWaitingHuman {
+		t.Errorf("status = %v, want %q", out["status"], StatusWaitingHuman)
+	}
+	if out["child_turn_id"] != "spawn:asking" {
+		t.Errorf("child_turn_id = %v", out["child_turn_id"])
+	}
+	if out["question"] != "Which deployment window should I target?" {
+		t.Errorf("question = %v, want the child's HITL question surfaced to the parent", out["question"])
+	}
+	if out["human_request_id"] != "hr-ask-001" {
+		t.Errorf("human_request_id = %v, want the child's HumanRequestID (parent needs it to answer via answer_child)", out["human_request_id"])
+	}
+}
+
 // Compile-time: mocks satisfy the interfaces.
 var _ SpawnBus = (*mockPeeperBus)(nil)
 var _ SpawnBusPeeper = (*mockPeeperBus)(nil)
