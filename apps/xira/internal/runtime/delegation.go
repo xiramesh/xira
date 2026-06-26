@@ -184,7 +184,7 @@ func (s *Service) runtimeADKTools(
 	// (PR #53 review). poll_turn peeks instead.
 	pollTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
 		Name:        pollTurnToolName,
-		Description: "Check whether a spawned child agent turn has finished and return its result if so. Pass the agent_turn_id from spawn_turn. Returns immediately: {status:completed/failed, result_summary} when done, or {status:pending} when the child is still running. If pending, do other work and poll again later — do NOT block waiting.",
+		Description: "Check whether a spawned child agent turn has finished and return its result if so. Pass the agent_turn_id from spawn_turn. Returns immediately: {status:completed/failed, result_summary} when done, or {status:pending} when the child is still running. If pending, do other work and poll again later — do NOT block waiting. When the child is waiting for human input, the response also includes pending_questions: a list of {human_request_id, question} the child needs answered. For each, either answer it yourself via answer_child (passing that human_request_id) or do nothing to let the user answer in this chat.",
 		InputSchema: pollTurnInputSchema(),
 		OutputSchema: objectSchema(),
 	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {

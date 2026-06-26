@@ -318,14 +318,17 @@ func (t *serviceSpawnTarget) Run(ctx context.Context, agentID, task string) (Del
 		Status:  resp.Status,
 		Summary: resp.FinalResponse,
 	}
-	// #68: if the child entered HITL, carry the question + HumanRequestID so
-	// poll_turn can surface them to the parent LLM (and the parent can answer
-	// via answer_child). The spawn goroutine reads these off the PendingResult
-	// (spawnCore copies them when delivering).
+	// #68: if the child entered HITL, carry ALL its pending questions +
+	// HumanRequestIDs so poll_turn can surface them to the parent LLM (and the
+	// parent can answer each via answer_child). A turn can produce >1 HR
+	// (multiple human.request calls); carrying all avoids silently dropping the
+	// rest (PR #77 follow-up: previously only [0] was carried).
 	if resp.Status == StatusWaitingHuman && len(resp.HumanRequests) > 0 {
-		hr := resp.HumanRequests[0]
-		result.Question = hr.Question
-		result.HumanRequestID = hr.ID
+		pq := make([]PendingQuestion, 0, len(resp.HumanRequests))
+		for _, hr := range resp.HumanRequests {
+			pq = append(pq, PendingQuestion{Question: hr.Question, HumanRequestID: hr.ID})
+		}
+		result.PendingQuestions = pq
 	}
 	return result, nil
 }

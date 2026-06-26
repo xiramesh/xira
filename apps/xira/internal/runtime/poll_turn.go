@@ -123,18 +123,29 @@ func executePollTurn(ctx context.Context, childID string) map[string]any {
 	if pr.Err != "" {
 		out["error"] = pr.Err
 	}
-	// #68: when the child is waiting for human input, surface its question +
-	// HumanRequestID so the parent LLM can decide: answer itself (answer_child
-	// tool) or stay silent (escalates to the user in IM via the parent's chat
-	// key). Without these the parent only sees status=waiting_human with no
-	// context to act on.
-	if pr.Result.Status == StatusWaitingHuman {
-		if pr.Result.Question != "" {
-			out["question"] = pr.Result.Question
+	// #68: when the child is waiting for human input, surface ALL its pending
+	// questions + HumanRequestIDs so the parent LLM can decide for each: answer
+	// itself (answer_child tool) or stay silent (escalates to the user in IM via
+	// the parent's chat key). A child can have >1 pending question (multiple
+	// human.request calls); surfacing all avoids silently dropping the rest
+	// (PR #77 follow-up).
+	if pr.Result.Status == StatusWaitingHuman && len(pr.Result.PendingQuestions) > 0 {
+		list := make([]map[string]any, 0, len(pr.Result.PendingQuestions))
+		for _, pq := range pr.Result.PendingQuestions {
+			entry := map[string]any{"human_request_id": pq.HumanRequestID}
+			if pq.Question != "" {
+				entry["question"] = pq.Question
+			}
+			list = append(list, entry)
 		}
-		if pr.Result.HumanRequestID != "" {
-			out["human_request_id"] = pr.Result.HumanRequestID
+		out["pending_questions"] = list
+		// Backward-compat convenience: the primary question/id (first) as flat
+		// fields, so existing prompts that expect a single question still work.
+		primary := pr.Result.PendingQuestions[0]
+		if primary.Question != "" {
+			out["question"] = primary.Question
 		}
+		out["human_request_id"] = primary.HumanRequestID
 	}
 	return out
 }
