@@ -147,7 +147,6 @@ func newRuntimeEvent(base runtimeEventBase, kind, source, message string, payloa
 		SourceDetail:  sourceDetail(source),
 		Scope:         eventScope(base),
 		Correlation:   eventCorrelation(base, correlation),
-		Visibility:    eventVisibility(kind),
 		Severity:      "info",
 		Message:       strings.TrimSpace(message),
 		Payload:       eventPayload,
@@ -248,34 +247,6 @@ func anyString(value any) string {
 		return strings.TrimSpace(v.String())
 	default:
 		return ""
-	}
-}
-
-func eventVisibility(kind string) *RuntimeEventVisibility {
-	switch kind {
-	case "assistant.status":
-		return &RuntimeEventVisibility{Conversation: true, Activity: true, Inspector: true, Audit: false}
-	case "assistant.final":
-		return &RuntimeEventVisibility{Conversation: true, Activity: false, Inspector: true, Audit: false}
-	case "run.waiting_human", "agent.delegate.failed", "agent.delegate.timeout":
-		// v0 progress forwarder delivers these runtime-fact kinds into IM chat
-		// (waiting_human as interaction signal; delegate failed/timeout as
-		// progress). Without explicit conversation=true they fall through to the
-		// default below and are silently dropped by the forwarder's visibility
-		// filter. See docs/architecture/xira-conversation-progress-feed-v0.zh.md §7.
-		return &RuntimeEventVisibility{Conversation: true, Activity: true, Inspector: true, Audit: true}
-	case "adk.event":
-		return &RuntimeEventVisibility{Conversation: false, Activity: false, Inspector: true, Audit: true}
-	case "model.policy_resolved":
-		return &RuntimeEventVisibility{Conversation: false, Activity: false, Inspector: true, Audit: true}
-	case "context.packet.started":
-		return &RuntimeEventVisibility{Conversation: false, Activity: false, Inspector: true, Audit: true}
-	case "context.item.included":
-		return &RuntimeEventVisibility{Conversation: false, Activity: false, Inspector: true, Audit: false}
-	case "capability_gap":
-		return &RuntimeEventVisibility{Conversation: true, Activity: true, Inspector: true, Audit: true}
-	default:
-		return &RuntimeEventVisibility{Conversation: false, Activity: true, Inspector: true, Audit: true}
 	}
 }
 

@@ -93,7 +93,6 @@ type RuntimeEvent struct {
 	SourceDetail  *RuntimeEventSource      `json:"source_detail,omitempty" yaml:"source_detail,omitempty"`
 	Scope         *RuntimeEventScope       `json:"scope,omitempty" yaml:"scope,omitempty"`
 	Correlation   *RuntimeEventCorrelation `json:"correlation,omitempty" yaml:"correlation,omitempty"`
-	Visibility    *RuntimeEventVisibility  `json:"visibility,omitempty" yaml:"visibility,omitempty"`
 	Severity      string                   `json:"severity,omitempty" yaml:"severity,omitempty"`
 	Message       string                   `json:"message,omitempty" yaml:"message,omitempty"`
 	Payload       map[string]any           `json:"payload,omitempty" yaml:"payload,omitempty"`
@@ -133,13 +132,6 @@ type RuntimeEventCorrelation struct {
 	ChildRunID    string `json:"child_run_id,omitempty" yaml:"child_run_id,omitempty"`
 	ParentEventID string `json:"parent_event_id,omitempty" yaml:"parent_event_id,omitempty"`
 	ToolCallID    string `json:"tool_call_id,omitempty" yaml:"tool_call_id,omitempty"`
-}
-
-type RuntimeEventVisibility struct {
-	Conversation bool `json:"conversation" yaml:"conversation"`
-	Activity     bool `json:"activity" yaml:"activity"`
-	Inspector    bool `json:"inspector" yaml:"inspector"`
-	Audit        bool `json:"audit" yaml:"audit"`
 }
 
 type AgentRegistryEntry struct {
