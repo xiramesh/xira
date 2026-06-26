@@ -144,6 +144,23 @@ func (s *Service) generateADK(
 			})
 			return final, toolRecords.snapshot(), ErrSteered
 		}
+		// Deadline checkpoint (#76): ctx cancelled (e.g. resume WithTimeout
+		// fired). ADK's own event loop does NOT check ctx.Done between steps
+		// (verified against adk v1.4.0 base_flow.go), so without this peek a
+		// cancelled resume would keep running generate to its natural end — an
+		// unbounded detached goroutine (answer_child, #68) or an unbounded
+		// synchronous resume. Returns ctx.Err() (DeadlineExceeded/Canceled),
+		// a distinct error: errors.Is(ctx.Err(), ErrSteered) is always false,
+		// matching the steering_checkpoint_test.go "must NOT match
+		// context.Canceled" guard. Normal turns never hit this: their ctx
+		// carries no deadline (only IM-send chatcontext.go uses WithTimeout).
+		if ctx.Err() != nil {
+			recordEvent("adk.context_cancelled", "adk.runner", "turn aborted: context deadline/cancel", map[string]any{
+				"agent_id": profile.ID,
+				"ctx_err":  ctx.Err().Error(),
+			})
+			return final, toolRecords.snapshot(), ctx.Err()
+		}
 	}
 	if strings.TrimSpace(final) == "" {
 		recordEvent("adk.empty_final", "adk.runner", "final ADK event contained no response text", map[string]any{

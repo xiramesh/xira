@@ -173,6 +173,12 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 	resumeCtx := contextWithToolFailureGuard(ctx)
 	resumeCtx = contextWithToolTrace(resumeCtx, run.RunID)
 	resumeCtx = contextWithRuntimeNativeToolsDisabled(resumeCtx)
+	// #76: bound the resume turn (symmetric with resumeDirectHumanRequest).
+	// MaxDurationMS is the delegation ceiling (default 120s); the
+	// ctx-deadline checkpoint in generateADK enforces it.
+	resumeDeadline := time.Duration(profile.NormalizedDelegationPolicy().MaxDurationMS) * time.Millisecond
+	resumeCtx, resumeCancel := context.WithTimeout(resumeCtx, resumeDeadline)
+	defer resumeCancel()
 	suspendCollector := newRuntimeSuspendCollector()
 	resumeCtx = contextWithRuntimeSuspendCollector(resumeCtx, suspendCollector)
 	resumeCtx = contextWithRunExecution(resumeCtx, runExecutionContext{
@@ -201,6 +207,20 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 	}
 	final, toolCalls, err := s.generate(resumeCtx, resumeProfile, instruction, resumeReq, recordEvent, recordAudit)
 	if err != nil {
+		// #76: resume ctx cancelled (deadline) — mark run failed, symmetric
+		// with resumeDirectHumanRequest. Checks resumeCtx.Err() directly (the
+		// generate error is wrapped deep down, see resumeDirectHumanRequest).
+		if resumeCtx.Err() != nil {
+			run.Status = "failed"
+			if run.Metadata == nil {
+				run.Metadata = map[string]string{}
+			}
+			run.Metadata["error_type"] = "resume_timeout"
+			run.VerificationResult = VerificationResult{Status: "failed", Checks: []string{"resume_context_deadline"}}
+			run.EndedAt = time.Now()
+			replaceRunHumanRequest(&run, *req)
+			return s.runs.SaveRun(run)
+		}
 		return err
 	}
 	run.Message = resumeMessage
@@ -329,6 +349,14 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 	}
 	resumeCtx := contextWithToolFailureGuard(ctx)
 	resumeCtx = contextWithToolTrace(resumeCtx, run.RunID)
+	// #76: bound the resume turn so a hanging generate (multi-round tool loop)
+	// cannot run unbounded. MaxDurationMS is the delegation ceiling (default
+	// 120s); the ctx-deadline checkpoint in generateADK (service_adk.go)
+	// enforces it. Nested under ctx, so a shorter parent deadline (e.g. a test
+	// ctx or an HTTP request timeout) still wins.
+	resumeDeadline := time.Duration(profile.NormalizedDelegationPolicy().MaxDurationMS) * time.Millisecond
+	resumeCtx, resumeCancel := context.WithTimeout(resumeCtx, resumeDeadline)
+	defer resumeCancel()
 	suspendCollector := newRuntimeSuspendCollector()
 	resumeCtx = contextWithRuntimeSuspendCollector(resumeCtx, suspendCollector)
 	resumeCtx = contextWithRunExecution(resumeCtx, runExecutionContext{
@@ -357,6 +385,23 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 	}
 	final, toolCalls, err := s.generate(resumeCtx, profile, instruction, resumeReq, recordEvent, recordAudit)
 	if err != nil {
+		// #76: if the resume ctx itself was cancelled (deadline fired, or the
+		// detached answer_child goroutine's parent ctx died), mark the run
+		// failed so it is not left waiting_human forever. We check resumeCtx
+		// directly rather than errors.Is(err, context.*) because the error
+		// surfaces wrapped from deep down (e.g. "deepseek stream failed: ...")
+		// and does not unwrap to a context error.
+		if resumeCtx.Err() != nil {
+			run.Status = "failed"
+			if run.Metadata == nil {
+				run.Metadata = map[string]string{}
+			}
+			run.Metadata["error_type"] = "resume_timeout"
+			run.VerificationResult = VerificationResult{Status: "failed", Checks: []string{"resume_context_deadline"}}
+			run.EndedAt = time.Now()
+			replaceRunHumanRequest(&run, *req)
+			return s.runs.SaveRun(run)
+		}
 		return err
 	}
 	run.Message = resumeMessage
