@@ -1055,6 +1055,68 @@ func TestRunAgentReturnsBoundedShellFailureToADKModel(t *testing.T) {
 	}
 }
 
+// TestToolExecutionFailureProducesAuditEvent (#81): when a tool EXECUTION fails
+// (not "rejected by profile" — that already has recordAudit), the failure must
+// be audited in AuditEvents, not only logged. Before #81 the execution-failure
+// path (service.go ~tool.failed) only recordEvent'd into Events; the parallel
+// failure paths (not-allowed/not-registered) already recordAudit'd. This pins
+// the missing audit so the front-end's audit_events field gets it (front-end
+// run-inspector reads audit_events, not events — xiraClient.ts contract).
+func TestToolExecutionFailureProducesAuditEvent(t *testing.T) {
+	var requests []deepseek.ChatRequest
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		requests = append(requests, req)
+		body := deepSeekTextResponse("saw failure")
+		if len(requests) == 1 {
+			body = deepSeekShellRunToolCallResponseWithArgs("shell-fail-audit", map[string]any{
+				"command":         `exit 7`,
+				"timeout_seconds": 5,
+			})
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+
+	rt := newTestService(t, Config{
+		StateDir:       t.TempDir(),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		AgentID: agents.ResearchAssistantAgentID,
+		Message: "call shell",
+		Context: channel.NewInboundContext("test", "", nil),
+	})
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Error == "" {
+		t.Fatalf("expected a failed shell.run: %+v", resp.ToolCalls)
+	}
+
+	// The execution failure must produce a tool.call audit with Allowed=false.
+	var failAudit *AuditEvent
+	for i := range resp.AuditEvents {
+		a := &resp.AuditEvents[i]
+		if a.Action == "tool.call" && !a.Allowed && strings.Contains(a.Reason, "exit status 7") {
+			failAudit = a
+			break
+		}
+	}
+	if failAudit == nil {
+		t.Fatalf("AuditEvents missing tool.call failure audit (got %d events): %+v", len(resp.AuditEvents), resp.AuditEvents)
+	}
+	if failAudit.Target != "shell.run" {
+		t.Errorf("audit Target = %q, want shell.run", failAudit.Target)
+	}
+}
+
 func TestToolOutputReadCanReadRawOutputFromCurrentRun(t *testing.T) {
 	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	runID := "tool-output-read-run"

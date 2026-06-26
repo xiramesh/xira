@@ -1105,6 +1105,13 @@ func (s *Service) executeToolCall(
 			"error", rec.Error,
 		)
 		recordEvent("tool.failed", rec.Name, rec.Error, map[string]any{"tool": rec.Name})
+		// #81: audit the execution failure. The parallel failure paths (not
+		// allowed / not registered, above) already recordAudit("tool.call",
+		// ..., false, ...); this execution-failure path was the lone holdout —
+		// it only recordEvent'd into Events, so the front-end's audit_events
+		// field never saw tool execution failures (xiraClient.ts reads
+		// audit_events for the run-inspector, not events).
+		recordAudit("tool.call", rec.Name, false, rec.Error, rec.Input)
 	} else {
 		slog.Info("tool call finished",
 			"agent_id", profile.ID,
