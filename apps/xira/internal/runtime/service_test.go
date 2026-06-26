@@ -859,9 +859,6 @@ func TestRuntimeEventsUseV1EnvelopeWithLegacyFields(t *testing.T) {
 		if got := evt.Payload["channel"]; got != "xiragarden" {
 			t.Fatalf("event payload channel = %v", got)
 		}
-		if evt.Visibility == nil || !evt.Visibility.Inspector {
-			t.Fatalf("event visibility = %+v", evt.Visibility)
-		}
 		sawCompleted = sawCompleted || evt.Kind == "tool.completed"
 		sawFinished = sawFinished || evt.Kind == "tool.finished"
 	}
@@ -945,9 +942,6 @@ func TestAssistantStatusToolEmitsStatusEventWithoutPersistingContent(t *testing.
 	}
 	if statusEvent.Message != "I am checking local context." || statusEvent.Payload["producer"] != "runtime.status_tool" {
 		t.Fatalf("status event = %+v", statusEvent)
-	}
-	if statusEvent.Visibility == nil || !statusEvent.Visibility.Conversation {
-		t.Fatalf("status visibility = %+v", statusEvent.Visibility)
 	}
 	history := rt.SessionManager().AgentHistory(resp.SessionID, resp.AgentID)
 	if len(history) != 2 {

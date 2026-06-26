@@ -13,50 +13,22 @@ import (
 	"github.com/xiramesh/xira/internal/model/deepseek"
 )
 
-// TestV0FactEventsAreConversationVisible: the v0 progress forwarder filters
-// on Visibility.Conversation == true. The three runtime-fact kinds it must
-// deliver (run.waiting_human, agent.delegate.failed, agent.delegate.timeout)
-// currently fall through to the default conversation=false rule and would be
-// silently dropped. They MUST be explicitly conversation-visible. See
-// docs/architecture/xira-conversation-progress-feed-v0.zh.md §7.
-func TestV0FactEventsAreConversationVisible(t *testing.T) {
-	for _, kind := range []string{
-		"run.waiting_human",
-		"agent.delegate.failed",
-		"agent.delegate.timeout",
-	} {
-		v := eventVisibility(kind)
-		if v == nil {
-			t.Fatalf("eventVisibility(%q) = nil", kind)
-		}
-		if !v.Conversation {
-			t.Fatalf("kind %q must be conversation-visible, got %+v", kind, v)
-		}
-		// Assistant-authored status stays conversation-visible too (unchanged).
-	}
-}
-
-// Negative check: raw / high-frequency kinds must NOT flip to conversation.
-func TestRawKindsStayNonConversation(t *testing.T) {
-	for _, kind := range []string{
-		"adk.event",
-		"tool.started",
-		"tool.completed",
-		"model.policy_resolved",
-		"context.item.included",
-		"run.started",
-		"run.finished",
-	} {
-		if v := eventVisibility(kind); v != nil && v.Conversation {
-			t.Fatalf("kind %q must NOT be conversation-visible, got %+v", kind, v)
-		}
-	}
-}
+// progress_visibility_test.go: tests the run.waiting_human summary contract.
+//
+// The eventVisibility switch + Visibility field were removed (issue #43): the
+// per-chat-key architecture routes events by Event TYPE (renderEventText's
+// type switch in progress/render_event.go), not by a kind→visibility map. The
+// old forwarder that filtered on Visibility.Conversation was itself removed in
+// Phase 6b (a32dae7). The two tests that asserted on eventVisibility() directly
+// (TestV0FactEventsAreConversationVisible / TestRawKindsStayNonConversation)
+// guarded that deleted forwarder's filter and are gone with it — the rendering
+// contract they indirectly checked now lives in render_event_test.go's
+// type-switch assertions. What remains here is the waiting_human *summary*
+// contract (the human-facing question text spliced into the event payload).
 
 // TestRunWaitingHumanEventCarriesConversationSummary: the waiting_human event
-// must be conversation-visible AND carry a human-facing `summary` (rendered
-// into the IM chat by the forwarder). The summary is derived from the
-// interrupt reason / first human request question.
+// must carry a human-facing `summary` (rendered into IM chat). The summary is
+// derived from the interrupt reason / first human request question.
 func TestRunWaitingHumanEventCarriesConversationSummary(t *testing.T) {
 	const question = "Approve waiting_human summary smoke?"
 	rt := newWaitingHumanService(t, question)
@@ -73,9 +45,6 @@ func TestRunWaitingHumanEventCarriesConversationSummary(t *testing.T) {
 	evt, ok := findEvent(resp.Events, "run.waiting_human")
 	if !ok {
 		t.Fatalf("events missing run.waiting_human: %v", eventKinds(resp.Events))
-	}
-	if evt.Visibility == nil || !evt.Visibility.Conversation {
-		t.Fatalf("run.waiting_human must be conversation-visible: %+v", evt.Visibility)
 	}
 	summary, _ := evt.Payload["summary"].(string)
 	if !strings.Contains(summary, question) {

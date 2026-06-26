@@ -161,37 +161,6 @@ func TestHumanOptionsFromAny(t *testing.T) {
 	}
 }
 
-// TestEventVisibility covers the conversation-plane classification for every
-// kind the progress feed depends on. This is the §1.4 contract: the kind set
-// that conversation=true must be exactly the deliverable facts.
-func TestEventVisibility(t *testing.T) {
-	conversationKinds := map[string]bool{
-		"assistant.status":       true,
-		"assistant.final":        true,
-		"run.waiting_human":      true,
-		"agent.delegate.failed":  true,
-		"agent.delegate.timeout": true,
-		"capability_gap":         true,
-	}
-	for kind := range conversationKinds {
-		v := eventVisibility(kind)
-		if v == nil || !v.Conversation {
-			t.Errorf("kind %q should be Conversation=true", kind)
-		}
-	}
-	for _, kind := range []string{"adk.event", "model.policy_resolved", "context.packet.started", "context.item.included", "tool.completed"} {
-		v := eventVisibility(kind)
-		if v == nil || v.Conversation {
-			t.Errorf("kind %q should be Conversation=false", kind)
-		}
-	}
-	// Unknown kind -> default (Conversation false, others true).
-	v := eventVisibility("unknown.kind")
-	if v == nil || v.Conversation || !v.Activity || !v.Inspector || !v.Audit {
-		t.Fatalf("unknown kind default wrong: %+v", v)
-	}
-}
-
 // TestWaitingHumanSummary covers nil / question-from-request / reason fallback.
 func TestWaitingHumanSummary(t *testing.T) {
 	if got := waitingHumanSummary(nil); got != "" {

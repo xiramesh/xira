@@ -31,9 +31,6 @@ func TestLiveProgressFeedAssistantFinal(t *testing.T) {
 	if !ok {
 		t.Fatalf("live run missing assistant.final: %v", eventKinds(resp.Events))
 	}
-	if evt.Visibility == nil || !evt.Visibility.Conversation {
-		t.Fatalf("assistant.final must be conversation-visible: %+v", evt.Visibility)
-	}
 	if strings.Contains(evt.Message, resp.FinalResponse) {
 		t.Fatalf("assistant.final must not leak the full final text: %q", evt.Message)
 	}
@@ -57,9 +54,6 @@ func TestLiveProgressFeedWaitingHumanSummary(t *testing.T) {
 	evt, ok := findEvent(resp.Events, "run.waiting_human")
 	if !ok {
 		t.Fatalf("live run missing run.waiting_human: %v", eventKinds(resp.Events))
-	}
-	if evt.Visibility == nil || !evt.Visibility.Conversation {
-		t.Fatalf("run.waiting_human must be conversation-visible: %+v", evt.Visibility)
 	}
 	summary, _ := evt.Payload["summary"].(string)
 	if strings.TrimSpace(summary) == "" {

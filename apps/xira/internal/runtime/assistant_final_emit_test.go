@@ -38,9 +38,6 @@ func TestRunEmitsAssistantFinalOnCompleted(t *testing.T) {
 	if !ok {
 		t.Fatalf("events missing assistant.final: %v", eventKinds(resp.Events))
 	}
-	if evt.Visibility == nil || !evt.Visibility.Conversation {
-		t.Fatalf("assistant.final must be conversation-visible: %+v", evt.Visibility)
-	}
 	// Full final text must NOT leak into the event (avoid triple-store).
 	if strings.Contains(evt.Message, resp.FinalResponse) {
 		t.Fatalf("assistant.final message leaks final text: %q", evt.Message)

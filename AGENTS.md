@@ -43,7 +43,6 @@
 - payload 只放 `final_chars`（rune 数），final 全文不进事件。
 - 语义：`assistant.final` = 「agent 的最终回复已就绪」。它是下游（ChatContext 渲染收尾、
   未来消费者）判断「final 来了，该收尾」的**契约化信号**。
-- visibility：`events.go` 已定义 `conversation=true, activity=false, inspector=true, audit=false`。
 
 ### 1.3 `run.finished` ≠ final 就绪信号
 
@@ -56,29 +55,25 @@
   `assistant.final`（见 1.2）。两者职责不同：`run.finished` = run 结束；`assistant.final` =
   final 回复就绪。
 
-### 1.4 `eventVisibility` 的 switch：8 个 case，其余走 default
+### 1.4 事件渲染分流:Event 类型 switch(原 `eventVisibility` 陷阱已随架构演进解决)
 
-`eventVisibility`（`events.go`）的 switch 显式处理 **8 个 case**：
+**曾经**（全局 EventBus + Forwarder 时代）有个 kind→visibility 映射（`eventVisibility` switch,
+8 个 case + default）,Forwarder 按 `Visibility.Conversation` 过滤哪些事件进 IM。**陷阱**:新加的
+fact kind 忘在 switch 里开 `conversation=true` 就被静默 drop。
 
-| kind | conversation |
-|---|---|
-| `assistant.status` | true |
-| `assistant.final` | true |
-| `run.waiting_human` / `agent.delegate.failed` / `agent.delegate.timeout` | **true**（已打开，不再是缺口）|
-| `adk.event` | false |
-| `model.policy_resolved` | false |
-| `context.packet.started` | false |
-| `context.item.included` | false |
-| `capability_gap` | true |
+**现状**（per-chat-key 架构,Phase 6b `a32dae7`）:全局 EventBus + Forwarder + scopeMatcher **全删**。
+`eventVisibility` switch + `RuntimeEventVisibility` 字段也随 #43 删除（它们已无生产消费者 —— 渲染
+不再读 Visibility）。现在事件分流走两条路:
 
-**其余 kind 全走 default**（`conversation=false, activity=true, inspector=true, audit=true`）。
+- **渲染分流**:`renderEventText`（`progress/render_event.go`）按 **Event 类型 switch** 决定哪些进 IM
+  （`AgentTurnFailed`/`HumanRequested`/`AssistantStatus`/`ToolCalled` 渲染;`AgentTurnStarted`/
+  `Completed`/`Canceled`/`HumanResponded`/`AssistantFinal`/`ToolResult` 不渲染）。sealed 类型穷举,
+  新加 Event 类型必须显式 case,不会再"忘开 visibility 被静默 drop"。
+- **投递分流**:`runtimeEventToEvent`（`event_mapping.go`）只把 ~14 信号 kind 映射成 Event 投 EventBus;
+  其余 ~34 个 observability/audit kind 走 `ok=false → slog.Info` 结构化日志（#43 升级,带 payload）。
 
-含义：曾经有个缺口——`run.waiting_human` / `agent.delegate.failed` / `agent.delegate.timeout` 这
-些 fact 事件被发布但 `conversation` 没打开，只过滤 `Conversation==true` 的 forwarder 会 drop 它们。
-**这个缺口现已补上**（上述 case 已 `conversation=true`，见 events.go 注释"v0 progress forwarder
-delivers these runtime-fact kinds into IM chat"）。**但仍要警惕**：新加的 fact kind 如果语义上该
-对用户可见，必须显式在 switch 里开 `conversation=true`，否则会走 default 被静默 drop——这正是
-AGENTS.md §2 "缺口要补不要绕" 的典型场景。
+**警惕仍适用**:新加的信号 kind 如果该进 IM,要在 `runtimeEventToEvent` 加映射 + `renderEventText`
+加渲染 case,否则它走 non-signal 的 slog 路径(不进 IM)。这是 §2"缺口要补不要绕"在新架构下的延续。
 
 ## 2. 设计评审方法论（本次复盘总结）
 
@@ -87,10 +82,10 @@ AGENTS.md §2 "缺口要补不要绕" 的典型场景。
   盲区（比如只匹配 `recordEvent("literal")` 漏掉 `kind="..."; recordEvent(kind,...)` 动态形式），
   "我 grep 过了"也是没核实。见 §5.4。
 - **写规则/契约文档时，核实纪律更要加码。** 本文件 §1 曾凭记忆写了多处与代码不符的断言
-  （buffer 64 实际 256、assistant.final "从不发布"实际已发布、visibility "7 个 case" 实际 8 个），
-  栽在"禁止不核实"的规则文件本身上。模式很清楚：**代码实现时 TDD 严，一到"总结经验/固化契约"
-  核实纪律就垮**。下次写"X 很重要"的规则文档时，先把文档里每一个事实断言 grep 一遍——尤其
-  track 进 git 的，因为 track 赋予权威，带错的权威比没有更糟。
+  （buffer 64 实际 256、assistant.final "从不发布"实际已发布、visibility "8 个 case" 实际已随
+  架构演进整体删除），栽在"禁止不核实"的规则文件本身上。模式很清楚：**代码实现时 TDD 严，一到
+  "总结经验/固化契约" 核实纪律就垮**。下次写"X 很重要"的规则文档时，先把文档里每一个事实断言
+  grep 一遍——尤其 track 进 git 的，因为 track 赋予权威，带错的权威比没有更糟。
 - **缺口要补，不要绕。** 遇到缺失的契约或技术债，正确做法是补上，而不是用「已有的近似物」
   凑合绕过。用替代品绕 = 留下一个会漂移、会被遗忘、会被下一个 agent 当 bug 重修的洞。只有当
   绕开的代价明确小于补的代价、且不污染核心契约时，才考虑绕；核心契约上的缺口永远补。
