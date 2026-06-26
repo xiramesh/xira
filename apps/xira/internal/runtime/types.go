@@ -168,13 +168,18 @@ type DelegateAgentResult struct {
 	Confidence     string   `json:"confidence,omitempty" yaml:"confidence,omitempty"`
 	FollowupNeeded bool     `json:"followup_needed,omitempty" yaml:"followup_needed,omitempty"`
 	Error          string   `json:"error,omitempty" yaml:"error,omitempty"`
-	// Question is the child's HITL question, set only when Status ==
-	// waiting_human (#68: child→parent question). Surface to the parent LLM via
-	// poll_turn so it can answer via answer_child or escalate to the user.
-	Question string `json:"question,omitempty" yaml:"question,omitempty"`
-	// HumanRequestID is the child's pending HumanRequest id, set only when
-	// Status == waiting_human (#68). The parent LLM passes it to answer_child.
-	HumanRequestID string `json:"human_request_id,omitempty" yaml:"human_request_id,omitempty"`
+	// PendingQuestions carries the child's HITL questions when Status ==
+	// waiting_human (#68: child→parent question). A turn can produce MORE than
+	// one (multiple human.request calls), so this is a slice — poll_turn
+	// surfaces ALL of them (PR #77 follow-up: previously only [0] was carried,
+	// silently dropping the rest). Empty for non-HITL outcomes.
+	PendingQuestions []PendingQuestion `json:"pending_questions,omitempty" yaml:"pending_questions,omitempty"`
+}
+
+// PendingQuestion is one HITL question a child surfaces to its parent (#68).
+type PendingQuestion struct {
+	Question       string `json:"question,omitempty" yaml:"question,omitempty"`
+	HumanRequestID string `json:"human_request_id" yaml:"human_request_id"`
 }
 
 type AuditEvent struct {

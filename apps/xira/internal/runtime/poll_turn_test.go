@@ -159,11 +159,12 @@ func TestExecutePollTurnChildWaitingHumanSurfacesQuestion(t *testing.T) {
 		"spawn:asking": {
 			TurnID: "spawn:asking",
 			Result: DelegateAgentResult{
-				AgentID:        "research",
-				Status:         StatusWaitingHuman,
-				Summary:        "child needs input",
-				Question:       "Which deployment window should I target?",
-				HumanRequestID: "hr-ask-001",
+				AgentID:  "research",
+				Status:   StatusWaitingHuman,
+				Summary:  "child needs input",
+				PendingQuestions: []PendingQuestion{
+					{Question: "Which deployment window should I target?", HumanRequestID: "hr-ask-001"},
+				},
 			},
 		},
 	}}
@@ -181,6 +182,45 @@ func TestExecutePollTurnChildWaitingHumanSurfacesQuestion(t *testing.T) {
 	}
 	if out["human_request_id"] != "hr-ask-001" {
 		t.Errorf("human_request_id = %v, want the child's HumanRequestID (parent needs it to answer via answer_child)", out["human_request_id"])
+	}
+}
+
+// TestExecutePollTurnChildWaitingHumanSurfacesAllPendingQuestions (PR #77
+// follow-up): when a spawned child has MULTIPLE pending HumanRequests, poll_turn
+// must surface ALL of them — not just [0]. Reviewer flagged "多 HR 丢字段（只取
+// [0]）": a turn can produce >1 HR (multiple human.request calls), and silently
+// dropping all but the first leaves the parent LLM unable to answer the rest.
+func TestExecutePollTurnChildWaitingHumanSurfacesAllPendingQuestions(t *testing.T) {
+	sink := &mockPeeperBus{results: map[string]PendingResult{
+		"spawn:multi": {
+			TurnID: "spawn:multi",
+			Result: DelegateAgentResult{
+				AgentID: "research",
+				Status:  StatusWaitingHuman,
+				Summary: "child needs input on two things",
+				PendingQuestions: []PendingQuestion{
+					{Question: "Which deployment window?", HumanRequestID: "hr-a"},
+					{Question: "Roll back or patch forward?", HumanRequestID: "hr-b"},
+				},
+			},
+		},
+	}}
+	ctx := WithSpawnBus(context.Background(), sink)
+
+	out := executePollTurn(ctx, "spawn:multi")
+	if out["status"] != StatusWaitingHuman {
+		t.Errorf("status = %v, want %q", out["status"], StatusWaitingHuman)
+	}
+	// ALL pending questions must surface — not just the first.
+	questions, ok := out["pending_questions"].([]map[string]any)
+	if !ok {
+		t.Fatalf("pending_questions = %#v, want a slice with 2 entries", out["pending_questions"])
+	}
+	if len(questions) != 2 {
+		t.Fatalf("got %d pending questions, want 2 (the second must NOT be dropped)", len(questions))
+	}
+	if questions[0]["human_request_id"] != "hr-a" || questions[1]["human_request_id"] != "hr-b" {
+		t.Errorf("pending_questions ids = %+v, want [hr-a, hr-b]", questions)
 	}
 }
 

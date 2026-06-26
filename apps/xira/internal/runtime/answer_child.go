@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
@@ -154,6 +153,3 @@ func executeAnswerChild(_ context.Context, s *Service, in answerChildInput) map[
 func newAnswerChildCallID() string {
 	return "answer_child:" + uuid.NewString()
 }
-
-// _ keeps the time import if the time.Now() usage in the ADK wrapper moves.
-var _ = time.Now
