@@ -2,11 +2,14 @@ package runtime
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/model/deepseek"
 	fsession "github.com/xiramesh/xira/internal/session"
 )
 
@@ -171,3 +174,90 @@ func TestDeliverResumeFinalNilScopeSkipped(t *testing.T) {
 
 // guard against unused import in case strings.Trim usage moves.
 var _ = strings.TrimSpace
+
+// TestSpawnedChildRunScopeSupportsResumeDelivery is the断裂 A end-to-end guard
+// (issue #68). The existing tests above all hand-construct SessionScope
+// (scopeWith). This test does NOT — it runs a REAL RunChildAgent, loads the
+// persisted child run, and verifies the child's SessionScope is non-nil and
+// faithfully routes a resumed final back to the PARENT's chat key.
+//
+// Without the断裂 A fix (RunChildAgent building resp.SessionScope), the loaded
+// child run has a nil scope and deliverResumeFinal silently drops the final —
+// a spawned child entering HITL could never answer back in IM. This test wires
+// the whole chain: spawn → persist → load → resume-deliver, using the REAL
+// canonical scope product (no hand-clean values, per AGENTS.md §5.4).
+func TestSpawnedChildRunScopeSupportsResumeDelivery(t *testing.T) {
+	stateRoot := t.TempDir()
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return deepSeekHTTPResponse(deepSeekTextResponse("child final answer")), nil
+	})}
+	rt := newTestService(t, Config{
+		StateDir:       stateRoot,
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+
+	target := agents.BuiltinResearchAssistant()
+	target.Session = agents.SessionPolicy{Dimensions: []string{"chat", "sender"}}
+
+	const (
+		parentChannel = "feishu"
+		parentChat    = "oc_child_resume_e2e"
+		parentSender  = "ou_child_resume_e2e"
+	)
+	parentBase := runtimeEventBase{
+		RunID:    "parent-resume-e2e",
+		AgentID:  agents.BuiltinXiraAssistant().ID,
+		Channel:  parentChannel,
+		ChatID:   parentChat,
+		ChatType: "direct",
+		SenderID: parentSender,
+	}
+	if _, err := rt.RunChildAgent(context.Background(), childAgentRequest{
+		ParentBase:  parentBase,
+		ParentRunID: "parent-resume-e2e",
+		ChildRunID:  "child-resume-e2e",
+		Target:      target,
+		Message:     "task",
+		Depth:       1,
+	}); err != nil {
+		t.Fatalf("RunChildAgent error: %v", err)
+	}
+
+	// Load the REAL persisted child run — its scope came from RunChildAgent +
+	// BuildScope, not a test helper.
+	childRun, err := rt.RunStore().Load("child-resume-e2e")
+	if err != nil {
+		t.Fatalf("child run not recorded: %v", err)
+	}
+	if childRun.SessionScope == nil {
+		t.Fatalf("断裂 A regression: child run has nil SessionScope, resume final cannot route")
+	}
+
+	// Simulate the resume path: the child was waiting_human, got resumed, and
+	// now has a final to deliver. deliverResumeFinal must reconstruct the
+	// PARENT's chat key from the child's scope and Emit.
+	emitter := &recordingEmitter{}
+	rt.SetOutboundEmitter(emitter)
+	resumed := TurnResponse{
+		RunID:         childRun.RunID,
+		FinalResponse: "child resumed final",
+		Status:        "completed",
+		SessionScope:  childRun.SessionScope, // the REAL scope from RunChildAgent
+	}
+	rt.deliverResumeFinal(context.Background(), resumed)
+
+	calls := emitter.emitted()
+	if len(calls) != 1 {
+		t.Fatalf("deliverResumeFinal emitted %d envelopes, want 1 (child final must route back to parent's IM)", len(calls))
+	}
+	env := calls[0]
+	if env.Target.Channel != parentChannel {
+		t.Errorf("resumed child final routed to channel %q, want parent's %q", env.Target.Channel, parentChannel)
+	}
+	if env.Target.ChatID != parentChat {
+		t.Errorf("resumed child final routed to chat %q, want parent's %q", env.Target.ChatID, parentChat)
+	}
+	if env.Target.SenderID != parentSender {
+		t.Errorf("resumed child final routed to sender %q, want parent's %q", env.Target.SenderID, parentSender)
+	}
+}

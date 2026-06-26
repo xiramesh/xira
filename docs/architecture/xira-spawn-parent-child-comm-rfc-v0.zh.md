@@ -134,6 +134,40 @@ type PendingResult struct {
 但**优先级低于缺口 1**(事件可见)——子能问父是"更好",子进度可见是"必须"。
 先做缺口 1,缺口 2 留第二步。
 
+### 实施修订(2026-06,#68):方案翻转,改采方案 B(HITL 复用)
+
+> **⚠️ 本节覆盖上面的方案选择。** Phase 5 HITL resume 落地(`861cf17` 无状态 HITL
+> resume)后,重新核实发现:**方案 A 与"无状态"命题结构性冲突**,已弃。
+
+核实依据(逐行核代码,非凭 RFC 旧文):
+
+1. **方案 A 要子 goroutine 跨决策期常驻** —— spawn 的子是 `target.Run` 同步跑的
+   goroutine(`spawn_turn.go`)。"子问父"按方案 A 意味着子 goroutine 要阻塞等反向
+   回答。但 `861cf17` 的核心命题是"**HITL pause 算 turn 结束(落盘),resume 是新 turn**"
+   ——方案 A 的"子 goroutine 等待"在无状态模型里没有自然位置。
+2. **方案 B(子进 HITL)反而成了自然解** —— 子遇到分叉 → 子调 `human.request`(已有
+   tool,delegation.go)→ 子 turn 进 `waiting_human` 落盘、spawn goroutine 退出 →
+   父 `poll_turn` 看到 question(#68 新增 surface)→ 父决定自己答(`answer_child`,
+   #68 新增 tool,替子 Resolve)或沉默(转用户,per-chat-key §2.3 用户只跟父对话)→
+   子 resume 跑完 → 结果回父 chat key。
+3. **issue 原把方案 B 列为"依赖 Phase 5"** —— 当时 Phase 5 未落地;现在 #68 创建于
+   06-24,`861cf17` 是 06-25,**前提条件变了,方案选择重审**。
+
+最终决策(#68):**方案 B(HITL 复用)** + **选项 2(问父 agent,父替子 Resolve 或
+沉默转用户)**。issue 原方案 A 产出清单里"SpawnBus 双向化 / 新 deliver 路径"在
+无状态模型下多余;实际新增 = `poll_turn` surface question + `answer_child` tool。
+
+**前置必修(核实发现的两条断裂,#68 依赖)**:
+- **断裂 A**:`RunChildAgent` 从不构建 `SessionScope`(resp.SessionScope 一直 nil)→
+  子进 HITL resume 后 `deliverResumeFinal` 命中 nil-scope 分支,final 永远投不回 IM。
+  #68 修复:`RunChildAgent` 用 `BuildScope(childReq.Context, ...)` 给子 run 构建 scope
+  (子归父的会话树)。
+- **断裂 B**(已 documented,option A,不在 #68 修):resume ctx 缺 EventBus/flow-step
+  tool allowlist 等钥匙。逐行核实后确认 nativeDisabled 在两条 resume 路径的不对称是
+  **by-design**(语义不同),不该改;EventBus 在异步 resume 无 sink(硬补违反无状态
+  命题);AllowedTools 不持久化在 run(要改 schema,超 scope)。详见
+  `human_request_resume.go:resumeDirectHumanRequest` 的文档注释。
+
 ## 5. 缺口 3:steering 传递给子(父被 steer 时取消子)
 
 ### 问题

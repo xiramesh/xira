@@ -312,12 +312,22 @@ func (t *serviceSpawnTarget) Run(ctx context.Context, agentID, task string) (Del
 	// Phase 3: surface Status + raw FinalResponse as Summary. Structured
 	// parsing (evidence/limitations/confidence) is the SpawnBus consumer's
 	// job (Phase 4/5), not spawn's — spawn is fire-and-forget.
-	return DelegateAgentResult{
+	result := DelegateAgentResult{
 		AgentID: agentID,
 		RunID:   childRunID,
 		Status:  resp.Status,
 		Summary: resp.FinalResponse,
-	}, nil
+	}
+	// #68: if the child entered HITL, carry the question + HumanRequestID so
+	// poll_turn can surface them to the parent LLM (and the parent can answer
+	// via answer_child). The spawn goroutine reads these off the PendingResult
+	// (spawnCore copies them when delivering).
+	if resp.Status == StatusWaitingHuman && len(resp.HumanRequests) > 0 {
+		hr := resp.HumanRequests[0]
+		result.Question = hr.Question
+		result.HumanRequestID = hr.ID
+	}
+	return result, nil
 }
 
 // spawnTurnOutput is the FunctionResponse map the parent LLM sees.

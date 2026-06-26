@@ -204,6 +204,16 @@ AGENTS.md §2 "缺口要补不要绕" 的典型场景。
   scope 产物重跑恢复链测试）。
 - **flaky 测试不能搪塞**：全量跑 FAIL 时，不能"大概是 flaky"跳过。必须用 isolation 重跑 + `-race`
   证实。如果是真 flaky（已有 live LLM 测试），标注来源 + 开 issue 跟踪治理，不默默忽略。
+- **"不对称"≠"bug"，先核实是不是 by-design**（PR #68 栽在这）：核实两条相似路径（如两条
+  resume 路径 `resumeDirectHumanRequest` vs `resumeRunAfterApprovedToolOutput`）发现它们的
+  ctx 钥匙集合不一致时，**不要默认"这是要消除的断裂"**。先读各自语义：那条多一把
+  `contextWithRuntimeNativeToolsDisabled` 的路径，语义是"approved tool 已执行，resume 只产 final，
+  不该再有工具"——禁 native 工具是**对的**；另一条不禁，语义是"问题答完了，接着干"——保留工具
+  是**对的**。不对称是 by-design。对策：发现不对称先问"两条路径的语义相同吗？"——语义不同的
+  不对称是契约不是 bug，写测试把它**锁定**（pin）成"diff = 仅语义决定的那把"，而不是"抹平"。
+  顺带核实"能补的钥匙为什么没补"——可能是"补不了"（如 AllowedTools 不持久化在 run，要改 schema）
+  或"不该补"（如异步 resume 无 per-chat-key sink，硬补违反无状态命题），**这类缺口要 documented +
+  开 issue，不要硬绕也不要硬补**。
 - **这条尤其适用于"自信的场景"**：写规则文档、固化经验、做架构总结时，人（和 agent）最容易
   跳过核实。本文件 §1 曾连续多处凭记忆写错（buffer 数、发布状态、case 数），栽在"禁止不核实"
   的规则文件本身上。详见 §2 的元教训。

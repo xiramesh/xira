@@ -233,6 +233,28 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 	return nil
 }
 
+// resumeDirectHumanRequest resumes a run that paused on a direct human.request
+// (#68: typically a spawned child asking its parent a question). The resume
+// re-runs generate with the FULL profile — tools/skills kept, native tools NOT
+// disabled — because the semantic is "the question was answered, now keep
+// working." This is DELIBERATELY asymmetric with resumeRunAfterApprovedToolOutput
+// (which strips tools + disables native tools via
+// contextWithRuntimeNativeToolsDisabled): that path's semantic is "the approved
+// tool already ran, you only produce a final," so it needs no tools.
+//
+// # Known gaps on the resume ctx (documented, not fixed here — see option A
+// in issue #68; separate issues track these as they need schema changes or
+// violate the stateless-resume model):
+//
+//   - EventBus: resume runs in an HTTP/CLI context with no per-chat-key sink
+//     (per 861cf17's stateless-resume model). Signal events during resume are
+//     dropped with a slog.Debug trace (not silent). Hard-wiring a sink would
+//     reintroduce statefulness; the resume is async and the user observes the
+//     final via deliverResumeFinal, not real-time progress.
+//   - Flow-step tool allowlist: AllowedTools lives on TurnRequest but is NOT
+//     persisted on the run (TurnResponse), so it cannot be reconstructed here.
+//     The resumed child keeps its target-profile tool set (still bounded);
+//     only the parent's extra flow-step narrowing is lost.
 func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanrequest.HumanRequest) error {
 	if req == nil || req.Response == nil {
 		return nil
