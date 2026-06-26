@@ -65,12 +65,6 @@ export type XiraRuntimeEvent = {
     parent_event_id?: string;
     tool_call_id?: string;
   };
-  visibility?: {
-    conversation: boolean;
-    activity: boolean;
-    inspector: boolean;
-    audit: boolean;
-  };
   severity?: string;
   message?: string;
   payload?: Record<string, unknown>;
