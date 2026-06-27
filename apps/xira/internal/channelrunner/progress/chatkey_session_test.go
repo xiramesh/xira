@@ -482,6 +482,170 @@ func TestSessionNilRouterRunsInline(t *testing.T) {
 	}
 }
 
+// --- Step 2: DedupeForget + OnRunError branch tests ---
+
+// TestSessionDedupeForgetOnRunError: when RunAgent errors AND DedupeForget
+// is wired, DedupeForget fires (NOT DedupeComplete). Feishu's failure path.
+func TestSessionDedupeForgetOnRunError(t *testing.T) {
+	completeCalls, forgetCalls := 0, 0
+	rt := newFakeRuntime(fakeRuntimeStep{err: errors.New("boom")})
+	router := NewRouter()
+	cfg := ChatKeySessionConfig{
+		Runtime:      rt,
+		EntrypointID: "ep1",
+		Inbound:      testInbound(),
+		SendProgress: captureDeliverer(&[]string{}),
+		SendFinal:    captureDeliverer(&[]string{}),
+		DedupeComplete: func() { completeCalls++ },
+		DedupeForget:   func() { forgetCalls++ },
+	}
+	s := NewChatKeySession(testKey(), router, cfg)
+	runTurnSync(t, s, router, "msg")
+	if forgetCalls != 1 {
+		t.Errorf("DedupeForget on run error = %d, want 1", forgetCalls)
+	}
+	if completeCalls != 0 {
+		t.Errorf("DedupeComplete on run error = %d, want 0 (Forget wins)", completeCalls)
+	}
+}
+
+// TestSessionDedupeForgetOnSendFinalError: when SendFinal errors AND
+// DedupeForget is wired, DedupeForget fires (NOT Complete). The turn
+// produced a final but couldn't deliver it → channel may retry.
+func TestSessionDedupeForgetOnSendFinalError(t *testing.T) {
+	completeCalls, forgetCalls := 0, 0
+	rt := newFakeRuntime(fakeRuntimeStep{
+		resp: runtime.TurnResponse{Status: "completed", FinalResponse: "ok"},
+	})
+	router := NewRouter()
+	cfg := ChatKeySessionConfig{
+		Runtime:      rt,
+		EntrypointID: "ep1",
+		Inbound:      testInbound(),
+		SendProgress: captureDeliverer(&[]string{}),
+		SendFinal: func(_ context.Context, _ string) error { return errors.New("send failed") },
+		DedupeComplete: func() { completeCalls++ },
+		DedupeForget:   func() { forgetCalls++ },
+	}
+	s := NewChatKeySession(testKey(), router, cfg)
+	runTurnSync(t, s, router, "msg")
+	if forgetCalls != 1 {
+		t.Errorf("DedupeForget on SendFinal error = %d, want 1", forgetCalls)
+	}
+	if completeCalls != 0 {
+		t.Errorf("DedupeComplete on SendFinal error = %d, want 0", completeCalls)
+	}
+}
+
+// TestSessionEmptyFinalCountsAsSuccessForDedupe: empty final → DedupeComplete
+// fires (NOT Forget), because empty final is an intentional agent choice to
+// stay silent, not a failure. Re-running would just reproduce the silence.
+// This pins feishu's messageProcessed=true-on-empty-final semantics.
+func TestSessionEmptyFinalCountsAsSuccessForDedupe(t *testing.T) {
+	completeCalls, forgetCalls := 0, 0
+	rt := newFakeRuntime(fakeRuntimeStep{
+		resp: runtime.TurnResponse{Status: "completed", FinalResponse: "   "},
+	})
+	router := NewRouter()
+	cfg := ChatKeySessionConfig{
+		Runtime:      rt,
+		EntrypointID: "ep1",
+		Inbound:      testInbound(),
+		SendProgress: captureDeliverer(&[]string{}),
+		SendFinal:    captureDeliverer(&[]string{}),
+		DedupeComplete: func() { completeCalls++ },
+		DedupeForget:   func() { forgetCalls++ },
+	}
+	s := NewChatKeySession(testKey(), router, cfg)
+	runTurnSync(t, s, router, "msg")
+	if completeCalls != 1 {
+		t.Errorf("DedupeComplete on empty final = %d, want 1 (empty = success)", completeCalls)
+	}
+	if forgetCalls != 0 {
+		t.Errorf("DedupeForget on empty final = %d, want 0", forgetCalls)
+	}
+}
+
+// TestSessionOnRunErrorInvoked: OnRunError fires with the RunAgent error.
+// Reserved extension point (error can't propagate — see Config doc).
+func TestSessionOnRunErrorInvoked(t *testing.T) {
+	var capturedErr error
+	rt := newFakeRuntime(fakeRuntimeStep{err: errors.New("specific failure")})
+	router := NewRouter()
+	cfg := ChatKeySessionConfig{
+		Runtime:      rt,
+		EntrypointID: "ep1",
+		Inbound:      testInbound(),
+		SendProgress: captureDeliverer(&[]string{}),
+		SendFinal:    captureDeliverer(&[]string{}),
+		OnRunError:   func(err error) { capturedErr = err },
+	}
+	s := NewChatKeySession(testKey(), router, cfg)
+	runTurnSync(t, s, router, "msg")
+	if capturedErr == nil || capturedErr.Error() != "specific failure" {
+		t.Errorf("OnRunError captured = %v, want 'specific failure'", capturedErr)
+	}
+}
+
+// TestSessionOnRunErrorNotInvokedOnSteeringSuccess: OnRunError must NOT fire
+// when the only "error" was ErrSteered (that's a steering retry, not failure).
+func TestSessionOnRunErrorNotInvokedOnSteeringSuccess(t *testing.T) {
+	var capturedErr error
+	rt := newFakeRuntime(
+		fakeRuntimeStep{err: runtime.ErrSteered},
+		fakeRuntimeStep{resp: runtime.TurnResponse{Status: "completed", FinalResponse: "ok"}},
+	)
+	router := NewRouter()
+	cfg := ChatKeySessionConfig{
+		Runtime:      rt,
+		EntrypointID: "ep1",
+		Inbound:      testInbound(),
+		SendProgress: captureDeliverer(&[]string{}),
+		SendFinal:    captureDeliverer(&[]string{}),
+		OnRunError:   func(err error) { capturedErr = err },
+	}
+	s := NewChatKeySession(testKey(), router, cfg)
+	started := make(chan struct{})
+	go func() {
+		s.Handle(context.Background(), "orig")
+		close(started)
+	}()
+	<-started
+	if !waitForActive(router, true) {
+		t.Fatal("turn never became active")
+	}
+	router.SteeringQueue(testKey()).Enqueue("interjection")
+	if !waitForActive(router, false) {
+		t.Fatal("turn never finished")
+	}
+	if capturedErr != nil {
+		t.Errorf("OnRunError fired during steering retry: %v (should be nil)", capturedErr)
+	}
+}
+
+// TestSessionDedupeForgetNilFallsBackToComplete: when DedupeForget is nil
+// (ilink case) and RunAgent errors, DedupeComplete still fires — pinning the
+// ilink-compatible Step 1 behavior under the new success/failure-aware defer.
+func TestSessionDedupeForgetNilFallsBackToComplete(t *testing.T) {
+	completeCalls := 0
+	rt := newFakeRuntime(fakeRuntimeStep{err: errors.New("boom")})
+	router := NewRouter()
+	cfg := ChatKeySessionConfig{
+		Runtime:        rt,
+		EntrypointID:   "ep1",
+		Inbound:        testInbound(),
+		SendProgress:   captureDeliverer(&[]string{}),
+		SendFinal:      captureDeliverer(&[]string{}),
+		DedupeComplete: func() { completeCalls++ },
+		// DedupeForget intentionally nil — ilink's unconditional-complete mode.
+	}
+	s := NewChatKeySession(testKey(), router, cfg)
+	runTurnSync(t, s, router, "msg")
+	if completeCalls != 1 {
+		t.Errorf("DedupeComplete (Forget-nil fallback) = %d, want 1", completeCalls)
+	}
+}
+
 // TestSessionProgressWiredToChatContext: a progress Message emitted via the
 // per-turn ChatContext (injected as EventBus) reaches SendProgress. This
 // verifies the WithEventBus(chatCtx) wiring is preserved.

@@ -71,6 +71,23 @@ type ChatKeySessionConfig struct {
 	// account_id, etc.) so the Session's log lines match the channel's
 	// observability. nil = no extra fields.
 	LogFields []any
+
+	// DedupeForget releases the dedupe slot on turn FAILURE (RunAgent error
+	// or SendFinal failure), allowing the channel to retry the message.
+	// Mirrors feishu's `messages.Forget(key)` on failure paths. When non-nil,
+	// runTurn calls this instead of DedupeComplete on failure; when nil,
+	// failure falls back to DedupeComplete (ilink's unconditional-complete
+	// behavior — unchanged for Step 1 compatibility).
+	DedupeForget func()
+
+	// OnRunError is invoked when RunAgent returns a non-steering error.
+	// Reserved extension point: the error cannot propagate (runTurn has no
+	// return value per OnNewTurnFunc; turns run async in a router goroutine
+	// while the channel handler has already returned, so there is nowhere to
+	// surface the error to the SDK). Today feishu wires this to an slog.Error
+	// call to preserve its existing error log line; ilink leaves it nil.
+	// Future channels may use it for metrics/alerting/observability hooks.
+	OnRunError func(err error)
 }
 
 // ChatKeySession orchestrates one chatKey's turns. It wraps a Router
@@ -120,10 +137,23 @@ func (s *ChatKeySession) runTurn(_ runtime.ChatKey, turnMsg string, turnCtx cont
 	key := s.key
 	fields := s.cfg.LogFields
 
-	// Complete dedupe when turn finishes (async — turn runs in router goroutine).
-	if s.cfg.DedupeComplete != nil {
-		defer s.cfg.DedupeComplete()
-	}
+	// Dedupe release on turn exit. Step 2: success/failure-aware.
+	// turnSucceeded is set true ONLY when the turn produced a deliverable
+	// outcome (final sent, OR empty-final which is an intentional agent
+	// choice to stay silent — feishu's existing semantics count that as
+	// "processed"). On failure (RunAgent error or SendFinal error), if the
+	// channel wired DedupeForget, that wins (lets the channel retry); else
+	// fall back to DedupeComplete (ilink's unconditional-complete, Step 1).
+	turnSucceeded := false
+	defer func() {
+		if !turnSucceeded && s.cfg.DedupeForget != nil {
+			s.cfg.DedupeForget()
+			return
+		}
+		if s.cfg.DedupeComplete != nil {
+			s.cfg.DedupeComplete()
+		}
+	}()
 
 	// Per-chat-key progress delivery: ChatContext renders events and calls
 	// SendProgress. Created per turn (same lifetime as the steering retry loop).
@@ -212,6 +242,9 @@ func (s *ChatKeySession) runTurn(_ runtime.ChatKey, turnMsg string, turnCtx cont
 		break // normal completion, non-steering error, or no more interjections
 	}
 	if err != nil {
+		if s.cfg.OnRunError != nil {
+			s.cfg.OnRunError(err)
+		}
 		slog.Error("chatkey session runtime run failed",
 			append([]any{"chat_key", key.String(), "entrypoint_id", s.cfg.EntrypointID, "error", err}, fields...)...)
 		return
@@ -229,6 +262,11 @@ func (s *ChatKeySession) runTurn(_ runtime.ChatKey, turnMsg string, turnCtx cont
 			"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
 		}, fields...)...)
 	if strings.TrimSpace(resp.FinalResponse) == "" {
+		// Empty final is an intentional agent choice to stay silent — count
+		// as "processed" (matches feishu's messageProcessed=true on empty
+		// final → dedupe Complete, not Forget). The message should NOT be
+		// retried: re-running would just reproduce the silence.
+		turnSucceeded = true
 		slog.Warn("chatkey session response skipped",
 			append([]any{
 				"chat_key", key.String(),
@@ -248,6 +286,7 @@ func (s *ChatKeySession) runTurn(_ runtime.ChatKey, turnMsg string, turnCtx cont
 			}, fields...)...)
 		return
 	}
+	turnSucceeded = true
 	slog.Info("chatkey session response sent",
 		append([]any{
 			"chat_key", key.String(),
