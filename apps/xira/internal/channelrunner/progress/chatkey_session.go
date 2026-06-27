@@ -1,0 +1,258 @@
+package progress
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/runtime"
+)
+
+// chatkey_session.go: per-chatKey turn engine. Extracted 1:1 from ilink's
+// runTurn closure (ilink/runner.go:630-791, pre-Step-1). This is Step 1 of
+// RFC xira-chatkey-session-engine-rfc-v0: pure extraction, behavior
+// unchanged. The three-state machine (active/idle/hitl-paused) and the
+// HandleOutcome return value land in Step 3.
+//
+// Why this object exists: ilink, feishu, and websocket each had their own
+// turn-handling today, and only ilink had the full side-effect treatment
+// (steering retry, spawn-child cancel, SpawnCollector cleanup, ChatContext
+// lifecycle, dedupe complete). feishu/ws were missing pieces — a direct
+// violation of per-chat-key RFC #48's single-active-turn contract. Step 1
+// lifts ilink's closure into a shared object so Step 2/3 can wire feishu/ws
+// to the SAME engine instead of re-implementing it.
+
+// Deliverer sends a message (progress or final) to the channel. It is a func
+// type (not an interface) so channel runners close over their own concrete
+// types — ilink's *accountPoller + openilink.WeixinMessage, feishu's card
+// builder, websocket's frame writer — without progress importing any of them.
+//
+// Named Deliverer (not Sender) to avoid collision with the pre-existing
+// progress.Sender interface (chat-event SendProgress).
+type Deliverer func(ctx context.Context, text string) error
+
+// ChatKeySessionConfig holds the per-turn inputs that vary per inbound
+// message but are channel-agnostic. Channel-specific delivery is injected
+// via the Deliverer closures, which close over the channel's own types.
+type ChatKeySessionConfig struct {
+	// Runtime is the agent-run entry point. *runtime.Service satisfies this
+	// implicitly; tests pass a fake.
+	Runtime runtime.Runtime
+	// EntrypointID is the entrypoint that owns this turn (r.definition.ID in
+	// ilink). Becomes TurnRequest.EntrypointID.
+	EntrypointID string
+	// Inbound is the per-message channel context (channel/chat/sender).
+	// Becomes TurnRequest.Context.
+	Inbound channel.InboundContext
+
+	// SendProgress delivers in-turn progress text to the channel. Wired into
+	// ChatContext (the EventBus sink). May be invoked zero or many times per
+	// turn depending on events.
+	SendProgress Deliverer
+	// SendFinal delivers the turn's final response to the channel. Invoked
+	// exactly once on successful completion with a non-empty FinalResponse.
+	SendFinal Deliverer
+
+	// DedupeComplete is called on EVERY turn exit (success, error, empty
+	// final) via defer — mirrors ilink's `defer messages.Complete(...)`.
+	// Optional: nil = skip (feishu/ws may wire dedupe differently in Step 2/3).
+	DedupeComplete func()
+
+	// SpawnResetter clears the per-chatKey SpawnCollector on turn end,
+	// preventing child-turn PendingResults from accumulating across turns
+	// (memory leak in long chats). Mirrors ilink's
+	// `defer router.SpawnCollectorFor(key).Reset()`. Optional: nil = skip.
+	SpawnResetter func()
+
+	// LogFields supplies channel-specific slog fields (chat_id, message_id,
+	// account_id, etc.) so the Session's log lines match the channel's
+	// observability. nil = no extra fields.
+	LogFields []any
+}
+
+// ChatKeySession orchestrates one chatKey's turns. It wraps a Router
+// (unchanged: owns active-routing + TTL prune) and layers the turn
+// side-effects on top. One Session per chatKey, reused across turns
+// (mirrors Router's entry reuse).
+//
+// Lifecycle is governed by the Router: Handle delegates to router.Handle,
+// which prunes idle entries after routerEntryTTL (1h heuristic).
+type ChatKeySession struct {
+	key    runtime.ChatKey
+	router *Router
+	cfg    ChatKeySessionConfig
+}
+
+// NewChatKeySession constructs a Session. router may be nil only in tests
+// that want to skip active-routing (Handle then runs the turn inline).
+func NewChatKeySession(key runtime.ChatKey, router *Router, cfg ChatKeySessionConfig) *ChatKeySession {
+	return &ChatKeySession{key: key, router: router, cfg: cfg}
+}
+
+// Handle is the single entry point. Mirrors Router.Handle's contract: it is
+// NON-BLOCKING — returns immediately after either (a) enqueuing msg to the
+// SteeringQueue because a turn is active, or (b) dispatching a goroutine
+// that runs the turn. The caller cannot observe turn completion through
+// this return value; completion flips Router's entry.active to false.
+func (s *ChatKeySession) Handle(ctx context.Context, msg string) {
+	if s.router != nil {
+		s.router.Handle(s.key, msg, ctx, s.runTurn)
+		return
+	}
+	// Test path (mirrors ilink's `if r.router == nil` fallback): run inline.
+	s.runTurn(s.key, msg, ctx)
+}
+
+// runTurn is the extracted ilink closure body. Its signature matches
+// OnNewTurnFunc exactly (`func(key, msg, ctx)`, no return) because Router
+// is its only caller and that contract is fixed. Every defer, slog line,
+// and ErrSteered branch carries over 1:1 from ilink/runner.go:630-791.
+//
+// Side-effect ordering on exit (all via defer, LIFO):
+//  1. SpawnResetter (clears SpawnCollector)
+//  2. childCancels.CancelAll + Reset (cancel outstanding spawned children)
+//  3. chatCtx.Stop (flush progress sink)
+//  4. DedupeComplete (release dedupe slot)
+func (s *ChatKeySession) runTurn(_ runtime.ChatKey, turnMsg string, turnCtx context.Context) {
+	key := s.key
+	fields := s.cfg.LogFields
+
+	// Complete dedupe when turn finishes (async — turn runs in router goroutine).
+	if s.cfg.DedupeComplete != nil {
+		defer s.cfg.DedupeComplete()
+	}
+
+	// Per-chat-key progress delivery: ChatContext renders events and calls
+	// SendProgress. Created per turn (same lifetime as the steering retry loop).
+	policy := DefaultPolicy()
+	chatCtx := NewChatContext(turnCtx, ChatContextConfig{
+		Sender:   SenderFunc(func(ctx context.Context, m Message) error {
+			return s.cfg.SendProgress(ctx, m.Text)
+		}),
+		MaxChars: policy.MaxChars,
+		Policy:   policy,
+	})
+	chatCtx.Start()
+	defer chatCtx.Stop()
+
+	// Per-chat-key registry of spawned-child cancel funcs (RFC #67): when
+	// this turn is steered, CancelAll(chatKey) cancels every outstanding
+	// child so they stop burning tokens. Created per turn. On turn-end (ANY
+	// exit — steer, normal completion, or error) we CancelAll outstanding
+	// children so a parent that finishes (or fails) without polling its
+	// children does not leave them burning tokens to timeout. Then Reset
+	// clears the registry to prevent leaks across turns.
+	childCancels := NewChildCancelRegistry()
+	defer func() {
+		if n := childCancels.CancelAll(key); n > 0 {
+			slog.Info("chatkey session turn end: canceled outstanding spawned children",
+				append([]any{"chat_key", key.String(), "children", n}, fields...)...)
+		}
+		childCancels.Reset(key)
+	}()
+
+	// Clear spawn results when the turn ends: SpawnCollector is per-chatKey
+	// (router reuses the entry across turns), and the only other cleanup
+	// point is steering-retry Reset. Without this, every spawned child's
+	// PendingResult accumulates in the map forever — a real memory leak in
+	// long chats. A late Deliver after Reset is harmless.
+	if s.cfg.SpawnResetter != nil {
+		defer s.cfg.SpawnResetter()
+	}
+
+	// Steering retry loop: if RunAgent is canceled by steering checkpoint
+	// (user interjected mid-turn), drain the SteeringQueue and re-run with
+	// the interjection as the new message. Loop until RunAgent completes
+	// normally or errors non-steering.
+	currentMsg := turnMsg
+	var resp runtime.TurnResponse
+	var err error
+	for {
+		runCtx := runtime.WithEventBus(turnCtx, chatCtx)
+		// Inject the per-chat-key child cancel registry so spawned children
+		// register their cancel funcs and can be canceled on steer.
+		runCtx = runtime.WithChildCancelRegistry(runCtx, childCancels)
+		resp, err = s.cfg.Runtime.RunAgent(runCtx, runtime.TurnRequest{
+			EntrypointID: s.cfg.EntrypointID,
+			Message:      currentMsg,
+			Context:      s.cfg.Inbound,
+		})
+		// If steered (checkpoint detected pending interjection), drain queue
+		// and re-run with the interjection. Uses ErrSteered sentinel (NOT
+		// context.Canceled — checkpoint doesn't cancel ctx).
+		if err != nil && errors.Is(err, runtime.ErrSteered) {
+			if sink := runtime.SteeringBusFromContext(turnCtx); sink != nil {
+				if steered, ok := sink.TryDequeue(); ok {
+					// Cancel every outstanding spawned child: the user
+					// interjected, so the children of the interrupted run
+					// should stop rather than keep burning tokens.
+					if n := childCancels.CancelAll(key); n > 0 {
+						slog.Info("chatkey session steering: canceled outstanding spawned children",
+							append([]any{"chat_key", key.String(), "children", n}, fields...)...)
+					}
+					// Reset ChatContext quota/dedup for the retried run
+					// (without this, progress is silently dropped because
+					// progressSent already hit cap).
+					chatCtx.Reset()
+					// Reset spawn results too: the retried turn must not
+					// surface the previous run's stale child results.
+					if s.cfg.SpawnResetter != nil {
+						s.cfg.SpawnResetter()
+					}
+					slog.Info("chatkey session steering: restarting turn with user interjection",
+						append([]any{"chat_key", key.String(), "interjection_chars", utf8.RuneCountInString(steered)}, fields...)...)
+					currentMsg = steered
+					continue // retry with interjection
+				}
+			}
+		}
+		break // normal completion, non-steering error, or no more interjections
+	}
+	if err != nil {
+		slog.Error("chatkey session runtime run failed",
+			append([]any{"chat_key", key.String(), "entrypoint_id", s.cfg.EntrypointID, "error", err}, fields...)...)
+		return
+	}
+	slog.Info("chatkey session runtime run completed",
+		append([]any{
+			"chat_key", key.String(),
+			"entrypoint_id", s.cfg.EntrypointID,
+			"run_id", resp.RunID,
+			"agent_id", resp.AgentID,
+			"status", resp.Status,
+			"session_id", resp.SessionID,
+			"tool_calls", len(resp.ToolCalls),
+			"events", len(resp.Events),
+			"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
+		}, fields...)...)
+	if strings.TrimSpace(resp.FinalResponse) == "" {
+		slog.Warn("chatkey session response skipped",
+			append([]any{
+				"chat_key", key.String(),
+				"entrypoint_id", s.cfg.EntrypointID,
+				"run_id", resp.RunID,
+				"reason", "empty_final_response",
+			}, fields...)...)
+		return
+	}
+	if err := s.cfg.SendFinal(turnCtx, resp.FinalResponse); err != nil {
+		slog.Error("chatkey session response send failed",
+			append([]any{
+				"chat_key", key.String(),
+				"entrypoint_id", s.cfg.EntrypointID,
+				"run_id", resp.RunID,
+				"error", err,
+			}, fields...)...)
+		return
+	}
+	slog.Info("chatkey session response sent",
+		append([]any{
+			"chat_key", key.String(),
+			"entrypoint_id", s.cfg.EntrypointID,
+			"run_id", resp.RunID,
+			"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
+		}, fields...)...)
+}

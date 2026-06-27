@@ -3,7 +3,6 @@ package ilink
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -621,52 +620,25 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 	)
 	inbound := channel.NewInboundContextWithEntrypoint("ilink", r.definition.ID, senderID, metadata)
 	chatKey := frt.ChatKeyFromInbound(inbound)
-	// Per-chat-key Router (Phase 4 steering, RFC #48): if no active turn for
-	// this chatKey, starts a new turn. If active, steers (enqueues to
-	// SteeringQueue). handleMessage returns immediately — Monitor can
-	// receive the next message.
-	//
-	// If router is nil (Start not called — test scenario), run inline.
-	runTurn := func(_ frt.ChatKey, turnMsg string, turnCtx context.Context) {
-		// Complete dedupe when turn finishes (async — turn runs in router goroutine).
-		defer account.messages.Complete(dedupeKey, time.Now())
-		// Per-chat-key progress delivery: ChatContext replaces Forwarder.
-		policy := progress.DefaultPolicy()
-		chatCtx := progress.NewChatContext(turnCtx, progress.ChatContextConfig{
-			Sender: progress.SenderFunc(func(ctx context.Context, m progress.Message) error {
-				return r.send(ctx, account, msg, m.Text)
-			}),
-			MaxChars: policy.MaxChars,
-			Policy:   policy,
-		})
-		chatCtx.Start()
-		defer chatCtx.Stop()
-		// Per-chat-key registry of spawned-child cancel funcs (RFC #67): when
-		// this turn is steered, CancelAll(chatKey) cancels every outstanding
-		// child so they stop burning tokens. Created per turn (same lifetime as
-		// chatCtx). On turn-end (ANY exit path — steer, normal completion, or
-		// error) we CancelAll outstanding children so a parent that finishes
-		// (or fails) without polling its children does not leave them burning
-		// tokens to timeout. Then Reset clears the registry to prevent leaks
-		// across turns (PR #70 review WARNING).
-		childCancels := progress.NewChildCancelRegistry()
-		defer func() {
-			if n := childCancels.CancelAll(chatKey); n > 0 {
-				slog.Info("ilink turn end: canceled outstanding spawned children",
-					"chat_id", chatID,
-					"children", n)
-			}
-			childCancels.Reset(chatKey)
-		}()
-		// Clear spawn results when the turn ends (PR #53 R2 review WARNING):
-		// SpawnCollector is per-chatKey (router reuses the entry across turns),
-		// and the only other cleanup point is steering-retry Reset. Without
-		// this, every spawned child's PendingResult (incl. full FinalResponse)
-		// accumulates in the map forever — a real memory leak in long chats.
-		// A late Deliver after Reset (detached child goroutine) is harmless:
-		// it lands in an empty map that the NEXT turn reads, which is correct
-		// (the next turn shouldn't see the prior turn's results anyway).
-		defer func() {
+	// Per-chat-key turn handling is delegated to ChatKeySession (RFC
+	// xira-chatkey-session-engine-rfc-v0 Step 1). The session owns the
+	// steering retry loop, ChatContext lifecycle, SpawnCollector cleanup, and
+	// child-cancel registry; ilink injects only the channel-specific delivery
+	// (r.send with the original openilink message + account) and dedupe
+	// completion via closures. Behavior is 1:1 equivalent to the previous
+	// inline runTurn closure; the ilink tests verify equivalence.
+	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
+		Runtime:      r.runtime,
+		EntrypointID: r.definition.ID,
+		Inbound:      inbound,
+		SendProgress: func(ctx context.Context, text string) error {
+			return r.send(ctx, account, msg, text)
+		},
+		SendFinal: func(ctx context.Context, text string) error {
+			return r.send(ctx, account, msg, text)
+		},
+		DedupeComplete: func() { account.messages.Complete(dedupeKey, time.Now()) },
+		SpawnResetter: func() {
 			// r.router may be nil in unit tests that construct a Runner
 			// without the full wiring; guard against that.
 			if r.router != nil {
@@ -674,127 +646,17 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 					collector.Reset()
 				}
 			}
-		}()
-
-		// Steering retry loop: if RunAgent is canceled by steering checkpoint
-		// (user interjected mid-turn), drain the SteeringQueue and re-run
-		// with the interjection as the new message. Loop until RunAgent
-		// completes normally or errors non-steering.
-		currentMsg := turnMsg
-		var resp frt.TurnResponse
-		var err error
-		for {
-			runCtx := frt.WithEventBus(turnCtx, chatCtx)
-			// Inject the per-chat-key child cancel registry so spawned children
-			// register their cancel funcs and can be canceled on steer (RFC #67).
-			runCtx = frt.WithChildCancelRegistry(runCtx, childCancels)
-			resp, err = r.runtime.RunAgent(runCtx, frt.TurnRequest{
-				EntrypointID: r.definition.ID,
-				Message:      currentMsg,
-				Context:      inbound,
-			})
-			// If steered (checkpoint detected pending interjection), drain
-			// queue and re-run with the interjection. Uses ErrSteered sentinel
-			// (NOT context.Canceled — checkpoint doesn't cancel ctx).
-			if err != nil && errors.Is(err, frt.ErrSteered) {
-				if sink := frt.SteeringBusFromContext(turnCtx); sink != nil {
-					if steered, ok := sink.TryDequeue(); ok {
-						// Cancel every outstanding spawned child for this
-						// conversation (RFC #67): the user interjected, so the
-						// children of the interrupted run should stop rather
-						// than keep burning tokens. A canceled child's deferred
-						// Deliver lands in the SpawnCollector, but the retried
-						// turn spawns NEW children (new TurnIDs) and won't poll
-						// the stale TurnIDs — so those results are never read
-						// and are discarded on the next Reset. Harmless, but
-						// they do NOT feed the retry (PR #70 review INFO).
-						if n := childCancels.CancelAll(chatKey); n > 0 {
-							slog.Info("ilink steering: canceled outstanding spawned children",
-								"chat_id", chatID,
-								"children", n)
-						}
-						// Reset ChatContext quota/dedup for the retried run
-						// (PR #51 review: without this, progress is silently
-						// dropped because progressSent already hit cap).
-						chatCtx.Reset()
-						// Reset spawn results too: the retried turn must not
-						// surface the previous run's stale child results.
-						if collector := r.router.SpawnCollectorFor(chatKey); collector != nil {
-							collector.Reset()
-						}
-						slog.Info("ilink steering: restarting turn with user interjection",
-							"chat_id", chatID,
-							"message_id", messageID,
-							"interjection_chars", utf8.RuneCountInString(steered),
-						)
-						currentMsg = steered
-						continue // retry with interjection
-					}
-				}
-			}
-			break // normal completion, non-steering error, or no more interjections
-		}
-		if err != nil {
-			slog.Error("ilink runtime run failed",
-				"entrypoint_id", r.definition.ID,
-				"account_id", account.record.AccountID,
-				"chat_id", chatID,
-				"message_id", messageID,
-				"sender_id", senderID,
-				"error", err,
-			)
-			return
-		}
-		slog.Info("ilink runtime run completed",
+		},
+		LogFields: []any{
 			"entrypoint_id", r.definition.ID,
 			"account_id", account.record.AccountID,
-			"run_id", resp.RunID,
-			"agent_id", resp.AgentID,
-			"status", resp.Status,
-			"session_id", resp.SessionID,
 			"chat_id", chatID,
 			"message_id", messageID,
-			"tool_calls", len(resp.ToolCalls),
-			"events", len(resp.Events),
-			"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
-		)
-		if strings.TrimSpace(resp.FinalResponse) == "" {
-			slog.Warn("ilink response skipped",
-				"entrypoint_id", r.definition.ID,
-				"account_id", account.record.AccountID,
-				"run_id", resp.RunID,
-				"chat_id", chatID,
-				"message_id", messageID,
-				"reason", "empty_final_response",
-			)
-			return
-		}
-		if err := r.send(turnCtx, account, msg, resp.FinalResponse); err != nil {
-			slog.Error("ilink response send failed",
-				"entrypoint_id", r.definition.ID,
-				"account_id", account.record.AccountID,
-				"run_id", resp.RunID,
-				"chat_id", chatID,
-				"message_id", messageID,
-				"error", err,
-			)
-			return
-		}
-		slog.Info("ilink response sent",
-			"entrypoint_id", r.definition.ID,
-			"account_id", account.record.AccountID,
-			"run_id", resp.RunID,
-			"chat_id", chatID,
-			"message_id", messageID,
-			"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
-		)
-	}
+			"sender_id", senderID,
+		},
+	})
 	// Route through router (async, non-blocking) or run inline (test/no-Start).
-	if r.router != nil {
-		r.router.Handle(chatKey, content, ctx, runTurn)
-	} else {
-		runTurn(chatKey, content, ctx)
-	}
+	session.Handle(ctx, content)
 }
 
 func (r *Runner) currentContext() context.Context {
