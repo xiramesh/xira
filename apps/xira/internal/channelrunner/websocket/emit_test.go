@@ -3,7 +3,9 @@ package websocket
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/xiramesh/xira/internal/channel"
 	frt "github.com/xiramesh/xira/internal/runtime"
@@ -459,5 +461,119 @@ func TestRegisterConnKeyIdempotentSameKey(t *testing.T) {
 	}
 	if ctx.Err() != nil {
 		t.Fatal("connection was cancelled by idempotent re-register")
+	}
+}
+
+// TestTakeoverDoesNotCancelActiveTurn is the PR #97 re-review CRITICAL
+// regression. The contract being locked: when connection B takes over a
+// ChatKey that connection A registered (and may have an active turn on), the
+// takeover updates the registry (Emit reaches B) but does NOT cancel A's ctx.
+// A's ctx is the parent of any active turn it started; cancelling it would
+// murder the turn with context.Canceled (not ErrSteered) and strand any queued
+// message. registerConnKey returns the displaced conn for the caller's
+// information, but cancelling it is the caller's choice — and HandleConnection
+// chooses NOT to (see the onRegister comment in runner.go).
+//
+// This drives RunAgent directly with a respectCtx fakeRuntime: if A's ctx were
+// cancelled, RunAgent returns context.Canceled. With the fix it returns nil.
+func TestTakeoverDoesNotCancelActiveTurn(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.respectCtx = true
+	var heldUnblock atomic.Value // chan struct{}
+	rt.hold = func(unblock chan struct{}) { heldUnblock.Store(unblock) }
+
+	runner := newTestRunner(t, rt)
+
+	capsA := &capturedFrames{}
+	capsB := &capturedFrames{}
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	_, cancelB := context.WithCancel(context.Background())
+	defer cancelB()
+
+	handleA := runner.newConn(capsA.write, cancelA)
+	handleB := runner.newConn(capsB.write, cancelB)
+	runner.registerConnKey(handleA, keyOf("chat-t", "tom"))
+
+	// Start turn A on connection A's ctx. It blocks inside RunAgent (hold).
+	var turnAErr error
+	turnADone := make(chan struct{})
+	go func() {
+		_, err := runner.runtime.RunAgent(ctxA, frt.TurnRequest{Message: "first"})
+		turnAErr = err
+		close(turnADone)
+	}()
+
+	// Wait until turn A is blocked (hold captured the unblock chan).
+	for i := 0; i < 200; i++ {
+		if v := heldUnblock.Load(); v != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if heldUnblock.Load() == nil {
+		t.Fatal("turn A never entered RunAgent hold")
+	}
+
+	// Connection B takes over the same ChatKey. registerConnKey updates the
+	// registry and returns the displaced handleA — but does NOT cancel it, and
+	// the caller (HandleConnection's onRegister) does not cancel it either.
+	displaced := runner.registerConnKey(handleB, keyOf("chat-t", "tom"))
+	if displaced != handleA {
+		t.Fatalf("registerConnKey should return displaced handleA, got %v", displaced)
+	}
+	if ctxA.Err() != nil {
+		t.Fatal("takeover cancelled the active turn's ctx — turn A would be murdered (context.Canceled, not ErrSteered)")
+	}
+
+	// Registry now points to B; Emit reaches B (registry updated correctly).
+	env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)
+	env.Target = &channel.InboundContext{Channel: "websocket", ChatID: "chat-t", SenderID: "tom"}
+	env.Data = map[string]any{"content": "to-B"}
+	if err := runner.Emit(context.Background(), env); err != nil {
+		t.Fatalf("Emit should reach new connection B: %v", err)
+	}
+	if got := capsB.snapshot(); len(got) != 1 {
+		t.Errorf("connection B got %d frames, want 1", len(got))
+	}
+
+	// Unblock turn A — it must complete NORMALLY (nil error), proving the
+	// takeover did not kill it via ctx cancellation.
+	close(heldUnblock.Load().(chan struct{}))
+	select {
+	case <-turnADone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn A did not complete after unblock (ctx may have been cancelled)")
+	}
+	if turnAErr != nil {
+		t.Errorf("turn A exited with error %v, want nil (takeover must not kill active turn)", turnAErr)
+	}
+}
+
+// TestEmitMixedCaseChatKeyRoundtrip locks the fix for PR #97 re-review WARNING
+// #1. inbound registration stores the ChatKey with the ORIGINAL case the client
+// sent (e.g. "RoomA"/"UserA"), but the resume path reconstructs the Target from
+// SessionScope, where BuildScope lowercases chat/sender (session/manager.go).
+// Without canonicalization, Emit's lookup (lowercase target) misses the
+// registry entry (mixed-case key) → "no live connection".
+//
+// Fix: registry keys are canonicalized (lowercased chat/sender) at every entry
+// point, so inbound (mixed-case) and resume (lowercase) resolve to the same key.
+func TestEmitMixedCaseChatKeyRoundtrip(t *testing.T) {
+	runner := newTestRunner(t, newFakeRuntime())
+	caps := &capturedFrames{}
+	_, cancel := context.WithCancel(context.Background())
+	registerOneKey(runner, "RoomA", "UserA", caps.write, cancel) // client sent mixed case
+
+	// Resume reconstructs Target from SessionScope, which lowercases. Simulate
+	// that by looking up with the lowercased identity.
+	env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)
+	env.Target = &channel.InboundContext{Channel: "websocket", ChatID: "rooma", SenderID: "usera"}
+	env.Data = map[string]any{"content": "found"}
+	if err := runner.Emit(context.Background(), env); err != nil {
+		t.Fatalf("Emit with lowercased target should reach the mixed-case-registered connection: %v", err)
+	}
+	if got := caps.snapshot(); len(got) != 1 {
+		t.Errorf("mixed-case roundtrip: got %d frames, want 1 (canonicalization mismatch)", len(got))
 	}
 }

@@ -233,7 +233,7 @@ func (r *Runner) Emit(_ context.Context, env channel.OutboundEnvelope) error {
 	// omitted; clients tolerant of absent fields read final_response fine.
 	frame := outboundFrame{
 		Type:      "response",
-		ID:        "srv_resume_" + env.RequestID,
+		ID:        "srv_resume_" + firstNonEmpty(env.RequestID, env.RunID),
 		RequestID: env.RequestID,
 		RunID:     env.RunID,
 		Data: map[string]any{
@@ -273,6 +273,7 @@ func (r *Runner) registerConnKey(conn *wsConn, key frt.ChatKey) *wsConn {
 	if conn == nil {
 		return nil
 	}
+	key = canonicalKey(key)
 	r.connMu.Lock()
 	defer r.connMu.Unlock()
 	existing := r.conns[key]
@@ -281,10 +282,9 @@ func (r *Runner) registerConnKey(conn *wsConn, key frt.ChatKey) *wsConn {
 		return nil
 	}
 	// Take over the key. If a DIFFERENT connection held it, return it for the
-	// caller to cancel — keeping the "one active connection per ChatKey"
-	// contract. The displaced connection may own OTHER keys too; cancelling it
-	// (caller's job) invalidates those as well, which is the intended
-	// "you've been superseded, reconnect" semantics.
+	// caller's information — keeping the "one active connection per ChatKey"
+	// contract. The caller decides whether to cancel it; HandleConnection does
+	// NOT (see onRegister comment: cancelling would murder an active turn).
 	r.conns[key] = conn
 	conn.keys[key] = struct{}{}
 	if existing != nil && existing.id != conn.id {
@@ -315,7 +315,22 @@ func (r *Runner) releaseConn(conn *wsConn) {
 func (r *Runner) lookupConn(key frt.ChatKey) *wsConn {
 	r.connMu.Lock()
 	defer r.connMu.Unlock()
-	return r.conns[key]
+	return r.conns[canonicalKey(key)]
+}
+
+// canonicalKey lowercases ChatID and SenderID so the registry key is stable
+// across the two sources of ChatKeys: inbound (original client case, e.g.
+// "RoomA") and resume (reconstructed from SessionScope, where BuildScope
+// lowercases — session/manager.go). Without this, a mixed-case client id
+// registers under "RoomA" but resume looks up "rooma" → miss → "no live
+// connection". Channel is already lowercase ("websocket") and left as-is.
+// (PR #97 re-review WARNING #1.)
+func canonicalKey(key frt.ChatKey) frt.ChatKey {
+	return frt.ChatKey{
+		Channel:  strings.ToLower(key.Channel),
+		ChatID:   strings.ToLower(key.ChatID),
+		SenderID: strings.ToLower(key.SenderID),
+	}
 }
 
 // HandleConnection services one websocket connection end-to-end. The HTTP
@@ -437,12 +452,19 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 				// can reach it. Every message registers (the protocol allows
 				// multiple frames with different chat/sender on one connection);
 				// registerConnKey is idempotent for the same connection+key.
-				// If a DIFFERENT connection held this key, it is displaced and
-				// cancelled — one active connection per ChatKey. Same-connection
-				// re-registration never displaces itself (id match → no-op).
-				if displaced := r.registerConnKey(wsHandle, key); displaced != nil && displaced.cancel != nil {
-					displaced.cancel()
-				}
+				//
+				// Takeover does NOT cancel the displaced connection's ctx. The old
+				// connection's ctx is also the parent ctx of any ACTIVE turn it
+				// started (turns run in Router goroutines derived from connCtx).
+				// Cancelling it would kill that turn with context.Canceled (not
+				// ErrSteered), and a new message already acked+enqueued into the
+				// SteeringQueue would never be drained (only ErrSteered drains).
+				// So the registry records the new connection as the Emit target,
+				// while the old turn runs to completion on its own ctx — its
+				// OnTurnResult frames may fail to write (old writeFrame), but the
+				// turn is not murdered. The old connection's read loop exits when
+				// the client actually disconnects (EOF). (PR #97 re-review fix.)
+				r.registerConnKey(wsHandle, key)
 			})
 		case "human_response":
 			_ = writeFrame(errorFrame(frame.ID, requestID, "unsupported_type", "human_response is reserved for a later websocket resume slice; use the HTTP human-request API for now", false))

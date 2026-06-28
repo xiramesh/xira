@@ -29,6 +29,11 @@ type fakeRuntime struct {
 	maxConcurrent int32
 	hold          func(unblock chan struct{})
 	respond       func(req frt.TurnRequest) frt.TurnResponse
+	// respectCtx, when true, makes RunAgent honor ctx cancellation: if ctx is
+	// cancelled while held, RunAgent returns context.Canceled instead of
+	// blocking forever. The default (false) preserves the original behavior
+	// (block until unblock), which existing tests rely on.
+	respectCtx bool
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -39,7 +44,7 @@ func newFakeRuntime() *fakeRuntime {
 	}
 }
 
-func (f *fakeRuntime) RunAgent(_ context.Context, req frt.TurnRequest) (frt.TurnResponse, error) {
+func (f *fakeRuntime) RunAgent(ctx context.Context, req frt.TurnRequest) (frt.TurnResponse, error) {
 	cur := atomic.AddInt32(&f.concurrent, 1)
 	for {
 		max := atomic.LoadInt32(&f.maxConcurrent)
@@ -51,7 +56,15 @@ func (f *fakeRuntime) RunAgent(_ context.Context, req frt.TurnRequest) (frt.Turn
 	if f.hold != nil {
 		unblock := make(chan struct{})
 		f.hold(unblock)
-		<-unblock
+		if f.respectCtx {
+			select {
+			case <-unblock:
+			case <-ctx.Done():
+				return frt.TurnResponse{}, ctx.Err()
+			}
+		} else {
+			<-unblock
+		}
 	}
 	return f.respond(req), nil
 }
