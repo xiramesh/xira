@@ -142,22 +142,27 @@ func NewChatKeySession(key runtime.ChatKey, router *Router, cfg ChatKeySessionCo
 	return &ChatKeySession{key: key, router: router, cfg: cfg}
 }
 
-// Handle is the single entry point. Mirrors Router.Handle's contract: it is
-// NON-BLOCKING — returns immediately after either (a) enqueuing msg to the
-// SteeringQueue because a turn is active, or (b) dispatching a goroutine
-// that runs the turn. Returns true if the message was steered (enqueued),
-// false if a new turn was started. The caller cannot observe turn completion
-// through this return value; completion flips Router's entry.active to false.
-// The steered outcome lets channels (websocket) send the right ack and avoid
-// creating an activeRequest for a message that will never run its own turn
-// (PR #97 round-4 review).
-func (s *ChatKeySession) Handle(ctx context.Context, msg string) bool {
+// Handle routes + starts immediately (for ilink/feishu: pre-turn registration
+// is done before this call). requestID is recorded so steered messages can cite
+// it. Returns true if steered, false if started.
+func (s *ChatKeySession) Handle(ctx context.Context, requestID, msg string) bool {
 	if s.router != nil {
-		return s.router.Handle(s.key, msg, ctx, s.runTurn)
+		return s.router.Handle(s.key, requestID, msg, ctx, s.runTurn)
 	}
-	// Test path (mirrors ilink's `if r.router == nil` fallback): run inline.
 	s.runTurn(s.key, msg, ctx)
 	return false
+}
+
+// Route routes WITHOUT starting the turn goroutine, returning the outcome so
+// websocket can complete pre-turn registration (addActive + accepted ack)
+// before calling Start(). This closes the round-5 frame-ordering gap: the turn
+// cannot produce a terminal frame until the accepted ack has been sent.
+func (s *ChatKeySession) Route(ctx context.Context, requestID, msg string) RoutingOutcome {
+	if s.router != nil {
+		return s.router.Route(s.key, requestID, msg, ctx, s.runTurn)
+	}
+	s.runTurn(s.key, msg, ctx)
+	return RoutingOutcome{}
 }
 
 // runTurn is the extracted ilink closure body. Its signature matches

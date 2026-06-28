@@ -31,11 +31,12 @@ type Router struct {
 }
 
 type chatEntry struct {
-	mu        sync.Mutex
-	active    bool
-	steering  *SteeringQueue
-	spawn     *SpawnCollector
-	idleSince time.Time // set when active flips to false; used by prune
+	mu              sync.Mutex
+	active          bool
+	activeRequestID string // request_id of the in-flight turn (cited by steered acks)
+	steering        *SteeringQueue
+	spawn           *SpawnCollector
+	idleSince       time.Time // set when active flips to false; used by prune
 }
 
 // routerEntryTTL is how long an idle entry (no active turn) is kept before
@@ -51,19 +52,67 @@ func NewRouter() *Router {
 	}
 }
 
-// Handle routes a message: starts a new turn (calls onNewTurn) or steers
-// an active one (enqueues to SteeringQueue). The onNewTurn callback is
-// per-call — the caller passes its own closure with per-message context
-// (account, sender, etc.) that Router's lifecycle can't know about.
+// Handle routes a message AND starts the turn immediately (Route + Start). Use
+// this from channels whose pre-turn registration is already complete when they
+// route (ilink/feishu: ack/dedupe handled by the SDK before routing). Websocket
+// must NOT use this — it needs addActive + accepted ack between Route and Start
+// (PR #97 round-5 review); it uses ChatKeySession.Route instead.
 //
-// Returns true if the message was STEERED (enqueued because a turn is active
-// for this key); false if a NEW turn was started (onNewTurn runs in a goroutine).
-// The outcome is decided atomically under entry.mu (the active check and the
-// enqueue/start happen in the same critical section), so callers can rely on
-// it without a separate IsActive race (PR #97 round-4 review: previously
-// websocket read IsActive then called Handle with a noop callback, and a turn
-// completing between the two steps swallowed the message).
-func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Context, onNewTurn OnNewTurnFunc) bool {
+// requestID is recorded on the entry so a later steered message's outcome can
+// cite it as the reply target. Returns true if steered, false if started.
+func (r *Router) Handle(key runtime.ChatKey, requestID, msg string, parentCtx context.Context, onNewTurn OnNewTurnFunc) bool {
+	outcome := r.Route(key, requestID, msg, parentCtx, onNewTurn)
+	if outcome.Steered {
+		return true
+	}
+	outcome.Start()
+	return false
+}
+
+// RoutingOutcome is the atomic routing decision for one message (PR #97
+// round-5 review). Route decides under entry.mu whether a message STARTS a
+// turn or is STEERED, but for a started turn it does NOT launch the goroutine
+// — the caller calls Start() after completing pre-turn registration (websocket
+// needs addActive + accepted ack before any frame can be produced).
+//
+// Steered: the message was enqueued into the active turn's SteeringQueue. It
+// 	will not run its own turn; its reply comes via the active turn's OnTurnResult.
+// 	ActiveRequestID is the active turn's request_id (cited in the steered ack
+// 	so the client knows which request_id the eventual terminal carries — scheme P).
+// Started: the message began a new turn. The caller MUST call Start() (or
+// 	Abort() if it decides not to proceed, e.g. ack write failed).
+type RoutingOutcome struct {
+	Steered         bool
+	ActiveRequestID string // valid when Steered
+	start           func()
+	abort           func()
+}
+
+// Start launches the turn goroutine. Idempotent (no-op if already started,
+// aborted, or steered). The caller MUST ensure pre-turn registration is
+// complete first.
+func (o RoutingOutcome) Start() {
+	if o.start != nil {
+		o.start()
+	}
+}
+
+// Abort releases the Router entry without running the turn — for when the
+// caller routed "started" but then decided not to proceed (e.g. the accepted
+// ack write failed because the connection dropped). Idempotent. No-op if
+// steered or already started.
+func (o RoutingOutcome) Abort() {
+	if o.abort != nil {
+		o.abort()
+	}
+}
+
+// Route routes a message and returns the atomic outcome WITHOUT starting the
+// turn goroutine (for started turns). requestID is recorded on the entry so a
+// later steered message's outcome.ActiveRequestID can cite it. The caller calls
+// outcome.Start() once pre-turn registration is done. Handle wraps Route+Start
+// for channels that don't need the gap (ilink/feishu).
+func (r *Router) Route(key runtime.ChatKey, requestID, msg string, parentCtx context.Context, onNewTurn OnNewTurnFunc) RoutingOutcome {
 	// Lazy prune: evict entries idle longer than the TTL before routing, so
 	// Router.entries doesn't grow unboundedly (mirrors dedupe.pruneLocked).
 	r.prune(time.Now())
@@ -71,11 +120,13 @@ func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Conte
 	entry := r.getOrCreate(key)
 	entry.mu.Lock()
 	if entry.active {
+		activeID := entry.activeRequestID
 		entry.steering.Enqueue(msg)
 		entry.mu.Unlock()
-		return true // steered
+		return RoutingOutcome{Steered: true, ActiveRequestID: activeID}
 	}
 	entry.active = true
+	entry.activeRequestID = requestID
 	sq := entry.steering
 	entry.mu.Unlock()
 
@@ -86,13 +137,26 @@ func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Conte
 	ctx := runtime.WithSteeringBus(parentCtx, sq)
 	ctx = runtime.WithSpawnBus(ctx, entry.spawn)
 
-	// Run the turn in a goroutine so Handle returns immediately
-	// (non-blocking — Monitor can receive the next message).
-	go func() {
-		defer r.markComplete(key)
-		onNewTurn(key, msg, ctx)
-	}()
-	return false // started new turn
+	started := false
+	return RoutingOutcome{
+		start: func() {
+			if started {
+				return
+			}
+			started = true
+			go func() {
+				defer r.markComplete(key)
+				onNewTurn(key, msg, ctx)
+			}()
+		},
+		abort: func() {
+			if started {
+				return
+			}
+			started = true
+			r.markComplete(key)
+		},
+	}
 }
 
 // markComplete marks the turn as inactive for this chatKey.
@@ -105,6 +169,7 @@ func (r *Router) markComplete(key runtime.ChatKey) {
 	}
 	entry.mu.Lock()
 	entry.active = false
+	entry.activeRequestID = ""
 	entry.idleSince = time.Now()
 	entry.mu.Unlock()
 }

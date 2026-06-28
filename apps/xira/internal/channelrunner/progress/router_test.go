@@ -21,6 +21,7 @@ func TestRouterNoActiveTurnStartsNew(t *testing.T) {
 	router := NewRouter()
 	router.Handle(
 		runtime.ChatKey{Channel: "ilink", ChatID: "c1", SenderID: "u1"},
+		"",
 		"hello",
 		context.Background(),
 		func(key runtime.ChatKey, msg string, ctx context.Context) {
@@ -46,12 +47,12 @@ func TestRouterActiveTurnSteersSecondMessage(t *testing.T) {
 	router := NewRouter()
 
 	// First message → starts turn (blocks in goroutine).
-	router.Handle(key, "first", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "first", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		<-block
 	})
 
 	// Second message while turn active → should steer.
-	router.Handle(key, "second", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "second", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		t.Error("onNewTurn should NOT be called for steered message")
 	})
 
@@ -71,7 +72,7 @@ func TestRouterTurnCompletesThenNewTurnStarts(t *testing.T) {
 	done := make(chan struct{}, 2)
 
 	router := NewRouter()
-	router.Handle(key, "first", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "first", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
@@ -80,7 +81,7 @@ func TestRouterTurnCompletesThenNewTurnStarts(t *testing.T) {
 	<-done
 	time.Sleep(10 * time.Millisecond) // let markComplete run
 
-	router.Handle(key, "second", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "second", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
@@ -101,18 +102,18 @@ func TestRouterDifferentChatKeysIndependent(t *testing.T) {
 	var turns sync.WaitGroup
 	router := NewRouter()
 
-	router.Handle(keyA, "msgA", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(keyA, "", "msgA", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		turns.Add(1)
 		defer turns.Done()
 		<-block
 	})
-	router.Handle(keyB, "msgB", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(keyB, "", "msgB", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		turns.Add(1)
 		defer turns.Done()
 		<-block
 	})
 
-	router.Handle(keyA, "steerA", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {})
+	router.Handle(keyA, "", "steerA", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {})
 	sqA := router.SteeringQueue(keyA)
 	msgsA := sqA.DrainAll()
 	if len(msgsA) != 1 || msgsA[0] != "steerA" {
@@ -138,7 +139,7 @@ func TestRouterInjectsSpawnBus(t *testing.T) {
 
 	var gotSink runtime.SpawnBus
 	done := make(chan struct{})
-	router.Handle(key, "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		gotSink = runtime.SpawnBusFromContext(ctx)
 		close(done)
 	})
@@ -209,7 +210,7 @@ func TestRouterDoesNotEvictActiveEntry(t *testing.T) {
 
 	// Start a turn but don't let it complete — keep it active.
 	block := make(chan struct{})
-	router.Handle(key, "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		<-block // hold the turn open
 	})
 	t.Cleanup(func() { close(block) })
@@ -261,7 +262,7 @@ func TestRouterEvictedEntryRebuiltOnNextMessage(t *testing.T) {
 
 	// Next message rebuilds.
 	ran := make(chan string, 1)
-	router.Handle(key, "after-eviction", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "after-eviction", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		ran <- msg
 	})
 	select {
@@ -301,7 +302,7 @@ func TestRouterIsActiveReportsTurnState(t *testing.T) {
 		}
 	}
 	t.Cleanup(closeOnce)
-	go router.Handle(key, "hello", context.Background(), func(runtime.ChatKey, string, context.Context) {
+	go router.Handle(key, "", "hello", context.Background(), func(runtime.ChatKey, string, context.Context) {
 		<-block
 	})
 
@@ -334,10 +335,88 @@ func TestRouterIsActiveReportsTurnState(t *testing.T) {
 // leaving the entry idle (active=false, idleSince set).
 func runOneTurn(router *Router, key runtime.ChatKey) {
 	done := make(chan struct{})
-	router.Handle(key, "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		close(done)
 	})
 	<-done
 	// markComplete runs in the goroutine's defer; give it a moment.
 	time.Sleep(20 * time.Millisecond)
+}
+
+// TestRouteStartedDefersGoroutine verifies Route does NOT start the turn
+// goroutine until Start() is called — the two-phase contract websocket relies
+// on (addActive + ack must happen before any frame can be produced). PR #97
+// round-5 CRITICAL #1.
+func TestRouteStartedDefersGoroutine(t *testing.T) {
+	key := runtime.ChatKey{Channel: "ws", ChatID: "c", SenderID: "u"}
+	router := NewRouter()
+	started := make(chan struct{}, 1)
+	outcome := router.Route(key, "req-1", "msg", context.Background(),
+		func(runtime.ChatKey, string, context.Context) { started <- struct{}{} })
+	if outcome.Steered {
+		t.Fatal("first message should start, not steer")
+	}
+	// Before Start: goroutine must not have run.
+	select {
+	case <-started:
+		t.Fatal("turn goroutine ran before Start() — Route must defer it")
+	case <-time.After(20 * time.Millisecond):
+	}
+	outcome.Start()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("turn goroutine did not run after Start()")
+	}
+}
+
+// TestRouteAbortReleasesEntry verifies Abort marks the entry idle so a
+// follow-up message starts fresh (not steered into a phantom active entry).
+// PR #97 round-5: ack-failure rollback path.
+func TestRouteAbortReleasesEntry(t *testing.T) {
+	key := runtime.ChatKey{Channel: "ws", ChatID: "c", SenderID: "u"}
+	router := NewRouter()
+	outcome := router.Route(key, "req-1", "msg", context.Background(),
+		func(runtime.ChatKey, string, context.Context) { t.Error("aborted turn must not run") })
+	if outcome.Steered {
+		t.Fatal("first message should start")
+	}
+	outcome.Abort()
+	if router.IsActive(key) {
+		t.Fatal("entry still active after Abort — next message would be wrongly steered")
+	}
+	// Follow-up must start fresh (not steer).
+	ran := make(chan struct{}, 1)
+	o2 := router.Route(key, "req-2", "msg2", context.Background(),
+		func(runtime.ChatKey, string, context.Context) { ran <- struct{}{} })
+	if o2.Steered {
+		t.Fatal("follow-up message was steered into an aborted entry")
+	}
+	o2.Start()
+	select {
+	case <-ran:
+	case <-time.After(time.Second):
+		t.Fatal("follow-up turn did not run")
+	}
+}
+
+// TestRouteSteeredCitesActiveRequestID verifies a steered message's outcome
+// carries the active turn's request_id, so the channel can cite it in the
+// steered ack (scheme P). PR #97 round-5 CRITICAL #2.
+func TestRouteSteeredCitesActiveRequestID(t *testing.T) {
+	key := runtime.ChatKey{Channel: "ws", ChatID: "c", SenderID: "u"}
+	router := NewRouter()
+	block := make(chan struct{})
+	// First message starts a turn (request_id "req-A"), blocks.
+	router.Route(key, "req-A", "first", context.Background(),
+		func(runtime.ChatKey, string, context.Context) { <-block })
+	// Second message is steered; outcome must cite req-A.
+	o := router.Route(key, "req-B", "second", context.Background(), nil)
+	if !o.Steered {
+		t.Fatal("second message should be steered")
+	}
+	if o.ActiveRequestID != "req-A" {
+		t.Errorf("steered ActiveRequestID = %q, want req-A", o.ActiveRequestID)
+	}
+	close(block)
 }

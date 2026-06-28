@@ -665,7 +665,7 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		},
 	})
 	// Route through router (async, non-blocking) or run inline (test/no-Start).
-	session.Handle(ctx, content)
+	session.Handle(ctx, "", content)
 }
 
 func (r *Runner) currentContext() context.Context {

@@ -606,35 +606,37 @@ func (r *Runner) handleMessage(
 			}
 		},
 	})
-	// Dispatch atomically: session.Handle → router.Handle decides (under one
-	// entry lock) whether this message STARTS a turn or is STEERED into the
-	// active turn's queue. The outcome drives the ack + activeRequest — no
-	// separate IsActive race (PR #97 round-4 review: the old IsActive-then-Handle
-	// TOCTOU could swallow a message if the active turn finished between the two
-	// steps, leaving a stuck dedupe entry).
-	steered := session.Handle(ctx, prepared.turn.Message)
-	if steered {
+	// Route atomically (under Router's entry lock): decide started vs steered
+	// WITHOUT starting the turn goroutine yet. For a started turn we must
+	// finish addActive + accepted ack BEFORE launching the goroutine, so a fast
+	// RunAgent cannot emit a terminal frame or run removeActive ahead of
+	// registration (PR #97 round-5 review: the old order started the goroutine
+	// in session.Handle, then addActive'd — leaking the request and reordering
+	// frames relative to the ack).
+	outcome := session.Route(ctx, requestID, prepared.turn.Message)
+	if outcome.Steered {
 		// Steered: the message is an interjection on the active turn. It will be
 		// drained on the active turn's steering checkpoint and the reply comes
 		// via that turn's OnTurnResult (resolveSend routes it to the current
 		// connection). This message does NOT run its own turn, so it gets no
 		// independent terminal frame and no activeRequest (which would leak).
-		// The steered ack tells the client the reply will arrive under the
-		// active turn's request_id (steering = "interjection in this session",
-		// not an independent request — PR #97 round-4, scheme P).
+		// The steered ack cites the active turn's request_id (reply_request_id)
+		// so the client knows which request_id the eventual terminal carries —
+		// scheme P (steering = "interjection in this session").
 		_ = writeFrame(outboundFrame{
 			Type:      "ack",
 			ID:        "srv_ack_" + requestID,
 			RequestID: requestID,
 			Data: map[string]any{
-				"status":     "steered",
-				"message_id": prepared.messageID,
+				"status":           "steered",
+				"message_id":       prepared.messageID,
+				"reply_request_id": outcome.ActiveRequestID,
 			},
 		})
 		return
 	}
-	// Started: this message began a turn. Track it for event routing + cleanup,
-	// and ack accepted. The OnTurnResult closure (above) removeActive on exit.
+	// Started: this message began a turn. Register + ack BEFORE launching the
+	// goroutine (outcome.Start). OnTurnResult (closure above) removeActive on exit.
 	addActive(activeReq)
 	if err := writeFrame(outboundFrame{
 		Type:      "ack",
@@ -647,10 +649,15 @@ func (r *Runner) handleMessage(
 			"message_id":    prepared.messageID,
 		},
 	}); err != nil {
+		// Ack write failed (connection dropped). Roll back: forget dedupe,
+		// drop the activeRequest, and release the Router entry without running
+		// the turn (Abort marks it idle so the next message can start fresh).
 		r.dedupe.Forget(prepared.dedupeKey)
 		removeActive(requestID)
+		outcome.Abort()
 		return
 	}
+	outcome.Start()
 }
 
 type preparedTurn struct {

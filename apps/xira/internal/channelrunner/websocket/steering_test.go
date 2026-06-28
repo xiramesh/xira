@@ -149,14 +149,18 @@ func TestSteeringOutputGoesToCurrentConnection(t *testing.T) {
 	bTypes := typesOf(bFrames)
 
 	// B must get a steered ack (not accepted) — it tells B the reply will come
-	// under the active turn's request_id, not its own (scheme P).
+	// under the active turn's request_id, not its own (scheme P). The ack MUST
+	// cite reply_request_id = A's request_id, so B knows which request the
+	// eventual terminal will carry (PR #97 round-5 CRITICAL #2).
 	hasSteeredAck := false
+	var steeredReplyID string
 	for _, f := range bFrames {
 		if f.Type == "ack" {
 			data, _ := f.Data.(map[string]any)
 			status, _ := data["status"].(string)
 			if status == "steered" {
 				hasSteeredAck = true
+				steeredReplyID, _ = data["reply_request_id"].(string)
 			}
 			if status == "accepted" {
 				t.Errorf("B got accepted ack for a steered message — should be steered")
@@ -165,6 +169,9 @@ func TestSteeringOutputGoesToCurrentConnection(t *testing.T) {
 	}
 	if !hasSteeredAck {
 		t.Errorf("B frames %v: no steered ack", bTypes)
+	}
+	if steeredReplyID != "om_A" {
+		t.Errorf("steered ack reply_request_id = %q, want %q (B must know the terminal carries A's request_id)", steeredReplyID, "om_A")
 	}
 
 	// B must receive the response frame, and its request_id must be A's
@@ -198,6 +205,114 @@ func TestSteeringOutputGoesToCurrentConnection(t *testing.T) {
 	activeMu.Unlock()
 	if leaked > 0 {
 		t.Errorf("active map has %d leaked entries after steering (B should not own an activeRequest)", leaked)
+	}
+}
+
+// TestStartedAckPrecedesResponseFrame locks PR #97 round-5 CRITICAL #1: for a
+// started turn, the accepted ack MUST be written before any terminal frame,
+// and the activeRequest MUST be registered (addActive) before the turn goroutine
+// can run OnTurnResult (which removeActive's it). The old order called
+// session.Handle (which started the goroutine) before addActive + ack — a fast
+// RunAgent could emit response + removeActive before the request was tracked,
+// leaking it and reordering frames.
+//
+// capturedFrames preserves write order; with the fix (Route → addActive + ack
+// → Start), ack is always at index 0.
+func TestStartedAckPrecedesResponseFrame(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
+		return frt.TurnResponse{RunID: "run-o", Status: "completed", FinalResponse: "ok"}, nil
+	}
+	runner := newTestRunner(t, rt)
+
+	caps := &capturedFrames{}
+	var activeMu sync.Mutex
+	active := map[string]*activeRequest{}
+	addActive := func(r *activeRequest) { activeMu.Lock(); active[r.requestID] = r; activeMu.Unlock() }
+	removeActive := func(id string) { activeMu.Lock(); delete(active, id); activeMu.Unlock() }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handle := runner.newConn(caps.write, cancel)
+	onReg := func(key frt.ChatKey) { runner.registerConnKey(handle, key) }
+
+	runner.handleMessage(ctx, makeMessageFrame("om_O", "chat-o", "u", "hi"),
+		"websocket-default", caps.write, addActive, removeActive, onReg)
+	time.Sleep(100 * time.Millisecond) // fast turn completes
+
+	frames := caps.snapshot()
+	if len(frames) < 2 {
+		t.Fatalf("got %d frames, want at least ack + response", len(frames))
+	}
+	if frames[0].Type != "ack" {
+		t.Errorf("first frame = %q, want ack (ack must precede response — round-5 CRITICAL #1)", frames[0].Type)
+	}
+	ackData, _ := frames[0].Data.(map[string]any)
+	if s, _ := ackData["status"].(string); s != "accepted" {
+		t.Errorf("first ack status = %q, want accepted", s)
+	}
+	hasResponse := false
+	for _, f := range frames {
+		if f.Type == "response" {
+			hasResponse = true
+		}
+	}
+	if !hasResponse {
+		t.Error("no response frame after ack")
+	}
+	activeMu.Lock()
+	leaked := len(active)
+	activeMu.Unlock()
+	if leaked > 0 {
+		t.Errorf("active map leaked %d entries (removeActive ran before addActive — round-5 CRITICAL #1)", leaked)
+	}
+}
+
+// errWriteSimulated is a sentinel for TestStartedAckFailureRollsBack.
+var errWriteSimulated = errWriteSim{}
+
+type errWriteSim struct{}
+
+func (errWriteSim) Error() string { return "simulated write failure" }
+
+// TestStartedAckFailureRollsBack locks PR #97 round-5: if the accepted ack
+// write fails (connection dropped), the Router entry is aborted (not left
+// active), dedupe is forgotten, and no turn runs. A follow-up message starts
+// fresh instead of being wrongly steered into a phantom active entry.
+func TestStartedAckFailureRollsBack(t *testing.T) {
+	rt := newFakeRuntime()
+	var calls int32
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
+		atomic.AddInt32(&calls, 1)
+		return frt.TurnResponse{RunID: "run-r", Status: "completed", FinalResponse: "ok"}, nil
+	}
+	runner := newTestRunner(t, rt)
+
+	failingWrite := func(outboundFrame) error { return errWriteSimulated }
+	var activeMu sync.Mutex
+	active := map[string]*activeRequest{}
+	addActive := func(r *activeRequest) { activeMu.Lock(); active[r.requestID] = r; activeMu.Unlock() }
+	removeActive := func(id string) { activeMu.Lock(); delete(active, id); activeMu.Unlock() }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handle := runner.newConn(failingWrite, cancel)
+	onReg := func(key frt.ChatKey) { runner.registerConnKey(handle, key) }
+	key := keyOf("chat-r", "u")
+
+	runner.handleMessage(ctx, makeMessageFrame("om_R", "chat-r", "u", "hi"),
+		"websocket-default", failingWrite, addActive, removeActive, onReg)
+	time.Sleep(50 * time.Millisecond)
+
+	if atomic.LoadInt32(&calls) != 0 {
+		t.Errorf("RunAgent called %d times, want 0 (turn must not start when ack fails)", calls)
+	}
+	if runner.router.IsActive(key) {
+		t.Error("Router entry still active after ack-failure rollback — Abort did not release it")
+	}
+	activeMu.Lock()
+	leaked := len(active)
+	activeMu.Unlock()
+	if leaked > 0 {
+		t.Errorf("active map leaked %d entries after ack-failure rollback", leaked)
 	}
 }
 
