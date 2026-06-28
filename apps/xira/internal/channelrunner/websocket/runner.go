@@ -113,17 +113,30 @@ type Runner struct {
 	// cancels the old one (see registerConn). Two live connections sharing a
 	// ChatKey would race for the same Router entry — a per-chatKey single-active-
 	// turn contract violation.
-	connMu sync.Mutex
-	conns  map[frt.ChatKey]*wsConn
+	connMu    sync.Mutex
+	conns     map[frt.ChatKey]*wsConn
+	connIDSeq uint64 // monotonic connection identity, for same-conn detection
 }
 
 // wsConn holds a live websocket connection's send capability and lifecycle.
 // send is the per-connection writeFrame closure from HandleConnection (it owns
 // the write mutex + fail-fast cancel). cancel tears the connection down, used
-// when the connection is superseded by a newer one for the same ChatKey.
+// when a DIFFERENT physical connection supersedes this one for a ChatKey.
+//
+// id is this connection's stable identity, assigned at construction. It lets
+// registerConn tell apart "same connection registering another key" (no-op on
+// the old entry, just add the key) from "a new connection took over this key"
+// (cancel the old). Comparing cancel/send funcs directly is illegal in Go
+// (funcs compare only to nil); id is the safe identity token.
+//
+// keys is the set of ChatKeys this connection owns, so disconnect cleanup can
+// remove ALL of them (one connection may own several keys — the protocol
+// allows consecutive message frames with different chat_id/sender_id).
 type wsConn struct {
+	id     uint64
 	send   func(outboundFrame) error
 	cancel context.CancelFunc
+	keys   map[frt.ChatKey]struct{}
 }
 
 // NewRunner constructs a websocket Runner. rt may be nil in tests that inject
@@ -211,62 +224,91 @@ func (r *Runner) Emit(_ context.Context, env channel.OutboundEnvelope) error {
 	if conn == nil {
 		return fmt.Errorf("websocket Emit: no live connection for chat %q (connection may have closed)", chatID)
 	}
+	// Schema MUST match responseFrame (runner.go:responseFrame) so a WS client
+	// reads resumed finals via the SAME handler as normal turn responses — same
+	// type ("response"), same data fields. PR #97 review CRITICAL #1: a bespoke
+	// "content" field broke this; clients reading "final_response" got empty.
+	// Resume only knows run_id + final text (no agent/session/tool metadata —
+	// those are TurnResponse fields the envelope doesn't carry), so they are
+	// omitted; clients tolerant of absent fields read final_response fine.
 	frame := outboundFrame{
 		Type:      "response",
+		ID:        "srv_resume_" + env.RequestID,
 		RequestID: env.RequestID,
 		RunID:     env.RunID,
 		Data: map[string]any{
-			"status":  "completed",
-			"content": content,
+			"run_id":         env.RunID,
+			"status":         "completed",
+			"final_response": content,
+			"content_format": "markdown",
 		},
 	}
 	return conn.send(frame)
 }
 
-// registerConn records a live connection under chatKey, returning the
-// registered connection handle. If a connection already holds this key (a
-// second client connected for the same chat), the old connection is cancelled
-// so its HandleConnection read loop returns and tears down — one active
-// connection per ChatKey. Two live connections sharing a ChatKey would race
-// for the same Router entry.
-//
-// The returned *wsConn is the caller's identity token: on disconnect, the
-// caller passes it to unsetConnIfOurs, which removes the entry ONLY if it
-// still owns the key (a newer connection may have replaced it).
-//
-// The caller must NOT re-register an already-registered connection (that would
-// cancel it via its own entry). HandleConnection registers at most once per
-// connection lifecycle.
-func (r *Runner) registerConn(key frt.ChatKey, send func(outboundFrame) error, cancel context.CancelFunc) *wsConn {
+// newConn constructs a wsConn handle for one physical websocket connection.
+// The same *wsConn is reused across every ChatKey that connection registers
+// (one connection may own multiple keys). id is assigned here so registerConnKey
+// can detect "same connection re-registering a key" vs "a new connection took
+// over" — comparing funcs is illegal in Go; the id is the safe identity token.
+func (r *Runner) newConn(send func(outboundFrame) error, cancel context.CancelFunc) *wsConn {
 	r.connMu.Lock()
-	defer r.connMu.Unlock()
-	if existing, ok := r.conns[key]; ok && existing != nil && existing.cancel != nil {
-		existing.cancel()
-	}
-	c := &wsConn{send: send, cancel: cancel}
-	r.conns[key] = c
-	return c
+	r.connIDSeq++
+	id := r.connIDSeq
+	r.connMu.Unlock()
+	return &wsConn{id: id, send: send, cancel: cancel, keys: map[frt.ChatKey]struct{}{}}
 }
 
-// unsetConnIfOurs removes key's entry only if it is still the given connection.
-// When a newer connection has taken over the key (registerConn replaced it),
-// this is a no-op — the newer connection owns the key and must not be evicted.
-func (r *Runner) unsetConnIfOurs(key frt.ChatKey, conn *wsConn) {
+// registerConnKey associates key with conn. Returns the connection that was
+// previously holding key (if any) so the caller can cancel it — keeping the
+// "one active connection per ChatKey" contract (two connections sharing a
+// ChatKey would race for the same Router entry). If the SAME connection already
+// holds key (re-registering on another message frame), this is a no-op and
+// returns nil (a connection does not displace itself).
+//
+// The returned displaced connection is the caller's to cancel (its ctx is not
+// known to the registry). The registry only tracks key→conn mappings; lifecycle
+// (cancel) stays with HandleConnection.
+func (r *Runner) registerConnKey(conn *wsConn, key frt.ChatKey) *wsConn {
+	if conn == nil {
+		return nil
+	}
 	r.connMu.Lock()
 	defer r.connMu.Unlock()
-	if current, ok := r.conns[key]; ok && current == conn {
-		delete(r.conns, key)
+	existing := r.conns[key]
+	if existing != nil && existing.id == conn.id {
+		// Same connection already owns this key — no-op.
+		return nil
 	}
+	// Take over the key. If a DIFFERENT connection held it, return it for the
+	// caller to cancel — keeping the "one active connection per ChatKey"
+	// contract. The displaced connection may own OTHER keys too; cancelling it
+	// (caller's job) invalidates those as well, which is the intended
+	// "you've been superseded, reconnect" semantics.
+	r.conns[key] = conn
+	conn.keys[key] = struct{}{}
+	if existing != nil && existing.id != conn.id {
+		return existing
+	}
+	return nil
 }
 
-// unregisterConn removes a connection from the registry. Called from
-// HandleConnection's defer when the connection ends (read loop returned /
-// cancelled). If the key has already been taken over by a newer connection
-// (registerConn replaced it), this is a no-op — the new connection owns the key.
-func (r *Runner) unregisterConn(key frt.ChatKey) {
+// releaseConn removes every key this connection still owns from the registry.
+// Called from HandleConnection's defer on disconnect. Keys already taken over
+// by a newer connection (registerConnKey returned them as displaced) are no
+// longer mapped to conn, so they are skipped — the new owner must not be
+// evicted. This is the multi-key generalization of the per-key ownership guard.
+func (r *Runner) releaseConn(conn *wsConn) {
+	if conn == nil {
+		return
+	}
 	r.connMu.Lock()
 	defer r.connMu.Unlock()
-	delete(r.conns, key)
+	for key := range conn.keys {
+		if current, ok := r.conns[key]; ok && current.id == conn.id {
+			delete(r.conns, key)
+		}
+	}
 }
 
 // lookupConn returns the live connection for key, or nil if none is registered.
@@ -301,28 +343,16 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Connection-registry bookkeeping: this conn registers itself under its
-	// chat key (in handleMessage) so Emit can reach it, and unregisters when
-	// HandleConnection returns (disconnect). registered guards against
-	// self-cancel via registerConn's "cancel existing" rule — each conn
-	// registers at most once. handle is the conn's identity token; defer uses
-	// it to remove the entry ONLY if this conn still owns the key (a newer
-	// connection may have replaced it, and must not be evicted).
-	var (
-		registered      bool
-		registeredKey   frt.ChatKey
-		registeredHandle *wsConn
-		registeredMu    sync.Mutex
-	)
-	defer func() {
-		registeredMu.Lock()
-		key := registeredKey
-		handle := registeredHandle
-		registeredMu.Unlock()
-		if handle != nil {
-			r.unsetConnIfOurs(key, handle)
-		}
-	}()
+	// wsHandle is this connection's identity in the registry. One handle per
+	// physical connection, reused across every ChatKey it registers (the
+	// protocol allows multiple message frames with different chat/sender on one
+	// connection). On disconnect, releaseConn removes ALL keys this handle
+	// still owns. NewConn assigns a unique id so registerConnKey can tell
+	// "same connection, another key" (no-op) from "a new connection took over
+	// this key" (cancel the displaced one).
+	wsHandle := r.newConn(nil, cancel)
+	wsHandle.send = nil // set after writeFrame is defined below
+	defer r.releaseConn(wsHandle)
 
 	conn.SetReadLimit(-1)
 
@@ -343,6 +373,7 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 		}
 		return nil
 	}
+	wsHandle.send = writeFrame
 	addActive := func(req *activeRequest) {
 		activeMu.Lock()
 		defer activeMu.Unlock()
@@ -402,22 +433,16 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 			})
 		case "message":
 			r.handleMessage(connCtx, frame, defaultEntrypointID, writeFrame, addActive, removeActive, func(key frt.ChatKey) {
-				// Register this connection for outbound delivery ONCE per
-				// connection lifecycle. registerConn cancels any existing
-				// connection for this key, so re-registering the same conn
-				// would cancel itself — guarded by the registered flag.
-				registeredMu.Lock()
-				if registered {
-					registeredMu.Unlock()
-					return
+				// Register this connection under the message's chat key so Emit
+				// can reach it. Every message registers (the protocol allows
+				// multiple frames with different chat/sender on one connection);
+				// registerConnKey is idempotent for the same connection+key.
+				// If a DIFFERENT connection held this key, it is displaced and
+				// cancelled — one active connection per ChatKey. Same-connection
+				// re-registration never displaces itself (id match → no-op).
+				if displaced := r.registerConnKey(wsHandle, key); displaced != nil && displaced.cancel != nil {
+					displaced.cancel()
 				}
-				registered = true
-				registeredKey = key
-				registeredMu.Unlock()
-				handle := r.registerConn(key, writeFrame, cancel)
-				registeredMu.Lock()
-				registeredHandle = handle
-				registeredMu.Unlock()
 			})
 		case "human_response":
 			_ = writeFrame(errorFrame(frame.ID, requestID, "unsupported_type", "human_response is reserved for a later websocket resume slice; use the HTTP human-request API for now", false))

@@ -33,6 +33,17 @@ func keyOf(chatID, senderID string) frt.ChatKey {
 	})
 }
 
+// registerOneKey is a test shorthand: build a wsConn (newConn), register one
+// ChatKey under it, cancel any displaced connection. Returns the handle for
+// disconnect-cleanup tests (releaseConn). Mirrors what HandleConnection does.
+func registerOneKey(runner *Runner, chatID, senderID string, send func(outboundFrame) error, cancel context.CancelFunc) *wsConn {
+	conn := runner.newConn(send, cancel)
+	if displaced := runner.registerConnKey(conn, keyOf(chatID, senderID)); displaced != nil && displaced.cancel != nil {
+		displaced.cancel()
+	}
+	return conn
+}
+
 // TestEmitDeliversToRegisteredConnection verifies Emit routes a final to the
 // connection registered under the envelope's Target ChatKey. This is the core
 // resume-delivery guarantee: a resumed run's final reaches the live WS client.
@@ -41,9 +52,10 @@ func TestEmitDeliversToRegisteredConnection(t *testing.T) {
 	caps := &capturedFrames{}
 
 	_, cancel := context.WithCancel(context.Background())
-	runner.registerConn(keyOf("chat-1", "alice"), caps.write, cancel)
+	registerOneKey(runner, "chat-1", "alice", caps.write, cancel)
 
 	env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)
+	env.RunID = "run-1"
 	env.Target = &channel.InboundContext{Channel: "websocket", ChatID: "chat-1", SenderID: "alice"}
 	env.Data = map[string]any{"content": "final answer"}
 
@@ -58,9 +70,25 @@ func TestEmitDeliversToRegisteredConnection(t *testing.T) {
 		t.Errorf("frame type = %q, want %q", frames[0].Type, "response")
 	}
 	data, _ := frames[0].Data.(map[string]any)
-	content, _ := data["content"].(string)
-	if content != "final answer" {
-		t.Errorf("frame content = %q, want %q", content, "final answer")
+	// Schema MUST match responseFrame (runner.go:786) so a WS client reading
+	// resumed finals via the same handler as normal turn responses sees the
+	// final text. PR #97 review CRITICAL #1: a bespoke "content" field broke
+	// this — clients reading "final_response" got empty.
+	finalResponse, _ := data["final_response"].(string)
+	if finalResponse != "final answer" {
+		t.Errorf("frame final_response = %q, want %q (must match responseFrame schema)", finalResponse, "final answer")
+	}
+	if got, _ := data["content_format"].(string); got != "markdown" {
+		t.Errorf("frame content_format = %q, want %q", got, "markdown")
+	}
+	if got, _ := data["run_id"].(string); got != "run-1" {
+		t.Errorf("frame run_id = %q, want %q", got, "run-1")
+	}
+	if got, _ := data["status"].(string); got != "completed" {
+		t.Errorf("frame status = %q, want %q", got, "completed")
+	}
+	if _, hasContent := data["content"]; hasContent {
+		t.Errorf("frame must NOT carry bespoke 'content' field (use final_response); got data=%v", data)
 	}
 }
 
@@ -94,11 +122,11 @@ func TestEmitUnregisteredOnConnClose(t *testing.T) {
 	caps := &capturedFrames{}
 
 	_, cancel := context.WithCancel(context.Background())
-	runner.registerConn(keyOf("chat-2", "bob"), caps.write, cancel)
+	conn := registerOneKey(runner, "chat-2", "bob", caps.write, cancel)
 
 	// Simulate disconnect: the connection's HandleConnection returns and
-	// unregisters (the defer in HandleConnection).
-	runner.unregisterConn(keyOf("chat-2", "bob"))
+	// releases all its keys (the defer in HandleConnection).
+	runner.releaseConn(conn)
 
 	env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)
 	env.Target = &channel.InboundContext{Channel: "websocket", ChatID: "chat-2", SenderID: "bob"}
@@ -123,14 +151,15 @@ func TestNewConnectionReplacesOldForSameChatKey(t *testing.T) {
 
 	oldCtx, oldCancel := context.WithCancel(context.Background())
 	defer oldCancel() // safety: ensure cleanup if test fails before replacement
-	runner.registerConn(keyOf("chat-3", "carol"), func(outboundFrame) error { return nil }, oldCancel)
+	registerOneKey(runner, "chat-3", "carol", func(outboundFrame) error { return nil }, oldCancel)
 
 	newCaps := &capturedFrames{}
 	_, newCancel := context.WithCancel(context.Background())
 	defer newCancel()
-	runner.registerConn(keyOf("chat-3", "carol"), newCaps.write, newCancel)
+	registerOneKey(runner, "chat-3", "carol", newCaps.write, newCancel)
 
-	// Old connection's cancel must have fired synchronously inside registerConn.
+	// Old connection's cancel must have fired: registerOneKey cancels the
+	// displaced connection returned by registerConnKey.
 	if oldCtx.Err() == nil {
 		t.Fatal("old connection was not cancelled when replaced")
 	}
@@ -151,7 +180,7 @@ func TestNewConnectionReplacesOldForSameChatKey(t *testing.T) {
 // fails loudly on missing Target/content rather than panicking or dropping.
 func TestEmitRejectsMalformedEnvelope(t *testing.T) {
 	runner := newTestRunner(t, newFakeRuntime())
-	runner.registerConn(keyOf("chat-4", "dave"), func(outboundFrame) error { return nil }, func() {})
+	registerOneKey(runner, "chat-4", "dave", func(outboundFrame) error { return nil }, func() {})
 
 	tests := []struct {
 		name string
@@ -224,7 +253,7 @@ func TestEmitUnsupportedTypeErrors(t *testing.T) {
 	runner := newTestRunner(t, newFakeRuntime())
 	caps := &capturedFrames{}
 	_, cancel := context.WithCancel(context.Background())
-	runner.registerConn(keyOf("chat-x", "x"), caps.write, cancel)
+	registerOneKey(runner, "chat-x", "x", caps.write, cancel)
 
 	env := channel.NewOutboundEnvelope(channel.OutboundRuntimeEvent) // not a deliverable type
 	env.Target = &channel.InboundContext{Channel: "websocket", ChatID: "chat-x", SenderID: "x"}
@@ -250,26 +279,24 @@ func TestHandleMessageRegistersConnectionForEmit(t *testing.T) {
 	addActive := func(*activeRequest) {}
 	removeActive := func(string) {}
 
-	// onRegister mirrors HandleConnection's real wiring: register under the
-	// chat key with this conn's writeFrame + cancel. We track the handle so we
-	// can assert ownership semantics, like HandleConnection's defer would.
+	// onRegister mirrors HandleConnection's real wiring: register the
+	// connection's handle under the message's chat key. The handle is built
+	// once (newConn), like HandleConnection does, and reused per message.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var registeredHandle *wsConn
+	wsHandle := runner.newConn(caps.write, cancel)
 	onRegister := func(key frt.ChatKey) {
-		registeredHandle = runner.registerConn(key, caps.write, cancel)
+		if displaced := runner.registerConnKey(wsHandle, key); displaced != nil && displaced.cancel != nil {
+			displaced.cancel()
+		}
 	}
 
 	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-9", "eve", "hi"),
 		"websocket-default", caps.write, addActive, removeActive, onRegister)
 
-	// Give the router goroutine a moment to run the turn (it writes the
-	// response frame asynchronously). The registration, however, happens
-	// synchronously inside handleMessage before session.Handle returns control
-	// — so the registry is populated by the time handleMessage returns.
-	if registeredHandle == nil {
-		t.Fatal("onRegister did not register a connection handle")
-	}
+	// Registration happens synchronously inside handleMessage before
+	// session.Handle returns control, so the registry is populated by the
+	// time handleMessage returns.
 	if got := runner.lookupConn(keyOf("chat-9", "eve")); got == nil {
 		t.Fatal("connection not in registry after handleMessage")
 	}
@@ -282,11 +309,11 @@ func TestHandleMessageRegistersConnectionForEmit(t *testing.T) {
 		t.Fatalf("Emit after handleMessage: %v", err)
 	}
 
-	// Now simulate disconnect: HandleConnection's defer would call
-	// unsetConnIfOurs(key, handle). Verify it removes the entry we own.
-	runner.unsetConnIfOurs(keyOf("chat-9", "eve"), registeredHandle)
+	// Now simulate disconnect: HandleConnection's defer calls releaseConn,
+	// removing every key the handle still owns. Verify the entry is gone.
+	runner.releaseConn(wsHandle)
 	if got := runner.lookupConn(keyOf("chat-9", "eve")); got != nil {
-		t.Error("connection still in registry after unsetConnIfOurs on disconnect")
+		t.Error("connection still in registry after releaseConn on disconnect")
 	}
 
 	// Emit after disconnect must error (no live connection).
@@ -295,11 +322,11 @@ func TestHandleMessageRegistersConnectionForEmit(t *testing.T) {
 	}
 }
 
-// TestUnsetConnIfOursDoesNotEvictNewOwner verifies the ownership guard: when a
-// newer connection took over the key, the OLD connection's disconnect cleanup
-// must NOT evict the new owner. This is the subtle correctness property that
-// keeps the registry consistent under concurrent connect/disconnect.
-func TestUnsetConnIfOursDoesNotEvictNewOwner(t *testing.T) {
+// TestReleaseConnDoesNotEvictNewOwner verifies the ownership guard: when a
+// newer connection took over a key, the OLD connection's disconnect cleanup
+// (releaseConn) must NOT evict the new owner. releaseConn removes only keys
+// whose current mapping still points at the disconnecting connection.
+func TestReleaseConnDoesNotEvictNewOwner(t *testing.T) {
 	runner := newTestRunner(t, newFakeRuntime())
 
 	oldCaps := &capturedFrames{}
@@ -307,13 +334,18 @@ func TestUnsetConnIfOursDoesNotEvictNewOwner(t *testing.T) {
 	_, oldCancel := context.WithCancel(context.Background())
 	_, newCancel := context.WithCancel(context.Background())
 
-	oldHandle := runner.registerConn(keyOf("chat-A", "zoe"), oldCaps.write, oldCancel)
-	// New connection takes over (cancels old).
-	newHandle := runner.registerConn(keyOf("chat-A", "zoe"), newCaps.write, newCancel)
+	oldHandle := runner.newConn(oldCaps.write, oldCancel)
+	runner.registerConnKey(oldHandle, keyOf("chat-A", "zoe"))
+	// New connection takes over the same key.
+	newHandle := runner.newConn(newCaps.write, newCancel)
+	displaced := runner.registerConnKey(newHandle, keyOf("chat-A", "zoe"))
+	if displaced != oldHandle {
+		t.Fatalf("registerConnKey should have returned the displaced old handle")
+	}
 
-	// Old connection now disconnects — its defer calls unsetConnIfOurs with its
-	// own (now-stale) handle. Must NOT evict the new owner.
-	runner.unsetConnIfOurs(keyOf("chat-A", "zoe"), oldHandle)
+	// Old connection now disconnects — its defer calls releaseConn. Must NOT
+	// evict the new owner, because key chat-A no longer maps to oldHandle.
+	runner.releaseConn(oldHandle)
 	if got := runner.lookupConn(keyOf("chat-A", "zoe")); got == nil {
 		t.Fatal("new owner evicted by old connection's disconnect cleanup")
 	}
@@ -332,4 +364,100 @@ func TestUnsetConnIfOursDoesNotEvictNewOwner(t *testing.T) {
 		t.Errorf("new connection got %d frames, want 1", len(got))
 	}
 	_ = newHandle
+}
+
+// TestOneConnectionMultipleChatKeys verifies a single WS connection can own
+// multiple ChatKeys simultaneously. The protocol allows consecutive message
+// frames on one connection, each with its own context.chat_id/sender_id. PR #97
+// review CRITICAL #2: the original `registered bool` guard only registered the
+// FIRST ChatKey, so resume delivery for later chats on the same connection
+// failed. The fix lets registerConn recognize "same connection" (by identity)
+// so it does NOT cancel itself, and the connection tracks all its keys.
+func TestOneConnectionMultipleChatKeys(t *testing.T) {
+	runner := newTestRunner(t, newFakeRuntime())
+	caps := &capturedFrames{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// One connection (one newConn handle) registers two different chat keys.
+	// registerConnKey must recognize the same handle (by id) and NOT displace
+	// itself — so the connection's cancel never fires.
+	wsHandle := runner.newConn(caps.write, cancel)
+	runner.registerConnKey(wsHandle, keyOf("chat-1", "alice"))
+	runner.registerConnKey(wsHandle, keyOf("chat-2", "alice"))
+
+	// The connection must not have been cancelled by the second register.
+	if ctx.Err() != nil {
+		t.Fatal("connection was cancelled when registering a second key on the SAME connection")
+	}
+
+	// Both keys must resolve to this connection.
+	if got := runner.lookupConn(keyOf("chat-1", "alice")); got == nil {
+		t.Error("first key not in registry")
+	}
+	if got := runner.lookupConn(keyOf("chat-2", "alice")); got == nil {
+		t.Error("second key not in registry")
+	}
+
+	// Emit to EITHER key must reach the connection.
+	for _, chatID := range []string{"chat-1", "chat-2"} {
+		env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)
+		env.Target = &channel.InboundContext{Channel: "websocket", ChatID: chatID, SenderID: "alice"}
+		env.Data = map[string]any{"content": "to-" + chatID}
+		if err := runner.Emit(context.Background(), env); err != nil {
+			t.Errorf("Emit to %s on multi-key connection: %v", chatID, err)
+		}
+	}
+	if got := len(caps.snapshot()); got != 2 {
+		t.Errorf("multi-key connection got %d frames, want 2 (one per chat)", got)
+	}
+
+	// Disconnect cleanup (releaseConn) must remove BOTH keys this connection owns.
+	runner.releaseConn(wsHandle)
+	if runner.lookupConn(keyOf("chat-1", "alice")) != nil {
+		t.Error("first key still in registry after releaseConn")
+	}
+	if runner.lookupConn(keyOf("chat-2", "alice")) != nil {
+		t.Error("second key still in registry after releaseConn")
+	}
+}
+
+// TestRegisterConnKeyAndReleaseConnNilSafe covers the defensive nil guards.
+// registerConnKey(nil, ...) returns nil (no panic); releaseConn(nil) is a
+// no-op. These guards keep the registry safe if a caller ever passes a nil
+// handle (e.g. a future code path that conditionally constructs a wsConn).
+func TestRegisterConnKeyAndReleaseConnNilSafe(t *testing.T) {
+	runner := newTestRunner(t, newFakeRuntime())
+	if got := runner.registerConnKey(nil, keyOf("chat-z", "z")); got != nil {
+		t.Errorf("registerConnKey(nil,...) = %v, want nil", got)
+	}
+	// Must not panic:
+	runner.releaseConn(nil)
+	if runner.lookupConn(keyOf("chat-z", "z")) != nil {
+		t.Error("nil conn should not have registered anything")
+	}
+}
+
+// TestRegisterConnKeyIdempotentSameKey verifies re-registering the SAME
+// connection under an already-owned key is a no-op (returns nil, no
+// displacement). This is the path a connection hits when consecutive message
+// frames carry the same chat_id/sender_id — registerConnKey must not displace
+// itself.
+func TestRegisterConnKeyIdempotentSameKey(t *testing.T) {
+	runner := newTestRunner(t, newFakeRuntime())
+	caps := &capturedFrames{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wsHandle := runner.newConn(caps.write, cancel)
+
+	if displaced := runner.registerConnKey(wsHandle, keyOf("chat-i", "ian")); displaced != nil {
+		t.Fatalf("first register displaced %v, want nil", displaced)
+	}
+	// Re-register the SAME handle under the SAME key — must be a no-op.
+	if displaced := runner.registerConnKey(wsHandle, keyOf("chat-i", "ian")); displaced != nil {
+		t.Errorf("idempotent re-register displaced %v, want nil (same connection+key)", displaced)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("connection was cancelled by idempotent re-register")
+	}
 }
