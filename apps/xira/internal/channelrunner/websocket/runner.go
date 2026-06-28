@@ -333,6 +333,34 @@ func canonicalKey(key frt.ChatKey) frt.ChatKey {
 	}
 }
 
+// resolveSend returns the write function for the CURRENT live connection under
+// chatKey. This is the dynamic counterpart to a captured writeFrame closure:
+// instead of always writing to the connection that started the turn (which may
+// have been superseded by a reconnect), it looks up the registry at write time
+// so the frame reaches whoever is connected now.
+//
+// Why this exists (PR #97 round-3 review): steering runs the retried turn in
+// the ORIGINAL turn's ChatKeySession, whose OnTurnResult closure captured the
+// original connection's writeFrame. If connection B took over the ChatKey
+// mid-turn, the retry's terminal frame was written to A — B got only an ack.
+// resolveSend makes OnRawEvent/OnTurnResult write to the current registry
+// connection instead of the captured one.
+//
+// Returns a function that reports a descriptive error when no live connection
+// is registered (so the caller's `_ = send(...)` path stays observable rather
+// than silently swallowing). ack/error frames written synchronously in
+// handleMessage still use the captured writeFrame directly — at that point the
+// connection is provably live (it just delivered the inbound frame).
+func (r *Runner) resolveSend(chatKey frt.ChatKey) func(outboundFrame) error {
+	return func(frame outboundFrame) error {
+		conn := r.lookupConn(chatKey)
+		if conn == nil || conn.send == nil {
+			return fmt.Errorf("websocket: no live connection for %s (frame %q dropped)", chatKey, frame.Type)
+		}
+		return conn.send(frame)
+	}
+}
+
 // HandleConnection services one websocket connection end-to-end. The HTTP
 // upgrade (websocket.Accept) is performed by the api package; this method
 // receives the already-accepted conn and runs the read loop. Per-connection
@@ -522,6 +550,36 @@ func (r *Runner) handleMessage(
 		})
 		return
 	}
+	// Compute the chat key early: the registry update + steering check both
+	// need it before we decide whether to start a full turn.
+	chatKey := frt.ChatKeyFromInbound(prepared.eventContext)
+	// Register this connection under the chat key so outbound delivery (Emit /
+	// resume final / steered-retry output) reaches the live client. onRegister
+	// (wired by HandleConnection) updates the registry to this connection.
+	onRegister(chatKey)
+	// Steering short-circuit: if a turn is already active for this chatKey,
+	// this message is a user interjection (or a reconnect sending a new
+	// message). It is enqueued into the SteeringQueue and the active turn will
+	// drain it on its steering checkpoint. We must NOT start a second turn, and
+	// we must NOT create an activeRequest/session whose OnTurnResult would
+	// never run (that leaks the activeRequest). The active turn's retry will
+	// deliver its terminal frame to the CURRENT connection via resolveSend
+	// (which looks up the registry — already updated above to this connection).
+	// (PR #97 round-3 review: prevents activeReq leak + the "B only gets an ack"
+	// dead-end by giving B an explicit steered ack.)
+	if r.router.IsActive(chatKey) {
+		_ = writeFrame(outboundFrame{
+			Type:      "ack",
+			ID:        "srv_ack_" + requestID,
+			RequestID: requestID,
+			Data: map[string]any{
+				"status":     "steered",
+				"message_id": prepared.messageID,
+			},
+		})
+		r.router.Handle(chatKey, prepared.turn.Message, ctx, func(frt.ChatKey, string, context.Context) {})
+		return
+	}
 	activeReq := &activeRequest{
 		requestID: requestID,
 		context:   prepared.eventContext,
@@ -553,13 +611,13 @@ func (r *Runner) handleMessage(
 	// runEntrypointID (empty when the entrypoint isn't registered, so RunAgent
 	// uses its default agent), whereas eventContext carries the effective ID for
 	// event-routing/filtering. Matching the pre-Step-3a behavior exactly.
-	chatKey := frt.ChatKeyFromInbound(prepared.eventContext)
-	// Register this connection under the chat key so outbound delivery (Emit /
-	// resume final) can reach the live client. onRegister (wired by
-	// HandleConnection) cancels any prior connection for the same key — one
-	// active connection per ChatKey. Called after dedupe + ack so invalid /
-	// duplicate / ignored messages never claim a registry slot.
-	onRegister(chatKey)
+	// (chatKey + onRegister already done above, before the IsActive check.)
+	// send resolves to the CURRENT live connection for chatKey at write time.
+	// This matters for steering: if connection B took over chatKey mid-turn,
+	// the retry runs in A's ChatKeySession but its terminal frame must reach B
+	// (resolveSend looks up the registry, which now points to B). The captured
+	// writeFrame would wrongly write to A. (PR #97 round-3 review fix.)
+	send := r.resolveSend(chatKey)
 	frameID := frame.ID
 	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
 		Runtime:      r.runtime,
@@ -568,18 +626,20 @@ func (r *Runner) handleMessage(
 		// OnRawEvent: stream in-flight signal RuntimeEvents as event frames
 		// (symmetric with ilink/feishu's OnRawEvent — WS is a channel too, not
 		// a special case). Replaces the old batched resp.Events loop in
-		// OnTurnResult (which would double-deliver if both were kept).
+		// OnTurnResult (which would double-deliver if both were kept). Uses
+		// resolveSend (not the captured writeFrame) so a steered retry's events
+		// reach the current connection too.
 		OnRawEvent: func(evt frt.RuntimeEvent) {
 			if !activeReq.acceptEvent(evt) {
 				return
 			}
-			_ = writeFrame(runtimeEventFrame(requestID, evt))
+			_ = send(runtimeEventFrame(requestID, evt))
 		},
 		OnTurnResult: func(resp frt.TurnResponse, runErr error) {
 			defer removeActive(requestID)
 			if runErr != nil {
 				r.dedupe.Forget(prepared.dedupeKey)
-				_ = writeFrame(errorFrame(frameID, requestID, "run_failed", runErr.Error(), true))
+				_ = send(errorFrame(frameID, requestID, "run_failed", runErr.Error(), true))
 				return
 			}
 			// NOTE: resp.Events is NOT iterated here — in-flight events are
@@ -590,7 +650,7 @@ func (r *Runner) handleMessage(
 			} else {
 				out = responseFrame(frameID, requestID, resp)
 			}
-			if err := writeFrame(out); err != nil {
+			if err := send(out); err != nil {
 				r.dedupe.Forget(prepared.dedupeKey)
 				return
 			}

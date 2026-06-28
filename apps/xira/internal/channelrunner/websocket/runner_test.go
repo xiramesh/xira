@@ -28,7 +28,10 @@ type fakeRuntime struct {
 	concurrent    int32
 	maxConcurrent int32
 	hold          func(unblock chan struct{})
-	respond       func(req frt.TurnRequest) frt.TurnResponse
+	// respond returns the (response, error) for a RunAgent call. Tests use this
+	// to script steering (return frt.ErrSteered on the first call) and other
+	// error paths. Default returns a completed turn.
+	respond func(req frt.TurnRequest) (frt.TurnResponse, error)
 	// respectCtx, when true, makes RunAgent honor ctx cancellation: if ctx is
 	// cancelled while held, RunAgent returns context.Canceled instead of
 	// blocking forever. The default (false) preserves the original behavior
@@ -38,8 +41,8 @@ type fakeRuntime struct {
 
 func newFakeRuntime() *fakeRuntime {
 	return &fakeRuntime{
-		respond: func(frt.TurnRequest) frt.TurnResponse {
-			return frt.TurnResponse{RunID: "run-1", Status: "completed", FinalResponse: "ok"}
+		respond: func(frt.TurnRequest) (frt.TurnResponse, error) {
+			return frt.TurnResponse{RunID: "run-1", Status: "completed", FinalResponse: "ok"}, nil
 		},
 	}
 }
@@ -66,7 +69,7 @@ func (f *fakeRuntime) RunAgent(ctx context.Context, req frt.TurnRequest) (frt.Tu
 			<-unblock
 		}
 	}
-	return f.respond(req), nil
+	return f.respond(req)
 }
 
 func (f *fakeRuntime) maxSeen() int32 { return atomic.LoadInt32(&f.maxConcurrent) }
@@ -126,10 +129,17 @@ func typesOf(frames []outboundFrame) []string {
 	return out
 }
 
-// noopRegister is a no-op onRegister callback for handleMessage tests that
-// don't exercise the connection registry (they drive handleMessage directly,
-// simulating a single already-registered connection).
-var noopRegister = func(frt.ChatKey) {}
+// registerConnForTest returns an onRegister callback that registers a real
+// connection (with the given writeFrame) under the message's chatKey. This
+// mirrors production HandleConnection wiring so resolveSend (used by
+// OnTurnResult/OnRawEvent) can find the connection. Tests that previously used
+// a no-op onRegister must register, otherwise the turn's terminal frame is
+// dropped (resolveSend finds no live connection).
+func registerConnForTest(runner *Runner, writeFrame func(outboundFrame) error) func(frt.ChatKey) {
+	return func(key frt.ChatKey) {
+		runner.registerConnKey(runner.newConn(writeFrame, func() {}), key)
+	}
+}
 
 // --- tests ---
 
@@ -158,8 +168,8 @@ func TestRunnerConcurrentSameChatDoesNotRace(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); runner.handleMessage(ctx, msg1, "websocket-default", caps.write, addActive, removeActive, noopRegister) }()
-	go func() { defer wg.Done(); runner.handleMessage(ctx, msg2, "websocket-default", caps.write, addActive, removeActive, noopRegister) }()
+	go func() { defer wg.Done(); runner.handleMessage(ctx, msg1, "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write)) }()
+	go func() { defer wg.Done(); runner.handleMessage(ctx, msg2, "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write)) }()
 
 	time.Sleep(50 * time.Millisecond) // let both dispatch
 	gmu.Lock()
@@ -179,13 +189,13 @@ func TestRunnerConcurrentSameChatDoesNotRace(t *testing.T) {
 // Verifies OnTurnResult wiring assembles the structured output correctly.
 func TestRunnerOnTurnResultEmitsEventAndResponseFrames(t *testing.T) {
 	rt := newFakeRuntime()
-	rt.respond = func(frt.TurnRequest) frt.TurnResponse {
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
 		return frt.TurnResponse{
 			RunID:         "run-1",
 			Status:        "completed",
 			FinalResponse: "answer",
 			Events:        []frt.RuntimeEvent{{ID: "evt-1", Kind: "run.started"}, {ID: "evt-2", Kind: "run.completed"}},
-		}
+		}, nil
 	}
 	runner := newTestRunner(t, rt)
 	caps := &capturedFrames{}
@@ -194,7 +204,7 @@ func TestRunnerOnTurnResultEmitsEventAndResponseFrames(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive, noopRegister)
+	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write))
 
 	time.Sleep(100 * time.Millisecond) // let the turn + frames complete
 	types := typesOf(caps.snapshot())
@@ -224,7 +234,7 @@ func TestRunnerOnTurnResultEmitsEventAndResponseFrames(t *testing.T) {
 // an "interrupt" frame (HITL), not a "response" frame. WS protocol-level HITL.
 func TestRunnerOnTurnResultEmitsInterruptFrame(t *testing.T) {
 	rt := newFakeRuntime()
-	rt.respond = func(frt.TurnRequest) frt.TurnResponse {
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
 		return frt.TurnResponse{
 			RunID:  "run-1",
 			Status: "waiting_human",
@@ -232,7 +242,7 @@ func TestRunnerOnTurnResultEmitsInterruptFrame(t *testing.T) {
 				Status: "waiting_human",
 				Reason: "tool_gate",
 			},
-		}
+		}, nil
 	}
 	runner := newTestRunner(t, rt)
 	caps := &capturedFrames{}
@@ -241,7 +251,7 @@ func TestRunnerOnTurnResultEmitsInterruptFrame(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive, noopRegister)
+	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write))
 
 	time.Sleep(100 * time.Millisecond)
 	types := typesOf(caps.snapshot())
@@ -274,7 +284,7 @@ func TestRunnerOnTurnResultEmitsErrorFrameOnRunFailure(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive, noopRegister)
+	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write))
 
 	time.Sleep(100 * time.Millisecond)
 	var errFrame *outboundFrame

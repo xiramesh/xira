@@ -35,14 +35,14 @@ func keyOf(chatID, senderID string) frt.ChatKey {
 	})
 }
 
-// registerOneKey is a test shorthand: build a wsConn (newConn), register one
-// ChatKey under it, cancel any displaced connection. Returns the handle for
-// disconnect-cleanup tests (releaseConn). Mirrors what HandleConnection does.
+// registerOneKey is a test shorthand: build a wsConn (newConn) and register
+// one ChatKey under it. Returns the handle for disconnect-cleanup tests
+// (releaseConn). Mirrors production HandleConnection's onRegister: registers
+// the key but does NOT cancel a displaced connection (takeover must not murder
+// an active turn — PR #97 round-3 review).
 func registerOneKey(runner *Runner, chatID, senderID string, send func(outboundFrame) error, cancel context.CancelFunc) *wsConn {
 	conn := runner.newConn(send, cancel)
-	if displaced := runner.registerConnKey(conn, keyOf(chatID, senderID)); displaced != nil && displaced.cancel != nil {
-		displaced.cancel()
-	}
+	runner.registerConnKey(conn, keyOf(chatID, senderID))
 	return conn
 }
 
@@ -143,16 +143,17 @@ func TestEmitUnregisteredOnConnClose(t *testing.T) {
 	}
 }
 
-// TestNewConnectionReplacesOldForSameChatKey verifies the one-active-connection-
-// per-ChatKey contract: when a second connection registers under the same key,
-// the first is cancelled (its client is told to back off / reconnect) and only
-// the new one remains. Two live connections sharing a ChatKey would race for the
-// same Router entry — a per-chatKey single-active-turn contract violation.
+// TestNewConnectionReplacesOldForSameChatKey verifies the takeover contract:
+// when a second connection registers under the same ChatKey, the registry
+// points to the NEW connection (Emit reaches it), but the OLD connection is
+// NOT cancelled — takeover must not murder an active turn whose ctx is the old
+// connection's connCtx (PR #97 round-3 review). The old connection's read loop
+// exits naturally when the client disconnects.
 func TestNewConnectionReplacesOldForSameChatKey(t *testing.T) {
 	runner := newTestRunner(t, newFakeRuntime())
 
 	oldCtx, oldCancel := context.WithCancel(context.Background())
-	defer oldCancel() // safety: ensure cleanup if test fails before replacement
+	defer oldCancel()
 	registerOneKey(runner, "chat-3", "carol", func(outboundFrame) error { return nil }, oldCancel)
 
 	newCaps := &capturedFrames{}
@@ -160,13 +161,12 @@ func TestNewConnectionReplacesOldForSameChatKey(t *testing.T) {
 	defer newCancel()
 	registerOneKey(runner, "chat-3", "carol", newCaps.write, newCancel)
 
-	// Old connection's cancel must have fired: registerOneKey cancels the
-	// displaced connection returned by registerConnKey.
-	if oldCtx.Err() == nil {
-		t.Fatal("old connection was not cancelled when replaced")
+	// Takeover must NOT cancel the old connection (it may have an active turn).
+	if oldCtx.Err() != nil {
+		t.Fatal("old connection was cancelled on takeover — would murder an active turn (PR #97 round-3)")
 	}
 
-	// Only the new connection should receive Emit.
+	// Registry points to the new connection; Emit reaches it.
 	env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)
 	env.Target = &channel.InboundContext{Channel: "websocket", ChatID: "chat-3", SenderID: "carol"}
 	env.Data = map[string]any{"content": "to-new"}
