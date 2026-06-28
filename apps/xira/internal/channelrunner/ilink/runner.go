@@ -627,13 +627,22 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 	// (r.send with the original openilink message + account) and dedupe
 	// completion via closures. Behavior is 1:1 equivalent to the previous
 	// inline runTurn closure; the ilink tests verify equivalence.
+	// IMEventRenderer receives raw RuntimeEvents and renders them to localized
+	// text + quota + dedup (the behavior the old ChatContext baked in). Per-turn
+	// instance. See feishu/runner.go for the same wiring.
+	imRenderer := progress.NewIMEventRenderer(func(ctx context.Context, text string) error {
+		return r.send(ctx, account, msg, text)
+	}, progress.DefaultPolicy())
+	imRenderer.Start()
 	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
 		Runtime:      r.runtime,
 		EntrypointID: r.definition.ID,
 		Inbound:      inbound,
-		SendProgress: func(ctx context.Context, text string) error {
-			return r.send(ctx, account, msg, text)
-		},
+		// OnRawEvent replaces SendProgress (raw → IMEventRenderer render+quota+
+		// dedup+ordered async send). SendProgress nil → legacy ChatContext
+		// no-op (no double). OnTurnEnd stops the renderer's sendLoop at exit.
+		OnRawEvent: imRenderer.DeliverRaw,
+		OnTurnEnd:  imRenderer.Stop,
 		SendFinal: func(ctx context.Context, text string) error {
 			return r.send(ctx, account, msg, text)
 		},

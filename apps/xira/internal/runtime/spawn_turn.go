@@ -385,6 +385,14 @@ func childToolConstraintCtx(parent context.Context) context.Context {
 	if bus := EventBusFromContext(parent); bus != nil {
 		ctx = WithEventBus(ctx, bus)
 	}
+	// RawEventSink is inherited for the same reason: when the parent channel
+	// opted into raw passthrough (OnRawEvent → IMEventRenderer / ws frame),
+	// spawned-child progress must reach the SAME sink, or the user goes blind
+	// to child-agent activity (RFC #66 regression — PR #94 review CRITICAL).
+	// Mirrors the EventBus inheritance just above.
+	if rawSink := RawEventSinkFromContext(parent); rawSink != nil {
+		ctx = WithRawEventSink(ctx, rawSink)
+	}
 	// ChatKey + ChildCancelRegistry are inherited (RFC #67) so the child can
 	// register its cancel func and be canceled on parent steer.
 	if key, ok := ChatKeyFromContext(parent); ok {

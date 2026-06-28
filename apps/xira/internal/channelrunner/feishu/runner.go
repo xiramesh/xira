@@ -231,13 +231,26 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 	)
 	inbound := channel.NewInboundContextWithEntrypoint("feishu", r.definition.ID, senderID, metadata)
 	chatKey := frt.ChatKeyFromInbound(inbound)
+	// IMEventRenderer receives raw RuntimeEvents and renders them to localized
+	// text + quota + dedup (the behavior the old ChatContext baked in). This is
+	// the "channel decides rendering" path: feishu opts into the shared IM
+	// renderer; future feishu versions could swap in card/emoji rendering.
+	// Per-turn instance (quota/dedup state is per-turn).
+	imRenderer := progress.NewIMEventRenderer(func(ctx context.Context, text string) error {
+		return r.send(ctx, chatID, text)
+	}, progress.DefaultPolicy())
+	imRenderer.Start()
 	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
 		Runtime:      r.runtime,
 		EntrypointID: r.definition.ID,
 		Inbound:      inbound,
-		SendProgress: func(ctx context.Context, text string) error {
-			return r.send(ctx, chatID, text)
-		},
+		// OnRawEvent replaces SendProgress: raw events flow to IMEventRenderer
+		// (render + quota + dedup + ordered async send). SendProgress is left
+		// nil so the legacy ChatContext path is a no-op (avoids double-delivery).
+		OnRawEvent: imRenderer.DeliverRaw,
+		// OnTurnEnd flushes + stops the renderer's sendLoop at turn exit
+		// (mirrors ChatContext.Stop's drain+wait contract).
+		OnTurnEnd: imRenderer.Stop,
 		SendFinal: func(ctx context.Context, text string) error {
 			return r.send(ctx, chatID, text)
 		},

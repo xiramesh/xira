@@ -25,6 +25,14 @@ import (
 //	RuntimeEvent.Time        → Event.TimestampVal (→ Timestamp() accessor)
 //	Correlation.ParentRunID  → Event.ParentAgentTurnIDVal (→ ParentAgentTurnID())
 func runtimeEventToEvent(evt RuntimeEvent) (Event, bool) {
+	return EventFromRuntime(evt)
+}
+
+// EventFromRuntime is the exported form of runtimeEventToEvent. Channels (e.g.
+// progress.IMEventRenderer) that receive a flat RuntimeEvent via RawEventSink
+// and want to reuse the sealed-Event-based RenderEvent call it to map first.
+// Returns ok=false for non-signal kinds (observability/audit/internal).
+func EventFromRuntime(evt RuntimeEvent) (Event, bool) {
 	base := eventIdentity{
 		id:     evt.ID,
 		turnID: AgentTurnID(evt.RunID),
