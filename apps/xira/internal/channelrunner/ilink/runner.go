@@ -633,13 +633,16 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 	imRenderer := progress.NewIMEventRenderer(func(ctx context.Context, text string) error {
 		return r.send(ctx, account, msg, text)
 	}, progress.DefaultPolicy())
+	imRenderer.Start()
 	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
 		Runtime:      r.runtime,
 		EntrypointID: r.definition.ID,
 		Inbound:      inbound,
 		// OnRawEvent replaces SendProgress (raw → IMEventRenderer render+quota+
-		// dedup+send). SendProgress nil → legacy ChatContext no-op (no double).
+		// dedup+ordered async send). SendProgress nil → legacy ChatContext
+		// no-op (no double). OnTurnEnd stops the renderer's sendLoop at exit.
 		OnRawEvent: imRenderer.DeliverRaw,
+		OnTurnEnd:  imRenderer.Stop,
 		SendFinal: func(ctx context.Context, text string) error {
 			return r.send(ctx, account, msg, text)
 		},

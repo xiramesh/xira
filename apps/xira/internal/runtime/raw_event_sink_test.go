@@ -115,3 +115,55 @@ func TestRawEventSinkFuncWraps(t *testing.T) {
 		t.Errorf("func sink got %+v, want x", got)
 	}
 }
+
+// TestChildToolConstraintCtxInheritsRawEventSink: spawned-child contexts MUST
+// inherit the parent's RawEventSink, so child-agent progress reaches the same
+// sink the parent channel wired (RFC #66). Without this, a channel that opts
+// into raw passthrough (ilink/feishu OnRawEvent → IMEventRenderer) goes BLIND
+// to spawned children — the exact regression PR #94 review CRITICAL caught.
+// This is the spawn-event-visibility gate test that the original PR's green
+// suite lacked (those tests had no spawn scenario).
+func TestChildToolConstraintCtxInheritsRawEventSink(t *testing.T) {
+	sink := &captureSink{}
+	parent := WithRawEventSink(context.Background(), sink)
+	child := childToolConstraintCtx(parent)
+
+	got := RawEventSinkFromContext(child)
+	if got != RawEventSink(sink) {
+		t.Fatal("spawned-child ctx did NOT inherit parent RawEventSink — child events would be lost")
+	}
+}
+
+// TestChildToolConstraintCtxInheritsEventBusToo: the parallel guarantee for the
+// legacy EventBus path (so the fix doesn't regress main's working behavior).
+func TestChildToolConstraintCtxInheritsEventBusToo(t *testing.T) {
+	bus := &captureEventBus{}
+	parent := WithEventBus(context.Background(), bus)
+	child := childToolConstraintCtx(parent)
+
+	if got := EventBusFromContext(child); got != EventBus(bus) {
+		t.Fatal("spawned-child ctx did NOT inherit parent EventBus — RFC #66 child progress regression")
+	}
+}
+
+// TestChildToolConstraintCtxStripsSteeringBus: pin the by-design asymmetry —
+// SteeringBus is NOT inherited (children aren't steered; they're canceled on
+// parent steer). Guards against accidentally inheriting "everything" in a
+// future cleanup. (This is the inverse of the two inheritance tests above.)
+func TestChildToolConstraintCtxStripsSteeringBus(t *testing.T) {
+	parent := WithSteeringBus(context.Background(), fakeSteeringBus{})
+	child := childToolConstraintCtx(parent)
+
+	if got := SteeringBusFromContext(child); got != nil {
+		t.Error("spawned-child ctx inherited SteeringBus — children must NOT be steered (RFC §5)")
+	}
+}
+
+// fakeSteeringBus is a minimal SteeringBus for the strip test (the real impl
+// lives in progress.SteeringQueue; runtime only sees the interface).
+type fakeSteeringBus struct{}
+
+func (fakeSteeringBus) Enqueue(string)                  {}
+func (fakeSteeringBus) TryDequeue() (string, bool)      { return "", false }
+func (fakeSteeringBus) DrainAll() []string              { return nil }
+func (fakeSteeringBus) HasPending() bool                { return false }

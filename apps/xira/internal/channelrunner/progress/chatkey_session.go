@@ -115,6 +115,12 @@ type ChatKeySessionConfig struct {
 	// = no raw sink (the channel gets no in-flight events — degenerate; every
 	// channel should inject something, but nil is tolerated).
 	OnRawEvent func(evt runtime.RuntimeEvent)
+
+	// OnTurnEnd is invoked at turn exit (any path: success, error, steer
+	// exhaustion) via defer, AFTER SpawnResetter/childCancels. Channels use it
+	// to flush + release per-turn resources like IMEventRenderer's sendLoop
+	// (mirrors ChatContext.Stop's "drain + wait" contract). nil = skip.
+	OnTurnEnd func()
 }
 
 // ChatKeySession orchestrates one chatKey's turns. It wraps a Router
@@ -227,6 +233,13 @@ func (s *ChatKeySession) runTurn(_ runtime.ChatKey, turnMsg string, turnCtx cont
 	// long chats. A late Deliver after Reset is harmless.
 	if s.cfg.SpawnResetter != nil {
 		defer s.cfg.SpawnResetter()
+	}
+
+	// OnTurnEnd: flush + release per-turn channel resources (e.g. the
+	// IMEventRenderer sendLoop). Deferred before the branch so BOTH the text
+	// and structured paths run it at exit. nil = skip.
+	if s.cfg.OnTurnEnd != nil {
+		defer s.cfg.OnTurnEnd()
 	}
 
 	// Branch on output form: structured (WS/Discord) vs text (IM/ilink/feishu).
