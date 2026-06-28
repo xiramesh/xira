@@ -657,5 +657,157 @@ func TestSessionProgressWiredToChatContext(t *testing.T) {
 	t.Skip("progress event delivery covered by chatcontext_test.go")
 }
 
+// --- Step 3a: OnTurnResult structured-output path tests ---
+
+// TestSessionOnTurnResultPathInvoked: when OnTurnResult is wired, runTurn takes
+// the structured-output path and calls it with the TurnResponse (no
+// SendProgress/SendFinal). turnSucceeded=true so DedupeComplete fires.
+func TestSessionOnTurnResultPathInvoked(t *testing.T) {
+	var gotResp runtime.TurnResponse
+	var gotErr error
+	called := false
+	rt := newFakeRuntime(fakeRuntimeStep{
+		resp: runtime.TurnResponse{RunID: "r1", Status: "completed", FinalResponse: "ignored-by-ws", Events: []runtime.RuntimeEvent{{ID: "e1"}}},
+	})
+	router := NewRouter()
+	progCalls, finalCalls := 0, 0
+	cfg := ChatKeySessionConfig{
+		Runtime:      rt,
+		EntrypointID: "ep1",
+		Inbound:      testInbound(),
+		// Text callbacks wired but should NOT be called on the structured path.
+		SendProgress: func(context.Context, string) error { progCalls++; return nil },
+		SendFinal:    func(context.Context, string) error { finalCalls++; return nil },
+		OnTurnResult: func(resp runtime.TurnResponse, err error) {
+			called = true
+			gotResp = resp
+			gotErr = err
+		},
+		DedupeComplete: func() {},
+	}
+	s := NewChatKeySession(testKey(), router, cfg)
+	runTurnSync(t, s, router, "hello")
+
+	if !called {
+		t.Fatal("OnTurnResult not invoked")
+	}
+	if gotErr != nil {
+		t.Errorf("OnTurnResult err = %v, want nil", gotErr)
+	}
+	if gotResp.RunID != "r1" {
+		t.Errorf("OnTurnResult resp.RunID = %q, want r1", gotResp.RunID)
+	}
+	if len(gotResp.Events) != 1 || gotResp.Events[0].ID != "e1" {
+		t.Errorf("OnTurnResult Events = %v, want [e1]", gotResp.Events)
+	}
+	if progCalls != 0 || finalCalls != 0 {
+		t.Errorf("text callbacks called on structured path: progress=%d final=%d (both want 0)", progCalls, finalCalls)
+	}
+}
+
+// TestSessionOnTurnResultOnError: RunAgent error on structured path still
+// invokes OnTurnResult (so WS can send a run_failed frame), but
+// turnSucceeded stays false → DedupeForget fires if wired.
+func TestSessionOnTurnResultOnError(t *testing.T) {
+	completeCalls, forgetCalls := 0, 0
+	var gotErr error
+	resultCalled := false
+	rt := newFakeRuntime(fakeRuntimeStep{err: errors.New("boom")})
+	router := NewRouter()
+	cfg := ChatKeySessionConfig{
+		Runtime:      rt,
+		EntrypointID: "ep1",
+		Inbound:      testInbound(),
+		OnTurnResult: func(_ runtime.TurnResponse, err error) {
+			resultCalled = true
+			gotErr = err
+		},
+		DedupeComplete: func() { completeCalls++ },
+		DedupeForget:   func() { forgetCalls++ },
+	}
+	s := NewChatKeySession(testKey(), router, cfg)
+	runTurnSync(t, s, router, "hello")
+
+	if !resultCalled {
+		t.Error("OnTurnResult not invoked on error path (WS needs it to send run_failed frame)")
+	}
+	if gotErr == nil || gotErr.Error() != "boom" {
+		t.Errorf("OnTurnResult err = %v, want 'boom'", gotErr)
+	}
+	if forgetCalls != 1 {
+		t.Errorf("DedupeForget on structured error = %d, want 1", forgetCalls)
+	}
+	if completeCalls != 0 {
+		t.Errorf("DedupeComplete on structured error = %d, want 0", completeCalls)
+	}
+}
+
+// TestSessionOnTurnResultNoChatContext: structured path must not create a
+// ChatContext. Indirectly verified by TestSessionOnTurnResultPathInvoked
+// (SendProgress never called = ChatContext sink never drove it). This test
+// pins that explicitly: if a ChatContext existed and got events, it would
+// call SendProgress. Since structured path skips ChatContext, SendProgress
+// stays at 0 even though RunAgent produced Events.
+func TestSessionOnTurnResultNoChatContext(t *testing.T) {
+	progCalls := 0
+	rt := newFakeRuntime(fakeRuntimeStep{
+		resp: runtime.TurnResponse{
+			Status: "completed",
+			Events: []runtime.RuntimeEvent{{ID: "e1"}, {ID: "e2"}},
+		},
+	})
+	router := NewRouter()
+	cfg := ChatKeySessionConfig{
+		Runtime:      rt,
+		EntrypointID: "ep1",
+		Inbound:      testInbound(),
+		SendProgress: func(context.Context, string) error { progCalls++; return nil },
+		OnTurnResult: func(runtime.TurnResponse, error) {},
+	}
+	s := NewChatKeySession(testKey(), router, cfg)
+	runTurnSync(t, s, router, "msg")
+	if progCalls != 0 {
+		t.Errorf("SendProgress called %d times on structured path (ChatContext must be skipped)", progCalls)
+	}
+}
+
+// TestSessionOnTurnResultSteeringRetry: structured path honors steering
+// (ErrSteered → drain queue → re-run). OnTurnResult gets the retried run's
+// response, not the interrupted one.
+func TestSessionOnTurnResultSteeringRetry(t *testing.T) {
+	rt := newFakeRuntime(
+		fakeRuntimeStep{err: runtime.ErrSteered},
+		fakeRuntimeStep{resp: runtime.TurnResponse{RunID: "r2", Status: "completed"}},
+	)
+	router := NewRouter()
+	var gotRunID string
+	cfg := ChatKeySessionConfig{
+		Runtime:      rt,
+		EntrypointID: "ep1",
+		Inbound:      testInbound(),
+		OnTurnResult: func(resp runtime.TurnResponse, _ error) { gotRunID = resp.RunID },
+	}
+	s := NewChatKeySession(testKey(), router, cfg)
+	started := make(chan struct{})
+	go func() {
+		s.Handle(context.Background(), "orig")
+		close(started)
+	}()
+	<-started
+	if !waitForActive(router, true) {
+		t.Fatal("turn never became active")
+	}
+	router.SteeringQueue(testKey()).Enqueue("interjection")
+	if !waitForActive(router, false) {
+		t.Fatal("turn never finished")
+	}
+	if rt.callCount() != 2 {
+		t.Errorf("RunAgent calls = %d, want 2 (orig + steer retry)", rt.callCount())
+	}
+	if gotRunID != "r2" {
+		t.Errorf("OnTurnResult RunID = %q, want r2 (retried run)", gotRunID)
+	}
+}
+
 // helper: ensure unused import 'strings' doesn't break if we trim tests later.
 var _ = strings.TrimSpace

@@ -9,14 +9,34 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
+	"github.com/xiramesh/xira/internal/channelcontrol"
+	wschannel "github.com/xiramesh/xira/internal/channelrunner/websocket"
+	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
+
+// wsTestFrame is the api-side test-only mirror of the websocket channel's
+// outbound frame (now living unexported in channelrunner/websocket). These
+// integration tests read frames off the wire as JSON, so a local struct with
+// matching json tags is all that's needed — api tests must not reach into the
+// channelrunner package.
+type wsTestFrame struct {
+	Type      string `json:"type"`
+	ID        string `json:"id,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+	Data      any    `json:"data,omitempty"`
+}
+
+// wsTestMaxFrameBytes mirrors the channelrunner/websocket maxFrameBytes const
+// (1<<20). Local copy so the oversized-frame test can stay in the api package.
+const wsTestMaxFrameBytes = 1 << 20
 
 func TestWebSocketChannelMessageEmitsAckEventAndResponse(t *testing.T) {
 	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server := NewServer(rt, "127.0.0.1:0")
+	server := newWebSocketTestServer(t, rt)
 	if err := server.StartAsync(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +72,7 @@ func TestWebSocketChannelMessageEmitsAckEventAndResponse(t *testing.T) {
 	}
 
 	var sawStarted bool
-	var response websocketOutboundFrame
+	var response wsTestFrame
 	for i := 0; i < 20; i++ {
 		frame := readWebSocketFrame(t, conn)
 		switch frame.Type {
@@ -99,7 +119,7 @@ func TestWebSocketChannelUsesFrameIDAsMessageIDFallback(t *testing.T) {
 	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server := NewServer(rt, "127.0.0.1:0")
+	server := newWebSocketTestServer(t, rt)
 	if err := server.StartAsync(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +166,7 @@ func TestWebSocketChannelRejectsMismatchedChannel(t *testing.T) {
 	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server := NewServer(rt, "127.0.0.1:0")
+	server := newWebSocketTestServer(t, rt)
 	if err := server.StartAsync(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +195,7 @@ func TestWebSocketChannelRejectsEntrypointMismatch(t *testing.T) {
 	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server := NewServer(rt, "127.0.0.1:0")
+	server := newWebSocketTestServer(t, rt)
 	if err := server.StartAsync(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +225,7 @@ func TestWebSocketChannelIgnoresUnmentionedGroupMessage(t *testing.T) {
 	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server := NewServer(rt, "127.0.0.1:0")
+	server := newWebSocketTestServer(t, rt)
 	if err := server.StartAsync(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +263,7 @@ func TestWebSocketChannelRejectsHumanResponseUntilResumeBindingExists(t *testing
 	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server := NewServer(rt, "127.0.0.1:0")
+	server := newWebSocketTestServer(t, rt)
 	if err := server.StartAsync(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +289,7 @@ func TestWebSocketChannelRejectsOversizedInboundFrame(t *testing.T) {
 	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server := NewServer(rt, "127.0.0.1:0")
+	server := newWebSocketTestServer(t, rt)
 	if err := server.StartAsync(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +300,7 @@ func TestWebSocketChannelRejectsOversizedInboundFrame(t *testing.T) {
 		"type": "message",
 		"id":   "msg_oversized",
 		"data": map[string]any{
-			"message": strings.Repeat("x", websocketMaxFrameBytes+1),
+			"message": strings.Repeat("x", wsTestMaxFrameBytes+1),
 			"context": map[string]any{
 				"chat_id":   "chat-1",
 				"sender_id": "user-1",
@@ -289,7 +309,7 @@ func TestWebSocketChannelRejectsOversizedInboundFrame(t *testing.T) {
 	})
 	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer readCancel()
-	var frame websocketOutboundFrame
+	var frame wsTestFrame
 	if err := wsjson.Read(readCtx, conn, &frame); err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +322,7 @@ func TestWebSocketChannelDedupesMessageID(t *testing.T) {
 	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	server := NewServer(rt, "127.0.0.1:0")
+	server := newWebSocketTestServer(t, rt)
 	if err := server.StartAsync(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -359,6 +379,36 @@ func dialWebSocketChannel(t *testing.T, server *Server) *websocket.Conn {
 	return conn
 }
 
+// newWebSocketTestServer builds a Server whose ChannelControls expose a real
+// websocket Runner built from rt. This wires the post-Step-3a path: the HTTP
+// upgrade handler delegates to the Runner via wsRunnerProvider.
+func newWebSocketTestServer(t *testing.T, rt *frt.Service) *Server {
+	t.Helper()
+	runner, err := wschannel.NewRunner(entrypoints.Definition{ID: "websocket-default", Channel: "websocket"}, rt, t.TempDir())
+	if err != nil {
+		t.Fatalf("wschannel.NewRunner: %v", err)
+	}
+	controls := &testWSControls{runner: runner}
+	return NewServer(rt, "127.0.0.1:0", controls)
+}
+
+// testWSControls implements ChannelControls (no-ops for pairing methods, since
+// these WS tests don't exercise pairing) and wsRunnerProvider (returns the
+// websocket Runner).
+type testWSControls struct{ runner *wschannel.Runner }
+
+func (c *testWSControls) CreatePairing(context.Context, string) (channelcontrol.PairingSnapshot, error) {
+	return channelcontrol.PairingSnapshot{}, nil
+}
+func (c *testWSControls) GetPairing(string, string) (channelcontrol.PairingSnapshot, error) {
+	return channelcontrol.PairingSnapshot{}, nil
+}
+func (c *testWSControls) ListAccounts(string) ([]channelcontrol.AccountSnapshot, error) {
+	return nil, nil
+}
+func (c *testWSControls) DeleteAccount(context.Context, string, string) error { return nil }
+func (c *testWSControls) WSRunner() *wschannel.Runner                             { return c.runner }
+
 func writeWebSocketFrame(t *testing.T, conn *websocket.Conn, frame any) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -368,23 +418,23 @@ func writeWebSocketFrame(t *testing.T, conn *websocket.Conn, frame any) {
 	}
 }
 
-func readWebSocketFrame(t *testing.T, conn *websocket.Conn) websocketOutboundFrame {
+func readWebSocketFrame(t *testing.T, conn *websocket.Conn) wsTestFrame {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	var frame websocketOutboundFrame
+	var frame wsTestFrame
 	if err := wsjson.Read(ctx, conn, &frame); err != nil {
 		t.Fatal(err)
 	}
 	return frame
 }
 
-func frameDataString(frame websocketOutboundFrame, key string) string {
+func frameDataString(frame wsTestFrame, key string) string {
 	value, _ := frameDataMap(nil, frame)[key].(string)
 	return value
 }
 
-func frameDataMap(t *testing.T, frame websocketOutboundFrame) map[string]any {
+func frameDataMap(t *testing.T, frame wsTestFrame) map[string]any {
 	data, ok := frame.Data.(map[string]any)
 	if !ok && t != nil {
 		t.Fatalf("frame data = %+v", frame.Data)
@@ -392,7 +442,7 @@ func frameDataMap(t *testing.T, frame websocketOutboundFrame) map[string]any {
 	return data
 }
 
-func assertWebSocketCapabilities(t *testing.T, frame websocketOutboundFrame, want []string) {
+func assertWebSocketCapabilities(t *testing.T, frame wsTestFrame, want []string) {
 	t.Helper()
 	data, ok := frame.Data.(map[string]any)
 	if !ok {

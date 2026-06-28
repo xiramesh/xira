@@ -88,6 +88,19 @@ type ChatKeySessionConfig struct {
 	// call to preserve its existing error log line; ilink leaves it nil.
 	// Future channels may use it for metrics/alerting/observability hooks.
 	OnRunError func(err error)
+
+	// OnTurnResult is the structured-output callback (WS, future Discord embeds).
+	// When non-nil, runTurn takes the structured-output path: it SKIPS ChatContext
+	// (SendProgress/SendFinal unused — the channel assembles its own output from
+	// the full TurnResponse + Events). When nil (IM case: ilink/feishu), runTurn
+	// uses the text-output path (ChatContext → SendProgress/SendFinal) as before.
+	//
+	// This is NOT a WS special-case. It's the channelrunner abstraction's
+	// acknowledgment that output forms differ (feishu card, ilink text, ws frame).
+	// Output was always meant to be channel-injected (RFC §5.1: "r.send = 专属").
+	// WS doesn't render events to text — it streams the raw RuntimeEvents as
+	// frames — so it needs the structured response, not the ChatContext sink.
+	OnTurnResult func(resp runtime.TurnResponse, err error)
 }
 
 // ChatKeySession orchestrates one chatKey's turns. It wraps a Router
@@ -193,6 +206,15 @@ func (s *ChatKeySession) runTurn(_ runtime.ChatKey, turnMsg string, turnCtx cont
 		defer s.cfg.SpawnResetter()
 	}
 
+	// Branch on output form: structured (WS/Discord) vs text (IM/ilink/feishu).
+	// The shared defers above (dedupe, childCancels, SpawnResetter) apply to
+	// both paths. The structured path skips ChatContext entirely — WS streams
+	// raw RuntimeEvents as frames, doesn't render them to text via SendProgress.
+	if s.cfg.OnTurnResult != nil {
+		s.runTurnStructured(key, turnMsg, turnCtx, childCancels, fields, &turnSucceeded)
+		return
+	}
+
 	// Steering retry loop: if RunAgent is canceled by steering checkpoint
 	// (user interjected mid-turn), drain the SteeringQueue and re-run with
 	// the interjection as the new message. Loop until RunAgent completes
@@ -294,4 +316,84 @@ func (s *ChatKeySession) runTurn(_ runtime.ChatKey, turnMsg string, turnCtx cont
 			"run_id", resp.RunID,
 			"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
 		}, fields...)...)
+}
+
+// runTurnStructured is the WS / structured-output turn path. Mirrors runTurn's
+// text path (steering retry loop, child-cancel registry wiring) but:
+//   - Does NOT create a ChatContext (WS streams raw RuntimeEvents, no text
+//     rendering) and does NOT call SendProgress/SendFinal.
+//   - Does NOT wire EventBus onto the run ctx (WS reads resp.Events directly
+//     after RunAgent returns, not via a sink).
+//   - Hands the final TurnResponse + error to OnTurnResult, which the channel
+//     uses to assemble its own structured output (WS frames, future embeds).
+//
+// turnSucceeded is shared with runTurn's deferred dedupe logic: set true when
+// OnTurnResult is invoked WITHOUT a non-steering error (i.e. the turn produced
+// a result the channel can deliver). On RunAgent error, OnRunError fires first
+// (if wired) and turnSucceeded stays false → DedupeForget path (if wired).
+//
+// (RFC chatkey-session Step 3a. See chatkey_session.go header for why the
+// branch exists rather than forcing WS into the text model.)
+func (s *ChatKeySession) runTurnStructured(
+	key runtime.ChatKey,
+	turnMsg string,
+	turnCtx context.Context,
+	childCancels *ChildCancelRegistry,
+	fields []any,
+	turnSucceeded *bool,
+) {
+	currentMsg := turnMsg
+	var resp runtime.TurnResponse
+	var err error
+	for {
+		// No WithEventBus: WS consumes resp.Events directly (not via sink).
+		runCtx := runtime.WithChildCancelRegistry(turnCtx, childCancels)
+		resp, err = s.cfg.Runtime.RunAgent(runCtx, runtime.TurnRequest{
+			EntrypointID: s.cfg.EntrypointID,
+			Message:      currentMsg,
+			Context:      s.cfg.Inbound,
+		})
+		if err != nil && errors.Is(err, runtime.ErrSteered) {
+			if sink := runtime.SteeringBusFromContext(turnCtx); sink != nil {
+				if steered, ok := sink.TryDequeue(); ok {
+					if n := childCancels.CancelAll(key); n > 0 {
+						slog.Info("chatkey session steering: canceled outstanding spawned children",
+							append([]any{"chat_key", key.String(), "children", n}, fields...)...)
+					}
+					if s.cfg.SpawnResetter != nil {
+						s.cfg.SpawnResetter()
+					}
+					slog.Info("chatkey session steering: restarting turn with user interjection",
+						append([]any{"chat_key", key.String(), "interjection_chars", utf8.RuneCountInString(steered)}, fields...)...)
+					currentMsg = steered
+					continue
+				}
+			}
+		}
+		break
+	}
+	if err != nil {
+		if s.cfg.OnRunError != nil {
+			s.cfg.OnRunError(err)
+		}
+		slog.Error("chatkey session runtime run failed",
+			append([]any{"chat_key", key.String(), "entrypoint_id", s.cfg.EntrypointID, "error", err}, fields...)...)
+		// Still call OnTurnResult so WS can send an error frame to the client
+		// (e.g. run_failed). turnSucceeded stays false → DedupeForget if wired.
+		s.cfg.OnTurnResult(resp, err)
+		return
+	}
+	slog.Info("chatkey session runtime run completed",
+		append([]any{
+			"chat_key", key.String(),
+			"entrypoint_id", s.cfg.EntrypointID,
+			"run_id", resp.RunID,
+			"agent_id", resp.AgentID,
+			"status", resp.Status,
+			"session_id", resp.SessionID,
+			"tool_calls", len(resp.ToolCalls),
+			"events", len(resp.Events),
+		}, fields...)...)
+	*turnSucceeded = true
+	s.cfg.OnTurnResult(resp, nil)
 }
