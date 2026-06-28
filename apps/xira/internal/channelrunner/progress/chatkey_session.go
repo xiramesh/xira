@@ -101,6 +101,20 @@ type ChatKeySessionConfig struct {
 	// WS doesn't render events to text — it streams the raw RuntimeEvents as
 	// frames — so it needs the structured response, not the ChatContext sink.
 	OnTurnResult func(resp runtime.TurnResponse, err error)
+
+	// OnRawEvent is the raw-event passthrough (RFC chatkey-session). When
+	// non-nil, runTurn/runTurnStructured inject a RawEventSink into the turn
+	// context, and dispatchEvent delivers each in-flight signal RuntimeEvent
+	// (flat, with scope/payload) to it — unrendered. The channel decides how to
+	// present it: ilink/feishu wire IMEventRenderer (localized text + quota +
+	// dedup, behavior-equivalent to the old ChatContext); ws wires its own
+	// frame-writer; future channels can render to emoji/cards/whatever.
+	//
+	// This replaces ChatContext's forced render: channelrunner only passes the
+	// raw event (information); the channel decides rendering (interaction). nil
+	// = no raw sink (the channel gets no in-flight events — degenerate; every
+	// channel should inject something, but nil is tolerated).
+	OnRawEvent func(evt runtime.RuntimeEvent)
 }
 
 // ChatKeySession orchestrates one chatKey's turns. It wraps a Router
@@ -149,6 +163,15 @@ func (s *ChatKeySession) Handle(ctx context.Context, msg string) {
 func (s *ChatKeySession) runTurn(_ runtime.ChatKey, turnMsg string, turnCtx context.Context) {
 	key := s.key
 	fields := s.cfg.LogFields
+
+	// Raw-event passthrough (RFC chatkey-session): if the channel injected
+	// OnRawEvent, wire it as a RawEventSink on the turn context. dispatchEvent
+	// will then deliver each in-flight signal RuntimeEvent to it (unrendered),
+	// IN PARALLEL to the EventBus/ChatContext delivery below. A channel opts
+	// into raw OR text rendering — typically not both. nil = no raw sink.
+	if s.cfg.OnRawEvent != nil {
+		turnCtx = runtime.WithRawEventSink(turnCtx, runtime.RawEventSinkFunc(s.cfg.OnRawEvent))
+	}
 
 	// Dedupe release on turn exit. Step 2: success/failure-aware.
 	// turnSucceeded is set true ONLY when the turn produced a deliverable
@@ -222,8 +245,18 @@ func (s *ChatKeySession) runTurn(_ runtime.ChatKey, turnMsg string, turnCtx cont
 	currentMsg := turnMsg
 	var resp runtime.TurnResponse
 	var err error
+	// Wire the EventBus (ChatContext text path) ONLY when the channel did NOT
+	// opt into raw passthrough. When OnRawEvent is set, the RawEventSink (wired
+	// at the top of runTurn) handles events; wiring ChatContext's EventBus too
+	// would double-deliver (and ChatContext's SendProgress is nil for raw-path
+	// channels anyway). Legacy text-only channels (none in-tree after the
+	// ilink/feishu migration, but the path is preserved) keep ChatContext.
+	wireEventBus := s.cfg.OnRawEvent == nil
 	for {
-		runCtx := runtime.WithEventBus(turnCtx, chatCtx)
+		runCtx := turnCtx
+		if wireEventBus {
+			runCtx = runtime.WithEventBus(turnCtx, chatCtx)
+		}
 		// Inject the per-chat-key child cancel registry so spawned children
 		// register their cancel funcs and can be canceled on steer.
 		runCtx = runtime.WithChildCancelRegistry(runCtx, childCancels)
@@ -342,6 +375,13 @@ func (s *ChatKeySession) runTurnStructured(
 	fields []any,
 	turnSucceeded *bool,
 ) {
+	// Raw-event passthrough: same as the text path. WS injects OnRawEvent to
+	// receive in-flight signal RuntimeEvents (which it frames itself) — this
+	// complements OnTurnResult (the turn-level result). Without this, WS only
+	// sees the batched resp.Events at turn end, not live progress.
+	if s.cfg.OnRawEvent != nil {
+		turnCtx = runtime.WithRawEventSink(turnCtx, runtime.RawEventSinkFunc(s.cfg.OnRawEvent))
+	}
 	currentMsg := turnMsg
 	var resp runtime.TurnResponse
 	var err error

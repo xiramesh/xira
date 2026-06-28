@@ -32,6 +32,15 @@ func dispatchEvent(ctx context.Context, evt RuntimeEvent) {
 			"payload", evt.Payload)
 		return
 	}
+	// Raw passthrough (RFC chatkey-session): hand the flat RuntimeEvent (with
+	// scope/payload) to a channel that renders itself (feishu emoji/card, ws
+	// frame, ilink via IMEventRenderer). Delivered IN PARALLEL to the EventBus
+	// below — a channel opts into one sink, not both. Only signal events
+	// (those that map to a sealed Event) are delivered raw, matching what
+	// channels render; non-signal observability kinds stay slog-only above.
+	if rawSink := RawEventSinkFromContext(ctx); rawSink != nil {
+		rawSink.DeliverRaw(evt)
+	}
 	if sink := EventBusFromContext(ctx); sink != nil {
 		sink.Deliver(event)
 	} else {

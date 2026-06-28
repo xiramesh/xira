@@ -337,6 +337,16 @@ func (r *Runner) handleMessage(
 		Runtime:      r.runtime,
 		EntrypointID: prepared.turn.EntrypointID,
 		Inbound:      prepared.turn.Context,
+		// OnRawEvent: stream in-flight signal RuntimeEvents as event frames
+		// (symmetric with ilink/feishu's OnRawEvent — WS is a channel too, not
+		// a special case). Replaces the old batched resp.Events loop in
+		// OnTurnResult (which would double-deliver if both were kept).
+		OnRawEvent: func(evt frt.RuntimeEvent) {
+			if !activeReq.acceptEvent(evt) {
+				return
+			}
+			_ = writeFrame(runtimeEventFrame(requestID, evt))
+		},
 		OnTurnResult: func(resp frt.TurnResponse, runErr error) {
 			defer removeActive(requestID)
 			if runErr != nil {
@@ -344,15 +354,8 @@ func (r *Runner) handleMessage(
 				_ = writeFrame(errorFrame(frameID, requestID, "run_failed", runErr.Error(), true))
 				return
 			}
-			for _, evt := range resp.Events {
-				if !activeReq.acceptEvent(evt) {
-					continue
-				}
-				if err := writeFrame(runtimeEventFrame(requestID, evt)); err != nil {
-					r.dedupe.Forget(prepared.dedupeKey)
-					return
-				}
-			}
+			// NOTE: resp.Events is NOT iterated here — in-flight events are
+			// streamed via OnRawEvent above. Iterating both would double-deliver.
 			var out outboundFrame
 			if resp.Interrupt != nil {
 				out = interruptFrame(frameID, requestID, resp)
