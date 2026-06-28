@@ -290,3 +290,18 @@ var errSimulated = simpleErr("simulated RunAgent failure")
 type simpleErr string
 
 func (e simpleErr) Error() string { return string(e) }
+
+// NOTE on writeFrame fail-fast (PR #93 review MEDIUM-1): there is no unit test
+// here that exercises writeFrame's cancel()-on-write-error. An end-to-end test
+// via httptest is NOT reliable for this: a plain client disconnect fails the
+// READ side (readInboundFrame errors on the closed conn) so HandleConnection
+// returns even without the write-cancel. The write-fail-fast path only matters
+// in the rare window where the peer is gone but the read side hasn't errored
+// yet — a timing condition that's flaky to reproduce. We rely on:
+//   1. Structural parity with pre-Step-3a api (which had `cancel()` on write
+//      error) — the behavior was ported verbatim, see writeFrame + HandleConnection
+//      doc comment.
+//   2. The doc comment on writeFrame explaining WHY the cancel is required
+//      (silent-data-loss avoidance, AGENTS.md §2).
+// If you remove the cancel(), you reintroduce silent data loss on half-dead
+// connections. Don't.

@@ -147,7 +147,26 @@ func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
 // receives the already-accepted conn and runs the read loop. Per-connection
 // state (writeMu, active-request table) is created here, local to the
 // connection — mirroring ilink's per-accountPoller pattern.
+//
+// Turn lifetime vs connection lifetime: each dispatched turn runs in a router
+// goroutine, derived from connCtx (the per-connection cancelable context
+// below). If the client disconnects, connCtx is cancelled, which propagates
+// into RunAgent's ctx and ends the turn. There is no goroutine leak. The
+// reverse — a turn outliving the connection — can only happen if RunAgent has
+// already begun and does not promptly honor ctx cancellation; in that case
+// the turn finishes but its frames can't be written (writeFrame fails →
+// failFast cancels connCtx → the turn's ctx is cancelled too). This is the
+// intended fail-fast contract, not a leak.
 func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, defaultEntrypointID string) {
+	// Derive a per-connection cancelable ctx so a write failure can fail-fast
+	// the entire connection (cancel → read loop returns → connection closes).
+	// Without this, writeFrame errors are dropped by callers (`_ = writeFrame`)
+	// and the client would keep talking to a half-dead connection whose replies
+	// silently disappear — silent data loss (AGENTS.md §2). Mirrors the
+	// pre-Step-3a api behavior (cancel() on write error).
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	conn.SetReadLimit(-1)
 
 	var writeMu sync.Mutex
@@ -157,7 +176,12 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 	writeFrame := func(frame outboundFrame) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		if err := writeJSON(ctx, conn, frame); err != nil {
+		if err := writeJSON(connCtx, conn, frame); err != nil {
+			// Fail-fast: a write failure means the connection is broken (peer
+			// gone, network split). Cancel connCtx so the read loop exits and
+			// this connection tears down, instead of silently swallowing all
+			// subsequent replies (the caller discards this error via `_ =`).
+			cancel()
 			return err
 		}
 		return nil
@@ -178,7 +202,7 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 	}
 
 	for {
-		frame, err := readInboundFrame(ctx, conn)
+		frame, err := readInboundFrame(connCtx, conn)
 		if err != nil {
 			requestID := ""
 			var badJSON badJSONError
@@ -220,7 +244,7 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 				},
 			})
 		case "message":
-			r.handleMessage(ctx, frame, defaultEntrypointID, writeFrame, addActive, removeActive)
+			r.handleMessage(connCtx, frame, defaultEntrypointID, writeFrame, addActive, removeActive)
 		case "human_response":
 			_ = writeFrame(errorFrame(frame.ID, requestID, "unsupported_type", "human_response is reserved for a later websocket resume slice; use the HTTP human-request API for now", false))
 		case "ping":
