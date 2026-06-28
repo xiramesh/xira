@@ -10,18 +10,20 @@ import (
 	wschannel "github.com/xiramesh/xira/internal/channelrunner/websocket"
 )
 
-// websocket_channel.go (post-Step-3a): this file used to contain ALL websocket
-// protocol handling (frame types, turn dispatch, RunAgent calls). That has
-// been relocated to internal/channelrunner/websocket/ — the websocket channel
-// is a channel implementation like ilink/feishu and belongs under
-// channelrunner/, registered with Manager. What remains here is ONLY the HTTP
-// upgrade entry: api.Server owns the HTTP listener and performs websocket
-// Accept, then hands the upgraded connection to the websocket Runner for the
-// read loop and turn dispatch.
+// websocket_upgrade.go: the HTTP→websocket upgrade entry. WebSocket
+// connections begin life as an HTTP request (RFC 6455 — there is no "pure WS
+// listen"), so Xira's HTTP server (api.Server, which owns the mux/listener)
+// registers /api/v1/channels/websocket/messages and upgrades it here. The
+// upgraded connection is then handed to the websocket channel Runner
+// (channelrunner/websocket) for the read loop + turn dispatch.
 //
-// Why the split: HTTP serving is api.Server's job (it owns the mux/listener);
-// per-connection protocol + turn handling is the channel runner's job. The
-// pre-Step-3a design conflated them by inlining everything in *Server methods.
+// This file holds ONLY the server-side upgrade handler — NOT the websocket
+// channel implementation. The channel logic (frame types, turn dispatch,
+// RunAgent, event framing, dedupe, etc.) lives in channelrunner/websocket/,
+// registered with Manager alongside ilink/feishu. The split reflects the
+// connection-direction asymmetry: ilink/feishu are outbound (Xira connects to
+// the platform in Runner.Start), websocket is inbound (clients connect to
+// Xira), so it needs this HTTP entry to accept the upgrade.
 
 const websocketDefaultEntrypoint = "websocket-default"
 
