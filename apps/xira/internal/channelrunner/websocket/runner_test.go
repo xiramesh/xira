@@ -113,6 +113,11 @@ func typesOf(frames []outboundFrame) []string {
 	return out
 }
 
+// noopRegister is a no-op onRegister callback for handleMessage tests that
+// don't exercise the connection registry (they drive handleMessage directly,
+// simulating a single already-registered connection).
+var noopRegister = func(frt.ChatKey) {}
+
 // --- tests ---
 
 // TestRunnerConcurrentSameChatDoesNotRace: two messages to the SAME chat,
@@ -140,8 +145,8 @@ func TestRunnerConcurrentSameChatDoesNotRace(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); runner.handleMessage(ctx, msg1, "websocket-default", caps.write, addActive, removeActive) }()
-	go func() { defer wg.Done(); runner.handleMessage(ctx, msg2, "websocket-default", caps.write, addActive, removeActive) }()
+	go func() { defer wg.Done(); runner.handleMessage(ctx, msg1, "websocket-default", caps.write, addActive, removeActive, noopRegister) }()
+	go func() { defer wg.Done(); runner.handleMessage(ctx, msg2, "websocket-default", caps.write, addActive, removeActive, noopRegister) }()
 
 	time.Sleep(50 * time.Millisecond) // let both dispatch
 	gmu.Lock()
@@ -176,7 +181,7 @@ func TestRunnerOnTurnResultEmitsEventAndResponseFrames(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive)
+	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive, noopRegister)
 
 	time.Sleep(100 * time.Millisecond) // let the turn + frames complete
 	types := typesOf(caps.snapshot())
@@ -223,7 +228,7 @@ func TestRunnerOnTurnResultEmitsInterruptFrame(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive)
+	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive, noopRegister)
 
 	time.Sleep(100 * time.Millisecond)
 	types := typesOf(caps.snapshot())
@@ -256,7 +261,7 @@ func TestRunnerOnTurnResultEmitsErrorFrameOnRunFailure(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive)
+	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive, noopRegister)
 
 	time.Sleep(100 * time.Millisecond)
 	var errFrame *outboundFrame

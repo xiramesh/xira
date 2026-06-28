@@ -25,7 +25,6 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"log/slog"
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
@@ -102,6 +101,29 @@ type Runner struct {
 	runtime    frt.Runtime
 	router     *progress.Router
 	dedupe     *dedupe.MessageDeduper
+
+	// conns is the per-Runner connection registry (RFC chatkey-session Step 3b).
+	// It maps a ChatKey to its single live connection, so outbound delivery
+	// (Emit / resume final) can find the client that originated a turn. This is
+	// websocket's analogue of ilink's accounts map (ilink/runner.go:83) and
+	// feishu's stable chatID — websocket connections are short-lived, so the
+	// registry tracks whichever is currently connected per chat key.
+	//
+	// One active connection per ChatKey: a new connection for an occupied key
+	// cancels the old one (see registerConn). Two live connections sharing a
+	// ChatKey would race for the same Router entry — a per-chatKey single-active-
+	// turn contract violation.
+	connMu sync.Mutex
+	conns  map[frt.ChatKey]*wsConn
+}
+
+// wsConn holds a live websocket connection's send capability and lifecycle.
+// send is the per-connection writeFrame closure from HandleConnection (it owns
+// the write mutex + fail-fast cancel). cancel tears the connection down, used
+// when the connection is superseded by a newer one for the same ChatKey.
+type wsConn struct {
+	send   func(outboundFrame) error
+	cancel context.CancelFunc
 }
 
 // NewRunner constructs a websocket Runner. rt may be nil in tests that inject
@@ -112,6 +134,7 @@ func NewRunner(def entrypoints.Definition, rt *frt.Service, stateRoot string) (*
 		runtime:    rt,
 		router:     progress.NewRouter(),
 		dedupe:     dedupe.New("", dedupeTTL),
+		conns:      map[frt.ChatKey]*wsConn{},
 	}, nil
 }
 
@@ -126,20 +149,131 @@ func (r *Runner) Start(ctx context.Context) error { return nil }
 // cancelled by their own ctx (owned by the HTTP handler).
 func (r *Runner) Stop(ctx context.Context) error { return nil }
 
-// Emit delivers an OutboundEnvelope to the websocket channel. This satisfies
-// channel.OutboundEmitter so resume (via Manager.Emit) can route a final
-// response back to websocket. NOTE: websocket connections are short-lived and
-// per-request; resume typically fires after the originating connection has
-// closed, so Emit cannot reliably push to the original client. It logs a
-// warning and returns nil (non-fatal) — resume delivery to a live client is a
-// future concern (Step 3b), not a regression (today's websocket has no resume
-// delivery path either).
-func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
-	slog.Warn("websocket Emit called but resume-to-live-connection is not yet supported",
-		"channel", "websocket",
-		"chat_id", env.Target.ChatID,
-	)
-	return nil
+// Capabilities advertises what this channel can do. websocket supports
+// proactive outbound (resume delivery to a live connection). Interactive
+// human response (in-IM approve/deny via human_response frames) is a future
+// concern — the inbound human_response frame is still rejected (see
+// HandleConnection) — so we do NOT advertise CapabilityInteractiveHumanResponse
+// yet (advertising an unimplemented capability would be a lie).
+func (r *Runner) Capabilities() channel.CapabilitySet {
+	return channel.CapabilitySet{
+		channel.CapabilityProactiveOutbound,
+	}
+}
+
+// Compile-time: *Runner implements channel.OutboundEmitter.
+var _ channel.OutboundEmitter = (*Runner)(nil)
+
+// Emit delivers an OutboundEnvelope to the websocket channel. It is the
+// unified outbound surface used by the resume path (RFC #27 — stateless HITL
+// resume): when a run resumed via HTTP/CLI produces a final, the runtime calls
+// Manager.Emit, which routes here by Target.Channel == "websocket".
+//
+// Addressing: the envelope's Target.ChatID + Target.SenderID identify the chat
+// key whose live connection should receive the frame. resume reconstructs
+// Target from the run's persisted SessionScope, so the (chat, sender) here is
+// the original inbound identity — matching the key the connection registered
+// under in handleMessage.
+//
+// If no live connection is registered for the key (the client disconnected
+// during the HITL pause — websocket connections are short-lived), Emit returns
+// an error. This is best-effort: the resume path (human_request_resume.go:101)
+// logs the error but does not fail the run, which is already persisted. We
+// return an error rather than silently nil so the gap is observable, not
+// swallowed (silent data loss, AGENTS.md §2).
+//
+// env.Type handling: OutboundAssistantFinal / OutboundProactiveMessage are
+// delivered as a "response" frame (the same shape OnTurnResult sends, so the
+// client's response handler covers both live turns and resumed finals).
+func (r *Runner) Emit(_ context.Context, env channel.OutboundEnvelope) error {
+	if env.Target == nil {
+		return fmt.Errorf("websocket Emit: envelope has no target")
+	}
+	chatID := strings.TrimSpace(env.Target.ChatID)
+	if chatID == "" {
+		return fmt.Errorf("websocket Emit: target has no chat_id")
+	}
+	content := ""
+	if env.Data != nil {
+		if v, ok := env.Data["content"].(string); ok {
+			content = v
+		}
+	}
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("websocket Emit: envelope has no content")
+	}
+	switch env.Type {
+	case channel.OutboundAssistantFinal, channel.OutboundProactiveMessage:
+	default:
+		return fmt.Errorf("websocket Emit: unsupported outbound type %q", env.Type)
+	}
+	conn := r.lookupConn(frt.ChatKeyFromInbound(*env.Target))
+	if conn == nil {
+		return fmt.Errorf("websocket Emit: no live connection for chat %q (connection may have closed)", chatID)
+	}
+	frame := outboundFrame{
+		Type:      "response",
+		RequestID: env.RequestID,
+		RunID:     env.RunID,
+		Data: map[string]any{
+			"status":  "completed",
+			"content": content,
+		},
+	}
+	return conn.send(frame)
+}
+
+// registerConn records a live connection under chatKey, returning the
+// registered connection handle. If a connection already holds this key (a
+// second client connected for the same chat), the old connection is cancelled
+// so its HandleConnection read loop returns and tears down — one active
+// connection per ChatKey. Two live connections sharing a ChatKey would race
+// for the same Router entry.
+//
+// The returned *wsConn is the caller's identity token: on disconnect, the
+// caller passes it to unsetConnIfOurs, which removes the entry ONLY if it
+// still owns the key (a newer connection may have replaced it).
+//
+// The caller must NOT re-register an already-registered connection (that would
+// cancel it via its own entry). HandleConnection registers at most once per
+// connection lifecycle.
+func (r *Runner) registerConn(key frt.ChatKey, send func(outboundFrame) error, cancel context.CancelFunc) *wsConn {
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
+	if existing, ok := r.conns[key]; ok && existing != nil && existing.cancel != nil {
+		existing.cancel()
+	}
+	c := &wsConn{send: send, cancel: cancel}
+	r.conns[key] = c
+	return c
+}
+
+// unsetConnIfOurs removes key's entry only if it is still the given connection.
+// When a newer connection has taken over the key (registerConn replaced it),
+// this is a no-op — the newer connection owns the key and must not be evicted.
+func (r *Runner) unsetConnIfOurs(key frt.ChatKey, conn *wsConn) {
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
+	if current, ok := r.conns[key]; ok && current == conn {
+		delete(r.conns, key)
+	}
+}
+
+// unregisterConn removes a connection from the registry. Called from
+// HandleConnection's defer when the connection ends (read loop returned /
+// cancelled). If the key has already been taken over by a newer connection
+// (registerConn replaced it), this is a no-op — the new connection owns the key.
+func (r *Runner) unregisterConn(key frt.ChatKey) {
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
+	delete(r.conns, key)
+}
+
+// lookupConn returns the live connection for key, or nil if none is registered.
+func (r *Runner) lookupConn(key frt.ChatKey) *wsConn {
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
+	return r.conns[key]
 }
 
 // HandleConnection services one websocket connection end-to-end. The HTTP
@@ -166,6 +300,29 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 	// pre-Step-3a api behavior (cancel() on write error).
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Connection-registry bookkeeping: this conn registers itself under its
+	// chat key (in handleMessage) so Emit can reach it, and unregisters when
+	// HandleConnection returns (disconnect). registered guards against
+	// self-cancel via registerConn's "cancel existing" rule — each conn
+	// registers at most once. handle is the conn's identity token; defer uses
+	// it to remove the entry ONLY if this conn still owns the key (a newer
+	// connection may have replaced it, and must not be evicted).
+	var (
+		registered      bool
+		registeredKey   frt.ChatKey
+		registeredHandle *wsConn
+		registeredMu    sync.Mutex
+	)
+	defer func() {
+		registeredMu.Lock()
+		key := registeredKey
+		handle := registeredHandle
+		registeredMu.Unlock()
+		if handle != nil {
+			r.unsetConnIfOurs(key, handle)
+		}
+	}()
 
 	conn.SetReadLimit(-1)
 
@@ -244,7 +401,24 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 				},
 			})
 		case "message":
-			r.handleMessage(connCtx, frame, defaultEntrypointID, writeFrame, addActive, removeActive)
+			r.handleMessage(connCtx, frame, defaultEntrypointID, writeFrame, addActive, removeActive, func(key frt.ChatKey) {
+				// Register this connection for outbound delivery ONCE per
+				// connection lifecycle. registerConn cancels any existing
+				// connection for this key, so re-registering the same conn
+				// would cancel itself — guarded by the registered flag.
+				registeredMu.Lock()
+				if registered {
+					registeredMu.Unlock()
+					return
+				}
+				registered = true
+				registeredKey = key
+				registeredMu.Unlock()
+				handle := r.registerConn(key, writeFrame, cancel)
+				registeredMu.Lock()
+				registeredHandle = handle
+				registeredMu.Unlock()
+			})
 		case "human_response":
 			_ = writeFrame(errorFrame(frame.ID, requestID, "unsupported_type", "human_response is reserved for a later websocket resume slice; use the HTTP human-request API for now", false))
 		case "ping":
@@ -270,6 +444,7 @@ func (r *Runner) handleMessage(
 	writeFrame func(outboundFrame) error,
 	addActive func(*activeRequest),
 	removeActive func(string),
+	onRegister func(key frt.ChatKey),
 ) {
 	requestID := requestIDOf(frame)
 	var data messageData
@@ -332,6 +507,12 @@ func (r *Runner) handleMessage(
 	// uses its default agent), whereas eventContext carries the effective ID for
 	// event-routing/filtering. Matching the pre-Step-3a behavior exactly.
 	chatKey := frt.ChatKeyFromInbound(prepared.eventContext)
+	// Register this connection under the chat key so outbound delivery (Emit /
+	// resume final) can reach the live client. onRegister (wired by
+	// HandleConnection) cancels any prior connection for the same key — one
+	// active connection per ChatKey. Called after dedupe + ack so invalid /
+	// duplicate / ignored messages never claim a registry slot.
+	onRegister(chatKey)
 	frameID := frame.ID
 	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
 		Runtime:      r.runtime,

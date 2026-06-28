@@ -89,7 +89,9 @@ func TestManagerEmitRoutesByChannel(t *testing.T) {
 }
 
 // TestManagerEmitUnknownChannelErrors verifies Emit returns a clear error when
-// no runner matches the target channel (e.g. websocket, not yet wired).
+// no runner is registered for the target channel. This Manager has only a
+// feishu runner, so Emit to "websocket" finds no match — even though
+// *websocket.Runner does implement OutboundEmitter, it isn't registered here.
 func TestManagerEmitUnknownChannelErrors(t *testing.T) {
 	mgr := &Manager{runners: []Runner{
 		&mockEmitRunner{id: "feishu-default", ch: "feishu"},
@@ -99,7 +101,7 @@ func TestManagerEmitUnknownChannelErrors(t *testing.T) {
 
 	err := mgr.Emit(context.Background(), env)
 	if err == nil {
-		t.Fatal("Emit to unknown channel should error")
+		t.Fatal("Emit to channel with no registered runner should error")
 	}
 }
 
