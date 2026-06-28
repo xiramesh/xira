@@ -287,10 +287,8 @@ func TestHandleMessageRegistersConnectionForEmit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	wsHandle := runner.newConn(caps.write, cancel)
-	onRegister := func(key frt.ChatKey) {
-		if displaced := runner.registerConnKey(wsHandle, key); displaced != nil && displaced.cancel != nil {
-			displaced.cancel()
-		}
+	onRegister := func(key frt.ChatKey) *wsConn {
+		return runner.registerConnKey(wsHandle, key)
 	}
 
 	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-9", "eve", "hi"),

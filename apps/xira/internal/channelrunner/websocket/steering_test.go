@@ -99,8 +99,8 @@ func TestSteeringOutputGoesToCurrentConnection(t *testing.T) {
 
 	// onRegister mirrors the FIXED HandleConnection wiring: register the key,
 	// do NOT cancel the displaced connection.
-	mkOnRegister := func(handle *wsConn) func(frt.ChatKey) {
-		return func(key frt.ChatKey) { runner.registerConnKey(handle, key) }
+	mkOnRegister := func(handle *wsConn) func(frt.ChatKey) *wsConn {
+		return func(key frt.ChatKey) *wsConn { return runner.registerConnKey(handle, key) }
 	}
 
 	key := keyOf("chat-s", "sam")
@@ -233,7 +233,7 @@ func TestStartedAckPrecedesResponseFrame(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	handle := runner.newConn(caps.write, cancel)
-	onReg := func(key frt.ChatKey) { runner.registerConnKey(handle, key) }
+	onReg := func(key frt.ChatKey) *wsConn { return runner.registerConnKey(handle, key) }
 
 	runner.handleMessage(ctx, makeMessageFrame("om_O", "chat-o", "u", "hi"),
 		"websocket-default", caps.write, addActive, removeActive, onReg)
@@ -295,7 +295,7 @@ func TestStartedAckFailureRollsBack(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	handle := runner.newConn(failingWrite, cancel)
-	onReg := func(key frt.ChatKey) { runner.registerConnKey(handle, key) }
+	onReg := func(key frt.ChatKey) *wsConn { return runner.registerConnKey(handle, key) }
 	key := keyOf("chat-r", "u")
 
 	runner.handleMessage(ctx, makeMessageFrame("om_R", "chat-r", "u", "hi"),
@@ -355,8 +355,8 @@ func TestSteeringAtomicOutcomeNoSwallow(t *testing.T) {
 	handleA := runner.newConn(capsA.write, cancelA)
 	handleB := runner.newConn(capsB.write, cancelB)
 
-	mkOnRegister := func(h *wsConn) func(frt.ChatKey) {
-		return func(key frt.ChatKey) { runner.registerConnKey(h, key) }
+	mkOnRegister := func(h *wsConn) func(frt.ChatKey) *wsConn {
+		return func(key frt.ChatKey) *wsConn { return runner.registerConnKey(h, key) }
 	}
 	key := keyOf("chat-t", "tim")
 
@@ -430,7 +430,7 @@ func TestConcurrentIdleMessagesNoLeak(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	handle := runner.newConn(caps.write, cancel)
-	onReg := func(key frt.ChatKey) { runner.registerConnKey(handle, key) }
+	onReg := func(key frt.ChatKey) *wsConn { return runner.registerConnKey(handle, key) }
 
 	var activeMu sync.Mutex
 	active := map[string]*activeRequest{}
@@ -470,4 +470,164 @@ func TestConcurrentIdleMessagesNoLeak(t *testing.T) {
 	if leaked > 0 {
 		t.Errorf("active map leaked %d entries after concurrent idle messages", leaked)
 	}
+}
+
+// TestDuplicateReconnectRefreshesRegistry locks PR #97 round-6 CRITICAL #2: a
+// reconnect retrying the same message_id must still refresh the live-connection
+// registry, so the active turn's final reaches the NEW socket. Before the fix,
+// the duplicate branch returned before onRegister, leaving the registry pointing
+// at the old (possibly dead) connection.
+func TestDuplicateReconnectRefreshesRegistry(t *testing.T) {
+	rt := newFakeRuntime()
+	runner := newTestRunner(t, rt)
+
+	capsOld := &capturedFrames{}
+	capsNew := &capturedFrames{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	oldConn := runner.newConn(capsOld.write, cancel)
+	newConn := runner.newConn(capsNew.write, cancel)
+	key := keyOf("chat-d", "u")
+
+	// Old connection registers first (simulating the original send).
+	runner.registerConnKey(oldConn, key)
+	if runner.lookupConn(key) != oldConn {
+		t.Fatal("old conn should own the key initially")
+	}
+
+	// New connection sends the SAME message_id (reconnect retry). onRegister for
+	// the new conn must run BEFORE the duplicate early-return, refreshing the
+	// registry to point at newConn.
+	mkOnRegister := func(h *wsConn) func(frt.ChatKey) *wsConn {
+		return func(k frt.ChatKey) *wsConn { return runner.registerConnKey(h, k) }
+	}
+	// First, make om_dup a duplicate: send it once (old conn) so dedupe occupies it.
+	runner.handleMessage(ctx, makeMessageFrame("om_dup", "chat-d", "u", "first-send"),
+		"websocket-default", capsOld.write, func(*activeRequest) {}, func(string) {}, mkOnRegister(oldConn))
+	time.Sleep(50 * time.Millisecond) // let the first turn complete + dedupe Complete
+
+	// Now the reconnect retry with the SAME message_id on the NEW connection.
+	runner.handleMessage(ctx, makeMessageFrame("om_dup", "chat-d", "u", "retry"),
+		"websocket-default", capsNew.write, func(*activeRequest) {}, func(string) {}, mkOnRegister(newConn))
+
+	// Registry must now point at the NEW connection (refreshed despite duplicate).
+	if got := runner.lookupConn(key); got != newConn {
+		t.Errorf("registry points at %p after reconnect duplicate, want newConn (CRITICAL #2: duplicate must refresh registry)", got)
+	}
+	// And the duplicate ack reached the new connection.
+	hasDup := false
+	for _, f := range capsNew.snapshot() {
+		if f.Type == "ack" {
+			if d, _ := f.Data.(map[string]any); d != nil {
+				if s, _ := d["status"].(string); s == "duplicate" {
+					hasDup = true
+				}
+			}
+		}
+	}
+	if !hasDup {
+		t.Error("new connection got no duplicate ack")
+	}
+}
+
+// TestStartedAckFailureRollsBackRegistry locks PR #97 round-6: when the accepted
+// ack write fails, the registry takeover is rolled back (prior owner restored),
+// not left pointing at the failed connection. Combined with dedupe forget +
+// Router Abort + removeActive, this makes ack-success the single commit point.
+func TestStartedAckFailureRollsBackRegistry(t *testing.T) {
+	rt := newFakeRuntime()
+	var calls int32
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
+		atomic.AddInt32(&calls, 1)
+		return frt.TurnResponse{RunID: "run", Status: "completed", FinalResponse: "ok"}, nil
+	}
+	runner := newTestRunner(t, rt)
+
+	capsOld := &capturedFrames{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	oldConn := runner.newConn(capsOld.write, cancel)
+	runner.registerConnKey(oldConn, keyOf("chat-rb", "u"))
+
+	// New connection's writeFrame always fails (connection dropped at ack time).
+	failingWrite := func(outboundFrame) error { return errWriteSimulated }
+	newConn := runner.newConn(failingWrite, cancel)
+	mkOnRegister := func(h *wsConn) func(frt.ChatKey) *wsConn {
+		return func(k frt.ChatKey) *wsConn { return runner.registerConnKey(h, k) }
+	}
+	key := keyOf("chat-rb", "u")
+
+	runner.handleMessage(ctx, makeMessageFrame("om_rb", "chat-rb", "u", "hi"),
+		"websocket-default", failingWrite, func(*activeRequest) {}, func(string) {}, mkOnRegister(newConn))
+	time.Sleep(50 * time.Millisecond)
+
+	// Turn must not have run.
+	if atomic.LoadInt32(&calls) != 0 {
+		t.Errorf("RunAgent called %d times, want 0 (ack failed, turn must not start)", calls)
+	}
+	// Registry must be rolled back to the prior owner (oldConn), NOT the failed
+	// new connection.
+	if got := runner.lookupConn(key); got != oldConn {
+		t.Errorf("registry points at %p after ack-failure rollback, want oldConn (takeover must roll back)", got)
+	}
+	// Router entry must be idle (Abort ran), so a follow-up starts fresh.
+	if runner.router.IsActive(key) {
+		t.Error("Router entry still active/reserved after ack-failure rollback")
+	}
+}
+
+// TestSteeredAckFailureRollsBack locks PR #97 round-6 CRITICAL #3: when the
+// steered ack write fails, dedupe is forgotten (allow retry) and the registry
+// takeover rolls back. Before the fix, the steered ack failure was silently
+// ignored, leaving dedupe stuck and registry pointing at the failed connection.
+func TestSteeredAckFailureRollsBack(t *testing.T) {
+	rt := newFakeRuntime()
+	// First turn blocks (active), so the second message is steered.
+	unblock := make(chan struct{})
+	fired := make(chan struct{})
+	first := true
+	rt.hold = func(inner chan struct{}) {
+		if first {
+			first = false
+			close(fired)
+			<-unblock
+		}
+		close(inner)
+	}
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
+		return frt.TurnResponse{RunID: "run", Status: "completed", FinalResponse: "ok"}, nil
+	}
+	runner := newTestRunner(t, rt)
+
+	capsA := &capturedFrames{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	connA := runner.newConn(capsA.write, cancel)
+	connB := runner.newConn(func(outboundFrame) error { return errWriteSimulated }, cancel) // B's writes fail
+	mkOnRegister := func(h *wsConn) func(frt.ChatKey) *wsConn {
+		return func(k frt.ChatKey) *wsConn { return runner.registerConnKey(h, k) }
+	}
+	key := keyOf("chat-sf", "u")
+
+	// A starts (blocks).
+	go runner.handleMessage(ctx, makeMessageFrame("om_A", "chat-sf", "u", "first"),
+		"websocket-default", capsA.write, func(*activeRequest) {}, func(string) {}, mkOnRegister(connA))
+	<-fired
+
+	// B sends same chat → steered. B's ack write FAILS. dedupe must be forgotten
+	// for B's message so it can be retried; registry must roll back to A.
+	runner.handleMessage(ctx, makeMessageFrame("om_B", "chat-sf", "u", "second"),
+		"websocket-default", func(outboundFrame) error { return errWriteSimulated },
+		func(*activeRequest) {}, func(string) {}, mkOnRegister(connB))
+
+	// Registry must roll back to A (B's takeover undone because B's ack failed).
+	if got := runner.lookupConn(key); got != connA {
+		t.Errorf("registry points at %p after steered-ack failure, want connA (rollback)", got)
+	}
+	// B's message_id dedupe must be forgotten (retriable). Re-Begin must succeed.
+	dk := dedupeKey("websocket-default", "om_B") // messageID is om_B (frame.ID)
+	if !runner.dedupe.Begin(dk, time.Now()) {
+		t.Error("B's dedupe key still processing after steered-ack failure rollback (must be forgotten for retry)")
+	}
+	close(unblock)
 }

@@ -293,6 +293,25 @@ func (r *Runner) registerConnKey(conn *wsConn, key frt.ChatKey) *wsConn {
 	return nil
 }
 
+// restoreConn reverts a registry takeover: if `old` is non-nil, it becomes the
+// owner of key again (the takeover that displaced it is undone). Used when a
+// message's accepted/steered ack write fails — the registry change must roll
+// back so resume/Emit still reaches the prior live connection instead of the
+// failed one (PR #97 round-6 review WARNING: takeover rollback).
+func (r *Runner) restoreConn(key frt.ChatKey, old *wsConn) {
+	if old == nil {
+		return
+	}
+	key = canonicalKey(key)
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
+	r.conns[key] = old
+	if old.keys == nil {
+		old.keys = map[frt.ChatKey]struct{}{}
+	}
+	old.keys[key] = struct{}{}
+}
+
 // releaseConn removes every key this connection still owns from the registry.
 // Called from HandleConnection's defer on disconnect. Keys already taken over
 // by a newer connection (registerConnKey returned them as displaced) are no
@@ -475,24 +494,19 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 				},
 			})
 		case "message":
-			r.handleMessage(connCtx, frame, defaultEntrypointID, writeFrame, addActive, removeActive, func(key frt.ChatKey) {
+			r.handleMessage(connCtx, frame, defaultEntrypointID, writeFrame, addActive, removeActive, func(key frt.ChatKey) *wsConn {
 				// Register this connection under the message's chat key so Emit
-				// can reach it. Every message registers (the protocol allows
-				// multiple frames with different chat/sender on one connection);
-				// registerConnKey is idempotent for the same connection+key.
+				// can reach it. Returns the displaced (prior) owner so the caller
+				// can roll back the takeover if the ack write fails (PR #97 round-6).
 				//
 				// Takeover does NOT cancel the displaced connection's ctx. The old
 				// connection's ctx is also the parent ctx of any ACTIVE turn it
 				// started (turns run in Router goroutines derived from connCtx).
 				// Cancelling it would kill that turn with context.Canceled (not
-				// ErrSteered), and a new message already acked+enqueued into the
-				// SteeringQueue would never be drained (only ErrSteered drains).
-				// So the registry records the new connection as the Emit target,
-				// while the old turn runs to completion on its own ctx — its
-				// OnTurnResult frames may fail to write (old writeFrame), but the
-				// turn is not murdered. The old connection's read loop exits when
-				// the client actually disconnects (EOF). (PR #97 re-review fix.)
-				r.registerConnKey(wsHandle, key)
+				// ErrSteered). So the registry records the new connection as the
+				// Emit target, while the old turn runs to completion on its own ctx;
+				// the old connection's read loop exits on real disconnect (EOF).
+				return r.registerConnKey(wsHandle, key)
 			})
 		case "human_response":
 			_ = writeFrame(errorFrame(frame.ID, requestID, "unsupported_type", "human_response is reserved for a later websocket resume slice; use the HTTP human-request API for now", false))
@@ -519,7 +533,7 @@ func (r *Runner) handleMessage(
 	writeFrame func(outboundFrame) error,
 	addActive func(*activeRequest),
 	removeActive func(string),
-	onRegister func(key frt.ChatKey),
+	onRegister func(key frt.ChatKey) *wsConn, // registers conn under key, returns displaced prior owner
 ) {
 	requestID := requestIDOf(frame)
 	var data messageData
@@ -541,28 +555,39 @@ func (r *Runner) handleMessage(
 		})
 		return
 	}
+	// Register the connection BEFORE dedupe/duplicate check, so a reconnect
+	// retrying the same message_id still refreshes the live-connection registry
+	// (PR #97 round-6 CRITICAL #2). The displaced prior owner is retained so the
+	// takeover can be rolled back if the subsequent ack write fails.
+	chatKey := frt.ChatKeyFromInbound(prepared.eventContext)
+	displaced := onRegister(chatKey)
+	// rollbackRegistry undoes the takeover on ack failure (restore prior owner).
+	rollbackRegistry := func() { r.restoreConn(chatKey, displaced) }
+
 	if !r.dedupe.Begin(prepared.dedupeKey, time.Now()) {
-		_ = writeFrame(outboundFrame{
+		// Duplicate: a retry/reconnect with the same message_id. The registry is
+		// already refreshed (above), so the active turn's final will reach this
+		// connection. Cite the active turn's request_id if one is running.
+		activeID := r.router.ActiveRequestID(chatKey)
+		ackData := map[string]any{"status": "duplicate", "message_id": prepared.messageID}
+		if activeID != "" {
+			ackData["reply_request_id"] = activeID
+		}
+		if err := writeFrame(outboundFrame{
 			Type:      "ack",
 			ID:        "srv_ack_" + requestID,
 			RequestID: requestID,
-			Data:      map[string]any{"status": "duplicate", "message_id": prepared.messageID},
-		})
+			Data:      ackData,
+		}); err != nil {
+			// Duplicate ack failed (connection dropped): roll back the registry
+			// takeover so Emit still reaches the prior live connection.
+			rollbackRegistry()
+		}
 		return
 	}
-	// Compute the chat key early: the registry update + steering check both
-	// need it before we decide whether to start a full turn.
-	chatKey := frt.ChatKeyFromInbound(prepared.eventContext)
-	// Register this connection under the chat key so outbound delivery (Emit /
-	// resume final / steered-retry output) reaches the live client. onRegister
-	// (wired by HandleConnection) updates the registry to this connection.
-	onRegister(chatKey)
-	// Build the turn's per-message state up front. activeReq is referenced by
-	// the session's OnRawEvent/OnTurnResult closures, so it must exist before
-	// the session — but it is only ADDed to the active map if this message
-	// actually starts a turn (not steered). send resolves to the CURRENT live
-	// connection at write time so a steered retry's frames reach whoever is
-	// connected now (PR #97 round-3).
+	// Build the turn's per-message state. activeReq is referenced by the
+	// session's closures but only addActive'd if this message starts a turn.
+	// send resolves to the CURRENT live connection at write time (round-3).
 	activeReq := &activeRequest{
 		requestID: requestID,
 		context:   prepared.eventContext,
@@ -623,7 +648,7 @@ func (r *Runner) handleMessage(
 		// The steered ack cites the active turn's request_id (reply_request_id)
 		// so the client knows which request_id the eventual terminal carries —
 		// scheme P (steering = "interjection in this session").
-		_ = writeFrame(outboundFrame{
+		if err := writeFrame(outboundFrame{
 			Type:      "ack",
 			ID:        "srv_ack_" + requestID,
 			RequestID: requestID,
@@ -632,11 +657,21 @@ func (r *Runner) handleMessage(
 				"message_id":       prepared.messageID,
 				"reply_request_id": outcome.ActiveRequestID,
 			},
-		})
+		}); err != nil {
+			// Steered ack failed (connection dropped). The message is already
+			// enqueued, but the client never got the ack. Roll back so the
+			// message_id can be retried cleanly: forget dedupe (allow retry) and
+			// restore the prior registry owner (round-6 CRITICAL #3).
+			r.dedupe.Forget(prepared.dedupeKey)
+			rollbackRegistry()
+		}
 		return
 	}
-	// Started: this message began a turn. Register + ack BEFORE launching the
-	// goroutine (outcome.Start). OnTurnResult (closure above) removeActive on exit.
+	// Started: this message began a turn (Router entry is RESERVED, not yet
+	// active). Register + accepted ack BEFORE Start() commits it to active, so
+	// a fast RunAgent cannot emit a terminal frame ahead of the ack (round-5),
+	// AND a concurrent message cannot be steered into this uncommitted turn
+	// (round-6: reserved is not steerable).
 	addActive(activeReq)
 	if err := writeFrame(outboundFrame{
 		Type:      "ack",
@@ -649,12 +684,13 @@ func (r *Runner) handleMessage(
 			"message_id":    prepared.messageID,
 		},
 	}); err != nil {
-		// Ack write failed (connection dropped). Roll back: forget dedupe,
-		// drop the activeRequest, and release the Router entry without running
-		// the turn (Abort marks it idle so the next message can start fresh).
+		// Accepted ack failed (connection dropped). Full rollback: the turn must
+		// NOT start, and ALL pre-ack state must unwind so the next message starts
+		// fresh (round-6 CRITICAL #1 + WARNING takeover rollback).
 		r.dedupe.Forget(prepared.dedupeKey)
 		removeActive(requestID)
-		outcome.Abort()
+		outcome.Abort() // Router: reserved → idle
+		rollbackRegistry()
 		return
 	}
 	outcome.Start()

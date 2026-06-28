@@ -32,7 +32,8 @@ type Router struct {
 
 type chatEntry struct {
 	mu              sync.Mutex
-	active          bool
+	active          bool // true only while a turn goroutine is running (committed)
+	reserved        bool // true between Route(started) and Start/Abort — pending, not yet committed
 	activeRequestID string // request_id of the in-flight turn (cited by steered acks)
 	steering        *SteeringQueue
 	spawn           *SpawnCollector
@@ -112,6 +113,13 @@ func (o RoutingOutcome) Abort() {
 // later steered message's outcome.ActiveRequestID can cite it. The caller calls
 // outcome.Start() once pre-turn registration is done. Handle wraps Route+Start
 // for channels that don't need the gap (ilink/feishu).
+//
+// A started turn is RESERVED (entry.reserved=true), NOT active. Only Start()
+// flips it to active. This means a second message arriving during the
+// pending-start window (after Route, before Start) sees active=false and STARTS
+// its own turn — it is NOT steered into the uncommitted one. This prevents the
+// orphan bug where a steered message cites a request_id whose turn later Aborts
+// (PR #97 round-6 review CRITICAL #1).
 func (r *Router) Route(key runtime.ChatKey, requestID, msg string, parentCtx context.Context, onNewTurn OnNewTurnFunc) RoutingOutcome {
 	// Lazy prune: evict entries idle longer than the TTL before routing, so
 	// Router.entries doesn't grow unboundedly (mirrors dedupe.pruneLocked).
@@ -125,7 +133,10 @@ func (r *Router) Route(key runtime.ChatKey, requestID, msg string, parentCtx con
 		entry.mu.Unlock()
 		return RoutingOutcome{Steered: true, ActiveRequestID: activeID}
 	}
-	entry.active = true
+	// Reserve the entry (NOT active). Until Start() commits it to active, a
+	// concurrent message sees active=false and starts its own turn — it cannot
+	// be orphaned into this uncommitted one.
+	entry.reserved = true
 	entry.activeRequestID = requestID
 	sq := entry.steering
 	entry.mu.Unlock()
@@ -144,6 +155,10 @@ func (r *Router) Route(key runtime.ChatKey, requestID, msg string, parentCtx con
 				return
 			}
 			started = true
+			entry.mu.Lock()
+			entry.reserved = false
+			entry.active = true
+			entry.mu.Unlock()
 			go func() {
 				defer r.markComplete(key)
 				onNewTurn(key, msg, ctx)
@@ -154,7 +169,10 @@ func (r *Router) Route(key runtime.ChatKey, requestID, msg string, parentCtx con
 				return
 			}
 			started = true
-			r.markComplete(key)
+			entry.mu.Lock()
+			entry.reserved = false
+			entry.activeRequestID = ""
+			entry.mu.Unlock()
 		},
 	}
 }
@@ -169,6 +187,7 @@ func (r *Router) markComplete(key runtime.ChatKey) {
 	}
 	entry.mu.Lock()
 	entry.active = false
+	entry.reserved = false
 	entry.activeRequestID = ""
 	entry.idleSince = time.Now()
 	entry.mu.Unlock()
@@ -188,6 +207,25 @@ func (r *Router) IsActive(key runtime.ChatKey) bool {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	return entry.active
+}
+
+// ActiveRequestID returns the request_id of the in-flight (committed active)
+// turn for chatKey, or "" if none. Used by websocket's duplicate-ack path to
+// tell a reconnecting client which request_id the active turn's terminal will
+// carry (scheme P). Lock order: r.mu → entry.mu.
+func (r *Router) ActiveRequestID(key runtime.ChatKey) string {
+	r.mu.Lock()
+	entry, ok := r.entries[key]
+	r.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.active {
+		return ""
+	}
+	return entry.activeRequestID
 }
 
 // prune evicts entries that are idle (no active turn) and have been idle

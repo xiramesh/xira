@@ -102,13 +102,14 @@ func TestRouterDifferentChatKeysIndependent(t *testing.T) {
 	var turns sync.WaitGroup
 	router := NewRouter()
 
+	// Add BEFORE Handle launches the goroutine (Add inside the goroutine races
+	// with Wait below — round-6 race fix).
+	turns.Add(2)
 	router.Handle(keyA, "", "msgA", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
-		turns.Add(1)
 		defer turns.Done()
 		<-block
 	})
 	router.Handle(keyB, "", "msgB", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
-		turns.Add(1)
 		defer turns.Done()
 		<-block
 	})
@@ -407,16 +408,49 @@ func TestRouteSteeredCitesActiveRequestID(t *testing.T) {
 	key := runtime.ChatKey{Channel: "ws", ChatID: "c", SenderID: "u"}
 	router := NewRouter()
 	block := make(chan struct{})
-	// First message starts a turn (request_id "req-A"), blocks.
-	router.Route(key, "req-A", "first", context.Background(),
+	// First message starts a turn (request_id "req-A"). It must be COMMITTED
+	// (Start) before the second message can be steered — a reserved (pending-
+	// start) turn is NOT steerable (round-6).
+	o1 := router.Route(key, "req-A", "first", context.Background(),
 		func(runtime.ChatKey, string, context.Context) { <-block })
+	o1.Start()
 	// Second message is steered; outcome must cite req-A.
 	o := router.Route(key, "req-B", "second", context.Background(), nil)
 	if !o.Steered {
-		t.Fatal("second message should be steered")
+		t.Fatal("second message should be steered (first turn is committed active)")
 	}
 	if o.ActiveRequestID != "req-A" {
 		t.Errorf("steered ActiveRequestID = %q, want req-A", o.ActiveRequestID)
 	}
 	close(block)
+}
+
+// TestRouteReservedNotSteerable locks PR #97 round-6 CRITICAL #1: a turn in the
+// pending-start window (Route'd but not yet Start'd — e.g. websocket is still
+// writing the accepted ack) is RESERVED, not active. A second message arriving
+// in that window must START its own turn, NOT be steered into the uncommitted
+// one. Otherwise, if the first turn Aborts (ack failed), the steered message is
+// orphaned (no active turn to drain it).
+func TestRouteReservedNotSteerable(t *testing.T) {
+	key := runtime.ChatKey{Channel: "ws", ChatID: "c", SenderID: "u"}
+	router := NewRouter()
+	// First message: Route but do NOT Start — simulate the pending-start window.
+	router.Route(key, "req-A", "first", context.Background(),
+		func(runtime.ChatKey, string, context.Context) { t.Error("pending turn must not run before Start") })
+	if router.IsActive(key) {
+		t.Fatal("reserved turn must NOT be IsActive (pending, uncommitted)")
+	}
+	// Second message in the window: must START, not steer.
+	ran := make(chan struct{}, 1)
+	o2 := router.Route(key, "req-B", "second", context.Background(),
+		func(runtime.ChatKey, string, context.Context) { ran <- struct{}{} })
+	if o2.Steered {
+		t.Fatal("second message was steered into a reserved (uncommitted) turn — orphan risk")
+	}
+	o2.Start()
+	select {
+	case <-ran:
+	case <-time.After(time.Second):
+		t.Fatal("second turn did not run")
+	}
 }
