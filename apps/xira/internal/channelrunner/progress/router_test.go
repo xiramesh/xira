@@ -279,6 +279,57 @@ func TestRouterEvictedEntryRebuiltOnNextMessage(t *testing.T) {
 	}
 }
 
+// TestRouterIsActiveReportsTurnState: IsActive reflects whether a turn is
+// in-flight for chatKey. Used by cross-package tests (feishu/ws) to wait for
+// async turn completion before asserting on side-effects.
+func TestRouterIsActiveReportsTurnState(t *testing.T) {
+	router := NewRouter()
+	key := runtime.ChatKey{Channel: "test", ChatID: "c1", SenderID: "u1"}
+
+	// No entry yet → not active.
+	if router.IsActive(key) {
+		t.Error("IsActive=true before any Handle (want false)")
+	}
+
+	// Start a turn and hold it open.
+	block := make(chan struct{})
+	closed := false
+	closeOnce := func() {
+		if !closed {
+			closed = true
+			close(block)
+		}
+	}
+	t.Cleanup(closeOnce)
+	go router.Handle(key, "hello", context.Background(), func(runtime.ChatKey, string, context.Context) {
+		<-block
+	})
+
+	// Wait until active (dispatch is async).
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && !router.IsActive(key) {
+		time.Sleep(time.Millisecond)
+	}
+	if !router.IsActive(key) {
+		t.Fatal("IsActive stayed false while a turn was in-flight")
+	}
+
+	// Release the turn; wait for it to go inactive.
+	closeOnce()
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && router.IsActive(key) {
+		time.Sleep(time.Millisecond)
+	}
+	if router.IsActive(key) {
+		t.Error("IsActive stayed true after turn completed (want false)")
+	}
+
+	// Unknown key → false.
+	if router.IsActive(runtime.ChatKey{Channel: "test", ChatID: "other", SenderID: "u1"}) {
+		t.Error("IsActive=true for a key that was never Handle'd")
+	}
+}
+
 // runOneTurn is a test helper: runs a Handle that completes immediately,
 // leaving the entry idle (active=false, idleSince set).
 func runOneTurn(router *Router, key runtime.ChatKey) {

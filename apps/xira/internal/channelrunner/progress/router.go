@@ -100,6 +100,22 @@ func (r *Router) markComplete(key runtime.ChatKey) {
 	entry.mu.Unlock()
 }
 
+// IsActive reports whether a turn is currently in flight for chatKey. Exported
+// so cross-package tests (feishu/ws) can wait for a dispatched turn to finish
+// before asserting on its side-effects (which run async in the router
+// goroutine). Lock order: r.mu → entry.mu (consistent with Handle/markComplete).
+func (r *Router) IsActive(key runtime.ChatKey) bool {
+	r.mu.Lock()
+	entry, ok := r.entries[key]
+	r.mu.Unlock()
+	if !ok {
+		return false
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	return entry.active
+}
+
 // prune evicts entries that are idle (no active turn) and have been idle
 // longer than routerEntryTTL. Called lazily from Handle (on-access, mirroring
 // dedupe.pruneLocked) — no background goroutine. Safe to call with any "now"

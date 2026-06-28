@@ -31,7 +31,12 @@ const messageDedupeTTL = time.Hour
 
 type Runner struct {
 	definition entrypoints.Definition
-	runtime    *frt.Service
+	// runtime is runtime.Runtime (interface) rather than *frt.Service so unit
+	// tests can inject a fake that blocks/scripts RunAgent without standing
+	// up a full Service with entrypoints+agents. *frt.Service satisfies this
+	// implicitly (runtime.go var _ assertion). Production wiring via NewRunner
+	// is unchanged.
+	runtime    frt.Runtime
 	appID      string
 	appSecret  string
 	verify     string
@@ -43,6 +48,7 @@ type Runner struct {
 	wsClient *larkws.Client
 
 	messages *dedupe.MessageDeduper
+	router   *progress.Router // per-Runner turn router (RFC chatkey-session Step 2)
 }
 
 func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot string) (*Runner, error) {
@@ -81,6 +87,7 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 		encryptKey: resolveValue(definition.EncryptKey, definition.EncryptKeyEnv),
 		client:     lark.NewClient(appID, appSecret, opts...),
 		messages:   dedupe.New(filepath.Join(stateDir, "dedupe.json"), messageDedupeTTL),
+		router:     progress.NewRouter(),
 	}, nil
 }
 
@@ -202,15 +209,18 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		)
 		return nil
 	}
-	messageProcessed := false
-	defer func() {
-		if messageProcessed {
-			r.messages.Complete(dedupeKey, time.Now())
-			return
-		}
-		r.messages.Forget(dedupeKey)
-	}()
-
+	// Per-chatKey turn handling is delegated to ChatKeySession (RFC
+	// chatkey-session Step 2). The Session owns the steering retry loop,
+	// ChatContext lifecycle, SpawnCollector cleanup, and child-cancel
+	// registry; feishu injects only channel-specific delivery (r.send with
+	// chatID) and dedupe success/failure via closures.
+	//
+	// Behavior change vs pre-Step-2 (changelog): lark ws dispatcher delivers
+	// each inbound message in its own goroutine, so two messages in the SAME
+	// chat previously raced as two concurrent RunAgent turns — a per-chatKey
+	// single-active-turn contract violation. The Router now serializes them:
+	// the 2nd message steers (enqueued) instead of racing. Different chats
+	// still run in parallel (per-chatKey isolation preserved).
 	metadata := r.buildMetadata(message, event.Event.Sender, chatType, messageType)
 	slog.Info("feishu dispatching message to runtime",
 		"entrypoint_id", r.definition.ID,
@@ -220,79 +230,51 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		"sender_id", senderID,
 	)
 	inbound := channel.NewInboundContextWithEntrypoint("feishu", r.definition.ID, senderID, metadata)
-	// Conversation progress forwarder: projects allowlisted runtime facts
-	// (delegate failed/timeout, waiting_human) into this IM chat during the
-	// Per-chat-key progress delivery (RFC #48): ChatContext replaces Forwarder.
-	policy := progress.DefaultPolicy()
-	chatCtx := progress.NewChatContext(ctx, progress.ChatContextConfig{
-		Sender: progress.SenderFunc(func(ctx context.Context, m progress.Message) error {
-			return r.send(ctx, chatID, m.Text)
-		}),
-		MaxChars: policy.MaxChars,
-		Policy:   policy,
-	})
-	chatCtx.Start()
-	runCtx := frt.WithEventBus(ctx, chatCtx)
-	resp, err := r.runtime.RunAgent(runCtx, frt.TurnRequest{
+	chatKey := frt.ChatKeyFromInbound(inbound)
+	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
+		Runtime:      r.runtime,
 		EntrypointID: r.definition.ID,
-		Message:      content,
-		// Trigger identity travels as a first-class InboundContext: channel +
-		// chat/sender/space are extracted from the metadata map so the session
-		// lands under sessions/feishu/<entrypoint>/chat_<id>__sender_<id>/.
-		Context: inbound,
-	})
-	chatCtx.Stop()
-	if err != nil {
-		slog.Error("feishu runtime run failed",
+		Inbound:      inbound,
+		SendProgress: func(ctx context.Context, text string) error {
+			return r.send(ctx, chatID, text)
+		},
+		SendFinal: func(ctx context.Context, text string) error {
+			return r.send(ctx, chatID, text)
+		},
+		// Dedupe success/failure dual-path (preserves feishu's pre-Step-2
+		// semantics): success → Complete (TTL-retain against lark redelivery);
+		// failure → Forget (delete entry, allow retry). empty-final counts as
+		// success (intentional silence — see Session.turnSucceeded).
+		DedupeComplete: func() { r.messages.Complete(dedupeKey, time.Now()) },
+		DedupeForget:   func() { r.messages.Forget(dedupeKey) },
+		// OnRunError reproduces the pre-Step-2 error log. The error itself
+		// cannot propagate to the SDK (turns run async; handleMessageReceive
+		// has already returned). Lark ws SDK ignores handler errors anyway
+		// (no retry), so this is observability-only.
+		OnRunError: func(err error) {
+			slog.Error("feishu runtime run failed",
+				"entrypoint_id", r.definition.ID,
+				"chat_id", chatID,
+				"message_id", messageID,
+				"sender_id", senderID,
+				"error", err)
+		},
+		SpawnResetter: func() {
+			if c := r.router.SpawnCollectorFor(chatKey); c != nil {
+				c.Reset()
+			}
+		},
+		LogFields: []any{
 			"entrypoint_id", r.definition.ID,
+			"app_id", r.appID,
 			"chat_id", chatID,
+			"chat_type", chatType,
 			"message_id", messageID,
 			"sender_id", senderID,
-			"error", err,
-		)
-		return fmt.Errorf("feishu entrypoint %s run agent: %w", r.definition.ID, err)
-	}
-	slog.Info("feishu runtime run completed",
-		"entrypoint_id", r.definition.ID,
-		"run_id", resp.RunID,
-		"agent_id", resp.AgentID,
-		"status", resp.Status,
-		"session_id", resp.SessionID,
-		"chat_id", chatID,
-		"message_id", messageID,
-		"tool_calls", len(resp.ToolCalls),
-		"events", len(resp.Events),
-		"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
-	)
-	if strings.TrimSpace(resp.FinalResponse) == "" {
-		slog.Warn("feishu response skipped",
-			"entrypoint_id", r.definition.ID,
-			"run_id", resp.RunID,
-			"chat_id", chatID,
-			"message_id", messageID,
-			"reason", "empty_final_response",
-		)
-		messageProcessed = true
-		return nil
-	}
-	if err := r.send(ctx, chatID, resp.FinalResponse); err != nil {
-		slog.Error("feishu response send failed",
-			"entrypoint_id", r.definition.ID,
-			"run_id", resp.RunID,
-			"chat_id", chatID,
-			"message_id", messageID,
-			"error", err,
-		)
-		return fmt.Errorf("feishu entrypoint %s send response: %w", r.definition.ID, err)
-	}
-	messageProcessed = true
-	slog.Info("feishu response sent",
-		"entrypoint_id", r.definition.ID,
-		"run_id", resp.RunID,
-		"chat_id", chatID,
-		"message_id", messageID,
-		"final_response_chars", utf8.RuneCountInString(resp.FinalResponse),
-	)
+		},
+	})
+	// Non-blocking: returns immediately (steer enqueue or dispatch goroutine).
+	session.Handle(ctx, content)
 	return nil
 }
 
