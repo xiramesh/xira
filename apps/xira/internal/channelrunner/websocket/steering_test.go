@@ -147,15 +147,43 @@ func TestSteeringOutputGoesToCurrentConnection(t *testing.T) {
 	// to B at retry time). A must NOT receive B's terminal frame.
 	bFrames := capsB.snapshot()
 	bTypes := typesOf(bFrames)
-	hasResponse := false
-	for _, ty := range bTypes {
-		if ty == "response" {
-			hasResponse = true
+
+	// B must get a steered ack (not accepted) — it tells B the reply will come
+	// under the active turn's request_id, not its own (scheme P).
+	hasSteeredAck := false
+	for _, f := range bFrames {
+		if f.Type == "ack" {
+			data, _ := f.Data.(map[string]any)
+			status, _ := data["status"].(string)
+			if status == "steered" {
+				hasSteeredAck = true
+			}
+			if status == "accepted" {
+				t.Errorf("B got accepted ack for a steered message — should be steered")
+			}
 		}
 	}
-	if !hasResponse {
+	if !hasSteeredAck {
+		t.Errorf("B frames %v: no steered ack", bTypes)
+	}
+
+	// B must receive the response frame, and its request_id must be A's
+	// ("reply follows the active turn" — scheme P). B does NOT get a
+	// request_id=om_B terminal.
+	var respFrame *outboundFrame
+	for i := range bFrames {
+		if bFrames[i].Type == "response" {
+			respFrame = &bFrames[i]
+			break
+		}
+	}
+	if respFrame == nil {
 		t.Fatalf("connection B got frames %v, want a response frame (steering output must reach the current connection)", bTypes)
 	}
+	if respFrame.RequestID != "om_A" {
+		t.Errorf("B's response RequestID = %q, want %q (steering reply follows the active turn, scheme P)", respFrame.RequestID, "om_A")
+	}
+
 	for _, f := range capsA.snapshot() {
 		// A may have acks/early frames, but must NOT have the retry's response.
 		if f.Type == "response" {
@@ -164,12 +192,167 @@ func TestSteeringOutputGoesToCurrentConnection(t *testing.T) {
 	}
 
 	// B must not leak an activeRequest: B's message was steered, so B's
-	// OnTurnResult never runs and removeActive("om_B"...) never fires — UNLESS
-	// the fix prevents creating one for steered messages.
+	// OnTurnResult never runs — the fix must not addActive for steered messages.
 	activeMu.Lock()
 	leaked := len(active)
 	activeMu.Unlock()
 	if leaked > 0 {
 		t.Errorf("active map has %d leaked entries after steering (B should not own an activeRequest)", leaked)
+	}
+}
+
+// TestSteeringAtomicOutcomeNoSwallow locks the round-4 CRITICAL #1 fix: the
+// routing decision (started vs steered) is ATOMIC under Router's entry lock, so
+// a message is never swallowed by a TOCTOU window. The old code read IsActive
+// externally, then called Handle with a noop — if the active turn finished
+// between those steps, Handle started a new turn with a noop callback and the
+// message was lost (dedupe stuck). With the atomic outcome from Handle, B's
+// message sent AFTER A's turn completes is correctly started as a new turn.
+func TestSteeringAtomicOutcomeNoSwallow(t *testing.T) {
+	rt := newFakeRuntime()
+	// A's turn: block once so we can sequence, then succeed. Later turns (B)
+	// pass through immediately (hold closes their inner chan right away).
+	aUnblock := make(chan struct{})
+	fired := make(chan struct{})
+	firstDone := make(chan struct{})
+	rt.hold = func(inner chan struct{}) {
+		select {
+		case <-firstDone:
+			close(inner) // not the first call — release immediately
+			return
+		default:
+		}
+		close(fired)
+		<-aUnblock
+		close(inner)
+		close(firstDone)
+	}
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
+		return frt.TurnResponse{RunID: "run-x", Status: "completed", FinalResponse: "ok"}, nil
+	}
+	runner := newTestRunner(t, rt)
+	capsA := &capturedFrames{}
+	capsB := &capturedFrames{}
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	ctxB, cancelB := context.WithCancel(context.Background())
+	defer cancelB()
+	handleA := runner.newConn(capsA.write, cancelA)
+	handleB := runner.newConn(capsB.write, cancelB)
+
+	mkOnRegister := func(h *wsConn) func(frt.ChatKey) {
+		return func(key frt.ChatKey) { runner.registerConnKey(h, key) }
+	}
+	key := keyOf("chat-t", "tim")
+
+	// A starts a turn (blocks).
+	go runner.handleMessage(ctxA, makeMessageFrame("om_A", "chat-t", "tim", "first"),
+		"websocket-default", capsA.write, func(*activeRequest) {}, func(string) {}, mkOnRegister(handleA))
+	<-fired
+
+	// Let A's turn COMPLETE (markComplete runs) BEFORE B sends.
+	close(aUnblock)
+	for i := 0; i < 300; i++ {
+		if !runner.router.IsActive(key) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if runner.router.IsActive(key) {
+		t.Fatal("A's turn should have completed before B sends")
+	}
+
+	// Now B sends. Since A is idle, B must START a new turn (not be swallowed).
+	runner.handleMessage(ctxB, makeMessageFrame("om_B", "chat-t", "tim", "second"),
+		"websocket-default", capsB.write, func(*activeRequest) {}, func(string) {}, mkOnRegister(handleB))
+
+	// B must get an accepted ack (started), not steered.
+	time.Sleep(100 * time.Millisecond)
+	var gotAccepted bool
+	for _, f := range capsB.snapshot() {
+		if f.Type == "ack" {
+			data, _ := f.Data.(map[string]any)
+			if s, _ := data["status"].(string); s == "accepted" {
+				gotAccepted = true
+			}
+		}
+	}
+	if !gotAccepted {
+		t.Fatal("B did not get accepted ack — message may have been swallowed by a TOCTOU race")
+	}
+	// B must get a response (turn ran). Before the fix, noop swallowed it.
+	hasResp := false
+	for _, f := range capsB.snapshot() {
+		if f.Type == "response" {
+			hasResp = true
+		}
+	}
+	if !hasResp {
+		t.Fatal("B got no response — turn was not started (message swallowed)")
+	}
+	_ = handleA
+	_ = handleB
+}
+
+// TestConcurrentIdleMessagesNoLeak locks the round-4 CRITICAL #1 reverse race:
+// two idle messages sent concurrently to the SAME chat. With atomic outcome,
+// exactly one STARTS (accepted + activeRequest) and the other is STEERED
+// (steered ack, no activeRequest). Neither leaks, neither is swallowed.
+func TestConcurrentIdleMessagesNoLeak(t *testing.T) {
+	rt := newFakeRuntime()
+	// Hold the first RunAgent so the second message definitely sees active=true.
+	unblock := make(chan struct{})
+	fired := make(chan struct{})
+	once := sync.Once{}
+	rt.hold = func(inner chan struct{}) {
+		once.Do(func() { close(fired); <-unblock; close(inner) })
+	}
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
+		return frt.TurnResponse{RunID: "run-c", Status: "completed", FinalResponse: "done"}, nil
+	}
+	runner := newTestRunner(t, rt)
+	caps := &capturedFrames{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handle := runner.newConn(caps.write, cancel)
+	onReg := func(key frt.ChatKey) { runner.registerConnKey(handle, key) }
+
+	var activeMu sync.Mutex
+	active := map[string]*activeRequest{}
+	addActive := func(r *activeRequest) { activeMu.Lock(); active[r.requestID] = r; activeMu.Unlock() }
+	removeActive := func(id string) { activeMu.Lock(); delete(active, id); activeMu.Unlock() }
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); runner.handleMessage(ctx, makeMessageFrame("m1", "chat-c", "u", "one"), "websocket-default", caps.write, addActive, removeActive, onReg) }()
+	// Ensure m1 enters RunAgent (active) before m2 routes.
+	<-fired
+	go func() { defer wg.Done(); runner.handleMessage(ctx, makeMessageFrame("m2", "chat-c", "u", "two"), "websocket-default", caps.write, addActive, removeActive, onReg) }()
+
+	// Let m2 route (it should be steered). Then unblock m1.
+	time.Sleep(50 * time.Millisecond)
+	close(unblock)
+	wg.Wait()
+	time.Sleep(50 * time.Millisecond)
+
+	// Exactly one accepted, one steered (order unspecified).
+	acks := map[string]int{}
+	for _, f := range caps.snapshot() {
+		if f.Type == "ack" {
+			data, _ := f.Data.(map[string]any)
+			s, _ := data["status"].(string)
+			acks[s]++
+		}
+	}
+	if acks["accepted"] != 1 || acks["steered"] != 1 {
+		t.Errorf("acks = %+v, want exactly one accepted + one steered", acks)
+	}
+	// The steered message must not leak an activeRequest; the started one cleans
+	// up via OnTurnResult. After everything settles, active must be empty.
+	activeMu.Lock()
+	leaked := len(active)
+	activeMu.Unlock()
+	if leaked > 0 {
+		t.Errorf("active map leaked %d entries after concurrent idle messages", leaked)
 	}
 }

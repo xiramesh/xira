@@ -557,78 +557,24 @@ func (r *Runner) handleMessage(
 	// resume final / steered-retry output) reaches the live client. onRegister
 	// (wired by HandleConnection) updates the registry to this connection.
 	onRegister(chatKey)
-	// Steering short-circuit: if a turn is already active for this chatKey,
-	// this message is a user interjection (or a reconnect sending a new
-	// message). It is enqueued into the SteeringQueue and the active turn will
-	// drain it on its steering checkpoint. We must NOT start a second turn, and
-	// we must NOT create an activeRequest/session whose OnTurnResult would
-	// never run (that leaks the activeRequest). The active turn's retry will
-	// deliver its terminal frame to the CURRENT connection via resolveSend
-	// (which looks up the registry — already updated above to this connection).
-	// (PR #97 round-3 review: prevents activeReq leak + the "B only gets an ack"
-	// dead-end by giving B an explicit steered ack.)
-	if r.router.IsActive(chatKey) {
-		_ = writeFrame(outboundFrame{
-			Type:      "ack",
-			ID:        "srv_ack_" + requestID,
-			RequestID: requestID,
-			Data: map[string]any{
-				"status":     "steered",
-				"message_id": prepared.messageID,
-			},
-		})
-		r.router.Handle(chatKey, prepared.turn.Message, ctx, func(frt.ChatKey, string, context.Context) {})
-		return
-	}
+	// Build the turn's per-message state up front. activeReq is referenced by
+	// the session's OnRawEvent/OnTurnResult closures, so it must exist before
+	// the session — but it is only ADDed to the active map if this message
+	// actually starts a turn (not steered). send resolves to the CURRENT live
+	// connection at write time so a steered retry's frames reach whoever is
+	// connected now (PR #97 round-3).
 	activeReq := &activeRequest{
 		requestID: requestID,
 		context:   prepared.eventContext,
 		runIDs:    map[string]struct{}{},
 		seen:      map[string]struct{}{},
 	}
-	addActive(activeReq)
-	if err := writeFrame(outboundFrame{
-		Type:      "ack",
-		ID:        "srv_ack_" + requestID,
-		RequestID: requestID,
-		Data: map[string]any{
-			"status":        "accepted",
-			"entrypoint_id": prepared.eventContext.EntrypointID,
-			"channel":       "websocket",
-			"message_id":    prepared.messageID,
-		},
-	}); err != nil {
-		r.dedupe.Forget(prepared.dedupeKey)
-		removeActive(requestID)
-		return
-	}
-
-	// Dispatch the turn via ChatKeySession (structured-output path: OnTurnResult).
-	// Router provides per-chatKey single-active protection + steering. The turn
-	// runs in a router goroutine; OnTurnResult writes frames back via writeFrame.
-	//
-	// Inbound = prepared.turn.Context (NOT eventContext): turn.Context carries
-	// runEntrypointID (empty when the entrypoint isn't registered, so RunAgent
-	// uses its default agent), whereas eventContext carries the effective ID for
-	// event-routing/filtering. Matching the pre-Step-3a behavior exactly.
-	// (chatKey + onRegister already done above, before the IsActive check.)
-	// send resolves to the CURRENT live connection for chatKey at write time.
-	// This matters for steering: if connection B took over chatKey mid-turn,
-	// the retry runs in A's ChatKeySession but its terminal frame must reach B
-	// (resolveSend looks up the registry, which now points to B). The captured
-	// writeFrame would wrongly write to A. (PR #97 round-3 review fix.)
 	send := r.resolveSend(chatKey)
 	frameID := frame.ID
 	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
 		Runtime:      r.runtime,
 		EntrypointID: prepared.turn.EntrypointID,
 		Inbound:      prepared.turn.Context,
-		// OnRawEvent: stream in-flight signal RuntimeEvents as event frames
-		// (symmetric with ilink/feishu's OnRawEvent — WS is a channel too, not
-		// a special case). Replaces the old batched resp.Events loop in
-		// OnTurnResult (which would double-deliver if both were kept). Uses
-		// resolveSend (not the captured writeFrame) so a steered retry's events
-		// reach the current connection too.
 		OnRawEvent: func(evt frt.RuntimeEvent) {
 			if !activeReq.acceptEvent(evt) {
 				return
@@ -642,8 +588,6 @@ func (r *Runner) handleMessage(
 				_ = send(errorFrame(frameID, requestID, "run_failed", runErr.Error(), true))
 				return
 			}
-			// NOTE: resp.Events is NOT iterated here — in-flight events are
-			// streamed via OnRawEvent above. Iterating both would double-deliver.
 			var out outboundFrame
 			if resp.Interrupt != nil {
 				out = interruptFrame(frameID, requestID, resp)
@@ -662,7 +606,51 @@ func (r *Runner) handleMessage(
 			}
 		},
 	})
-	session.Handle(ctx, prepared.turn.Message)
+	// Dispatch atomically: session.Handle → router.Handle decides (under one
+	// entry lock) whether this message STARTS a turn or is STEERED into the
+	// active turn's queue. The outcome drives the ack + activeRequest — no
+	// separate IsActive race (PR #97 round-4 review: the old IsActive-then-Handle
+	// TOCTOU could swallow a message if the active turn finished between the two
+	// steps, leaving a stuck dedupe entry).
+	steered := session.Handle(ctx, prepared.turn.Message)
+	if steered {
+		// Steered: the message is an interjection on the active turn. It will be
+		// drained on the active turn's steering checkpoint and the reply comes
+		// via that turn's OnTurnResult (resolveSend routes it to the current
+		// connection). This message does NOT run its own turn, so it gets no
+		// independent terminal frame and no activeRequest (which would leak).
+		// The steered ack tells the client the reply will arrive under the
+		// active turn's request_id (steering = "interjection in this session",
+		// not an independent request — PR #97 round-4, scheme P).
+		_ = writeFrame(outboundFrame{
+			Type:      "ack",
+			ID:        "srv_ack_" + requestID,
+			RequestID: requestID,
+			Data: map[string]any{
+				"status":     "steered",
+				"message_id": prepared.messageID,
+			},
+		})
+		return
+	}
+	// Started: this message began a turn. Track it for event routing + cleanup,
+	// and ack accepted. The OnTurnResult closure (above) removeActive on exit.
+	addActive(activeReq)
+	if err := writeFrame(outboundFrame{
+		Type:      "ack",
+		ID:        "srv_ack_" + requestID,
+		RequestID: requestID,
+		Data: map[string]any{
+			"status":        "accepted",
+			"entrypoint_id": prepared.eventContext.EntrypointID,
+			"channel":       "websocket",
+			"message_id":    prepared.messageID,
+		},
+	}); err != nil {
+		r.dedupe.Forget(prepared.dedupeKey)
+		removeActive(requestID)
+		return
+	}
 }
 
 type preparedTurn struct {

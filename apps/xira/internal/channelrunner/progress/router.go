@@ -55,7 +55,15 @@ func NewRouter() *Router {
 // an active one (enqueues to SteeringQueue). The onNewTurn callback is
 // per-call — the caller passes its own closure with per-message context
 // (account, sender, etc.) that Router's lifecycle can't know about.
-func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Context, onNewTurn OnNewTurnFunc) {
+//
+// Returns true if the message was STEERED (enqueued because a turn is active
+// for this key); false if a NEW turn was started (onNewTurn runs in a goroutine).
+// The outcome is decided atomically under entry.mu (the active check and the
+// enqueue/start happen in the same critical section), so callers can rely on
+// it without a separate IsActive race (PR #97 round-4 review: previously
+// websocket read IsActive then called Handle with a noop callback, and a turn
+// completing between the two steps swallowed the message).
+func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Context, onNewTurn OnNewTurnFunc) bool {
 	// Lazy prune: evict entries idle longer than the TTL before routing, so
 	// Router.entries doesn't grow unboundedly (mirrors dedupe.pruneLocked).
 	r.prune(time.Now())
@@ -65,7 +73,7 @@ func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Conte
 	if entry.active {
 		entry.steering.Enqueue(msg)
 		entry.mu.Unlock()
-		return
+		return true // steered
 	}
 	entry.active = true
 	sq := entry.steering
@@ -84,6 +92,7 @@ func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Conte
 		defer r.markComplete(key)
 		onNewTurn(key, msg, ctx)
 	}()
+	return false // started new turn
 }
 
 // markComplete marks the turn as inactive for this chatKey.
