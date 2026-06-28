@@ -12,7 +12,6 @@ import (
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelcontrol"
-	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
@@ -20,7 +19,6 @@ import (
 type Server struct {
 	runtime         *frt.Service
 	channelControls ChannelControls
-	websocketDedupe *dedupe.MessageDeduper
 	server          *http.Server
 	addr            string
 }
@@ -40,9 +38,8 @@ func NewServer(rt *frt.Service, addr string, controls ...ChannelControls) *Serve
 		addr = "127.0.0.1:0"
 	}
 	s := &Server{
-		runtime:         rt,
-		addr:            addr,
-		websocketDedupe: dedupe.New("", websocketMessageDedupeTTL),
+		runtime: rt,
+		addr:    addr,
 	}
 	if len(controls) > 0 {
 		s.channelControls = controls[0]

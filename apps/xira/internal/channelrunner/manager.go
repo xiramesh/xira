@@ -10,6 +10,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/channelrunner/feishu"
 	"github.com/xiramesh/xira/internal/channelrunner/ilink"
+	"github.com/xiramesh/xira/internal/channelrunner/websocket"
 	"github.com/xiramesh/xira/internal/runtime"
 )
 
@@ -43,6 +44,13 @@ func NewManager(rt *runtime.Service) (*Manager, error) {
 			slog.Info("channel runner registered", "id", runner.ID(), "channel", runner.Channel())
 		case "ilink":
 			runner, err := ilink.NewRunner(definition, rt, rt.StateRoot())
+			if err != nil {
+				return nil, err
+			}
+			manager.runners = append(manager.runners, runner)
+			slog.Info("channel runner registered", "id", runner.ID(), "channel", runner.Channel())
+		case "websocket":
+			runner, err := websocket.NewRunner(definition, rt, rt.StateRoot())
 			if err != nil {
 				return nil, err
 			}
@@ -85,6 +93,23 @@ func (m *Manager) Count() int {
 		return 0
 	}
 	return len(m.runners)
+}
+
+// WSRunner returns the websocket Runner registered with this Manager, or nil
+// if none. The api package's HTTP upgrade handler delegates per-connection
+// work to this Runner (RFC chatkey-session Step 3a). If multiple websocket
+// entrypoints exist, the first registered wins (sufficient today; per-
+// entrypoint selection can be added when needed).
+func (m *Manager) WSRunner() *websocket.Runner {
+	if m == nil {
+		return nil
+	}
+	for _, runner := range m.runners {
+		if ws, ok := runner.(*websocket.Runner); ok {
+			return ws
+		}
+	}
+	return nil
 }
 
 func (m *Manager) CreatePairing(ctx context.Context, entrypointID string) (channelcontrol.PairingSnapshot, error) {
