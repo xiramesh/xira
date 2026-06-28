@@ -135,8 +135,8 @@ func typesOf(frames []outboundFrame) []string {
 // OnTurnResult/OnRawEvent) can find the connection. Tests that previously used
 // a no-op onRegister must register, otherwise the turn's terminal frame is
 // dropped (resolveSend finds no live connection).
-func registerConnForTest(runner *Runner, writeFrame func(outboundFrame) error) func(frt.ChatKey) *wsConn {
-	return func(key frt.ChatKey) *wsConn {
+func registerConnForTest(runner *Runner, writeFrame func(outboundFrame) error) func(frt.ChatKey) (*wsConn, bool) {
+	return func(key frt.ChatKey) (*wsConn, bool) {
 		return runner.registerConnKey(runner.newConn(writeFrame, func() {}), key)
 	}
 }

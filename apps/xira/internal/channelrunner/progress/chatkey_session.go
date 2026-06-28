@@ -142,27 +142,17 @@ func NewChatKeySession(key runtime.ChatKey, router *Router, cfg ChatKeySessionCo
 	return &ChatKeySession{key: key, router: router, cfg: cfg}
 }
 
-// Handle routes + starts immediately (for ilink/feishu: pre-turn registration
-// is done before this call). requestID is recorded so steered messages can cite
-// it. Returns true if steered, false if started.
+// Handle routes + starts immediately. requestID is recorded so steered/duplicate
+// messages can cite it as the reply target. Returns true if steered, false if
+// started. All channels (ilink/feishu/websocket) use this — websocket's
+// single-connection contract (PR #97 round-7) means no concurrent routing, so
+// the two-phase Route/Start of rounds 5-6 is no longer needed.
 func (s *ChatKeySession) Handle(ctx context.Context, requestID, msg string) bool {
 	if s.router != nil {
 		return s.router.Handle(s.key, requestID, msg, ctx, s.runTurn)
 	}
 	s.runTurn(s.key, msg, ctx)
 	return false
-}
-
-// Route routes WITHOUT starting the turn goroutine, returning the outcome so
-// websocket can complete pre-turn registration (addActive + accepted ack)
-// before calling Start(). This closes the round-5 frame-ordering gap: the turn
-// cannot produce a terminal frame until the accepted ack has been sent.
-func (s *ChatKeySession) Route(ctx context.Context, requestID, msg string) RoutingOutcome {
-	if s.router != nil {
-		return s.router.Route(s.key, requestID, msg, ctx, s.runTurn)
-	}
-	s.runTurn(s.key, msg, ctx)
-	return RoutingOutcome{}
 }
 
 // runTurn is the extracted ilink closure body. Its signature matches

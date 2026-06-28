@@ -3,7 +3,7 @@ package websocket
 import (
 	"context"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,12 +37,11 @@ func keyOf(chatID, senderID string) frt.ChatKey {
 
 // registerOneKey is a test shorthand: build a wsConn (newConn) and register
 // one ChatKey under it. Returns the handle for disconnect-cleanup tests
-// (releaseConn). Mirrors production HandleConnection's onRegister: registers
-// the key but does NOT cancel a displaced connection (takeover must not murder
-// an active turn — PR #97 round-3 review).
+// (releaseConn). Under the single-connection contract this assumes no live
+// prior owner (fresh key) — the test setup ensures that.
 func registerOneKey(runner *Runner, chatID, senderID string, send func(outboundFrame) error, cancel context.CancelFunc) *wsConn {
 	conn := runner.newConn(send, cancel)
-	runner.registerConnKey(conn, keyOf(chatID, senderID))
+	_, _ = runner.registerConnKey(conn, keyOf(chatID, senderID))
 	return conn
 }
 
@@ -140,41 +139,6 @@ func TestEmitUnregisteredOnConnClose(t *testing.T) {
 	}
 	if got := caps.snapshot(); len(got) != 0 {
 		t.Errorf("dead connection received %d frames, want 0", len(got))
-	}
-}
-
-// TestNewConnectionReplacesOldForSameChatKey verifies the takeover contract:
-// when a second connection registers under the same ChatKey, the registry
-// points to the NEW connection (Emit reaches it), but the OLD connection is
-// NOT cancelled — takeover must not murder an active turn whose ctx is the old
-// connection's connCtx (PR #97 round-3 review). The old connection's read loop
-// exits naturally when the client disconnects.
-func TestNewConnectionReplacesOldForSameChatKey(t *testing.T) {
-	runner := newTestRunner(t, newFakeRuntime())
-
-	oldCtx, oldCancel := context.WithCancel(context.Background())
-	defer oldCancel()
-	registerOneKey(runner, "chat-3", "carol", func(outboundFrame) error { return nil }, oldCancel)
-
-	newCaps := &capturedFrames{}
-	_, newCancel := context.WithCancel(context.Background())
-	defer newCancel()
-	registerOneKey(runner, "chat-3", "carol", newCaps.write, newCancel)
-
-	// Takeover must NOT cancel the old connection (it may have an active turn).
-	if oldCtx.Err() != nil {
-		t.Fatal("old connection was cancelled on takeover — would murder an active turn (PR #97 round-3)")
-	}
-
-	// Registry points to the new connection; Emit reaches it.
-	env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)
-	env.Target = &channel.InboundContext{Channel: "websocket", ChatID: "chat-3", SenderID: "carol"}
-	env.Data = map[string]any{"content": "to-new"}
-	if err := runner.Emit(context.Background(), env); err != nil {
-		t.Fatalf("Emit returned error: %v", err)
-	}
-	if got := newCaps.snapshot(); len(got) != 1 {
-		t.Errorf("new connection got %d frames, want 1", len(got))
 	}
 }
 
@@ -287,7 +251,7 @@ func TestHandleMessageRegistersConnectionForEmit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	wsHandle := runner.newConn(caps.write, cancel)
-	onRegister := func(key frt.ChatKey) *wsConn {
+	onRegister := func(key frt.ChatKey) (*wsConn, bool) {
 		return runner.registerConnKey(wsHandle, key)
 	}
 
@@ -322,114 +286,14 @@ func TestHandleMessageRegistersConnectionForEmit(t *testing.T) {
 	}
 }
 
-// TestReleaseConnDoesNotEvictNewOwner verifies the ownership guard: when a
-// newer connection took over a key, the OLD connection's disconnect cleanup
-// (releaseConn) must NOT evict the new owner. releaseConn removes only keys
-// whose current mapping still points at the disconnecting connection.
-func TestReleaseConnDoesNotEvictNewOwner(t *testing.T) {
-	runner := newTestRunner(t, newFakeRuntime())
-
-	oldCaps := &capturedFrames{}
-	newCaps := &capturedFrames{}
-	_, oldCancel := context.WithCancel(context.Background())
-	_, newCancel := context.WithCancel(context.Background())
-
-	oldHandle := runner.newConn(oldCaps.write, oldCancel)
-	runner.registerConnKey(oldHandle, keyOf("chat-A", "zoe"))
-	// New connection takes over the same key.
-	newHandle := runner.newConn(newCaps.write, newCancel)
-	displaced := runner.registerConnKey(newHandle, keyOf("chat-A", "zoe"))
-	if displaced != oldHandle {
-		t.Fatalf("registerConnKey should have returned the displaced old handle")
-	}
-
-	// Old connection now disconnects — its defer calls releaseConn. Must NOT
-	// evict the new owner, because key chat-A no longer maps to oldHandle.
-	runner.releaseConn(oldHandle)
-	if got := runner.lookupConn(keyOf("chat-A", "zoe")); got == nil {
-		t.Fatal("new owner evicted by old connection's disconnect cleanup")
-	}
-
-	// Emit must reach the NEW connection, not error.
-	env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)
-	env.Target = &channel.InboundContext{Channel: "websocket", ChatID: "chat-A", SenderID: "zoe"}
-	env.Data = map[string]any{"content": "to-new"}
-	if err := runner.Emit(context.Background(), env); err != nil {
-		t.Fatalf("Emit should reach new owner: %v", err)
-	}
-	if got := oldCaps.snapshot(); len(got) != 0 {
-		t.Errorf("old connection got %d frames, want 0 (it was replaced)", len(got))
-	}
-	if got := newCaps.snapshot(); len(got) != 1 {
-		t.Errorf("new connection got %d frames, want 1", len(got))
-	}
-	_ = newHandle
-}
-
-// TestOneConnectionMultipleChatKeys verifies a single WS connection can own
-// multiple ChatKeys simultaneously. The protocol allows consecutive message
-// frames on one connection, each with its own context.chat_id/sender_id. PR #97
-// review CRITICAL #2: the original `registered bool` guard only registered the
-// FIRST ChatKey, so resume delivery for later chats on the same connection
-// failed. The fix lets registerConn recognize "same connection" (by identity)
-// so it does NOT cancel itself, and the connection tracks all its keys.
-func TestOneConnectionMultipleChatKeys(t *testing.T) {
-	runner := newTestRunner(t, newFakeRuntime())
-	caps := &capturedFrames{}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// One connection (one newConn handle) registers two different chat keys.
-	// registerConnKey must recognize the same handle (by id) and NOT displace
-	// itself — so the connection's cancel never fires.
-	wsHandle := runner.newConn(caps.write, cancel)
-	runner.registerConnKey(wsHandle, keyOf("chat-1", "alice"))
-	runner.registerConnKey(wsHandle, keyOf("chat-2", "alice"))
-
-	// The connection must not have been cancelled by the second register.
-	if ctx.Err() != nil {
-		t.Fatal("connection was cancelled when registering a second key on the SAME connection")
-	}
-
-	// Both keys must resolve to this connection.
-	if got := runner.lookupConn(keyOf("chat-1", "alice")); got == nil {
-		t.Error("first key not in registry")
-	}
-	if got := runner.lookupConn(keyOf("chat-2", "alice")); got == nil {
-		t.Error("second key not in registry")
-	}
-
-	// Emit to EITHER key must reach the connection.
-	for _, chatID := range []string{"chat-1", "chat-2"} {
-		env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)
-		env.Target = &channel.InboundContext{Channel: "websocket", ChatID: chatID, SenderID: "alice"}
-		env.Data = map[string]any{"content": "to-" + chatID}
-		if err := runner.Emit(context.Background(), env); err != nil {
-			t.Errorf("Emit to %s on multi-key connection: %v", chatID, err)
-		}
-	}
-	if got := len(caps.snapshot()); got != 2 {
-		t.Errorf("multi-key connection got %d frames, want 2 (one per chat)", got)
-	}
-
-	// Disconnect cleanup (releaseConn) must remove BOTH keys this connection owns.
-	runner.releaseConn(wsHandle)
-	if runner.lookupConn(keyOf("chat-1", "alice")) != nil {
-		t.Error("first key still in registry after releaseConn")
-	}
-	if runner.lookupConn(keyOf("chat-2", "alice")) != nil {
-		t.Error("second key still in registry after releaseConn")
-	}
-}
-
 // TestRegisterConnKeyAndReleaseConnNilSafe covers the defensive nil guards.
 // registerConnKey(nil, ...) returns nil (no panic); releaseConn(nil) is a
 // no-op. These guards keep the registry safe if a caller ever passes a nil
 // handle (e.g. a future code path that conditionally constructs a wsConn).
 func TestRegisterConnKeyAndReleaseConnNilSafe(t *testing.T) {
 	runner := newTestRunner(t, newFakeRuntime())
-	if got := runner.registerConnKey(nil, keyOf("chat-z", "z")); got != nil {
-		t.Errorf("registerConnKey(nil,...) = %v, want nil", got)
+	if displaced, rejected := runner.registerConnKey(nil, keyOf("chat-z", "z")); displaced != nil || rejected {
+		t.Errorf("registerConnKey(nil,...) = (%v, %v), want (nil, false)", displaced, rejected)
 	}
 	// Must not panic:
 	runner.releaseConn(nil)
@@ -439,10 +303,9 @@ func TestRegisterConnKeyAndReleaseConnNilSafe(t *testing.T) {
 }
 
 // TestRegisterConnKeyIdempotentSameKey verifies re-registering the SAME
-// connection under an already-owned key is a no-op (returns nil, no
-// displacement). This is the path a connection hits when consecutive message
-// frames carry the same chat_id/sender_id — registerConnKey must not displace
-// itself.
+// connection under an already-owned key is a no-op (displaced nil, not
+// rejected). This is the path a connection hits when consecutive message frames
+// carry the same chat_id/sender_id.
 func TestRegisterConnKeyIdempotentSameKey(t *testing.T) {
 	runner := newTestRunner(t, newFakeRuntime())
 	caps := &capturedFrames{}
@@ -450,101 +313,15 @@ func TestRegisterConnKeyIdempotentSameKey(t *testing.T) {
 	defer cancel()
 	wsHandle := runner.newConn(caps.write, cancel)
 
-	if displaced := runner.registerConnKey(wsHandle, keyOf("chat-i", "ian")); displaced != nil {
-		t.Fatalf("first register displaced %v, want nil", displaced)
+	if displaced, rejected := runner.registerConnKey(wsHandle, keyOf("chat-i", "ian")); displaced != nil || rejected {
+		t.Fatalf("first register = (%v, %v), want (nil, false)", displaced, rejected)
 	}
 	// Re-register the SAME handle under the SAME key — must be a no-op.
-	if displaced := runner.registerConnKey(wsHandle, keyOf("chat-i", "ian")); displaced != nil {
-		t.Errorf("idempotent re-register displaced %v, want nil (same connection+key)", displaced)
+	if displaced, rejected := runner.registerConnKey(wsHandle, keyOf("chat-i", "ian")); displaced != nil || rejected {
+		t.Errorf("idempotent re-register = (%v, %v), want (nil, false)", displaced, rejected)
 	}
 	if ctx.Err() != nil {
 		t.Fatal("connection was cancelled by idempotent re-register")
-	}
-}
-
-// TestTakeoverDoesNotCancelActiveTurn is the PR #97 re-review CRITICAL
-// regression. The contract being locked: when connection B takes over a
-// ChatKey that connection A registered (and may have an active turn on), the
-// takeover updates the registry (Emit reaches B) but does NOT cancel A's ctx.
-// A's ctx is the parent of any active turn it started; cancelling it would
-// murder the turn with context.Canceled (not ErrSteered) and strand any queued
-// message. registerConnKey returns the displaced conn for the caller's
-// information, but cancelling it is the caller's choice — and HandleConnection
-// chooses NOT to (see the onRegister comment in runner.go).
-//
-// This drives RunAgent directly with a respectCtx fakeRuntime: if A's ctx were
-// cancelled, RunAgent returns context.Canceled. With the fix it returns nil.
-func TestTakeoverDoesNotCancelActiveTurn(t *testing.T) {
-	rt := newFakeRuntime()
-	rt.respectCtx = true
-	var heldUnblock atomic.Value // chan struct{}
-	rt.hold = func(unblock chan struct{}) { heldUnblock.Store(unblock) }
-
-	runner := newTestRunner(t, rt)
-
-	capsA := &capturedFrames{}
-	capsB := &capturedFrames{}
-	ctxA, cancelA := context.WithCancel(context.Background())
-	defer cancelA()
-	_, cancelB := context.WithCancel(context.Background())
-	defer cancelB()
-
-	handleA := runner.newConn(capsA.write, cancelA)
-	handleB := runner.newConn(capsB.write, cancelB)
-	runner.registerConnKey(handleA, keyOf("chat-t", "tom"))
-
-	// Start turn A on connection A's ctx. It blocks inside RunAgent (hold).
-	var turnAErr error
-	turnADone := make(chan struct{})
-	go func() {
-		_, err := runner.runtime.RunAgent(ctxA, frt.TurnRequest{Message: "first"})
-		turnAErr = err
-		close(turnADone)
-	}()
-
-	// Wait until turn A is blocked (hold captured the unblock chan).
-	for i := 0; i < 200; i++ {
-		if v := heldUnblock.Load(); v != nil {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if heldUnblock.Load() == nil {
-		t.Fatal("turn A never entered RunAgent hold")
-	}
-
-	// Connection B takes over the same ChatKey. registerConnKey updates the
-	// registry and returns the displaced handleA — but does NOT cancel it, and
-	// the caller (HandleConnection's onRegister) does not cancel it either.
-	displaced := runner.registerConnKey(handleB, keyOf("chat-t", "tom"))
-	if displaced != handleA {
-		t.Fatalf("registerConnKey should return displaced handleA, got %v", displaced)
-	}
-	if ctxA.Err() != nil {
-		t.Fatal("takeover cancelled the active turn's ctx — turn A would be murdered (context.Canceled, not ErrSteered)")
-	}
-
-	// Registry now points to B; Emit reaches B (registry updated correctly).
-	env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)
-	env.Target = &channel.InboundContext{Channel: "websocket", ChatID: "chat-t", SenderID: "tom"}
-	env.Data = map[string]any{"content": "to-B"}
-	if err := runner.Emit(context.Background(), env); err != nil {
-		t.Fatalf("Emit should reach new connection B: %v", err)
-	}
-	if got := capsB.snapshot(); len(got) != 1 {
-		t.Errorf("connection B got %d frames, want 1", len(got))
-	}
-
-	// Unblock turn A — it must complete NORMALLY (nil error), proving the
-	// takeover did not kill it via ctx cancellation.
-	close(heldUnblock.Load().(chan struct{}))
-	select {
-	case <-turnADone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("turn A did not complete after unblock (ctx may have been cancelled)")
-	}
-	if turnAErr != nil {
-		t.Errorf("turn A exited with error %v, want nil (takeover must not kill active turn)", turnAErr)
 	}
 }
 
@@ -574,4 +351,126 @@ func TestEmitMixedCaseChatKeyRoundtrip(t *testing.T) {
 	if got := caps.snapshot(); len(got) != 1 {
 		t.Errorf("mixed-case roundtrip: got %d frames, want 1 (canonicalization mismatch)", len(got))
 	}
+}
+
+// TestSecondLiveConnectionRejected locks the single-connection contract (PR #97
+// round-7): when a ChatKey already has a LIVE owner, a second connection's
+// registerConnKey must return rejected=true, and the registry stays with the
+// original owner. This is what eliminates the multi-connection takeover cascade
+// that drove rounds 2-7.
+func TestSecondLiveConnectionRejected(t *testing.T) {
+	runner := newTestRunner(t, newFakeRuntime())
+	capsA := &capturedFrames{}
+	capsB := &capturedFrames{}
+	_, cancelA := context.WithCancel(context.Background())
+	_, cancelB := context.WithCancel(context.Background())
+	connA := runner.newConn(capsA.write, cancelA)
+	connB := runner.newConn(capsB.write, cancelB)
+	key := keyOf("chat-solo", "u")
+
+	// First connection registers (fresh key) — succeeds.
+	if _, rejected := runner.registerConnKey(connA, key); rejected {
+		t.Fatal("first register on a fresh key should not be rejected")
+	}
+	// Second LIVE connection → must be rejected; registry stays with connA.
+	if _, rejected := runner.registerConnKey(connB, key); !rejected {
+		t.Fatal("second live connection should be rejected (single-connection contract)")
+	}
+	if got := runner.lookupConn(key); got != connA {
+		t.Errorf("registry = %p, want connA %p (rejected takeover must not change owner)", got, connA)
+	}
+}
+
+// TestStaleConnectionReplaced solves the "dead connection traps the chat" risk
+// of reject-new: if the prior owner hasn't been seen for > staleThreshold (its
+// socket died unnoticed), a new connection may take over. This is what makes
+// reject-new survivable for reconnects (PR #97 round-7).
+func TestStaleConnectionReplaced(t *testing.T) {
+	runner := newTestRunner(t, newFakeRuntime())
+	capsA := &capturedFrames{}
+	capsB := &capturedFrames{}
+	_, cancelA := context.WithCancel(context.Background())
+	_, cancelB := context.WithCancel(context.Background())
+	connA := runner.newConn(capsA.write, cancelA)
+	connB := runner.newConn(capsB.write, cancelB)
+	key := keyOf("chat-stale", "u")
+
+	// connA registers first.
+	runner.registerConnKey(connA, key)
+	// Force connA's lastSeen into the past (simulate a dead socket: no frames
+	// for longer than staleThreshold).
+	runner.connMu.Lock()
+	connA.lastSeen = time.Now().Add(-staleThreshold - time.Second)
+	runner.connMu.Unlock()
+
+	// connB (new connection) takes over the stale owner — NOT rejected.
+	if _, rejected := runner.registerConnKey(connB, key); rejected {
+		t.Fatal("new connection should take over a STALE owner, not be rejected")
+	}
+	if got := runner.lookupConn(key); got != connB {
+		t.Errorf("registry = %p after stale takeover, want connB %p", got, connB)
+	}
+	// Emit now reaches the new owner.
+	env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)
+	env.Target = &channel.InboundContext{Channel: "websocket", ChatID: "chat-stale", SenderID: "u"}
+	env.Data = map[string]any{"content": "to-new-owner"}
+	if err := runner.Emit(context.Background(), env); err != nil {
+		t.Fatalf("Emit after stale takeover: %v", err)
+	}
+	if got := capsB.snapshot(); len(got) != 1 {
+		t.Errorf("new owner got %d frames, want 1", len(got))
+	}
+	if got := capsA.snapshot(); len(got) != 0 {
+		t.Errorf("stale owner got %d frames, want 0", len(got))
+	}
+}
+
+// TestHandleMessageRejectsSecondConnection is the end-to-end single-connection
+// test: connA owns chat-solo; connB sends a message for the same chat and must
+// receive a "rejected" ack (not accepted/steered), with no turn started.
+func TestHandleMessageRejectsSecondConnection(t *testing.T) {
+	rt := newFakeRuntime()
+	runner := newTestRunner(t, rt)
+	capsA := &capturedFrames{}
+	capsB := &capturedFrames{}
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	ctxB, cancelB := context.WithCancel(context.Background())
+	defer cancelB()
+	connA := runner.newConn(capsA.write, cancelA)
+	connB := runner.newConn(capsB.write, cancelB)
+
+	mkOnRegister := func(h *wsConn) func(frt.ChatKey) (*wsConn, bool) {
+		return func(key frt.ChatKey) (*wsConn, bool) { return runner.registerConnKey(h, key) }
+	}
+	addActive := func(*activeRequest) {}
+	removeActive := func(string) {}
+
+	// connA sends first → registered + turn starts.
+	runner.handleMessage(ctxA, makeMessageFrame("om_A", "chat-solo", "u", "first"),
+		"websocket-default", capsA.write, addActive, removeActive, mkOnRegister(connA))
+
+	// connB sends for the SAME chat while connA is live → must be rejected.
+	runner.handleMessage(ctxB, makeMessageFrame("om_B", "chat-solo", "u", "second"),
+		"websocket-default", capsB.write, addActive, removeActive, mkOnRegister(connB))
+
+	bFrames := capsB.snapshot()
+	hasRejected := false
+	for _, f := range bFrames {
+		if f.Type == "ack" {
+			if d, _ := f.Data.(map[string]any); d != nil {
+				if s, _ := d["status"].(string); s == "rejected" {
+					hasRejected = true
+				}
+			}
+		}
+	}
+	if !hasRejected {
+		t.Errorf("connB frames %v: no rejected ack (single-connection contract)", typesOf(bFrames))
+	}
+	// Registry must still be connA.
+	if got := runner.lookupConn(keyOf("chat-solo", "u")); got != connA {
+		t.Errorf("registry = %p after rejected connB, want connA", got)
+	}
+	_ = sync.Mutex{} // keep sync import if unused after edits
 }

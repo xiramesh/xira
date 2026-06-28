@@ -118,26 +118,30 @@ type Runner struct {
 	connIDSeq uint64 // monotonic connection identity, for same-conn detection
 }
 
-// wsConn holds a live websocket connection's send capability and lifecycle.
-// send is the per-connection writeFrame closure from HandleConnection (it owns
-// the write mutex + fail-fast cancel). cancel tears the connection down, used
-// when a DIFFERENT physical connection supersedes this one for a ChatKey.
+// wsConn holds a live websocket connection's send capability. id is a stable
+// identity (funcs can't be compared in Go). lastSeen is updated on every frame
+// received from this connection, so registerConnKey can tell a STALE owner (no
+// frames for > staleThreshold → presumed dead) from a live one.
 //
-// id is this connection's stable identity, assigned at construction. It lets
-// registerConn tell apart "same connection registering another key" (no-op on
-// the old entry, just add the key) from "a new connection took over this key"
-// (cancel the old). Comparing cancel/send funcs directly is illegal in Go
-// (funcs compare only to nil); id is the safe identity token.
-//
-// keys is the set of ChatKeys this connection owns, so disconnect cleanup can
-// remove ALL of them (one connection may own several keys — the protocol
-// allows consecutive message frames with different chat_id/sender_id).
+// Single-connection contract (PR #97 round-7): one ChatKey has at most one
+// live owner. A new connection registering a key held by a LIVE owner is
+// REJECTED (the client should not open a second connection for the same chat).
+// A new connection may take over only when the prior owner is STALE (its
+// underlying socket died without the server noticing). This eliminates the
+// multi-connection takeover that drove rounds 2-7's boundary cascade.
 type wsConn struct {
-	id     uint64
-	send   func(outboundFrame) error
-	cancel context.CancelFunc
-	keys   map[frt.ChatKey]struct{}
+	id       uint64
+	send     func(outboundFrame) error
+	cancel   context.CancelFunc
+	lastSeen time.Time
+	keys     map[frt.ChatKey]struct{}
 }
+
+// staleThreshold is how long without any frame from a connection before it is
+// presumed dead (its socket died unnoticed). A new connection may take over a
+// key from a stale owner. Clients ping every ~15-30s, so 60s allows a couple
+// missed pings before takeover.
+const staleThreshold = 60 * time.Second
 
 // NewRunner constructs a websocket Runner. rt may be nil in tests that inject
 // a fake runtime via the (unexported) field afterwards.
@@ -256,60 +260,46 @@ func (r *Runner) newConn(send func(outboundFrame) error, cancel context.CancelFu
 	r.connIDSeq++
 	id := r.connIDSeq
 	r.connMu.Unlock()
-	return &wsConn{id: id, send: send, cancel: cancel, keys: map[frt.ChatKey]struct{}{}}
+	return &wsConn{id: id, send: send, cancel: cancel, lastSeen: time.Now(), keys: map[frt.ChatKey]struct{}{}}
 }
 
 // registerConnKey associates key with conn. Returns the connection that was
 // previously holding key (if any) so the caller can cancel it — keeping the
 // "one active connection per ChatKey" contract (two connections sharing a
-// ChatKey would race for the same Router entry). If the SAME connection already
-// holds key (re-registering on another message frame), this is a no-op and
-// returns nil (a connection does not displace itself).
+// registerConnKey registers conn as the owner of key under the single-connection
+// contract. Returns (displaced, rejected):
+//   - same connection already owns key → (nil, false) no-op
+//   - a different LIVE owner holds key → (existing, true) REJECTED — the caller
+//     should tell the client "chat already has a connection"
+//   - a different STALE owner holds key (no frame for > staleThreshold) →
+//     (existing, false) take over; the prior owner is presumed dead (its socket
+//     died without notice). The caller does NOT cancel the stale owner — it's
+//     already dead; cancel would be moot.
+//   - no prior owner → (nil, false) registered.
 //
-// The returned displaced connection is the caller's to cancel (its ctx is not
-// known to the registry). The registry only tracks key→conn mappings; lifecycle
-// (cancel) stays with HandleConnection.
-func (r *Runner) registerConnKey(conn *wsConn, key frt.ChatKey) *wsConn {
+// The stale check is what makes "reject new" survivable for reconnects: if the
+// old socket truly died, lastSeen stops updating and a new connection can take
+// over after staleThreshold. This avoids the multi-connection takeover cascade
+// (rounds 2-7) while not trapping users behind a dead connection.
+func (r *Runner) registerConnKey(conn *wsConn, key frt.ChatKey) (displaced *wsConn, rejected bool) {
 	if conn == nil {
-		return nil
+		return nil, false
 	}
 	key = canonicalKey(key)
 	r.connMu.Lock()
 	defer r.connMu.Unlock()
 	existing := r.conns[key]
 	if existing != nil && existing.id == conn.id {
-		// Same connection already owns this key — no-op.
-		return nil
+		return nil, false // same connection, no-op
 	}
-	// Take over the key. If a DIFFERENT connection held it, return it for the
-	// caller's information — keeping the "one active connection per ChatKey"
-	// contract. The caller decides whether to cancel it; HandleConnection does
-	// NOT (see onRegister comment: cancelling would murder an active turn).
+	if existing != nil && time.Since(existing.lastSeen) < staleThreshold {
+		// Live owner — reject the new connection (single-connection contract).
+		return existing, true
+	}
+	// No owner, or stale owner (presumed dead) — take over.
 	r.conns[key] = conn
 	conn.keys[key] = struct{}{}
-	if existing != nil && existing.id != conn.id {
-		return existing
-	}
-	return nil
-}
-
-// restoreConn reverts a registry takeover: if `old` is non-nil, it becomes the
-// owner of key again (the takeover that displaced it is undone). Used when a
-// message's accepted/steered ack write fails — the registry change must roll
-// back so resume/Emit still reaches the prior live connection instead of the
-// failed one (PR #97 round-6 review WARNING: takeover rollback).
-func (r *Runner) restoreConn(key frt.ChatKey, old *wsConn) {
-	if old == nil {
-		return
-	}
-	key = canonicalKey(key)
-	r.connMu.Lock()
-	defer r.connMu.Unlock()
-	r.conns[key] = old
-	if old.keys == nil {
-		old.keys = map[frt.ChatKey]struct{}{}
-	}
-	old.keys[key] = struct{}{}
+	return existing, false
 }
 
 // releaseConn removes every key this connection still owns from the registry.
@@ -469,6 +459,11 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 			}
 			return
 		}
+		// Mark this connection as live (seen a frame). registerConnKey uses
+		// lastSeen to detect stale owners (single-connection takeover, round-7).
+		r.connMu.Lock()
+		wsHandle.lastSeen = time.Now()
+		r.connMu.Unlock()
 		requestID := requestIDOf(frame)
 		switch strings.TrimSpace(frame.Type) {
 		case "hello":
@@ -494,18 +489,10 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 				},
 			})
 		case "message":
-			r.handleMessage(connCtx, frame, defaultEntrypointID, writeFrame, addActive, removeActive, func(key frt.ChatKey) *wsConn {
-				// Register this connection under the message's chat key so Emit
-				// can reach it. Returns the displaced (prior) owner so the caller
-				// can roll back the takeover if the ack write fails (PR #97 round-6).
-				//
-				// Takeover does NOT cancel the displaced connection's ctx. The old
-				// connection's ctx is also the parent ctx of any ACTIVE turn it
-				// started (turns run in Router goroutines derived from connCtx).
-				// Cancelling it would kill that turn with context.Canceled (not
-				// ErrSteered). So the registry records the new connection as the
-				// Emit target, while the old turn runs to completion on its own ctx;
-				// the old connection's read loop exits on real disconnect (EOF).
+			r.handleMessage(connCtx, frame, defaultEntrypointID, writeFrame, addActive, removeActive, func(key frt.ChatKey) (*wsConn, bool) {
+				// Register this connection under the message's chat key (single-
+				// connection contract, PR #97 round-7). Returns (displaced, rejected):
+				// rejected=true if a LIVE owner already holds the key.
 				return r.registerConnKey(wsHandle, key)
 			})
 		case "human_response":
@@ -533,7 +520,7 @@ func (r *Runner) handleMessage(
 	writeFrame func(outboundFrame) error,
 	addActive func(*activeRequest),
 	removeActive func(string),
-	onRegister func(key frt.ChatKey) *wsConn, // registers conn under key, returns displaced prior owner
+	onRegister func(key frt.ChatKey) (displaced *wsConn, rejected bool), // single-connection register
 ) {
 	requestID := requestIDOf(frame)
 	var data messageData
@@ -555,45 +542,44 @@ func (r *Runner) handleMessage(
 		})
 		return
 	}
-	// Register the connection BEFORE dedupe/duplicate check, so a reconnect
-	// retrying the same message_id still refreshes the live-connection registry
-	// (PR #97 round-6 CRITICAL #2). The displaced prior owner is retained so the
-	// takeover can be rolled back if the subsequent ack write fails.
+	// Register the connection under the chat key (single-connection contract).
+	// onRegister returns rejected=true if a LIVE owner already holds this key —
+	// the client opened a second connection for the same chat. Reject it.
 	chatKey := frt.ChatKeyFromInbound(prepared.eventContext)
-	displaced := onRegister(chatKey)
-	// rollbackRegistry undoes the takeover on ack failure (restore prior owner).
-	rollbackRegistry := func() { r.restoreConn(chatKey, displaced) }
-
+	if _, rejected := onRegister(chatKey); rejected {
+		_ = writeFrame(outboundFrame{
+			Type:      "ack",
+			ID:        "srv_ack_" + requestID,
+			RequestID: requestID,
+			Data:      map[string]any{"status": "rejected", "reason": "chat_already_has_connection"},
+		})
+		return
+	}
 	if !r.dedupe.Begin(prepared.dedupeKey, time.Now()) {
-		// Duplicate: a retry/reconnect with the same message_id. The registry is
-		// already refreshed (above), so the active turn's final will reach this
-		// connection. Cite the active turn's request_id if one is running.
+		// Duplicate: a retry/reconnect with the same message_id. Cite the active
+		// turn's request_id if one is running (scheme P: reply follows active turn).
 		activeID := r.router.ActiveRequestID(chatKey)
 		ackData := map[string]any{"status": "duplicate", "message_id": prepared.messageID}
 		if activeID != "" {
 			ackData["reply_request_id"] = activeID
 		}
-		if err := writeFrame(outboundFrame{
+		_ = writeFrame(outboundFrame{
 			Type:      "ack",
 			ID:        "srv_ack_" + requestID,
 			RequestID: requestID,
 			Data:      ackData,
-		}); err != nil {
-			// Duplicate ack failed (connection dropped): roll back the registry
-			// takeover so Emit still reaches the prior live connection.
-			rollbackRegistry()
-		}
+		})
 		return
 	}
-	// Build the turn's per-message state. activeReq is referenced by the
-	// session's closures but only addActive'd if this message starts a turn.
-	// send resolves to the CURRENT live connection at write time (round-3).
+	// Build the turn's per-message state. send resolves to the live connection
+	// at write time (so a stale-owner takeover's frames reach the new owner).
 	activeReq := &activeRequest{
 		requestID: requestID,
 		context:   prepared.eventContext,
 		runIDs:    map[string]struct{}{},
 		seen:      map[string]struct{}{},
 	}
+	addActive(activeReq)
 	send := r.resolveSend(chatKey)
 	frameID := frame.ID
 	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
@@ -631,48 +617,9 @@ func (r *Runner) handleMessage(
 			}
 		},
 	})
-	// Route atomically (under Router's entry lock): decide started vs steered
-	// WITHOUT starting the turn goroutine yet. For a started turn we must
-	// finish addActive + accepted ack BEFORE launching the goroutine, so a fast
-	// RunAgent cannot emit a terminal frame or run removeActive ahead of
-	// registration (PR #97 round-5 review: the old order started the goroutine
-	// in session.Handle, then addActive'd — leaking the request and reordering
-	// frames relative to the ack).
-	outcome := session.Route(ctx, requestID, prepared.turn.Message)
-	if outcome.Steered {
-		// Steered: the message is an interjection on the active turn. It will be
-		// drained on the active turn's steering checkpoint and the reply comes
-		// via that turn's OnTurnResult (resolveSend routes it to the current
-		// connection). This message does NOT run its own turn, so it gets no
-		// independent terminal frame and no activeRequest (which would leak).
-		// The steered ack cites the active turn's request_id (reply_request_id)
-		// so the client knows which request_id the eventual terminal carries —
-		// scheme P (steering = "interjection in this session").
-		if err := writeFrame(outboundFrame{
-			Type:      "ack",
-			ID:        "srv_ack_" + requestID,
-			RequestID: requestID,
-			Data: map[string]any{
-				"status":           "steered",
-				"message_id":       prepared.messageID,
-				"reply_request_id": outcome.ActiveRequestID,
-			},
-		}); err != nil {
-			// Steered ack failed (connection dropped). The message is already
-			// enqueued, but the client never got the ack. Roll back so the
-			// message_id can be retried cleanly: forget dedupe (allow retry) and
-			// restore the prior registry owner (round-6 CRITICAL #3).
-			r.dedupe.Forget(prepared.dedupeKey)
-			rollbackRegistry()
-		}
-		return
-	}
-	// Started: this message began a turn (Router entry is RESERVED, not yet
-	// active). Register + accepted ack BEFORE Start() commits it to active, so
-	// a fast RunAgent cannot emit a terminal frame ahead of the ack (round-5),
-	// AND a concurrent message cannot be steered into this uncommitted turn
-	// (round-6: reserved is not steerable).
-	addActive(activeReq)
+	// Accepted ack, then dispatch (Handle starts the turn goroutine). Under the
+	// single-connection contract there is no concurrent routing for this key, so
+	// per-chatKey single-active holds naturally (no two-phase Route/Start needed).
 	if err := writeFrame(outboundFrame{
 		Type:      "ack",
 		ID:        "srv_ack_" + requestID,
@@ -684,16 +631,14 @@ func (r *Runner) handleMessage(
 			"message_id":    prepared.messageID,
 		},
 	}); err != nil {
-		// Accepted ack failed (connection dropped). Full rollback: the turn must
-		// NOT start, and ALL pre-ack state must unwind so the next message starts
-		// fresh (round-6 CRITICAL #1 + WARNING takeover rollback).
+		// Ack write failed (connection dropped): forget dedupe so the message can
+		// be retried, and drop the activeRequest. The turn is not started (Handle
+		// hasn't been called).
 		r.dedupe.Forget(prepared.dedupeKey)
 		removeActive(requestID)
-		outcome.Abort() // Router: reserved → idle
-		rollbackRegistry()
 		return
 	}
-	outcome.Start()
+	session.Handle(ctx, requestID, prepared.turn.Message)
 }
 
 type preparedTurn struct {
