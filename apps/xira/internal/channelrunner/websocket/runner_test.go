@@ -198,9 +198,11 @@ func TestRunnerConcurrentSameChatDoesNotRace(t *testing.T) {
 	}
 }
 
-// TestRunnerOnTurnResultEmitsEventAndResponseFrames: a successful turn with
-// Events emits an "event" frame per accepted event, then a "response" frame.
-// Verifies OnTurnResult wiring assembles the structured output correctly.
+// TestRunnerOnTurnResultEmitsEventAndResponseFrames: a successful turn emits
+// an "ack" then a "response" frame via OnTurnResult. NOTE: in-flight events are
+// streamed separately via OnRawEvent/RawEventSink (NOT from resp.Events — that
+// batched path was replaced). Event-frame coverage lives in
+// TestHandleMessageStreamsEventsViaOnRawEvent.
 func TestRunnerOnTurnResultEmitsEventAndResponseFrames(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
@@ -440,9 +442,23 @@ func TestSameConnectionSteeredMessageDoesNotLeakActiveRequest(t *testing.T) {
 func TestHandleMessageStreamsEventsViaOnRawEvent(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.emitEvents = []frt.RuntimeEvent{
+		// eventContextMatches path (Scope fields match request context).
 		{ID: "evt-1", Kind: "tool.called", RunID: "run-1", Scope: &frt.RuntimeEventScope{
 			Channel: "websocket", EntrypointID: "websocket-default",
 			ChatID: "chat-e", SenderID: "u", MessageID: "om_e",
+		}},
+		// Correlation path: once evt-1 is remembered (run-1), evt-2 citing run-1
+		// via Correlation is accepted (covers acceptEvent correlation branches +
+		// rememberEventRunsLocked).
+		{ID: "evt-2", Kind: "run.progress", RunID: "run-2", Correlation: &frt.RuntimeEventCorrelation{
+			ParentRunID: "run-1",
+		}, Scope: &frt.RuntimeEventScope{Channel: "other"}},
+		// payloadString path: no Scope, no RunID → acceptEvent falls through to
+		// eventContextMatches → eventField → payloadString (Payload carries the
+		// fields). Covers payloadString + the Scope-absent branch.
+		{ID: "evt-3", Kind: "agent.message", Payload: map[string]any{
+			"chat_id": "chat-e", "sender_id": "u", "entrypoint_id": "websocket-default",
+			"channel": "websocket",
 		}},
 	}
 	runner := newTestRunner(t, rt)

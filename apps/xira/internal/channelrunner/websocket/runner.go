@@ -109,10 +109,12 @@ type Runner struct {
 	// feishu's stable chatID — websocket connections are short-lived, so the
 	// registry tracks whichever is currently connected per chat key.
 	//
-	// One active connection per ChatKey: a new connection for an occupied key
-	// cancels the old one (see registerConn). Two live connections sharing a
-	// ChatKey would race for the same Router entry — a per-chatKey single-active-
-	// turn contract violation.
+	// Single-connection contract (round-7+): one ChatKey has at most one LIVE
+	// owner. A new connection for a key held by a LIVE owner is REJECTED (the
+	// old owner stays). A new connection may take over only when the prior owner
+	// is STALE (lastSeen expired) AND no turn is active on it. The old owner is
+	// NOT cancelled — cancelling would murder an active turn whose ctx derives
+	// from the old connCtx (the cascade that drove rounds 2-7's reviews).
 	connMu    sync.Mutex
 	conns     map[frt.ChatKey]*wsConn
 	connIDSeq uint64 // monotonic connection identity, for same-conn detection
@@ -263,9 +265,6 @@ func (r *Runner) newConn(send func(outboundFrame) error, cancel context.CancelFu
 	return &wsConn{id: id, send: send, cancel: cancel, lastSeen: time.Now(), keys: map[frt.ChatKey]struct{}{}}
 }
 
-// registerConnKey associates key with conn. Returns the connection that was
-// previously holding key (if any) so the caller can cancel it — keeping the
-// "one active connection per ChatKey" contract (two connections sharing a
 // registerConnKey registers conn as the owner of key under the single-connection
 // contract. Returns (displaced, rejected):
 //   - same connection already owns key → (nil, false) no-op
