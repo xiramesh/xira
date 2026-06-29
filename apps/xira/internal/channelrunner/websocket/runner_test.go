@@ -28,18 +28,30 @@ type fakeRuntime struct {
 	concurrent    int32
 	maxConcurrent int32
 	hold          func(unblock chan struct{})
-	respond       func(req frt.TurnRequest) frt.TurnResponse
+	// emitEvents, if non-nil, are dispatched to the RawEventSink on the RunAgent
+	// ctx (mimicking a real runtime that emits in-flight RuntimeEvents). Drives
+	// websocket OnRawEvent → acceptEvent → runtimeEventFrame for coverage.
+	emitEvents []frt.RuntimeEvent
+	// respond returns the (response, error) for a RunAgent call. Tests use this
+	// to script steering (return frt.ErrSteered on the first call) and other
+	// error paths. Default returns a completed turn.
+	respond func(req frt.TurnRequest) (frt.TurnResponse, error)
+	// respectCtx, when true, makes RunAgent honor ctx cancellation: if ctx is
+	// cancelled while held, RunAgent returns context.Canceled instead of
+	// blocking forever. The default (false) preserves the original behavior
+	// (block until unblock), which existing tests rely on.
+	respectCtx bool
 }
 
 func newFakeRuntime() *fakeRuntime {
 	return &fakeRuntime{
-		respond: func(frt.TurnRequest) frt.TurnResponse {
-			return frt.TurnResponse{RunID: "run-1", Status: "completed", FinalResponse: "ok"}
+		respond: func(frt.TurnRequest) (frt.TurnResponse, error) {
+			return frt.TurnResponse{RunID: "run-1", Status: "completed", FinalResponse: "ok"}, nil
 		},
 	}
 }
 
-func (f *fakeRuntime) RunAgent(_ context.Context, req frt.TurnRequest) (frt.TurnResponse, error) {
+func (f *fakeRuntime) RunAgent(ctx context.Context, req frt.TurnRequest) (frt.TurnResponse, error) {
 	cur := atomic.AddInt32(&f.concurrent, 1)
 	for {
 		max := atomic.LoadInt32(&f.maxConcurrent)
@@ -51,9 +63,27 @@ func (f *fakeRuntime) RunAgent(_ context.Context, req frt.TurnRequest) (frt.Turn
 	if f.hold != nil {
 		unblock := make(chan struct{})
 		f.hold(unblock)
-		<-unblock
+		if f.respectCtx {
+			select {
+			case <-unblock:
+			case <-ctx.Done():
+				return frt.TurnResponse{}, ctx.Err()
+			}
+		} else {
+			<-unblock
+		}
 	}
-	return f.respond(req), nil
+	// Emit scripted events to the RawEventSink on ctx (mimics a real runtime's
+	// in-flight events). Drives websocket's OnRawEvent → acceptEvent →
+	// runtimeEventFrame path for coverage.
+	if len(f.emitEvents) > 0 {
+		if sink := frt.RawEventSinkFromContext(ctx); sink != nil {
+			for _, evt := range f.emitEvents {
+				sink.DeliverRaw(evt)
+			}
+		}
+	}
+	return f.respond(req)
 }
 
 func (f *fakeRuntime) maxSeen() int32 { return atomic.LoadInt32(&f.maxConcurrent) }
@@ -113,6 +143,18 @@ func typesOf(frames []outboundFrame) []string {
 	return out
 }
 
+// registerConnForTest returns an onRegister callback that registers a real
+// connection (with the given writeFrame) under the message's chatKey. This
+// mirrors production HandleConnection wiring so resolveSend (used by
+// OnTurnResult/OnRawEvent) can find the connection. Tests that previously used
+// a no-op onRegister must register, otherwise the turn's terminal frame is
+// dropped (resolveSend finds no live connection).
+func registerConnForTest(runner *Runner, writeFrame func(outboundFrame) error) func(frt.ChatKey) (*wsConn, bool) {
+	return func(key frt.ChatKey) (*wsConn, bool) {
+		return runner.registerConnKey(runner.newConn(writeFrame, func() {}), key)
+	}
+}
+
 // --- tests ---
 
 // TestRunnerConcurrentSameChatDoesNotRace: two messages to the SAME chat,
@@ -140,8 +182,8 @@ func TestRunnerConcurrentSameChatDoesNotRace(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); runner.handleMessage(ctx, msg1, "websocket-default", caps.write, addActive, removeActive) }()
-	go func() { defer wg.Done(); runner.handleMessage(ctx, msg2, "websocket-default", caps.write, addActive, removeActive) }()
+	go func() { defer wg.Done(); runner.handleMessage(ctx, msg1, "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write)) }()
+	go func() { defer wg.Done(); runner.handleMessage(ctx, msg2, "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write)) }()
 
 	time.Sleep(50 * time.Millisecond) // let both dispatch
 	gmu.Lock()
@@ -156,18 +198,20 @@ func TestRunnerConcurrentSameChatDoesNotRace(t *testing.T) {
 	}
 }
 
-// TestRunnerOnTurnResultEmitsEventAndResponseFrames: a successful turn with
-// Events emits an "event" frame per accepted event, then a "response" frame.
-// Verifies OnTurnResult wiring assembles the structured output correctly.
+// TestRunnerOnTurnResultEmitsEventAndResponseFrames: a successful turn emits
+// an "ack" then a "response" frame via OnTurnResult. NOTE: in-flight events are
+// streamed separately via OnRawEvent/RawEventSink (NOT from resp.Events — that
+// batched path was replaced). Event-frame coverage lives in
+// TestHandleMessageStreamsEventsViaOnRawEvent.
 func TestRunnerOnTurnResultEmitsEventAndResponseFrames(t *testing.T) {
 	rt := newFakeRuntime()
-	rt.respond = func(frt.TurnRequest) frt.TurnResponse {
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
 		return frt.TurnResponse{
 			RunID:         "run-1",
 			Status:        "completed",
 			FinalResponse: "answer",
 			Events:        []frt.RuntimeEvent{{ID: "evt-1", Kind: "run.started"}, {ID: "evt-2", Kind: "run.completed"}},
-		}
+		}, nil
 	}
 	runner := newTestRunner(t, rt)
 	caps := &capturedFrames{}
@@ -176,11 +220,13 @@ func TestRunnerOnTurnResultEmitsEventAndResponseFrames(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive)
+	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write))
 
 	time.Sleep(100 * time.Millisecond) // let the turn + frames complete
 	types := typesOf(caps.snapshot())
-	// Expect: ack (accepted), then events, then response.
+	// Expect at least an ack (accepted) and a response. In-flight events are
+	// streamed via OnRawEvent (not a fixed batch); this turn has no scripted
+	// events so we only assert ack + response.
 	if len(types) == 0 {
 		t.Fatal("no frames emitted")
 	}
@@ -206,7 +252,7 @@ func TestRunnerOnTurnResultEmitsEventAndResponseFrames(t *testing.T) {
 // an "interrupt" frame (HITL), not a "response" frame. WS protocol-level HITL.
 func TestRunnerOnTurnResultEmitsInterruptFrame(t *testing.T) {
 	rt := newFakeRuntime()
-	rt.respond = func(frt.TurnRequest) frt.TurnResponse {
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
 		return frt.TurnResponse{
 			RunID:  "run-1",
 			Status: "waiting_human",
@@ -214,7 +260,7 @@ func TestRunnerOnTurnResultEmitsInterruptFrame(t *testing.T) {
 				Status: "waiting_human",
 				Reason: "tool_gate",
 			},
-		}
+		}, nil
 	}
 	runner := newTestRunner(t, rt)
 	caps := &capturedFrames{}
@@ -223,7 +269,7 @@ func TestRunnerOnTurnResultEmitsInterruptFrame(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive)
+	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write))
 
 	time.Sleep(100 * time.Millisecond)
 	types := typesOf(caps.snapshot())
@@ -256,7 +302,7 @@ func TestRunnerOnTurnResultEmitsErrorFrameOnRunFailure(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive)
+	runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-1", "user-1", "hi"), "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write))
 
 	time.Sleep(100 * time.Millisecond)
 	var errFrame *outboundFrame
@@ -305,3 +351,137 @@ func (e simpleErr) Error() string { return string(e) }
 //      (silent-data-loss avoidance, AGENTS.md §2).
 // If you remove the cancel(), you reintroduce silent data loss on half-dead
 // connections. Don't.
+
+// TestSameConnectionSteeredMessageDoesNotLeakActiveRequest locks PR #97 round-8:
+// a single websocket connection sending a second message for the same ChatKey
+// while the first turn is active is STEERED (Router enqueues it as an
+// interjection). The steered message must NOT create an activeRequest (its
+// OnTurnResult never runs → would leak), and must get a "steered" ack (not
+// "accepted"), citing the active turn's reply_request_id.
+//
+// Round-7's over-contraction wrongly ignored the Router outcome and always
+// addActive'd + sent "accepted" — this test reproduces that bug.
+func TestSameConnectionSteeredMessageDoesNotLeakActiveRequest(t *testing.T) {
+	rt := newFakeRuntime()
+	// Hold the first RunAgent so the turn stays active while the second message
+	// routes (it must be steered).
+	unblock := make(chan struct{})
+	fired := make(chan struct{})
+	first := true
+	rt.hold = func(inner chan struct{}) {
+		if first {
+			first = false
+			close(fired)
+			<-unblock
+		}
+		close(inner)
+	}
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
+		return frt.TurnResponse{RunID: "run-1", Status: "completed", FinalResponse: "ok"}, nil
+	}
+	runner := newTestRunner(t, rt)
+	caps := &capturedFrames{}
+
+	// Real active map to detect leaks.
+	var activeMu sync.Mutex
+	active := map[string]*activeRequest{}
+	addActive := func(req *activeRequest) { activeMu.Lock(); active[req.requestID] = req; activeMu.Unlock() }
+	removeActive := func(id string) { activeMu.Lock(); delete(active, id); activeMu.Unlock() }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// SAME connection for both messages (mirror HandleConnection: one wsHandle
+	// per physical connection, reused across frames). registerConnKey sees the
+	// same id → second register is a no-op (not rejected).
+	wsHandle := runner.newConn(caps.write, func() {})
+	onReg := func(key frt.ChatKey) (*wsConn, bool) {
+		return runner.registerConnKey(wsHandle, key)
+	}
+
+	// First message: starts a turn, blocks (active).
+	go runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-s", "u", "first"),
+		"websocket-default", caps.write, addActive, removeActive, onReg)
+	<-fired
+
+	// Second message (SAME chat key, same connection semantics) while turn active.
+	runner.handleMessage(ctx, makeMessageFrame("om_2", "chat-s", "u", "second"),
+		"websocket-default", caps.write, addActive, removeActive, onReg)
+
+	// At this point only om_1's turn is active; om_2 was steered and must NOT
+	// have an activeRequest (it would leak — its OnTurnResult never runs).
+	activeMu.Lock()
+	count := len(active)
+	activeMu.Unlock()
+	if count != 1 {
+		t.Errorf("active map has %d entries while second message steered, want 1 (only the active turn's request)", count)
+	}
+
+	// om_2 must have received a "steered" ack (not accepted), citing om_1.
+	gotSteered := false
+	for _, f := range caps.snapshot() {
+		if f.Type == "ack" && f.RequestID == "om_2" {
+			d, _ := f.Data.(map[string]any)
+			if s, _ := d["status"].(string); s == "steered" {
+				gotSteered = true
+				if rid, _ := d["reply_request_id"].(string); rid != "om_1" {
+					t.Errorf("steered ack reply_request_id = %q, want om_1", rid)
+				}
+			} else if s == "accepted" {
+				t.Error("om_2 got accepted ack for a steered message — should be steered")
+			}
+		}
+	}
+	if !gotSteered {
+		t.Error("om_2 did not get a steered ack")
+	}
+
+	close(unblock)
+}
+
+// TestHandleMessageStreamsEventsViaOnRawEvent drives the event-routing path
+// (OnRawEvent → acceptEvent → runtimeEventFrame) for coverage. A real runtime
+// dispatches RuntimeEvents mid-turn; fakeRuntime's emitEvents mimics this.
+func TestHandleMessageStreamsEventsViaOnRawEvent(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.emitEvents = []frt.RuntimeEvent{
+		// eventContextMatches path (Scope fields match request context).
+		{ID: "evt-1", Kind: "tool.called", RunID: "run-1", Scope: &frt.RuntimeEventScope{
+			Channel: "websocket", EntrypointID: "websocket-default",
+			ChatID: "chat-e", SenderID: "u", MessageID: "om_e",
+		}},
+		// Correlation path: once evt-1 is remembered (run-1), evt-2 citing run-1
+		// via Correlation is accepted (covers acceptEvent correlation branches +
+		// rememberEventRunsLocked).
+		{ID: "evt-2", Kind: "run.progress", RunID: "run-2", Correlation: &frt.RuntimeEventCorrelation{
+			ParentRunID: "run-1",
+		}, Scope: &frt.RuntimeEventScope{Channel: "other"}},
+		// payloadString path: no Scope, no RunID → acceptEvent falls through to
+		// eventContextMatches → eventField → payloadString (Payload carries the
+		// fields). Covers payloadString + the Scope-absent branch.
+		{ID: "evt-3", Kind: "agent.message", Payload: map[string]any{
+			"chat_id": "chat-e", "sender_id": "u", "entrypoint_id": "websocket-default",
+			"channel": "websocket",
+		}},
+	}
+	runner := newTestRunner(t, rt)
+	caps := &capturedFrames{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wsHandle := runner.newConn(caps.write, func() {})
+	onReg := func(key frt.ChatKey) (*wsConn, bool) {
+		return runner.registerConnKey(wsHandle, key)
+	}
+	runner.handleMessage(ctx, makeMessageFrame("om_e", "chat-e", "u", "hi"),
+		"websocket-default", caps.write, func(*activeRequest) {}, func(string) {}, onReg)
+	time.Sleep(50 * time.Millisecond)
+
+	hasEvent := false
+	for _, f := range caps.snapshot() {
+		if f.Type == "event" {
+			hasEvent = true
+		}
+	}
+	if !hasEvent {
+		t.Errorf("no event frames emitted; got %v", typesOf(caps.snapshot()))
+	}
+}

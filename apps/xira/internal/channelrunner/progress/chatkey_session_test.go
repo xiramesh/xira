@@ -107,13 +107,18 @@ func runTurnSync(t *testing.T, s *ChatKeySession, router *Router, msg string) {
 	t.Helper()
 	done := make(chan struct{})
 	go func() {
-		s.Handle(context.Background(), msg)
+		s.Handle(context.Background(), "", msg)
 		// Poll until Router reports the turn no longer active.
 		for {
 			router.mu.Lock()
 			e := router.entries[testKey()]
-			active := e != nil && e.active
 			router.mu.Unlock()
+			var active bool
+			if e != nil {
+				e.mu.Lock()
+				active = e.active
+				e.mu.Unlock()
+			}
 			if !active {
 				close(done)
 				return
@@ -173,7 +178,7 @@ func TestSessionActiveSteers(t *testing.T) {
 
 	started := make(chan struct{})
 	go func() {
-		s.Handle(context.Background(), "first")
+		s.Handle(context.Background(), "", "first")
 		close(started)
 	}()
 	<-started
@@ -184,7 +189,7 @@ func TestSessionActiveSteers(t *testing.T) {
 
 	// Second message while active → should steer, NOT call RunAgent.
 	beforeCalls := rt.callCount()
-	s.Handle(context.Background(), "interjection")
+	s.Handle(context.Background(), "", "interjection")
 	time.Sleep(20 * time.Millisecond) // give steer a moment
 
 	if rt.callCount() != beforeCalls {
@@ -216,8 +221,13 @@ func waitForActive(router *Router, want bool) bool {
 	for i := 0; i < 200; i++ {
 		router.mu.Lock()
 		e := router.entries[testKey()]
-		active := e != nil && e.active
 		router.mu.Unlock()
+		var active bool
+		if e != nil {
+			e.mu.Lock()
+			active = e.active
+			e.mu.Unlock()
+		}
 		if active == want {
 			return true
 		}
@@ -279,7 +289,7 @@ func TestSessionSteeringRetry(t *testing.T) {
 
 	started := make(chan struct{})
 	go func() {
-		s.Handle(context.Background(), "orig")
+		s.Handle(context.Background(), "", "orig")
 		close(started)
 	}()
 	<-started
@@ -473,7 +483,7 @@ func TestSessionNilRouterRunsInline(t *testing.T) {
 	}
 	s := NewChatKeySession(testKey(), nil, cfg) // nil router → inline path
 	// Inline path runs synchronously in this goroutine, so no polling needed.
-	s.Handle(context.Background(), "msg")
+	s.Handle(context.Background(), "", "msg")
 	if n := rt.callCount(); n != 1 {
 		t.Errorf("RunAgent call count = %d, want 1", n)
 	}
@@ -607,7 +617,7 @@ func TestSessionOnRunErrorNotInvokedOnSteeringSuccess(t *testing.T) {
 	s := NewChatKeySession(testKey(), router, cfg)
 	started := make(chan struct{})
 	go func() {
-		s.Handle(context.Background(), "orig")
+		s.Handle(context.Background(), "", "orig")
 		close(started)
 	}()
 	<-started
@@ -790,7 +800,7 @@ func TestSessionOnTurnResultSteeringRetry(t *testing.T) {
 	s := NewChatKeySession(testKey(), router, cfg)
 	started := make(chan struct{})
 	go func() {
-		s.Handle(context.Background(), "orig")
+		s.Handle(context.Background(), "", "orig")
 		close(started)
 	}()
 	<-started

@@ -287,7 +287,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		},
 	})
 	// Non-blocking: returns immediately (steer enqueue or dispatch goroutine).
-	session.Handle(ctx, content)
+	session.Handle(ctx, "", content)
 	return nil
 }
 

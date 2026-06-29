@@ -31,11 +31,12 @@ type Router struct {
 }
 
 type chatEntry struct {
-	mu        sync.Mutex
-	active    bool
-	steering  *SteeringQueue
-	spawn     *SpawnCollector
-	idleSince time.Time // set when active flips to false; used by prune
+	mu              sync.Mutex
+	active          bool   // true while a turn goroutine is running
+	activeRequestID string // request_id of the in-flight turn (cited by steered/duplicate acks)
+	steering        *SteeringQueue
+	spawn           *SpawnCollector
+	idleSince       time.Time // set when active flips to false; used by prune
 }
 
 // routerEntryTTL is how long an idle entry (no active turn) is kept before
@@ -51,11 +52,16 @@ func NewRouter() *Router {
 	}
 }
 
-// Handle routes a message: starts a new turn (calls onNewTurn) or steers
-// an active one (enqueues to SteeringQueue). The onNewTurn callback is
-// per-call — the caller passes its own closure with per-message context
-// (account, sender, etc.) that Router's lifecycle can't know about.
-func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Context, onNewTurn OnNewTurnFunc) {
+// Handle routes a message: starts a new turn (calls onNewTurn in a goroutine)
+// or steers an active one (enqueues to SteeringQueue). requestID is recorded on
+// the entry so a later steered/duplicate message's ActiveRequestID can cite it
+// as the reply target. Returns true if steered, false if started.
+//
+// The active check + enqueue/start happen atomically under entry.mu, so callers
+// can rely on the outcome without a separate IsActive race (PR #97 round-4).
+// Per-chatKey single-active is preserved: a second message for an active key is
+// steered, never started concurrently.
+func (r *Router) Handle(key runtime.ChatKey, requestID, msg string, parentCtx context.Context, onNewTurn OnNewTurnFunc) bool {
 	// Lazy prune: evict entries idle longer than the TTL before routing, so
 	// Router.entries doesn't grow unboundedly (mirrors dedupe.pruneLocked).
 	r.prune(time.Now())
@@ -65,9 +71,10 @@ func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Conte
 	if entry.active {
 		entry.steering.Enqueue(msg)
 		entry.mu.Unlock()
-		return
+		return true // steered
 	}
 	entry.active = true
+	entry.activeRequestID = requestID
 	sq := entry.steering
 	entry.mu.Unlock()
 
@@ -78,12 +85,89 @@ func (r *Router) Handle(key runtime.ChatKey, msg string, parentCtx context.Conte
 	ctx := runtime.WithSteeringBus(parentCtx, sq)
 	ctx = runtime.WithSpawnBus(ctx, entry.spawn)
 
-	// Run the turn in a goroutine so Handle returns immediately
-	// (non-blocking — Monitor can receive the next message).
 	go func() {
 		defer r.markComplete(key)
 		onNewTurn(key, msg, ctx)
 	}()
+	return false // started new turn
+}
+
+// RoutingOutcome is the atomic routing decision for one message, WITHOUT
+// launching the started turn's goroutine yet (the caller calls Start()). Used
+// by websocket, which must complete addActive + accepted ack before the turn
+// can produce a frame (PR #97 round-5) — but unlike the deleted round-6
+// reserved state, this needs NO pending/reserved middle state: the single-
+// connection contract (round-7) guarantees no concurrent Route for a key, so a
+// started turn can flip active=true immediately and a same-connection second
+// message will correctly see it as steered.
+//
+// Steered: enqueued into the active turn's queue (an interjection); reply comes
+// 	via that turn's OnTurnResult. ActiveRequestID is the active turn's request_id
+// 	(cited in the steered ack so the client knows which request_id the terminal
+// 	will carry).
+// Started: active=true, requestID recorded; the caller MUST call Start() to run
+// 	the turn (after addActive + ack). If the caller aborts, it must call Abort()
+// 	to release the entry.
+type RoutingOutcome struct {
+	Steered         bool
+	ActiveRequestID string // valid when Steered
+	start           func()
+	abort           func()
+}
+
+func (o RoutingOutcome) Start() {
+	if o.start != nil {
+		o.start()
+	}
+}
+
+func (o RoutingOutcome) Abort() {
+	if o.abort != nil {
+		o.abort()
+	}
+}
+
+// Route is the two-phase entry for websocket: it routes atomically (under
+// entry.mu) and returns the outcome WITHOUT starting the started turn's
+// goroutine. Handle wraps Route+Start for ilink/feishu (which complete ack/dedupe
+// before routing). requestID is recorded for steered/duplicate ack citation.
+func (r *Router) Route(key runtime.ChatKey, requestID, msg string, parentCtx context.Context, onNewTurn OnNewTurnFunc) RoutingOutcome {
+	r.prune(time.Now())
+	entry := r.getOrCreate(key)
+	entry.mu.Lock()
+	if entry.active {
+		activeID := entry.activeRequestID
+		entry.steering.Enqueue(msg)
+		entry.mu.Unlock()
+		return RoutingOutcome{Steered: true, ActiveRequestID: activeID}
+	}
+	entry.active = true
+	entry.activeRequestID = requestID
+	sq := entry.steering
+	entry.mu.Unlock()
+
+	ctx := runtime.WithSteeringBus(parentCtx, sq)
+	ctx = runtime.WithSpawnBus(ctx, entry.spawn)
+	started := false
+	return RoutingOutcome{
+		start: func() {
+			if started {
+				return
+			}
+			started = true
+			go func() {
+				defer r.markComplete(key)
+				onNewTurn(key, msg, ctx)
+			}()
+		},
+		abort: func() {
+			if started {
+				return
+			}
+			started = true
+			r.markComplete(key)
+		},
+	}
 }
 
 // markComplete marks the turn as inactive for this chatKey.
@@ -96,6 +180,7 @@ func (r *Router) markComplete(key runtime.ChatKey) {
 	}
 	entry.mu.Lock()
 	entry.active = false
+	entry.activeRequestID = ""
 	entry.idleSince = time.Now()
 	entry.mu.Unlock()
 }
@@ -114,6 +199,25 @@ func (r *Router) IsActive(key runtime.ChatKey) bool {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	return entry.active
+}
+
+// ActiveRequestID returns the request_id of the in-flight (committed active)
+// turn for chatKey, or "" if none. Used by websocket's duplicate-ack path to
+// tell a reconnecting client which request_id the active turn's terminal will
+// carry (scheme P). Lock order: r.mu → entry.mu.
+func (r *Router) ActiveRequestID(key runtime.ChatKey) string {
+	r.mu.Lock()
+	entry, ok := r.entries[key]
+	r.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.active {
+		return ""
+	}
+	return entry.activeRequestID
 }
 
 // prune evicts entries that are idle (no active turn) and have been idle

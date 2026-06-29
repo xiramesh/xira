@@ -142,18 +142,27 @@ func NewChatKeySession(key runtime.ChatKey, router *Router, cfg ChatKeySessionCo
 	return &ChatKeySession{key: key, router: router, cfg: cfg}
 }
 
-// Handle is the single entry point. Mirrors Router.Handle's contract: it is
-// NON-BLOCKING — returns immediately after either (a) enqueuing msg to the
-// SteeringQueue because a turn is active, or (b) dispatching a goroutine
-// that runs the turn. The caller cannot observe turn completion through
-// this return value; completion flips Router's entry.active to false.
-func (s *ChatKeySession) Handle(ctx context.Context, msg string) {
+// Handle routes + starts immediately (ilink/feishu: ack/dedupe done before
+// routing). requestID is recorded so steered/duplicate messages can cite it.
+// Returns true if steered, false if started.
+func (s *ChatKeySession) Handle(ctx context.Context, requestID, msg string) bool {
 	if s.router != nil {
-		s.router.Handle(s.key, msg, ctx, s.runTurn)
-		return
+		return s.router.Handle(s.key, requestID, msg, ctx, s.runTurn)
 	}
-	// Test path (mirrors ilink's `if r.router == nil` fallback): run inline.
 	s.runTurn(s.key, msg, ctx)
+	return false
+}
+
+// Route is the two-phase entry for websocket: routes without starting the turn
+// goroutine, returning the outcome so the caller can complete addActive + ack
+// before Start(). See Router.Route (PR #97 round-8: single-connection steering
+// still needs outcome-based ack/activeRequest lifecycle).
+func (s *ChatKeySession) Route(ctx context.Context, requestID, msg string) RoutingOutcome {
+	if s.router != nil {
+		return s.router.Route(s.key, requestID, msg, ctx, s.runTurn)
+	}
+	s.runTurn(s.key, msg, ctx)
+	return RoutingOutcome{}
 }
 
 // runTurn is the extracted ilink closure body. Its signature matches

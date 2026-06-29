@@ -21,6 +21,7 @@ func TestRouterNoActiveTurnStartsNew(t *testing.T) {
 	router := NewRouter()
 	router.Handle(
 		runtime.ChatKey{Channel: "ilink", ChatID: "c1", SenderID: "u1"},
+		"",
 		"hello",
 		context.Background(),
 		func(key runtime.ChatKey, msg string, ctx context.Context) {
@@ -46,12 +47,12 @@ func TestRouterActiveTurnSteersSecondMessage(t *testing.T) {
 	router := NewRouter()
 
 	// First message → starts turn (blocks in goroutine).
-	router.Handle(key, "first", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "first", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		<-block
 	})
 
 	// Second message while turn active → should steer.
-	router.Handle(key, "second", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "second", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		t.Error("onNewTurn should NOT be called for steered message")
 	})
 
@@ -71,7 +72,7 @@ func TestRouterTurnCompletesThenNewTurnStarts(t *testing.T) {
 	done := make(chan struct{}, 2)
 
 	router := NewRouter()
-	router.Handle(key, "first", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "first", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
@@ -80,7 +81,7 @@ func TestRouterTurnCompletesThenNewTurnStarts(t *testing.T) {
 	<-done
 	time.Sleep(10 * time.Millisecond) // let markComplete run
 
-	router.Handle(key, "second", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "second", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
@@ -101,18 +102,19 @@ func TestRouterDifferentChatKeysIndependent(t *testing.T) {
 	var turns sync.WaitGroup
 	router := NewRouter()
 
-	router.Handle(keyA, "msgA", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
-		turns.Add(1)
+	// Add BEFORE Handle launches the goroutine (Add inside the goroutine races
+	// with Wait below — round-6 race fix).
+	turns.Add(2)
+	router.Handle(keyA, "", "msgA", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		defer turns.Done()
 		<-block
 	})
-	router.Handle(keyB, "msgB", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
-		turns.Add(1)
+	router.Handle(keyB, "", "msgB", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		defer turns.Done()
 		<-block
 	})
 
-	router.Handle(keyA, "steerA", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {})
+	router.Handle(keyA, "", "steerA", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {})
 	sqA := router.SteeringQueue(keyA)
 	msgsA := sqA.DrainAll()
 	if len(msgsA) != 1 || msgsA[0] != "steerA" {
@@ -138,7 +140,7 @@ func TestRouterInjectsSpawnBus(t *testing.T) {
 
 	var gotSink runtime.SpawnBus
 	done := make(chan struct{})
-	router.Handle(key, "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		gotSink = runtime.SpawnBusFromContext(ctx)
 		close(done)
 	})
@@ -209,7 +211,7 @@ func TestRouterDoesNotEvictActiveEntry(t *testing.T) {
 
 	// Start a turn but don't let it complete — keep it active.
 	block := make(chan struct{})
-	router.Handle(key, "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		<-block // hold the turn open
 	})
 	t.Cleanup(func() { close(block) })
@@ -261,7 +263,7 @@ func TestRouterEvictedEntryRebuiltOnNextMessage(t *testing.T) {
 
 	// Next message rebuilds.
 	ran := make(chan string, 1)
-	router.Handle(key, "after-eviction", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "after-eviction", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		ran <- msg
 	})
 	select {
@@ -301,7 +303,7 @@ func TestRouterIsActiveReportsTurnState(t *testing.T) {
 		}
 	}
 	t.Cleanup(closeOnce)
-	go router.Handle(key, "hello", context.Background(), func(runtime.ChatKey, string, context.Context) {
+	go router.Handle(key, "", "hello", context.Background(), func(runtime.ChatKey, string, context.Context) {
 		<-block
 	})
 
@@ -334,7 +336,7 @@ func TestRouterIsActiveReportsTurnState(t *testing.T) {
 // leaving the entry idle (active=false, idleSince set).
 func runOneTurn(router *Router, key runtime.ChatKey) {
 	done := make(chan struct{})
-	router.Handle(key, "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
+	router.Handle(key, "", "hello", context.Background(), func(k runtime.ChatKey, msg string, ctx context.Context) {
 		close(done)
 	})
 	<-done
