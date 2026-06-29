@@ -92,6 +92,84 @@ func (r *Router) Handle(key runtime.ChatKey, requestID, msg string, parentCtx co
 	return false // started new turn
 }
 
+// RoutingOutcome is the atomic routing decision for one message, WITHOUT
+// launching the started turn's goroutine yet (the caller calls Start()). Used
+// by websocket, which must complete addActive + accepted ack before the turn
+// can produce a frame (PR #97 round-5) — but unlike the deleted round-6
+// reserved state, this needs NO pending/reserved middle state: the single-
+// connection contract (round-7) guarantees no concurrent Route for a key, so a
+// started turn can flip active=true immediately and a same-connection second
+// message will correctly see it as steered.
+//
+// Steered: enqueued into the active turn's queue (an interjection); reply comes
+// 	via that turn's OnTurnResult. ActiveRequestID is the active turn's request_id
+// 	(cited in the steered ack so the client knows which request_id the terminal
+// 	will carry).
+// Started: active=true, requestID recorded; the caller MUST call Start() to run
+// 	the turn (after addActive + ack). If the caller aborts, it must call Abort()
+// 	to release the entry.
+type RoutingOutcome struct {
+	Steered         bool
+	ActiveRequestID string // valid when Steered
+	start           func()
+	abort           func()
+}
+
+func (o RoutingOutcome) Start() {
+	if o.start != nil {
+		o.start()
+	}
+}
+
+func (o RoutingOutcome) Abort() {
+	if o.abort != nil {
+		o.abort()
+	}
+}
+
+// Route is the two-phase entry for websocket: it routes atomically (under
+// entry.mu) and returns the outcome WITHOUT starting the started turn's
+// goroutine. Handle wraps Route+Start for ilink/feishu (which complete ack/dedupe
+// before routing). requestID is recorded for steered/duplicate ack citation.
+func (r *Router) Route(key runtime.ChatKey, requestID, msg string, parentCtx context.Context, onNewTurn OnNewTurnFunc) RoutingOutcome {
+	r.prune(time.Now())
+	entry := r.getOrCreate(key)
+	entry.mu.Lock()
+	if entry.active {
+		activeID := entry.activeRequestID
+		entry.steering.Enqueue(msg)
+		entry.mu.Unlock()
+		return RoutingOutcome{Steered: true, ActiveRequestID: activeID}
+	}
+	entry.active = true
+	entry.activeRequestID = requestID
+	sq := entry.steering
+	entry.mu.Unlock()
+
+	ctx := runtime.WithSteeringBus(parentCtx, sq)
+	ctx = runtime.WithSpawnBus(ctx, entry.spawn)
+	started := false
+	return RoutingOutcome{
+		start: func() {
+			if started {
+				return
+			}
+			started = true
+			go func() {
+				defer r.markComplete(key)
+				onNewTurn(key, msg, ctx)
+			}()
+		},
+		abort: func() {
+			if started {
+				return
+			}
+			started = true
+			r.markComplete(key)
+		},
+	}
+}
+
 // markComplete marks the turn as inactive for this chatKey.
 func (r *Router) markComplete(key runtime.ChatKey) {
 	r.mu.Lock()

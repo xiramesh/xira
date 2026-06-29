@@ -296,7 +296,15 @@ func (r *Runner) registerConnKey(conn *wsConn, key frt.ChatKey) (displaced *wsCo
 		// Live owner — reject the new connection (single-connection contract).
 		return existing, true
 	}
-	// No owner, or stale owner (presumed dead) — take over.
+	// Stale owner — only take over if NO turn is active for this key. If a turn
+	// is still running on the stale owner, taking over would re-introduce the
+	// "old turn alive, registry moved" boundary (round-8 WARNING). The stale
+	// owner's turn keeps running on its own ctx; a fresh takeover happens only
+	// after it completes (entry goes idle).
+	if existing != nil && r.router.IsActive(key) {
+		return existing, true // reject: turn still active on the stale owner
+	}
+	// No owner, or stale owner with no active turn — take over.
 	r.conns[key] = conn
 	conn.keys[key] = struct{}{}
 	return existing, false
@@ -571,15 +579,18 @@ func (r *Runner) handleMessage(
 		})
 		return
 	}
-	// Build the turn's per-message state. send resolves to the live connection
-	// at write time (so a stale-owner takeover's frames reach the new owner).
+	// Build the turn's per-message state up front. activeReq is referenced by the
+	// session's OnRawEvent/OnTurnResult closures, so it must exist before the
+	// session — but it is only addActive'd for a STARTED turn (a steered message
+	// gets no independent turn, so its activeReq is never tracked and OnTurnResult
+	// never runs for it → no leak). send resolves to the live connection at write
+	// time (so a stale-owner takeover's frames reach the new owner).
 	activeReq := &activeRequest{
 		requestID: requestID,
 		context:   prepared.eventContext,
 		runIDs:    map[string]struct{}{},
 		seen:      map[string]struct{}{},
 	}
-	addActive(activeReq)
 	send := r.resolveSend(chatKey)
 	frameID := frame.ID
 	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
@@ -617,9 +628,37 @@ func (r *Runner) handleMessage(
 			}
 		},
 	})
-	// Accepted ack, then dispatch (Handle starts the turn goroutine). Under the
-	// single-connection contract there is no concurrent routing for this key, so
-	// per-chatKey single-active holds naturally (no two-phase Route/Start needed).
+	// Route atomically (under Router's entry lock): decide started vs steered
+	// WITHOUT starting the turn goroutine yet. The outcome drives the ack +
+	// activeRequest lifecycle — steered messages must NOT be accepted/tracked
+	// (they get no independent OnTurnResult/terminal), started ones must be
+	// tracked + acked before the goroutine runs (PR #97 round-8: round-7's
+	// over-contraction wrongly ignored the outcome and leaked activeRequest on
+	// same-connection steering).
+	outcome := session.Route(ctx, requestID, prepared.turn.Message)
+	if outcome.Steered {
+		// Steered: this is an interjection on the active turn. It will be drained
+		// on the active turn's steering checkpoint; its reply comes via that turn's
+		// OnTurnResult. Do NOT addActive (its OnTurnResult would never run → leak).
+		// The steered ack cites reply_request_id so the client knows which
+		// request_id the terminal carries (scheme P).
+		_ = writeFrame(outboundFrame{
+			Type:      "ack",
+			ID:        "srv_ack_" + requestID,
+			RequestID: requestID,
+			Data: map[string]any{
+				"status":           "steered",
+				"message_id":       prepared.messageID,
+				"reply_request_id": outcome.ActiveRequestID,
+			},
+		})
+		return
+	}
+	// Started: this message began a turn (entry active=true, goroutine not yet
+	// running). addActive + accepted ack, THEN Start — so a fast RunAgent cannot
+	// emit a terminal frame or removeActive ahead of registration (round-5
+	// ordering, retained under single-connection).
+	addActive(activeReq)
 	if err := writeFrame(outboundFrame{
 		Type:      "ack",
 		ID:        "srv_ack_" + requestID,
@@ -631,14 +670,14 @@ func (r *Runner) handleMessage(
 			"message_id":    prepared.messageID,
 		},
 	}); err != nil {
-		// Ack write failed (connection dropped): forget dedupe so the message can
-		// be retried, and drop the activeRequest. The turn is not started (Handle
-		// hasn't been called).
+		// Ack write failed (connection dropped): forget dedupe, drop the
+		// activeRequest, abort the Router entry (turn never runs).
 		r.dedupe.Forget(prepared.dedupeKey)
 		removeActive(requestID)
+		outcome.Abort()
 		return
 	}
-	session.Handle(ctx, requestID, prepared.turn.Message)
+	outcome.Start()
 }
 
 type preparedTurn struct {

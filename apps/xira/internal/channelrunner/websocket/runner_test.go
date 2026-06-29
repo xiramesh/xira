@@ -333,3 +333,89 @@ func (e simpleErr) Error() string { return string(e) }
 //      (silent-data-loss avoidance, AGENTS.md §2).
 // If you remove the cancel(), you reintroduce silent data loss on half-dead
 // connections. Don't.
+
+// TestSameConnectionSteeredMessageDoesNotLeakActiveRequest locks PR #97 round-8:
+// a single websocket connection sending a second message for the same ChatKey
+// while the first turn is active is STEERED (Router enqueues it as an
+// interjection). The steered message must NOT create an activeRequest (its
+// OnTurnResult never runs → would leak), and must get a "steered" ack (not
+// "accepted"), citing the active turn's reply_request_id.
+//
+// Round-7's over-contraction wrongly ignored the Router outcome and always
+// addActive'd + sent "accepted" — this test reproduces that bug.
+func TestSameConnectionSteeredMessageDoesNotLeakActiveRequest(t *testing.T) {
+	rt := newFakeRuntime()
+	// Hold the first RunAgent so the turn stays active while the second message
+	// routes (it must be steered).
+	unblock := make(chan struct{})
+	fired := make(chan struct{})
+	first := true
+	rt.hold = func(inner chan struct{}) {
+		if first {
+			first = false
+			close(fired)
+			<-unblock
+		}
+		close(inner)
+	}
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
+		return frt.TurnResponse{RunID: "run-1", Status: "completed", FinalResponse: "ok"}, nil
+	}
+	runner := newTestRunner(t, rt)
+	caps := &capturedFrames{}
+
+	// Real active map to detect leaks.
+	var activeMu sync.Mutex
+	active := map[string]*activeRequest{}
+	addActive := func(req *activeRequest) { activeMu.Lock(); active[req.requestID] = req; activeMu.Unlock() }
+	removeActive := func(id string) { activeMu.Lock(); delete(active, id); activeMu.Unlock() }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// SAME connection for both messages (mirror HandleConnection: one wsHandle
+	// per physical connection, reused across frames). registerConnKey sees the
+	// same id → second register is a no-op (not rejected).
+	wsHandle := runner.newConn(caps.write, func() {})
+	onReg := func(key frt.ChatKey) (*wsConn, bool) {
+		return runner.registerConnKey(wsHandle, key)
+	}
+
+	// First message: starts a turn, blocks (active).
+	go runner.handleMessage(ctx, makeMessageFrame("om_1", "chat-s", "u", "first"),
+		"websocket-default", caps.write, addActive, removeActive, onReg)
+	<-fired
+
+	// Second message (SAME chat key, same connection semantics) while turn active.
+	runner.handleMessage(ctx, makeMessageFrame("om_2", "chat-s", "u", "second"),
+		"websocket-default", caps.write, addActive, removeActive, onReg)
+
+	// At this point only om_1's turn is active; om_2 was steered and must NOT
+	// have an activeRequest (it would leak — its OnTurnResult never runs).
+	activeMu.Lock()
+	count := len(active)
+	activeMu.Unlock()
+	if count != 1 {
+		t.Errorf("active map has %d entries while second message steered, want 1 (only the active turn's request)", count)
+	}
+
+	// om_2 must have received a "steered" ack (not accepted), citing om_1.
+	gotSteered := false
+	for _, f := range caps.snapshot() {
+		if f.Type == "ack" && f.RequestID == "om_2" {
+			d, _ := f.Data.(map[string]any)
+			if s, _ := d["status"].(string); s == "steered" {
+				gotSteered = true
+				if rid, _ := d["reply_request_id"].(string); rid != "om_1" {
+					t.Errorf("steered ack reply_request_id = %q, want om_1", rid)
+				}
+			} else if s == "accepted" {
+				t.Error("om_2 got accepted ack for a steered message — should be steered")
+			}
+		}
+	}
+	if !gotSteered {
+		t.Error("om_2 did not get a steered ack")
+	}
+
+	close(unblock)
+}
