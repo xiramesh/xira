@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -425,6 +426,46 @@ func TestStaleConnectionReplaced(t *testing.T) {
 	}
 }
 
+// TestStaleConnectionWithActiveTurnRejected locks the round-8 WARNING fix: a
+// stale owner (lastSeen expired) is only replaced when NO turn is active. If a
+// turn is still running on the stale owner's chatKey, the takeover is rejected —
+// the turn keeps running on its own ctx, and registry stays put until the turn
+// completes (avoiding the "old turn alive, registry moved" boundary).
+func TestStaleConnectionWithActiveTurnRejected(t *testing.T) {
+	runner := newTestRunner(t, newFakeRuntime())
+	capsA := &capturedFrames{}
+	capsB := &capturedFrames{}
+	_, cancelA := context.WithCancel(context.Background())
+	_, cancelB := context.WithCancel(context.Background())
+	connA := runner.newConn(capsA.write, cancelA)
+	connB := runner.newConn(capsB.write, cancelB)
+	key := keyOf("chat-stale-active", "u")
+
+	// connA registers + starts a turn that stays active (onNewTurn blocks).
+	runner.registerConnKey(connA, key)
+	block := make(chan struct{})
+	runner.router.Route(key, "req-active", "msg", context.Background(),
+		func(frt.ChatKey, string, context.Context) { <-block })
+	if !runner.router.IsActive(key) {
+		t.Fatal("turn should be active")
+	}
+
+	// Force connA stale (lastSeen expired), but the turn is STILL active.
+	runner.connMu.Lock()
+	connA.lastSeen = time.Now().Add(-staleThreshold - time.Second)
+	runner.connMu.Unlock()
+
+	// connB must be REJECTED: stale owner but active turn → no takeover.
+	if _, rejected := runner.registerConnKey(connB, key); !rejected {
+		t.Fatal("new connection should be rejected when stale owner still has an active turn")
+	}
+	if got := runner.lookupConn(key); got != connA {
+		t.Errorf("registry = %p, want connA (stale-but-active owner must not be displaced)", got)
+	}
+
+	close(block) // let the active turn finish (releases the goroutine)
+}
+
 // TestHandleMessageRejectsSecondConnection is the end-to-end single-connection
 // test: connA owns chat-solo; connB sends a message for the same chat and must
 // receive a "rejected" ack (not accepted/steered), with no turn started.
@@ -473,4 +514,123 @@ func TestHandleMessageRejectsSecondConnection(t *testing.T) {
 		t.Errorf("registry = %p after rejected connB, want connA", got)
 	}
 	_ = sync.Mutex{} // keep sync import if unused after edits
+}
+
+// TestRunnerMetadata covers the trivial Runner accessors (ID/Channel/Start/Stop)
+// and the OutboundEmitter compile-time assertion. These are simple but were 0%
+// because no test instantiated a full Runner and called them.
+func TestRunnerMetadata(t *testing.T) {
+	runner := newTestRunner(t, newFakeRuntime())
+	if runner.ID() != "websocket-default" {
+		t.Errorf("ID() = %q, want websocket-default", runner.ID())
+	}
+	if runner.Channel() != "websocket" {
+		t.Errorf("Channel() = %q, want websocket", runner.Channel())
+	}
+	if err := runner.Start(context.Background()); err != nil {
+		t.Errorf("Start() error: %v", err)
+	}
+	if err := runner.Stop(context.Background()); err != nil {
+		t.Errorf("Stop() error: %v", err)
+	}
+}
+
+// TestHandleMessageDuplicateAcks covers the dedupe duplicate branch: a retry
+// of the same message_id gets a "duplicate" ack (not accepted/steered) and does
+// not start a second turn.
+func TestHandleMessageDuplicateAcks(t *testing.T) {
+	rt := newFakeRuntime()
+	runner := newTestRunner(t, rt)
+	caps := &capturedFrames{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wsHandle := runner.newConn(caps.write, func() {})
+	onReg := func(key frt.ChatKey) (*wsConn, bool) { return runner.registerConnKey(wsHandle, key) }
+
+	// First send: starts a turn.
+	runner.handleMessage(ctx, makeMessageFrame("om_dup", "chat-dup", "u", "first"),
+		"websocket-default", caps.write, func(*activeRequest) {}, func(string) {}, onReg)
+	time.Sleep(20 * time.Millisecond)
+	// Second send of SAME message_id: must be duplicate.
+	runner.handleMessage(ctx, makeMessageFrame("om_dup", "chat-dup", "u", "retry"),
+		"websocket-default", caps.write, func(*activeRequest) {}, func(string) {}, onReg)
+
+	gotDup := false
+	for _, f := range caps.snapshot() {
+		if f.Type == "ack" {
+			if d, _ := f.Data.(map[string]any); d != nil {
+				if s, _ := d["status"].(string); s == "duplicate" {
+					gotDup = true
+				}
+			}
+		}
+	}
+	if !gotDup {
+		t.Errorf("no duplicate ack; got %v", typesOf(caps.snapshot()))
+	}
+}
+
+// TestHandleMessageAckFailureForgetsDedupe covers the started-ack-failure
+// branch: if the accepted ack write fails, dedupe is forgotten (retriable) and
+// the turn does not start.
+func TestHandleMessageAckFailureForgetsDedupe(t *testing.T) {
+	rt := newFakeRuntime()
+	calls := int32(0)
+	rt.respond = func(frt.TurnRequest) (frt.TurnResponse, error) {
+		atomic.AddInt32(&calls, 1)
+		return frt.TurnResponse{RunID: "r", Status: "completed", FinalResponse: "ok"}, nil
+	}
+	runner := newTestRunner(t, rt)
+	failingWrite := func(outboundFrame) error { return errWriteAckFail }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wsHandle := runner.newConn(failingWrite, func() {})
+	onReg := func(key frt.ChatKey) (*wsConn, bool) { return runner.registerConnKey(wsHandle, key) }
+
+	runner.handleMessage(ctx, makeMessageFrame("om_af", "chat-af", "u", "hi"),
+		"websocket-default", failingWrite, func(*activeRequest) {}, func(string) {}, onReg)
+	time.Sleep(20 * time.Millisecond)
+
+	if atomic.LoadInt32(&calls) != 0 {
+		t.Errorf("RunAgent called %d times, want 0 (turn must not start when ack fails)", calls)
+	}
+	// dedupe must be forgotten so om_af is retriable.
+	dk := dedupeKey("websocket-default", "om_af")
+	if !runner.dedupe.Begin(dk, time.Now()) {
+		t.Error("dedupe key still processing after ack-failure rollback (must be forgotten for retry)")
+	}
+}
+
+// errWriteAckFail is a sentinel for ack-failure tests.
+var errWriteAckFail = errAckWrite{}
+
+type errAckWrite struct{}
+
+func (errAckWrite) Error() string { return "simulated ack write failure" }
+
+// TestHandleMessageBadJSON covers the bad_json error branch + badJSONError.Error.
+func TestHandleMessageBadJSON(t *testing.T) {
+	runner := newTestRunner(t, newFakeRuntime())
+	caps := &capturedFrames{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wsHandle := runner.newConn(caps.write, func() {})
+	onReg := func(key frt.ChatKey) (*wsConn, bool) { return runner.registerConnKey(wsHandle, key) }
+
+	runner.handleMessage(ctx, inboundFrame{Type: "message", ID: "om_bad", Data: []byte("{not json")},
+		"websocket-default", caps.write, func(*activeRequest) {}, func(string) {}, onReg)
+
+	hasBadJSON := false
+	for _, f := range caps.snapshot() {
+		if f.Type == "error" {
+			if d, _ := f.Data.(map[string]any); d != nil {
+				if s, _ := d["code"].(string); s == "bad_json" {
+					hasBadJSON = true
+				}
+			}
+		}
+	}
+	if !hasBadJSON {
+		t.Errorf("no bad_json error frame; got %v", typesOf(caps.snapshot()))
+	}
 }

@@ -28,6 +28,10 @@ type fakeRuntime struct {
 	concurrent    int32
 	maxConcurrent int32
 	hold          func(unblock chan struct{})
+	// emitEvents, if non-nil, are dispatched to the RawEventSink on the RunAgent
+	// ctx (mimicking a real runtime that emits in-flight RuntimeEvents). Drives
+	// websocket OnRawEvent → acceptEvent → runtimeEventFrame for coverage.
+	emitEvents []frt.RuntimeEvent
 	// respond returns the (response, error) for a RunAgent call. Tests use this
 	// to script steering (return frt.ErrSteered on the first call) and other
 	// error paths. Default returns a completed turn.
@@ -67,6 +71,16 @@ func (f *fakeRuntime) RunAgent(ctx context.Context, req frt.TurnRequest) (frt.Tu
 			}
 		} else {
 			<-unblock
+		}
+	}
+	// Emit scripted events to the RawEventSink on ctx (mimics a real runtime's
+	// in-flight events). Drives websocket's OnRawEvent → acceptEvent →
+	// runtimeEventFrame path for coverage.
+	if len(f.emitEvents) > 0 {
+		if sink := frt.RawEventSinkFromContext(ctx); sink != nil {
+			for _, evt := range f.emitEvents {
+				sink.DeliverRaw(evt)
+			}
 		}
 	}
 	return f.respond(req)
@@ -418,4 +432,38 @@ func TestSameConnectionSteeredMessageDoesNotLeakActiveRequest(t *testing.T) {
 	}
 
 	close(unblock)
+}
+
+// TestHandleMessageStreamsEventsViaOnRawEvent drives the event-routing path
+// (OnRawEvent → acceptEvent → runtimeEventFrame) for coverage. A real runtime
+// dispatches RuntimeEvents mid-turn; fakeRuntime's emitEvents mimics this.
+func TestHandleMessageStreamsEventsViaOnRawEvent(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.emitEvents = []frt.RuntimeEvent{
+		{ID: "evt-1", Kind: "tool.called", RunID: "run-1", Scope: &frt.RuntimeEventScope{
+			Channel: "websocket", EntrypointID: "websocket-default",
+			ChatID: "chat-e", SenderID: "u", MessageID: "om_e",
+		}},
+	}
+	runner := newTestRunner(t, rt)
+	caps := &capturedFrames{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wsHandle := runner.newConn(caps.write, func() {})
+	onReg := func(key frt.ChatKey) (*wsConn, bool) {
+		return runner.registerConnKey(wsHandle, key)
+	}
+	runner.handleMessage(ctx, makeMessageFrame("om_e", "chat-e", "u", "hi"),
+		"websocket-default", caps.write, func(*activeRequest) {}, func(string) {}, onReg)
+	time.Sleep(50 * time.Millisecond)
+
+	hasEvent := false
+	for _, f := range caps.snapshot() {
+		if f.Type == "event" {
+			hasEvent = true
+		}
+	}
+	if !hasEvent {
+		t.Errorf("no event frames emitted; got %v", typesOf(caps.snapshot()))
+	}
 }
