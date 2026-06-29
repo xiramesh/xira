@@ -82,6 +82,7 @@ func (s *Store) Create(ctx context.Context, input CreateRequest) (*HumanRequest,
 		Options:        append([]HumanOption(nil), input.Options...),
 		ActionSnapshot: cloneActionSnapshot(input.ActionSnapshot),
 		DedupeKey:      strings.TrimSpace(input.DedupeKey),
+		ChatKey:        strings.TrimSpace(input.ChatKey),
 		CreatedAt:      now,
 		Metadata:       cloneStringMap(input.Metadata),
 		Audit: []AuditRecord{{
@@ -197,6 +198,18 @@ func (s *Store) List(ctx context.Context, query ListQuery) ([]HumanRequest, erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.listLocked(query)
+}
+
+// ListByChatKey returns the PENDING human requests originating from chatKey
+// (runtime.ChatKey.String()). It's the most common query for #91-A/#92: "does
+// this chat have a HITL waiting for an answer?" Empty chatKey returns all
+// pending (no filter). Errors propagate from List.
+func (s *Store) ListByChatKey(ctx context.Context, workspaceKey, chatKey string) ([]HumanRequest, error) {
+	return s.List(ctx, ListQuery{
+		WorkspaceKey: workspaceKey,
+		Status:       StatusPending,
+		ChatKey:      chatKey,
+	})
 }
 
 func (s *Store) BeginReplay(ctx context.Context, input ReplayLeaseRequest) (*HumanRequest, error) {
@@ -399,6 +412,10 @@ func (s *Store) listLocked(query ListQuery) ([]HumanRequest, error) {
 			return nil, fmt.Errorf("load human request %s: %w", path, err)
 		}
 		if query.Status != "" && req.Status != query.Status {
+			continue
+		}
+		// ChatKey filter: empty = no filter (backward compatible, returns all).
+		if query.ChatKey != "" && req.ChatKey != query.ChatKey {
 			continue
 		}
 		out = append(out, req)

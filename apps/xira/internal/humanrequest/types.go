@@ -78,6 +78,12 @@ type HumanRequest struct {
 	Options        []HumanOption     `json:"options,omitempty" yaml:"options,omitempty"`
 	ActionSnapshot *ActionSnapshot   `json:"action_snapshot,omitempty" yaml:"action_snapshot,omitempty"`
 	DedupeKey      string            `json:"dedupe_key,omitempty" yaml:"dedupe_key,omitempty"`
+	// ChatKey is the originating chat key (runtime.ChatKey.String(),
+	// "channel/chat_id/sender_id") so the Store can answer "which pending HITL
+	// belongs to this chat". Stored as string to avoid a humanrequest→runtime
+	// import cycle. Empty for requests created before the field existed and for
+	// flow_bridge (which has no inbound context yet). #91-A.
+	ChatKey        string            `json:"chat_key,omitempty" yaml:"chat_key,omitempty"`
 	CreatedAt      time.Time         `json:"created_at" yaml:"created_at"`
 	ResolvedAt     *time.Time        `json:"resolved_at,omitempty" yaml:"resolved_at,omitempty"`
 	Response       *HumanResponse    `json:"response,omitempty" yaml:"response,omitempty"`
@@ -120,6 +126,9 @@ type CreateRequest struct {
 	Options        []HumanOption
 	ActionSnapshot *ActionSnapshot
 	DedupeKey      string
+	// ChatKey is the originating chat key (runtime.ChatKey.String()). Optional —
+	// flow_bridge can't fill it yet. #91-A.
+	ChatKey        string
 	CreatedAt      time.Time
 	Metadata       map[string]string
 }
@@ -137,6 +146,9 @@ type ResolveRequest struct {
 type ListQuery struct {
 	WorkspaceKey string
 	Status       RequestStatus
+	// ChatKey filters by originating chat (runtime.ChatKey.String()). Empty = no
+	// filter (returns all, backward compatible). #91-A.
+	ChatKey      string
 }
 
 type ReplayLeaseRequest struct {

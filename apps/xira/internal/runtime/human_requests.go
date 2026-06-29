@@ -23,6 +23,17 @@ func mustHumanRequestStore(root string) *humanrequest.Store {
 	return store
 }
 
+// chatKeyStringFromContext returns the chatKey from ctx as its canonical string
+// form (runtime.ChatKey.String()), or "" if ctx carries no chatKey. Used when
+// building CreateRequest.ChatKey (a plain string, to avoid the
+// humanrequest→runtime import cycle).
+func chatKeyStringFromContext(ctx context.Context) string {
+	if key, ok := ChatKeyFromContext(ctx); ok {
+		return key.String()
+	}
+	return ""
+}
+
 func (s *Service) WorkspaceKey() string {
 	if s == nil {
 		return ""
@@ -123,6 +134,7 @@ func (s *Service) createAgentHumanRequest(ctx context.Context, callID string, ar
 		Question:     question,
 		Options:      options,
 		DedupeKey:    "agent_request:" + exec.Base.RunID + ":" + callID + ":" + question,
+		ChatKey:      chatKeyStringFromContext(ctx),
 	})
 	if err != nil {
 		return nil, err
@@ -163,6 +175,7 @@ func (s *Service) createRuntimeToolGateHumanRequest(ctx context.Context, toolCal
 		Kind:         humanrequest.RequestApproval,
 		Question:     "Approve tool call " + strings.TrimSpace(toolName) + "?",
 		DedupeKey:    "runtime_tool_gate:" + exec.Base.RunID + ":" + toolCallID + ":" + strings.TrimSpace(toolName),
+		ChatKey:      chatKeyStringFromContext(ctx),
 		ActionSnapshot: &humanrequest.ActionSnapshot{
 			ToolName:    strings.TrimSpace(toolName),
 			Arguments:   snapshotArgs,

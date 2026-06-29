@@ -745,3 +745,171 @@ func mustCreateHumanRequest(t *testing.T, store *Store, req CreateRequest) *Huma
 	}
 	return created
 }
+
+// TestCreateHumanRequestPersistsChatKey verifies ChatKey round-trips through
+// Create → write YAML → Get → read YAML. This is the field #91-A adds so the
+// Store can answer "which pending HITL belongs to this chatKey".
+func TestCreateHumanRequestPersistsChatKey(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:           "hrq_ck1",
+		WorkspaceID:  "/ws",
+		WorkspaceKey: "ws_ck",
+		RunID:        "run-1",
+		AgentID:      "agent-1",
+		SessionID:    "sess-1",
+		Kind:         RequestFreeform,
+		Question:     "q",
+		DedupeKey:    "d-1",
+		CreatedAt:    time.Now(),
+		ChatKey:      "ilink/chat-1/user-1",
+	})
+	if req.ChatKey != "ilink/chat-1/user-1" {
+		t.Fatalf("Create() ChatKey = %q, want ilink/chat-1/user-1", req.ChatKey)
+	}
+	got, err := store.Get(context.Background(), "ws_ck", "hrq_ck1")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.ChatKey != "ilink/chat-1/user-1" {
+		t.Errorf("Get() ChatKey = %q, want ilink/chat-1/user-1 (round-trip failed)", got.ChatKey)
+	}
+}
+
+// TestListByChatKeyFiltersPendingRequests verifies ListQuery.ChatKey filters:
+// create 3 pending requests (2 chatKey-A, 1 chatKey-B), list with ChatKey=A →
+// only the 2 A requests return.
+func TestListByChatKeyFiltersPendingRequests(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	for i, key := range []string{"A/A/A", "A/A/A", "B/B/B"} {
+		mustCreateHumanRequest(t, store, CreateRequest{
+			ID:           "hrq_" + string(rune('a'+i)),
+			WorkspaceID:  "/ws",
+			WorkspaceKey: "ws_lk",
+			RunID:        "run-" + string(rune('a'+i)),
+			AgentID:      "agent-1",
+			SessionID:    "sess-1",
+			Kind:         RequestFreeform,
+			Question:     "q",
+			DedupeKey:    "d-" + string(rune('a'+i)),
+			CreatedAt:    time.Now(),
+			ChatKey:      key,
+		})
+	}
+	got, err := store.List(context.Background(), ListQuery{
+		WorkspaceKey: "ws_lk",
+		Status:       StatusPending,
+		ChatKey:      "A/A/A",
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("List(ChatKey=A) returned %d, want 2", len(got))
+	}
+	for _, r := range got {
+		if r.ChatKey != "A/A/A" {
+			t.Errorf("returned request ChatKey = %q, want A/A/A", r.ChatKey)
+		}
+	}
+}
+
+// TestListByChatKeyEmptyMatchesAll verifies backward compat: ChatKey=="" does
+// NOT filter (returns all, like the old behavior before the field existed).
+func TestListByChatKeyEmptyMatchesAll(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_e1", WorkspaceID: "/ws", WorkspaceKey: "ws_e", RunID: "r1",
+		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
+		DedupeKey: "d1", CreatedAt: time.Now(), ChatKey: "X/X/X",
+	})
+	mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_e2", WorkspaceID: "/ws", WorkspaceKey: "ws_e", RunID: "r2",
+		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
+		DedupeKey: "d2", CreatedAt: time.Now(), ChatKey: "Y/Y/Y",
+	})
+	got, err := store.List(context.Background(), ListQuery{
+		WorkspaceKey: "ws_e", Status: StatusPending,
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("List(no ChatKey filter) returned %d, want 2 (empty ChatKey = no filter)", len(got))
+	}
+}
+
+// TestOldYAMLWithoutChatKeyReadsAsEmpty verifies backward compat: a YAML file
+// written before the ChatKey field existed reads back with ChatKey=="" (no
+// error). Prevents breaking existing on-disk requests on upgrade.
+func TestOldYAMLWithoutChatKeyReadsAsEmpty(t *testing.T) {
+	root := t.TempDir()
+	reqDir := filepath.Join(root, "workspaces", "ws_old", "human-requests")
+	if err := os.MkdirAll(reqDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Hand-write a YAML without the chat_key field (mimics pre-upgrade file).
+	oldYAML := strings.NewReader(strings.TrimSpace(`
+id: hrq_old
+workspace_id: /ws
+workspace_key: ws_old
+run_id: run-1
+agent_id: agent-1
+session_id: sess-1
+kind: freeform
+status: pending
+question: legacy?
+dedupe_key: d-old
+created_at: 2026-06-01T00:00:00Z
+`))
+	dec := yaml.NewDecoder(oldYAML)
+	var hr HumanRequest
+	if err := dec.Decode(&hr); err != nil {
+		t.Fatalf("decode old YAML: %v", err)
+	}
+	if hr.ChatKey != "" {
+		t.Errorf("old YAML ChatKey = %q, want empty (missing field = zero value)", hr.ChatKey)
+	}
+}
+
+// TestListByChatKeyConvenienceMethod covers Store.ListByChatKey directly
+// (the convenience wrapper that fixes Status=Pending).
+func TestListByChatKeyConvenienceMethod(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_lb1", WorkspaceID: "/ws", WorkspaceKey: "ws_lb", RunID: "r1",
+		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
+		DedupeKey: "d1", CreatedAt: time.Now(), ChatKey: "ilink/c/u",
+	})
+	// A resolved (non-pending) request with the same chatKey — must NOT return.
+	resolved := mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_lb2", WorkspaceID: "/ws", WorkspaceKey: "ws_lb", RunID: "r2",
+		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q2",
+		DedupeKey: "d2", CreatedAt: time.Now(), ChatKey: "ilink/c/u",
+	})
+	if _, err := store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_lb", RequestID: resolved.ID, Kind: ResponseApprove,
+		Actor: "tester", Message: "ok", ResolvedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	got, err := store.ListByChatKey(context.Background(), "ws_lb", "ilink/c/u")
+	if err != nil {
+		t.Fatalf("ListByChatKey: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListByChatKey returned %d, want 1 (only pending; resolved excluded)", len(got))
+	}
+	if got[0].ID != "hrq_lb1" {
+		t.Errorf("returned ID = %q, want hrq_lb1", got[0].ID)
+	}
+	// Empty chatKey → all pending in workspace.
+	all, err := store.ListByChatKey(context.Background(), "ws_lb", "")
+	if err != nil {
+		t.Fatalf("ListByChatKey(empty): %v", err)
+	}
+	if len(all) != 1 {
+		t.Errorf("ListByChatKey(empty) returned %d, want 1", len(all))
+	}
+}
