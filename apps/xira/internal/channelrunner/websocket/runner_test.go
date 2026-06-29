@@ -224,7 +224,9 @@ func TestRunnerOnTurnResultEmitsEventAndResponseFrames(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond) // let the turn + frames complete
 	types := typesOf(caps.snapshot())
-	// Expect: ack (accepted), then events, then response.
+	// Expect at least an ack (accepted) and a response. In-flight events are
+	// streamed via OnRawEvent (not a fixed batch); this turn has no scripted
+	// events so we only assert ack + response.
 	if len(types) == 0 {
 		t.Fatal("no frames emitted")
 	}
