@@ -23,6 +23,24 @@ func mustHumanRequestStore(root string) *humanrequest.Store {
 	return store
 }
 
+// chatKeyStringFromContext returns the chatKey from ctx as its canonical string
+// form (runtime.ChatKey.String()), or "" if ctx carries no chatKey OR a zero-
+// value chatKey (which would otherwise serialize as "//" — meaningless and a
+// future ListByChatKey footgun). Used when building CreateRequest.ChatKey.
+func chatKeyStringFromContext(ctx context.Context) string {
+	key, ok := ChatKeyFromContext(ctx)
+	if !ok {
+		return ""
+	}
+	// A zero-value ChatKey (Channel/ChatID/SenderID all empty) is not a real
+	// chat identity — normalize to empty so it doesn't persist as "//" and get
+	// treated as a distinct (wrong) chat key by ListByChatKey.
+	if key.Channel == "" && key.ChatID == "" && key.SenderID == "" {
+		return ""
+	}
+	return key.String()
+}
+
 func (s *Service) WorkspaceKey() string {
 	if s == nil {
 		return ""
@@ -123,6 +141,7 @@ func (s *Service) createAgentHumanRequest(ctx context.Context, callID string, ar
 		Question:     question,
 		Options:      options,
 		DedupeKey:    "agent_request:" + exec.Base.RunID + ":" + callID + ":" + question,
+		ChatKey:      chatKeyStringFromContext(ctx),
 	})
 	if err != nil {
 		return nil, err
@@ -163,6 +182,7 @@ func (s *Service) createRuntimeToolGateHumanRequest(ctx context.Context, toolCal
 		Kind:         humanrequest.RequestApproval,
 		Question:     "Approve tool call " + strings.TrimSpace(toolName) + "?",
 		DedupeKey:    "runtime_tool_gate:" + exec.Base.RunID + ":" + toolCallID + ":" + strings.TrimSpace(toolName),
+		ChatKey:      chatKeyStringFromContext(ctx),
 		ActionSnapshot: &humanrequest.ActionSnapshot{
 			ToolName:    strings.TrimSpace(toolName),
 			Arguments:   snapshotArgs,

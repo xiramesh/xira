@@ -745,3 +745,572 @@ func mustCreateHumanRequest(t *testing.T, store *Store, req CreateRequest) *Huma
 	}
 	return created
 }
+
+// TestCreateHumanRequestPersistsChatKey verifies ChatKey round-trips through
+// Create → write YAML → Get → read YAML. This is the field #91-A adds so the
+// Store can answer "which pending HITL belongs to this chatKey".
+func TestCreateHumanRequestPersistsChatKey(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID:           "hrq_ck1",
+		WorkspaceID:  "/ws",
+		WorkspaceKey: "ws_ck",
+		RunID:        "run-1",
+		AgentID:      "agent-1",
+		SessionID:    "sess-1",
+		Kind:         RequestFreeform,
+		Question:     "q",
+		DedupeKey:    "d-1",
+		CreatedAt:    time.Now(),
+		ChatKey:      "ilink/chat-1/user-1",
+	})
+	if req.ChatKey != "ilink/chat-1/user-1" {
+		t.Fatalf("Create() ChatKey = %q, want ilink/chat-1/user-1", req.ChatKey)
+	}
+	got, err := store.Get(context.Background(), "ws_ck", "hrq_ck1")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.ChatKey != "ilink/chat-1/user-1" {
+		t.Errorf("Get() ChatKey = %q, want ilink/chat-1/user-1 (round-trip failed)", got.ChatKey)
+	}
+}
+
+// TestListByChatKeyFiltersPendingRequests verifies ListQuery.ChatKey filters:
+// create 3 pending requests (2 chatKey-A, 1 chatKey-B), list with ChatKey=A →
+// only the 2 A requests return.
+func TestListByChatKeyFiltersPendingRequests(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	for i, key := range []string{"A/A/A", "A/A/A", "B/B/B"} {
+		mustCreateHumanRequest(t, store, CreateRequest{
+			ID:           "hrq_" + string(rune('a'+i)),
+			WorkspaceID:  "/ws",
+			WorkspaceKey: "ws_lk",
+			RunID:        "run-" + string(rune('a'+i)),
+			AgentID:      "agent-1",
+			SessionID:    "sess-1",
+			Kind:         RequestFreeform,
+			Question:     "q",
+			DedupeKey:    "d-" + string(rune('a'+i)),
+			CreatedAt:    time.Now(),
+			ChatKey:      key,
+		})
+	}
+	got, err := store.List(context.Background(), ListQuery{
+		WorkspaceKey: "ws_lk",
+		Status:       StatusPending,
+		ChatKey:      "A/A/A",
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("List(ChatKey=A) returned %d, want 2", len(got))
+	}
+	for _, r := range got {
+		if r.ChatKey != "A/A/A" {
+			t.Errorf("returned request ChatKey = %q, want A/A/A", r.ChatKey)
+		}
+	}
+}
+
+// TestListByChatKeyEmptyMatchesAll verifies backward compat: ChatKey=="" does
+// NOT filter (returns all, like the old behavior before the field existed).
+func TestListByChatKeyEmptyMatchesAll(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_e1", WorkspaceID: "/ws", WorkspaceKey: "ws_e", RunID: "r1",
+		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
+		DedupeKey: "d1", CreatedAt: time.Now(), ChatKey: "X/X/X",
+	})
+	mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_e2", WorkspaceID: "/ws", WorkspaceKey: "ws_e", RunID: "r2",
+		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
+		DedupeKey: "d2", CreatedAt: time.Now(), ChatKey: "Y/Y/Y",
+	})
+	got, err := store.List(context.Background(), ListQuery{
+		WorkspaceKey: "ws_e", Status: StatusPending,
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("List(no ChatKey filter) returned %d, want 2 (empty ChatKey = no filter)", len(got))
+	}
+}
+
+// TestOldYAMLWithoutChatKeyReadsAsEmpty verifies backward compat: a YAML file
+// written before the ChatKey field existed reads back with ChatKey=="" (no
+// error). Prevents breaking existing on-disk requests on upgrade.
+func TestOldYAMLWithoutChatKeyReadsAsEmpty(t *testing.T) {
+	root := t.TempDir()
+	reqDir := filepath.Join(root, "workspaces", "ws_old", "human-requests")
+	if err := os.MkdirAll(reqDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Hand-write a YAML without the chat_key field (mimics pre-upgrade file).
+	oldYAML := strings.NewReader(strings.TrimSpace(`
+id: hrq_old
+workspace_id: /ws
+workspace_key: ws_old
+run_id: run-1
+agent_id: agent-1
+session_id: sess-1
+kind: freeform
+status: pending
+question: legacy?
+dedupe_key: d-old
+created_at: 2026-06-01T00:00:00Z
+`))
+	dec := yaml.NewDecoder(oldYAML)
+	var hr HumanRequest
+	if err := dec.Decode(&hr); err != nil {
+		t.Fatalf("decode old YAML: %v", err)
+	}
+	if hr.ChatKey != "" {
+		t.Errorf("old YAML ChatKey = %q, want empty (missing field = zero value)", hr.ChatKey)
+	}
+}
+
+// TestListByChatKeyConvenienceMethod covers Store.ListByChatKey directly
+// (the convenience wrapper that fixes Status=Pending).
+func TestListByChatKeyConvenienceMethod(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_lb1", WorkspaceID: "/ws", WorkspaceKey: "ws_lb", RunID: "r1",
+		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
+		DedupeKey: "d1", CreatedAt: time.Now(), ChatKey: "ilink/c/u",
+	})
+	// A resolved (non-pending) request with the same chatKey — must NOT return.
+	resolved := mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_lb2", WorkspaceID: "/ws", WorkspaceKey: "ws_lb", RunID: "r2",
+		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q2",
+		DedupeKey: "d2", CreatedAt: time.Now(), ChatKey: "ilink/c/u",
+	})
+	if _, err := store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: "ws_lb", RequestID: resolved.ID, Kind: ResponseApprove,
+		Actor: "tester", Message: "ok", ResolvedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	got, err := store.ListByChatKey(context.Background(), "ws_lb", "ilink/c/u")
+	if err != nil {
+		t.Fatalf("ListByChatKey: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListByChatKey returned %d, want 1 (only pending; resolved excluded)", len(got))
+	}
+	if got[0].ID != "hrq_lb1" {
+		t.Errorf("returned ID = %q, want hrq_lb1", got[0].ID)
+	}
+	// Empty chatKey MUST error: this is a dedicated #92 entry point, and an
+	// empty value (missing inbound field / bug) must NOT silently return all
+	// pending (cross-chat mismatch risk). The底层 List(ChatKey:"") "no filter"
+	// semantics are for backward-compat, not for this query.
+	if _, err := store.ListByChatKey(context.Background(), "ws_lb", ""); err == nil {
+		t.Fatal("ListByChatKey(empty) should error (cross-chat mismatch risk), not return all pending")
+	}
+}
+
+// TestValidateCreateErrorBranches covers validateCreate's validation branches
+// (each returns a distinct error). Table-driven to cover them all at once.
+func TestValidateCreateErrorBranches(t *testing.T) {
+	base := func() CreateRequest {
+		return CreateRequest{
+			ID: "hrq_v", WorkspaceID: "/ws", WorkspaceKey: "ws_v", RunID: "r",
+			AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
+		}
+	}
+	cases := []struct {
+		name string
+		mut  func(*CreateRequest)
+	}{
+		{"bad workspace key (path traversal)", func(c *CreateRequest) { c.WorkspaceKey = "../bad" }},
+		{"bad request id (path traversal)", func(c *CreateRequest) { c.ID = "../bad" }},
+		{"empty workspace id", func(c *CreateRequest) { c.WorkspaceID = "" }},
+		{"empty run id", func(c *CreateRequest) { c.RunID = "" }},
+		{"empty agent id", func(c *CreateRequest) { c.AgentID = "" }},
+		{"empty session id", func(c *CreateRequest) { c.SessionID = "" }},
+		{"invalid kind", func(c *CreateRequest) { c.Kind = "bogus" }},
+		{"empty question", func(c *CreateRequest) { c.Question = "" }},
+		{"option without id", func(c *CreateRequest) { c.Options = []HumanOption{{ID: ""}} }},
+		{"duplicate option id", func(c *CreateRequest) {
+			c.Options = []HumanOption{{ID: "x"}, {ID: "x"}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := base()
+			tc.mut(&input)
+			if err := validateCreate(input); err == nil {
+				t.Errorf("validateCreate(%s) = nil, want error", tc.name)
+			}
+		})
+	}
+	// Happy path: valid input returns nil.
+	if err := validateCreate(base()); err != nil {
+		t.Errorf("validateCreate(valid) = %v, want nil", err)
+	}
+}
+
+// TestStoreCreateValidationErrors covers Store.Create's validation entry points
+// (invalid workspace key, invalid request id) — exercises Create's error branches
+// before the happy path.
+func TestStoreCreateValidationErrors(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	base := func() CreateRequest {
+		return CreateRequest{ID: "x", WorkspaceID: "/ws", WorkspaceKey: "ws", RunID: "r",
+			AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q"}
+	}
+	// Bad workspace key.
+	bad := base()
+	bad.WorkspaceKey = "../bad"
+	if _, err := store.Create(context.Background(), bad); err == nil {
+		t.Error("Create with bad workspace key should error")
+	}
+	// Bad request id.
+	bad = base()
+	bad.ID = "../bad"
+	if _, err := store.Create(context.Background(), bad); err == nil {
+		t.Error("Create with bad request id should error")
+	}
+	// Missing question.
+	bad = base()
+	bad.Question = ""
+	if _, err := store.Create(context.Background(), bad); err == nil {
+		t.Error("Create with empty question should error")
+	}
+}
+
+// TestFailReplayValidation covers FailReplay's error branches (invalid workspace,
+// invalid request id, empty owner, no replay state, replay not running).
+func TestFailReplayValidation(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	// Create a request WITH an action snapshot so it has a Replay state.
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_fr", WorkspaceID: "/ws", WorkspaceKey: "ws_fr", RunID: "r",
+		AgentID: "a", SessionID: "s", Kind: RequestApproval, Question: "q",
+		ActionSnapshot: &ActionSnapshot{ToolName: "t", RunID: "r"},
+	})
+	// Begin replay first so FailReplay can act on it.
+	beginReq, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{
+		WorkspaceKey: "ws_fr", RequestID: "hrq_fr", Owner: "tester",
+	})
+	if err != nil {
+		t.Fatalf("BeginReplay: %v", err)
+	}
+	_ = beginReq
+
+	// Bad workspace key.
+	if _, err := store.FailReplay(context.Background(), FailReplayRequest{
+		WorkspaceKey: "../bad", RequestID: "hrq_fr", Owner: "tester", Error: "x",
+	}); err == nil {
+		t.Error("FailReplay bad workspace should error")
+	}
+	// Empty owner.
+	if _, err := store.FailReplay(context.Background(), FailReplayRequest{
+		WorkspaceKey: "ws_fr", RequestID: "hrq_fr", Owner: "", Error: "x",
+	}); err == nil {
+		t.Error("FailReplay empty owner should error")
+	}
+	// Not-found request.
+	if _, err := store.FailReplay(context.Background(), FailReplayRequest{
+		WorkspaceKey: "ws_fr", RequestID: "ghost", Owner: "tester", Error: "x",
+	}); err == nil {
+		t.Error("FailReplay ghost request should error")
+	}
+	// Happy path: fail the running replay.
+	if _, err := store.FailReplay(context.Background(), FailReplayRequest{
+		WorkspaceKey: "ws_fr", RequestID: "hrq_fr", Owner: "tester", Error: "done",
+	}); err != nil {
+		t.Errorf("FailReplay happy path: %v", err)
+	}
+	// Fail again → replay not running (conflict).
+	if _, err := store.FailReplay(context.Background(), FailReplayRequest{
+		WorkspaceKey: "ws_fr", RequestID: "hrq_fr", Owner: "tester", Error: "x",
+	}); err == nil {
+		t.Error("FailReplay on non-running replay should error")
+	}
+	_ = req
+}
+
+// TestWorkspaceKeyFor covers the trivial WorkspaceKeyFor (was 0%).
+func TestWorkspaceKeyFor(t *testing.T) {
+	got := WorkspaceKeyFor("team-a")
+	if got == "" {
+		t.Error("WorkspaceKeyFor returned empty for non-empty input")
+	}
+	// Deterministic for same input.
+	if WorkspaceKeyFor("team-a") != got {
+		t.Error("WorkspaceKeyFor not deterministic")
+	}
+}
+
+// TestStoreAdditionalErrorBranches covers remaining low-coverage branches:
+// List/Get error paths, validateResponseKind invalid, cloneStringMap nil.
+func TestStoreAdditionalErrorBranches(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	ctx := context.Background()
+
+	// List with bad workspace key → error.
+	if _, err := store.List(ctx, ListQuery{WorkspaceKey: "../bad"}); err == nil {
+		t.Error("List bad workspace should error")
+	}
+	// List with invalid status → error.
+	if _, err := store.List(ctx, ListQuery{WorkspaceKey: "ws", Status: "bogus"}); err == nil {
+		t.Error("List invalid status should error")
+	}
+	// Get with bad workspace key → error.
+	if _, err := store.Get(ctx, "../bad", "x"); err == nil {
+		t.Error("Get bad workspace should error")
+	}
+	// Get non-existent request → error.
+	if _, err := store.Get(ctx, "ws", "ghost"); err == nil {
+		t.Error("Get non-existent should error")
+	}
+	// validateResponseKind invalid → error.
+	if err := validateResponseKind("bogus"); err == nil {
+		t.Error("validateResponseKind bogus should error")
+	}
+	// validateResponseKind valid → nil.
+	for _, k := range []ResponseKind{ResponseApprove, ResponseDeny, ResponseCancel, ResponseAnswer} {
+		if err := validateResponseKind(k); err != nil {
+			t.Errorf("validateResponseKind(%q) = %v, want nil", k, err)
+		}
+	}
+}
+
+// TestCloneStringMapEdgeCases covers cloneStringMap nil + empty (was 33%).
+func TestCloneStringMapEdgeCases(t *testing.T) {
+	if got := cloneStringMap(nil); got != nil {
+		t.Errorf("cloneStringMap(nil) = %v, want nil", got)
+	}
+	if got := cloneStringMap(map[string]string{}); len(got) != 0 {
+		t.Errorf("cloneStringMap(empty) = %v, want empty", got)
+	}
+	in := map[string]string{"a": "1", "b": "2"}
+	got := cloneStringMap(in)
+	if len(got) != 2 || got["a"] != "1" || got["b"] != "2" {
+		t.Errorf("cloneStringMap = %v, want %v", got, in)
+	}
+	// Mutating clone must not affect original.
+	got["c"] = "3"
+	if _, ok := in["c"]; ok {
+		t.Error("cloneStringMap not independent from source")
+	}
+}
+
+// TestResolveWriteResponseAndLoad covers Resolve (which calls writeResponse +
+// loadRequest) and its error branches. Also exercises CompleteReplay's
+// not-running branch.
+func TestResolveWriteResponseAndLoad(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	ctx := context.Background()
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_rw", WorkspaceID: "/ws", WorkspaceKey: "ws_rw", RunID: "r",
+		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
+	})
+	// Happy path: Resolve writes a response.
+	if _, err := store.Resolve(ctx, ResolveRequest{
+		WorkspaceKey: "ws_rw", RequestID: "hrq_rw", Kind: ResponseAnswer,
+		Actor: "u", Message: "ans", ResolvedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	// Resolve again → already resolved (conflict).
+	if _, err := store.Resolve(ctx, ResolveRequest{
+		WorkspaceKey: "ws_rw", RequestID: "hrq_rw", Kind: ResponseAnswer,
+		Actor: "u", Message: "ans", ResolvedAt: time.Now(),
+	}); err == nil {
+		t.Error("Resolve twice should error (already resolved)")
+	}
+	// Resolve non-existent → error.
+	if _, err := store.Resolve(ctx, ResolveRequest{
+		WorkspaceKey: "ws_rw", RequestID: "ghost", Kind: ResponseAnswer,
+		Actor: "u", Message: "x", ResolvedAt: time.Now(),
+	}); err == nil {
+		t.Error("Resolve ghost should error")
+	}
+	// Resolve invalid kind → error.
+	if _, err := store.Resolve(ctx, ResolveRequest{
+		WorkspaceKey: "ws_rw", RequestID: "hrq_rw", Kind: "bogus",
+		Actor: "u", Message: "x", ResolvedAt: time.Now(),
+	}); err == nil {
+		t.Error("Resolve invalid kind should error")
+	}
+	_ = req
+}
+
+// TestCompleteReplayNotRunning covers CompleteReplay's "replay not running"
+// conflict branch (create a request, don't begin replay, try complete → error).
+func TestCompleteReplayNotRunning(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_cr", WorkspaceID: "/ws", WorkspaceKey: "ws_cr", RunID: "r",
+		AgentID: "a", SessionID: "s", Kind: RequestApproval, Question: "q",
+		ActionSnapshot: &ActionSnapshot{ToolName: "t", RunID: "r"},
+	})
+	// CompleteReplay without BeginReplay → replay not running error.
+	if _, err := store.CompleteReplay(context.Background(), CompleteReplayRequest{
+		WorkspaceKey: "ws_cr", RequestID: "hrq_cr", ResultReference: "ok",
+	}); err == nil {
+		t.Error("CompleteReplay without BeginReplay should error (not running)")
+	}
+}
+
+// TestWriteYAMLAtomicFailure covers writeYAMLAtomic's error branches by
+// pointing the store at an unwritable root (parent dir doesn't exist / is a
+// file). This exercises the os.WriteFile / os.Rename failure paths.
+func TestWriteYAMLAtomicFailure(t *testing.T) {
+	// Root that doesn't exist → Create will fail to write.
+	store := newTestStore(t, t.TempDir())
+	// Force an invalid requests dir by using a workspace key whose path is a
+	// file (not a dir) — writeRequest will fail.
+	root := t.TempDir()
+	filePath := filepath.Join(root, "blocker")
+	if err := os.WriteFile(filePath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store2, err2 := NewStore(filePath) // root is a file → writes fail
+	if err2 != nil || store2 == nil {
+		t.Skipf("NewStore on file root: %v (env-dependent, skip)", err2)
+	}
+	_, err := store2.Create(context.Background(), CreateRequest{
+		ID: "x", WorkspaceID: "/ws", WorkspaceKey: "ws", RunID: "r",
+		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
+	})
+	if err == nil {
+		t.Error("Create on unwritable root should error (writeYAMLAtomic failure path)")
+	}
+	_ = store
+}
+
+// TestLoadRequestMissing covers loadRequest's file-not-found branch explicitly.
+func TestLoadRequestMissing(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	// Get a request that was never created.
+	_, err := store.Get(context.Background(), "ws_lm", "never-existed")
+	if err == nil {
+		t.Error("Get missing request should error")
+	}
+}
+
+// TestBeginReplayErrorBranches covers BeginReplay's validation + state checks
+// (no snapshot, already running, not found) — was 77%.
+func TestBeginReplayErrorBranches(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	ctx := context.Background()
+	// Request WITHOUT action snapshot → BeginReplay rejects (no snapshot).
+	mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_nosnap", WorkspaceID: "/ws", WorkspaceKey: "ws_br", RunID: "r",
+		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
+	})
+	if _, err := store.BeginReplay(ctx, ReplayLeaseRequest{
+		WorkspaceKey: "ws_br", RequestID: "hrq_nosnap", Owner: "o",
+	}); err == nil {
+		t.Error("BeginReplay on request without snapshot should error")
+	}
+	// Not-found request.
+	if _, err := store.BeginReplay(ctx, ReplayLeaseRequest{
+		WorkspaceKey: "ws_br", RequestID: "ghost", Owner: "o",
+	}); err == nil {
+		t.Error("BeginReplay ghost should error")
+	}
+	// Request WITH snapshot → BeginReplay succeeds; second BeginReplay → conflict (already running).
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_snap", WorkspaceID: "/ws", WorkspaceKey: "ws_br", RunID: "r2",
+		AgentID: "a", SessionID: "s", Kind: RequestApproval, Question: "q",
+		ActionSnapshot: &ActionSnapshot{ToolName: "t", RunID: "r2"},
+	})
+	if _, err := store.BeginReplay(ctx, ReplayLeaseRequest{
+		WorkspaceKey: "ws_br", RequestID: "hrq_snap", Owner: "o",
+	}); err != nil {
+		t.Fatalf("BeginReplay happy: %v", err)
+	}
+	if _, err := store.BeginReplay(ctx, ReplayLeaseRequest{
+		WorkspaceKey: "ws_br", RequestID: "hrq_snap", Owner: "o2",
+	}); err == nil {
+		t.Error("BeginReplay twice should error (already running)")
+	}
+	_ = req
+}
+
+// TestStoreWriteFailuresOnReadOnlyRoot triggers writeYAMLAtomic failures by
+// pointing the store at a path that's a FILE (not a dir) — every write under it
+// fails reliably across OSes (no chmod dependency). Covers writeYAMLAtomic's
+// os.CreateTemp/os.Rename error branches → writeRequest/writeResponse error return.
+func TestStoreWriteFailuresOnReadOnlyRoot(t *testing.T) {
+	// Create a file; use it as the store root. Any write (Create/Resolve) under
+	// it fails because the "workspaces/<key>/..." path can't be created inside a file.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(blocker)
+	if err != nil {
+		t.Skipf("NewStore(blocker): %v", err)
+	}
+	// Create → writeRequest → writeYAMLAtomic fails (can't mkdir under a file).
+	_, err = store.Create(context.Background(), CreateRequest{
+		ID: "x", WorkspaceID: "/ws", WorkspaceKey: "ws", RunID: "r",
+		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
+	})
+	if err == nil {
+		t.Error("Create under file-as-root should fail (writeYAMLAtomic error path)")
+	}
+}
+
+// TestWriteYAMLAtomicErrorBranches covers writeYAMLAtomic's OS error branches
+// directly (it's a package-level function, testable without a Store). These
+// branches were the coverage tail: MkdirAll failure (dir is a file), and the
+// success path's Close/Rename.
+func TestWriteYAMLAtomicErrorBranches(t *testing.T) {
+	// MkdirAll fails: Dir(path) is an existing FILE → MkdirAll returns error.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeYAMLAtomic(filepath.Join(blocker, "sub", "f.yaml"), map[string]string{"k": "v"}, 0o600); err == nil {
+		t.Error("writeYAMLAtomic with file-as-dir should fail (MkdirAll error)")
+	}
+
+	// Happy path: valid dir → writes + renames → returns nil. Covers Write/Chmod/
+	// Close/Rename success branches.
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "out.yaml")
+	if err := writeYAMLAtomic(dst, map[string]string{"k": "v"}, 0o600); err != nil {
+		t.Fatalf("writeYAMLAtomic happy: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "k: v") {
+		t.Errorf("written content = %q, want to contain 'k: v'", string(got))
+	}
+}
+
+// TestLoadRequestCorruptedFile covers loadRequest's yaml.Unmarshal error branch
+// (a corrupt YAML file on disk). Was 72.7%.
+func TestLoadRequestCorruptedFile(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStore(t, root)
+	// Hand-write a corrupt YAML into the requests dir.
+	reqDir := filepath.Join(root, "workspaces", "ws_corrupt", "human-requests")
+	if err := os.MkdirAll(reqDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reqDir, "bad.yaml"), []byte("id: [unclosed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Get → loadRequest → readYAMLFile → yaml.Unmarshal fails.
+	if _, err := store.Get(context.Background(), "ws_corrupt", "bad"); err == nil {
+		t.Error("Get on corrupt YAML should error (loadRequest unmarshal failure)")
+	}
+	// List → listLocked → readYAMLFile on the corrupt file → errors (corrupt
+	// data on disk is surfaced, not silently skipped).
+	if _, err := store.List(context.Background(), ListQuery{WorkspaceKey: "ws_corrupt"}); err == nil {
+		t.Error("List with corrupt file should error (surfaced, not skipped)")
+	}
+}
