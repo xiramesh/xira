@@ -113,6 +113,9 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 			// (HITL resume via HTTP/CLI) can deliver their final response back to
 			// the originating IM channel (RFC #27 — stateless HITL resume).
 			rt.SetOutboundEmitter(channelRunners)
+			// Inject HITL resolve capability so IM channels (feishu/ilink) can
+			// resolve pending HITL from text replies (#92 — HITL IM direct answer).
+			channelRunners.SetHITLResolver(rt)
 			defer func() {
 				stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel()

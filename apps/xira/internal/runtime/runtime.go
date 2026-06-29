@@ -1,6 +1,10 @@
 package runtime
 
-import "context"
+import (
+	"context"
+
+	"github.com/xiramesh/xira/internal/humanrequest"
+)
 
 // runtime.go: package-level interface declarations for the runtime package.
 //
@@ -19,7 +23,19 @@ type Runtime interface {
 	RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, error)
 }
 
-// Compile-time assertion: *Service implements Runtime. If a future change
-// to Service.RunAgent's signature breaks this, the build fails here rather
-// than at every call site.
+// HITLResolver is the injectable subset of *Service for HITL resolve/query.
+// Channel adapters use it to check "does this chatKey have a pending HITL?"
+// and to resolve it from an IM reply (#92 — HITL IM direct answer). Separate
+// from Runtime so fakes for RunAgent-only tests don't need to implement HITL
+// methods; channel adapters that want HITL direct-answer set this field (nil =
+// HITL direct-answer disabled, messages always start a new turn).
+//
+// *Service satisfies this implicitly.
+type HITLResolver interface {
+	ListPendingHumanRequestsByChatKey(ctx context.Context, chatKey string) ([]humanrequest.HumanRequest, error)
+	ResolveHumanRequest(ctx context.Context, requestID string, input humanrequest.ResolveRequest) (*humanrequest.HumanRequest, error)
+}
+
+// Compile-time assertions: *Service implements Runtime + HITLResolver.
 var _ Runtime = (*Service)(nil)
+var _ HITLResolver = (*Service)(nil)

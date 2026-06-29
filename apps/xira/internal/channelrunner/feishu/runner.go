@@ -22,6 +22,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
@@ -36,12 +37,16 @@ type Runner struct {
 	// up a full Service with entrypoints+agents. *frt.Service satisfies this
 	// implicitly (runtime.go var _ assertion). Production wiring via NewRunner
 	// is unchanged.
-	runtime    frt.Runtime
-	appID      string
-	appSecret  string
-	verify     string
-	encryptKey string
-	client     *lark.Client
+	runtime frt.Runtime
+	// hitlResolver, when non-nil, lets feishu resolve pending HITL directly
+	// from IM text replies (#92). Injected by main.go from *frt.Service.
+	// nil = HITL direct-answer disabled (messages always start a new turn).
+	hitlResolver frt.HITLResolver
+	appID        string
+	appSecret    string
+	verify       string
+	encryptKey   string
+	client       *lark.Client
 
 	mu       sync.Mutex
 	cancel   context.CancelFunc
@@ -49,6 +54,14 @@ type Runner struct {
 
 	messages *dedupe.MessageDeduper
 	router   *progress.Router // per-Runner turn router (RFC chatkey-session Step 2)
+}
+
+// SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
+// Called by main.go after NewRunner. nil = HITL direct-answer disabled.
+func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
+	if r != nil {
+		r.hitlResolver = resolver
+	}
 }
 
 func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot string) (*Runner, error) {
@@ -305,6 +318,38 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 			"sender_id", senderID,
 		},
 	})
+	// HITL direct-answer (#92): if this chatKey has a pending HumanRequest,
+	// interpret the user's message as a reply to it and resolve it — skip
+	// starting a new turn. The resume path (deliverResumeFinal → Manager.Emit)
+	// sends the final back to IM asynchronously.
+	//
+	// This is the pure-text approach: the user types "同意"/"拒绝"/自由文本.
+	// Future enhancement: button card (飞书 WS SDK doesn't support card callbacks
+	// today; see #92 issue for details), emoji reaction on the user's original
+	// message (#102 OnRawEvent extension point).
+	if r.hitlResolver != nil {
+		if pending, err := r.hitlResolver.ListPendingHumanRequestsByChatKey(ctx, chatKey.String()); err == nil && len(pending) > 0 {
+			hr := pending[0] // most recent (store sorts by CreatedAt desc)
+			kind, msg := progress.ClassifyHITLResponse(content, hr.Kind)
+			if _, err := r.hitlResolver.ResolveHumanRequest(ctx, hr.ID, humanrequest.ResolveRequest{
+				Kind:    kind,
+				Actor:   senderID,
+				Message: msg,
+			}); err == nil {
+				// Resolved — resume runs async, final comes back via Emit.
+				// Don't start a new turn.
+				slog.Info("feishu HITL resolved via IM direct answer",
+					"entrypoint_id", r.definition.ID,
+					"chat_id", chatID,
+					"human_request_id", hr.ID,
+					"response_kind", kind,
+					"sender_id", senderID,
+				)
+				return nil
+			}
+			// resolve failed → fall through to normal turn (don't block the user)
+		}
+	}
 	// Non-blocking: returns immediately (steer enqueue or dispatch goroutine).
 	session.Handle(ctx, "", content)
 	return nil

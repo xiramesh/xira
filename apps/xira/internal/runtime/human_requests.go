@@ -75,6 +75,17 @@ func (s *Service) ListHumanRequests(ctx context.Context, status humanrequest.Req
 	return s.humanRequests.List(ctx, humanrequest.ListQuery{WorkspaceKey: s.WorkspaceKey(), Status: status})
 }
 
+// ListPendingHumanRequestsByChatKey returns pending HITL requests for a chatKey
+// (runtime.ChatKey.String()). Channel adapters use this to check "does this
+// chat have a HITL waiting for an answer?" before starting a new turn (#92 —
+// HITL IM direct answer). Returns empty (not error) if the store is absent.
+func (s *Service) ListPendingHumanRequestsByChatKey(ctx context.Context, chatKey string) ([]humanrequest.HumanRequest, error) {
+	if s == nil || s.humanRequests == nil {
+		return nil, nil
+	}
+	return s.humanRequests.ListByChatKey(ctx, s.WorkspaceKey(), chatKey)
+}
+
 func (s *Service) ResolveHumanRequest(ctx context.Context, requestID string, input humanrequest.ResolveRequest) (*humanrequest.HumanRequest, error) {
 	if s == nil || s.humanRequests == nil {
 		return nil, fmt.Errorf("human request store is not available")
