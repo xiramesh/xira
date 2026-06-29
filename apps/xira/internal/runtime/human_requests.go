@@ -24,14 +24,21 @@ func mustHumanRequestStore(root string) *humanrequest.Store {
 }
 
 // chatKeyStringFromContext returns the chatKey from ctx as its canonical string
-// form (runtime.ChatKey.String()), or "" if ctx carries no chatKey. Used when
-// building CreateRequest.ChatKey (a plain string, to avoid the
-// humanrequest→runtime import cycle).
+// form (runtime.ChatKey.String()), or "" if ctx carries no chatKey OR a zero-
+// value chatKey (which would otherwise serialize as "//" — meaningless and a
+// future ListByChatKey footgun). Used when building CreateRequest.ChatKey.
 func chatKeyStringFromContext(ctx context.Context) string {
-	if key, ok := ChatKeyFromContext(ctx); ok {
-		return key.String()
+	key, ok := ChatKeyFromContext(ctx)
+	if !ok {
+		return ""
 	}
-	return ""
+	// A zero-value ChatKey (Channel/ChatID/SenderID all empty) is not a real
+	// chat identity — normalize to empty so it doesn't persist as "//" and get
+	// treated as a distinct (wrong) chat key by ListByChatKey.
+	if key.Channel == "" && key.ChatID == "" && key.SenderID == "" {
+		return ""
+	}
+	return key.String()
 }
 
 func (s *Service) WorkspaceKey() string {

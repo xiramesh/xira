@@ -20,4 +20,11 @@ func TestChatKeyStringFromContext(t *testing.T) {
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
+	// Zero-value ChatKey (empty Channel/ChatID/SenderID) must normalize to "",
+	// NOT "//" — otherwise it persists as a distinct (wrong) chat key and breaks
+	// ListByChatKey's per-chat isolation.
+	zeroCtx := WithChatKey(context.Background(), ChatKey{})
+	if got := chatKeyStringFromContext(zeroCtx); got != "" {
+		t.Errorf("zero-value ChatKey → %q, want empty (must not persist as \"//\")", got)
+	}
 }

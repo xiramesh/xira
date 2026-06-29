@@ -202,9 +202,19 @@ func (s *Store) List(ctx context.Context, query ListQuery) ([]HumanRequest, erro
 
 // ListByChatKey returns the PENDING human requests originating from chatKey
 // (runtime.ChatKey.String()). It's the most common query for #91-A/#92: "does
-// this chat have a HITL waiting for an answer?" Empty chatKey returns all
-// pending (no filter). Errors propagate from List.
+// this chat have a HITL waiting for an answer?"
+//
+// An empty chatKey is a CONTRACT VIOLATION for this entry point: callers asking
+// "pending HITL for this chat" must supply the chat. An empty value (from a
+// missing inbound field, a bug, or an unhandled zero value) would silently
+// return ALL pending requests in the workspace — a cross-chat mismatch that
+// breaks per-chat-key isolation. So we return a validation error rather than
+// fall through to the底层 List's "empty = no filter" semantics (which exists
+// for backward-compat with pre-ChatKey data, not for this dedicated query).
 func (s *Store) ListByChatKey(ctx context.Context, workspaceKey, chatKey string) ([]HumanRequest, error) {
+	if strings.TrimSpace(chatKey) == "" {
+		return nil, fmt.Errorf("%w: ListByChatKey requires a non-empty chatKey (empty would return all pending — cross-chat mismatch risk)", ErrValidation)
+	}
 	return s.List(ctx, ListQuery{
 		WorkspaceKey: workspaceKey,
 		Status:       StatusPending,
