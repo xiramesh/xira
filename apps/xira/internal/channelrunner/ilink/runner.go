@@ -650,7 +650,7 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 			_ = inboundCaptured
 			imRenderer.DeliverRaw(evt)
 		},
-		OnTurnEnd:  imRenderer.Stop,
+		OnTurnEnd: imRenderer.Stop,
 		SendFinal: func(ctx context.Context, text string) error {
 			return r.send(ctx, account, msg, text)
 		},
@@ -766,8 +766,8 @@ func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
 		// Reconstruct the minimal WeixinMessage the send path needs: the
 		// recipient and (optionally) the context_token for reply-vs-push.
 		msg := openilink.WeixinMessage{
-			FromUserID:    recipient,
-			ContextToken:  strings.TrimSpace(env.Target.Raw["context_token"]),
+			FromUserID:   recipient,
+			ContextToken: strings.TrimSpace(env.Target.Raw["context_token"]),
 		}
 		return r.send(ctx, account, msg, content)
 	default:
