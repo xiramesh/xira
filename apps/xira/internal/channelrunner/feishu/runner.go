@@ -240,6 +240,16 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		return r.send(ctx, chatID, text)
 	}, progress.DefaultPolicy())
 	imRenderer.Start()
+	// inboundCaptured makes the full InboundContext (MessageID, ChatID, SenderID,
+	// Raw metadata) available inside the OnRawEvent closure. The RuntimeEvent's
+	// Scope already carries these fields (populated from inbound at
+	// service.go:399-418), so evt.Scope.MessageID == inbound.MessageID. But
+	// having inbound in the closure lets a future feishu renderer do platform-
+	// native interactions (emoji reaction on the user's original message, button
+	// card, thread reply) without changing OnRawEvent's signature. Today the
+	// closure still delegates to IMEventRenderer (text rendering) — the captured
+	// inbound is the extension point.
+	inboundCaptured := inbound
 	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
 		Runtime:      r.runtime,
 		EntrypointID: r.definition.ID,
@@ -247,7 +257,16 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		// OnRawEvent replaces SendProgress: raw events flow to IMEventRenderer
 		// (render + quota + dedup + ordered async send). SendProgress is left
 		// nil so the legacy ChatContext path is a no-op (avoids double-delivery).
-		OnRawEvent: imRenderer.DeliverRaw,
+		// The closure captures inboundCaptured so a future renderer can access
+		// the user's original MessageID etc. for platform-native interactions.
+		OnRawEvent: func(evt frt.RuntimeEvent) {
+			// Default: delegate to shared IM text renderer.
+			// Extension point: replace with feishu-specific rendering (emoji
+			// reaction on inboundCaptured.MessageID, interactive card, etc.).
+			// evt.Scope carries Channel/ChatID/SenderID/MessageID etc.
+			_ = inboundCaptured
+			imRenderer.DeliverRaw(evt)
+		},
 		// OnTurnEnd flushes + stops the renderer's sendLoop at turn exit
 		// (mirrors ChatContext.Stop's drain+wait contract).
 		OnTurnEnd: imRenderer.Stop,

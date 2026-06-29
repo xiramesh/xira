@@ -596,6 +596,14 @@ func (r *Runner) handleMessage(
 		Runtime:      r.runtime,
 		EntrypointID: prepared.turn.EntrypointID,
 		Inbound:      prepared.turn.Context,
+		// OnRawEvent: websocket already does its own event rendering (structured
+		// event frame, not text). The closure captures activeReq (event routing
+		// filter), requestID (frame correlation), and send (dynamic connection
+		// resolution). evt.Scope carries Channel/ChatID/SenderID/MessageID —
+		// websocket sends the full RuntimeEvent as a JSON frame so the client
+		// has all context. No IMEventRenderer; ws is the "channel decides
+		// rendering" model in action. prepared.turn.Context (= InboundConfig)
+		// is available as Config.Inbound above for future extensions.
 		OnRawEvent: func(evt frt.RuntimeEvent) {
 			if !activeReq.acceptEvent(evt) {
 				return

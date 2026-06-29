@@ -634,6 +634,10 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		return r.send(ctx, account, msg, text)
 	}, progress.DefaultPolicy())
 	imRenderer.Start()
+	// inboundCaptured makes the full InboundContext available inside the
+	// OnRawEvent closure — extension point for future ilink-specific event
+	// rendering (e.g. rich message formats). Today delegates to IMEventRenderer.
+	inboundCaptured := inbound
 	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
 		Runtime:      r.runtime,
 		EntrypointID: r.definition.ID,
@@ -641,7 +645,11 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		// OnRawEvent replaces SendProgress (raw → IMEventRenderer render+quota+
 		// dedup+ordered async send). SendProgress nil → legacy ChatContext
 		// no-op (no double). OnTurnEnd stops the renderer's sendLoop at exit.
-		OnRawEvent: imRenderer.DeliverRaw,
+		// The closure captures inboundCaptured as an extension point (see feishu).
+		OnRawEvent: func(evt frt.RuntimeEvent) {
+			_ = inboundCaptured
+			imRenderer.DeliverRaw(evt)
+		},
 		OnTurnEnd:  imRenderer.Stop,
 		SendFinal: func(ctx context.Context, text string) error {
 			return r.send(ctx, account, msg, text)
