@@ -634,6 +634,10 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		return r.send(ctx, account, msg, text)
 	}, progress.DefaultPolicy())
 	imRenderer.Start()
+	// inboundCaptured makes the full InboundContext available inside the
+	// OnRawEvent closure — extension point for future ilink-specific event
+	// rendering (e.g. rich message formats). Today delegates to IMEventRenderer.
+	inboundCaptured := inbound
 	session := progress.NewChatKeySession(chatKey, r.router, progress.ChatKeySessionConfig{
 		Runtime:      r.runtime,
 		EntrypointID: r.definition.ID,
@@ -641,8 +645,12 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		// OnRawEvent replaces SendProgress (raw → IMEventRenderer render+quota+
 		// dedup+ordered async send). SendProgress nil → legacy ChatContext
 		// no-op (no double). OnTurnEnd stops the renderer's sendLoop at exit.
-		OnRawEvent: imRenderer.DeliverRaw,
-		OnTurnEnd:  imRenderer.Stop,
+		// The closure captures inboundCaptured as an extension point (see feishu).
+		OnRawEvent: func(evt frt.RuntimeEvent) {
+			_ = inboundCaptured
+			imRenderer.DeliverRaw(evt)
+		},
+		OnTurnEnd: imRenderer.Stop,
 		SendFinal: func(ctx context.Context, text string) error {
 			return r.send(ctx, account, msg, text)
 		},
@@ -758,8 +766,8 @@ func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
 		// Reconstruct the minimal WeixinMessage the send path needs: the
 		// recipient and (optionally) the context_token for reply-vs-push.
 		msg := openilink.WeixinMessage{
-			FromUserID:    recipient,
-			ContextToken:  strings.TrimSpace(env.Target.Raw["context_token"]),
+			FromUserID:   recipient,
+			ContextToken: strings.TrimSpace(env.Target.Raw["context_token"]),
 		}
 		return r.send(ctx, account, msg, content)
 	default:
