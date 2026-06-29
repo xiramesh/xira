@@ -159,7 +159,24 @@ WS 作为客户端面的规范地位保留，但不让它污染适配器面。
 
 ---
 
-## 4. 三态状态机：今天隐藏在 `active` bool 后面的 HITL 缝
+## 4. ~~三态状态机~~ → 已取消（2026-06-29）：active bool 保留 + HITL 路由用落盘查询
+
+> **取消声明**：三态状态机（idle/active/hitl-paused）这个概念从架构中**删除**。
+> 原因（基于 §0.1 核心定位"落盘 session 是核心"）：
+>
+> 1. **active bool 保留**——它做的是并发安全（同一 chatKey 不并发跑 turn），不是状态机。
+>    真相只能在内存（磁盘上没有"turn 正在跑"的记录），进程崩了丢了也不影响 session 历史安全。
+> 2. **hitl-paused 状态取消**——它想做的是路由分叉（用户发消息时走 resume 而不是起新 turn），
+>    但这个用**落盘查询**（`store.ListByChatKey(chatKey)`）替代：适配器层在 session.Handle 之前
+>    查 pending HITL，有则走 resolve，没有则正常起新 turn。不依赖内存三态。
+> 3. 三态状态机的前提是"ChatKeySession 持有长期状态"，但 §0.1 已确认 ChatKeySession 只是
+>    单 turn 内存调度器，长期状态在落盘 session。内存里不该有"这个 chatKey 处于什么长期状态"
+>    的概念。
+>
+> 以下 §4.1-§4.4 保留作为**核实记录**（身份断裂问题已被 #100 ChatKey 字段修复；resume 绕过
+> Router 的契约不变），但三态状态机**不再实施**。§5.2 的状态机设计**作废**。
+
+### 4.1 用户论证里被忽略的洞
 
 ### 4.1 用户论证里被忽略的洞
 
@@ -238,7 +255,11 @@ final 通过 `s.deliverResumeFinal` → `s.outbound.Emit`（= Manager.Emit）按
 收敛后，ilink / feishu / ws 适配器各自**只剩**：协议事件解析 → `session.Handle(chatKey, msg, inbound)`；
 + 实现 `Sender`（进度）和 `Emit`（final/resume）。
 
-### 5.2 状态机显式建模（核心变更）
+### 5.2 ~~状态机显式建模~~ → 已取消（2026-06-29）
+
+> **取消声明**：以下 ChatKeyState 三态 + HandleOutcome 设计**作废**。Router 的 `active` bool
+> 保留（并发安全），HITL 路由用适配器层落盘查询替代（§4 取消声明）。以下代码保留作设计历史。
+> ChatKeySession 现状是 per-message 薄封装（调 Router.Handle），不持 state/pendingHR。
 
 ```go
 // progress/chatkey_session.go (新)
@@ -278,7 +299,15 @@ func (s *ChatKeySession) Handle(ctx context.Context, msg string, inbound channel
 **关键**：`HandleOutcome` 让 HITL 缝对适配器**可见**——适配器能区分"我起的 turn 跑完了"
 vs "我的消息触发了 resume（异步，final 会通过 Emit 回来）"。今天的 Router 不给这个信息。
 
-### 5.3 HITL 暂停怎么让 Session 知道（不破坏无状态命题）
+### 5.3 ~~HITL 暂停怎么让 Session 知道~~ → 已取消（2026-29）
+
+> **取消声明**：本节的"Session 持 HitLPaused hint"设计**作废**（随 §4/§5.2 三态取消）。
+> HITL 路由改为**适配器层落盘查询**：channel adapter 在 session.Handle 之前调
+> `store.ListByChatKey(chatKey)`，有 pending → 走 ResolveHumanRequest（resume，
+> 不经 Router），没有 → 正常 session.Handle。不持内存 hint，不处理 hint 过期。
+>
+> §5.3 原文的"无状态 resume 命题"（resume 不读 Router 内存）**仍然成立且更重要了**——
+> 现在 HITL 路由也不读 Session 内存，全部靠落盘 Store。以下原文保留作设计历史。
 
 这是设计上最 delicate 的一点。两条约束要同时满足：
 
