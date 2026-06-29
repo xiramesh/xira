@@ -212,7 +212,8 @@ func (s *Store) List(ctx context.Context, query ListQuery) ([]HumanRequest, erro
 // fall through to the底层 List's "empty = no filter" semantics (which exists
 // for backward-compat with pre-ChatKey data, not for this dedicated query).
 func (s *Store) ListByChatKey(ctx context.Context, workspaceKey, chatKey string) ([]HumanRequest, error) {
-	if strings.TrimSpace(chatKey) == "" {
+	chatKey = strings.TrimSpace(chatKey)
+	if chatKey == "" {
 		return nil, fmt.Errorf("%w: ListByChatKey requires a non-empty chatKey (empty would return all pending — cross-chat mismatch risk)", ErrValidation)
 	}
 	return s.List(ctx, ListQuery{
