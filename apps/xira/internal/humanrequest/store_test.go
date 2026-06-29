@@ -923,8 +923,8 @@ func TestValidateCreateErrorBranches(t *testing.T) {
 		}
 	}
 	cases := []struct {
-		name  string
-		mut   func(*CreateRequest)
+		name string
+		mut  func(*CreateRequest)
 	}{
 		{"bad workspace key (path traversal)", func(c *CreateRequest) { c.WorkspaceKey = "../bad" }},
 		{"bad request id (path traversal)", func(c *CreateRequest) { c.ID = "../bad" }},
@@ -1258,5 +1258,59 @@ func TestStoreWriteFailuresOnReadOnlyRoot(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("Create under file-as-root should fail (writeYAMLAtomic error path)")
+	}
+}
+
+// TestWriteYAMLAtomicErrorBranches covers writeYAMLAtomic's OS error branches
+// directly (it's a package-level function, testable without a Store). These
+// branches were the coverage tail: MkdirAll failure (dir is a file), and the
+// success path's Close/Rename.
+func TestWriteYAMLAtomicErrorBranches(t *testing.T) {
+	// MkdirAll fails: Dir(path) is an existing FILE → MkdirAll returns error.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeYAMLAtomic(filepath.Join(blocker, "sub", "f.yaml"), map[string]string{"k": "v"}, 0o600); err == nil {
+		t.Error("writeYAMLAtomic with file-as-dir should fail (MkdirAll error)")
+	}
+
+	// Happy path: valid dir → writes + renames → returns nil. Covers Write/Chmod/
+	// Close/Rename success branches.
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "out.yaml")
+	if err := writeYAMLAtomic(dst, map[string]string{"k": "v"}, 0o600); err != nil {
+		t.Fatalf("writeYAMLAtomic happy: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "k: v") {
+		t.Errorf("written content = %q, want to contain 'k: v'", string(got))
+	}
+}
+
+// TestLoadRequestCorruptedFile covers loadRequest's yaml.Unmarshal error branch
+// (a corrupt YAML file on disk). Was 72.7%.
+func TestLoadRequestCorruptedFile(t *testing.T) {
+	root := t.TempDir()
+	store := newTestStore(t, root)
+	// Hand-write a corrupt YAML into the requests dir.
+	reqDir := filepath.Join(root, "workspaces", "ws_corrupt", "human-requests")
+	if err := os.MkdirAll(reqDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reqDir, "bad.yaml"), []byte("id: [unclosed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Get → loadRequest → readYAMLFile → yaml.Unmarshal fails.
+	if _, err := store.Get(context.Background(), "ws_corrupt", "bad"); err == nil {
+		t.Error("Get on corrupt YAML should error (loadRequest unmarshal failure)")
+	}
+	// List → listLocked → readYAMLFile on the corrupt file → errors (corrupt
+	// data on disk is surfaced, not silently skipped).
+	if _, err := store.List(context.Background(), ListQuery{WorkspaceKey: "ws_corrupt"}); err == nil {
+		t.Error("List with corrupt file should error (surfaced, not skipped)")
 	}
 }
