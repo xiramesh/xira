@@ -15,6 +15,48 @@ SpawnCollector + ChildCancelRegistry + dedupe 收尾 + steering retry loop），
 
 ---
 
+## 0.1 核心定位澄清：落盘 session 是核心，turn 只是工作单元（2026-06-29 补）
+
+> 本节是 RFC v0 落地过程中（Step 1-2 完成后）的认知更新。它**不推翻** §0 的引擎设计，
+> 而是补一个 §0 没说清、但比引擎更根本的层次：**长期会话连续性的真相在哪**。
+
+### 核实结论
+
+§0 把 `ChatKeySession`（per-chatKey turn 引擎）定位为"核心"。但核实发现，**长期连续性
+不靠引擎的内存状态，靠落盘 session**：
+
+- `session.FileStore` 按 sessionID（由 chatKey 的 SessionScope 算 hash）落盘 `messages.jsonl`
+  —— 完整对话历史，跨进程可恢复（`LoadHistories()`）。
+- `service.go:579` 的 `AppendAgentMessages` 在 turn **完成**后**一次性原子写**
+  user+assistant+tools+HITL —— turn 崩了什么都不写，session 历史要么有完整一轮、要么没有，
+  **不会留下半截泄漏**。
+- 进程重启 → 用同样的 chatKey 算出同样的 sessionID → load 回历史 → 下一条消息开新 turn，
+  agent 看到之前干过啥，自然续上。
+
+所以宏观核心是**以 chatKey 为锚的落盘 session**。`ChatKeySession` / `Router` 只是**单 turn
+的内存调度器**（这条消息此刻该 steer、起新 turn、还是 resume），**不背长期状态**。turn 是
+session 里的一个工作单元：成功就追加历史，失败/崩溃就丢弃（不污染 session）。
+
+### 这对 RFC 后续章节的影响
+
+1. **§4/§5 的三态状态机（active/idle/hitl-paused）降级**。它只管"单 turn 此刻怎么调度"，
+   不决定长期连续性。HITL 的恢复真相在 `humanrequest.Store`（落盘），不在内存三态。三态状态机
+   从"RFC 核心"降为"单 turn 调度的可选优化"——它有用（让 HITL 在调度层可见），但不是连续性
+   的支柱。详见 #91 的降级重定义。
+2. **§5.3 的无状态 resume 命题，扩展为更一般的原则**：不只 HITL resume 不读内存，**普通崩溃
+   也不依赖内存**——session 历史在磁盘，重启自然续。落盘 session 是所有"中断后继续"的统一基础。
+3. **"崩溃恢复 + session 干净"已基本满足**（核实于 2026-06-29）。落盘 session 是原子的；
+   崩溃 turn 不留磁盘孤儿（`SaveRun` 只在完成后调）；唯一小缺口是 waiting_human 的 run 永不
+   回答时占空间（TTL 清理，运维问题，非架构问题）。
+
+### 一句话（更新版）
+
+> **核心 = 以 chatKey 为锚的落盘 session（`session.FileStore`）。turn 是 session 里的工作单元，
+> `ChatKeySession`/`Router` 是单 turn 的内存调度器。** 长期连续性、崩溃恢复、HITL resume 的
+> 真相都在落盘层；内存引擎只是"此刻这条消息怎么走"的路由分叉。
+
+---
+
 ## 1. 现状核实：三个 channel，三套不一致的 turn 处理
 
 逐个读源码核实（非凭文档），三者的差异**不是 by-design 取舍，是实现进度的拖尾**。
