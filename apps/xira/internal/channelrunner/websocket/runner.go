@@ -97,10 +97,11 @@ type activeRequest struct {
 // Runner is the websocket channel runner. One instance per websocket
 // entrypoint, registered in channelrunner.Manager alongside ilink/feishu.
 type Runner struct {
-	definition entrypoints.Definition
-	runtime    frt.Runtime
-	router     *progress.Router
-	dedupe     *dedupe.MessageDeduper
+	definition   entrypoints.Definition
+	runtime      frt.Runtime
+	hitlResolver frt.HITLResolver
+	router       *progress.Router
+	dedupe       *dedupe.MessageDeduper
 
 	// conns is the per-Runner connection registry (RFC chatkey-session Step 3b).
 	// It maps a ChatKey to its single live connection, so outbound delivery
@@ -159,6 +160,13 @@ func NewRunner(def entrypoints.Definition, rt *frt.Service, stateRoot string) (*
 
 func (r *Runner) ID() string      { return r.definition.ID }
 func (r *Runner) Channel() string { return "websocket" }
+
+// SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
+func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
+	if r != nil {
+		r.hitlResolver = resolver
+	}
+}
 
 // Start is a no-op: websocket is a passive server (connections arrive via the
 // HTTP upgrade handler in api). There is nothing to connect out to up-front.
@@ -575,6 +583,18 @@ func (r *Runner) handleMessage(
 			ID:        "srv_ack_" + requestID,
 			RequestID: requestID,
 			Data:      ackData,
+		})
+		return
+	}
+	// HITL direct-answer (#92): shared preflight check (same logic as feishu/ilink).
+	// If this chatKey has a pending HITL (agent_request only), resolve it from
+	// the user's message text and return. Resume runs async via Emit.
+	if progress.TryResolveHITL(ctx, r.hitlResolver, chatKey, prepared.turn.Message, prepared.eventContext.SenderID) {
+		_ = writeFrame(outboundFrame{
+			Type:      "ack",
+			ID:        "srv_ack_" + requestID,
+			RequestID: requestID,
+			Data:      map[string]any{"status": "hitl_resolved"},
 		})
 		return
 	}
