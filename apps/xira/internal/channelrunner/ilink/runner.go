@@ -21,6 +21,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
@@ -69,8 +70,11 @@ type pairingState struct {
 }
 
 type Runner struct {
-	definition      entrypoints.Definition
-	runtime         *frt.Service
+	definition entrypoints.Definition
+	runtime    *frt.Service
+	// hitlResolver, when non-nil, lets ilink resolve pending HITL directly
+	// from IM text replies (#92). nil = HITL direct-answer disabled.
+	hitlResolver    frt.HITLResolver
 	stateDir        string
 	baseURL         string
 	allowPairing    bool
@@ -83,6 +87,13 @@ type Runner struct {
 	accounts map[string]*accountPoller
 	pairings map[string]*pairingState
 	router   *progress.Router
+}
+
+// SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
+func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
+	if r != nil {
+		r.hitlResolver = resolver
+	}
 }
 
 func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot string) (*Runner, error) {
@@ -624,9 +635,39 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 	// xira-chatkey-session-engine-rfc-v0 Step 1). The session owns the
 	// steering retry loop, ChatContext lifecycle, SpawnCollector cleanup, and
 	// child-cancel registry; ilink injects only the channel-specific delivery
-	// (r.send with the original openilink message + account) and dedupe
-	// completion via closures. Behavior is 1:1 equivalent to the previous
-	// inline runTurn closure; the ilink tests verify equivalence.
+	// HITL direct-answer (#92): if this chatKey has a pending HumanRequest,
+	// interpret the user's message as a reply and resolve it — skip new turn.
+	// Checked BEFORE imRenderer.Start() to avoid goroutine leak (imRenderer.Stop
+	// is only called via OnTurnEnd inside session.Handle, which we skip on resolve).
+	// Resume runs async; final comes back via Manager.Emit → ilink.Emit.
+	// Pure-text: user's text is always treated as a free-form answer (no keyword
+	// matching — intent left to the agent). Future: button card → precise kind.
+	if r.hitlResolver != nil {
+		if pending, err := r.hitlResolver.ListPendingHumanRequestsByChatKey(ctx, chatKey.String()); err == nil && len(pending) > 0 {
+			hr := pending[0]
+			// Only agent_request HITLs can be resolved via free-form IM text.
+			// runtime_tool_gate needs precise approve/deny — see feishu/runner.go.
+			if hr.Source == "agent_request" {
+				kind, msg := progress.ClassifyHITLResponse(content, hr.Kind)
+				if _, err := r.hitlResolver.ResolveHumanRequest(ctx, hr.ID, humanrequest.ResolveRequest{
+					Kind:    kind,
+					Actor:   senderID,
+					Message: msg,
+				}); err == nil {
+					slog.Info("ilink HITL resolved via IM direct answer",
+						"entrypoint_id", r.definition.ID,
+						"account_id", account.record.AccountID,
+						"human_request_id", hr.ID,
+						"response_kind", kind,
+						"sender_id", senderID,
+					)
+					return
+				}
+				// resolve failed → fall through to normal turn
+			}
+			// runtime_tool_gate: skip IM direct-answer. Fall through to normal turn.
+		}
+	}
 	// IMEventRenderer receives raw RuntimeEvents and renders them to localized
 	// text + quota + dedup (the behavior the old ChatContext baked in). Per-turn
 	// instance. See feishu/runner.go for the same wiring.

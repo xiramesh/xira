@@ -112,6 +112,23 @@ func (m *Manager) WSRunner() *websocket.Runner {
 	return nil
 }
 
+// SetHITLResolver injects the HITL resolve capability into all channel runners
+// that support it (feishu, ilink). Called by main.go after NewManager (#92 —
+// HITL IM direct answer). Runners without SetHITLResolver are skipped.
+func (m *Manager) SetHITLResolver(resolver runtime.HITLResolver) {
+	if m == nil {
+		return
+	}
+	for _, runner := range m.runners {
+		switch r := runner.(type) {
+		case *feishu.Runner:
+			r.SetHITLResolver(resolver)
+		case *ilink.Runner:
+			r.SetHITLResolver(resolver)
+		}
+	}
+}
+
 func (m *Manager) CreatePairing(ctx context.Context, entrypointID string) (channelcontrol.PairingSnapshot, error) {
 	controller, err := m.pairingController(entrypointID)
 	if err != nil {

@@ -22,6 +22,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
@@ -36,12 +37,16 @@ type Runner struct {
 	// up a full Service with entrypoints+agents. *frt.Service satisfies this
 	// implicitly (runtime.go var _ assertion). Production wiring via NewRunner
 	// is unchanged.
-	runtime    frt.Runtime
-	appID      string
-	appSecret  string
-	verify     string
-	encryptKey string
-	client     *lark.Client
+	runtime frt.Runtime
+	// hitlResolver, when non-nil, lets feishu resolve pending HITL directly
+	// from IM text replies (#92). Injected by main.go from *frt.Service.
+	// nil = HITL direct-answer disabled (messages always start a new turn).
+	hitlResolver frt.HITLResolver
+	appID        string
+	appSecret    string
+	verify       string
+	encryptKey   string
+	client       *lark.Client
 
 	mu       sync.Mutex
 	cancel   context.CancelFunc
@@ -49,6 +54,14 @@ type Runner struct {
 
 	messages *dedupe.MessageDeduper
 	router   *progress.Router // per-Runner turn router (RFC chatkey-session Step 2)
+}
+
+// SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
+// Called by main.go after NewRunner. nil = HITL direct-answer disabled.
+func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
+	if r != nil {
+		r.hitlResolver = resolver
+	}
 }
 
 func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot string) (*Runner, error) {
@@ -231,6 +244,50 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 	)
 	inbound := channel.NewInboundContextWithEntrypoint("feishu", r.definition.ID, senderID, metadata)
 	chatKey := frt.ChatKeyFromInbound(inbound)
+	// HITL direct-answer (#92): if this chatKey has a pending HumanRequest,
+	// interpret the user's message as a reply to it and resolve it — skip
+	// starting a new turn. The resume path (deliverResumeFinal → Manager.Emit)
+	// sends the final back to IM asynchronously.
+	//
+	// Checked BEFORE imRenderer.Start() so that if we resolve, no renderer
+	// goroutine is created (avoids leak — imRenderer.Stop is only called via
+	// OnTurnEnd inside session.Handle, which we skip on resolve).
+	//
+	// Pure-text approach: user's text is always treated as a free-form answer
+	// (no keyword matching — intent is left to the agent during resume). Future:
+	// channels with button card can construct precise ResponseKind directly.
+	if r.hitlResolver != nil {
+		if pending, err := r.hitlResolver.ListPendingHumanRequestsByChatKey(ctx, chatKey.String()); err == nil && len(pending) > 0 {
+			hr := pending[0] // most recent (store sorts by CreatedAt desc)
+			// Only agent_request HITLs can be resolved via free-form IM text:
+			// ResponseAnswer triggers resumeDirectHumanRequest (agent reads the
+			// user's text and continues). runtime_tool_gate HITLs require a
+			// precise ResponseApprove/Deny/Cancel to replay/reject the tool —
+			// answer would mark it resolved without replay, stranding the run
+			// in waiting_human forever. Tool gates need button card (future) or
+			// HTTP/CLI.
+			if hr.Source == "agent_request" {
+				kind, msg := progress.ClassifyHITLResponse(content, hr.Kind)
+				if _, err := r.hitlResolver.ResolveHumanRequest(ctx, hr.ID, humanrequest.ResolveRequest{
+					Kind:    kind,
+					Actor:   senderID,
+					Message: msg,
+				}); err == nil {
+					slog.Info("feishu HITL resolved via IM direct answer",
+						"entrypoint_id", r.definition.ID,
+						"chat_id", chatID,
+						"human_request_id", hr.ID,
+						"response_kind", kind,
+						"sender_id", senderID,
+					)
+					return nil
+				}
+				// resolve failed → fall through to normal turn (don't block the user)
+			}
+			// runtime_tool_gate: skip IM direct-answer (needs precise approve/deny).
+			// Fall through to normal turn — the HITL stays pending for HTTP/CLI.
+		}
+	}
 	// IMEventRenderer receives raw RuntimeEvents and renders them to localized
 	// text + quota + dedup (the behavior the old ChatContext baked in). This is
 	// the "channel decides rendering" path: feishu opts into the shared IM
