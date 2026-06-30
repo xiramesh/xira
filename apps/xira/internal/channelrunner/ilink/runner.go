@@ -645,21 +645,27 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 	if r.hitlResolver != nil {
 		if pending, err := r.hitlResolver.ListPendingHumanRequestsByChatKey(ctx, chatKey.String()); err == nil && len(pending) > 0 {
 			hr := pending[0]
-			kind, msg := progress.ClassifyHITLResponse(content, hr.Kind)
-			if _, err := r.hitlResolver.ResolveHumanRequest(ctx, hr.ID, humanrequest.ResolveRequest{
-				Kind:    kind,
-				Actor:   senderID,
-				Message: msg,
-			}); err == nil {
-				slog.Info("ilink HITL resolved via IM direct answer",
-					"entrypoint_id", r.definition.ID,
-					"account_id", account.record.AccountID,
-					"human_request_id", hr.ID,
-					"response_kind", kind,
-					"sender_id", senderID,
-				)
-				return
+			// Only agent_request HITLs can be resolved via free-form IM text.
+			// runtime_tool_gate needs precise approve/deny — see feishu/runner.go.
+			if hr.Source == "agent_request" {
+				kind, msg := progress.ClassifyHITLResponse(content, hr.Kind)
+				if _, err := r.hitlResolver.ResolveHumanRequest(ctx, hr.ID, humanrequest.ResolveRequest{
+					Kind:    kind,
+					Actor:   senderID,
+					Message: msg,
+				}); err == nil {
+					slog.Info("ilink HITL resolved via IM direct answer",
+						"entrypoint_id", r.definition.ID,
+						"account_id", account.record.AccountID,
+						"human_request_id", hr.ID,
+						"response_kind", kind,
+						"sender_id", senderID,
+					)
+					return
+				}
+				// resolve failed → fall through to normal turn
 			}
+			// runtime_tool_gate: skip IM direct-answer. Fall through to normal turn.
 		}
 	}
 	// IMEventRenderer receives raw RuntimeEvents and renders them to localized

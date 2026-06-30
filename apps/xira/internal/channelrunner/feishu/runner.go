@@ -259,22 +259,33 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 	if r.hitlResolver != nil {
 		if pending, err := r.hitlResolver.ListPendingHumanRequestsByChatKey(ctx, chatKey.String()); err == nil && len(pending) > 0 {
 			hr := pending[0] // most recent (store sorts by CreatedAt desc)
-			kind, msg := progress.ClassifyHITLResponse(content, hr.Kind)
-			if _, err := r.hitlResolver.ResolveHumanRequest(ctx, hr.ID, humanrequest.ResolveRequest{
-				Kind:    kind,
-				Actor:   senderID,
-				Message: msg,
-			}); err == nil {
-				slog.Info("feishu HITL resolved via IM direct answer",
-					"entrypoint_id", r.definition.ID,
-					"chat_id", chatID,
-					"human_request_id", hr.ID,
-					"response_kind", kind,
-					"sender_id", senderID,
-				)
-				return nil
+			// Only agent_request HITLs can be resolved via free-form IM text:
+			// ResponseAnswer triggers resumeDirectHumanRequest (agent reads the
+			// user's text and continues). runtime_tool_gate HITLs require a
+			// precise ResponseApprove/Deny/Cancel to replay/reject the tool —
+			// answer would mark it resolved without replay, stranding the run
+			// in waiting_human forever. Tool gates need button card (future) or
+			// HTTP/CLI.
+			if hr.Source == "agent_request" {
+				kind, msg := progress.ClassifyHITLResponse(content, hr.Kind)
+				if _, err := r.hitlResolver.ResolveHumanRequest(ctx, hr.ID, humanrequest.ResolveRequest{
+					Kind:    kind,
+					Actor:   senderID,
+					Message: msg,
+				}); err == nil {
+					slog.Info("feishu HITL resolved via IM direct answer",
+						"entrypoint_id", r.definition.ID,
+						"chat_id", chatID,
+						"human_request_id", hr.ID,
+						"response_kind", kind,
+						"sender_id", senderID,
+					)
+					return nil
+				}
+				// resolve failed → fall through to normal turn (don't block the user)
 			}
-			// resolve failed → fall through to normal turn (don't block the user)
+			// runtime_tool_gate: skip IM direct-answer (needs precise approve/deny).
+			// Fall through to normal turn — the HITL stays pending for HTTP/CLI.
 		}
 	}
 	// IMEventRenderer receives raw RuntimeEvents and renders them to localized
