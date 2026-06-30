@@ -487,12 +487,12 @@ func TestReplayRejectsChangedToolArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	requestID := resp.HumanRequests[0].ID
-	requestPath := filepath.Join(rt.StateRoot(), "workspaces", rt.WorkspaceKey(), "human-requests", requestID+".yaml")
+	requestPath := filepath.Join(rt.StateRoot(), "workspaces", rt.WorkspaceKey(), "human-requests", requestID+".json")
 	data, err := os.ReadFile(requestPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tampered := strings.Replace(string(data), "content: original content", "content: tampered content", 1)
+	tampered := strings.Replace(string(data), `"content": "original content"`, `"content": "tampered content"`, 1)
 	if tampered == string(data) {
 		t.Fatalf("test fixture did not find snapshot content in %s:\n%s", requestPath, string(data))
 	}

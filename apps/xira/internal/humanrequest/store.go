@@ -13,8 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"encoding/json"
+
 	"github.com/google/uuid"
-	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -414,11 +415,11 @@ func (s *Store) listLocked(query ListQuery) ([]HumanRequest, error) {
 	}
 	out := make([]HumanRequest, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yaml" {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		req, err := readYAMLFile[HumanRequest](path)
+		req, err := readJSONFile[HumanRequest](path)
 		if err != nil {
 			return nil, fmt.Errorf("load human request %s: %w", path, err)
 		}
@@ -448,7 +449,7 @@ func (s *Store) loadRequest(workspaceKey, requestID string) (*HumanRequest, erro
 		return nil, err
 	}
 	path := s.requestPath(workspaceKey, requestID)
-	req, err := readYAMLFile[HumanRequest](path)
+	req, err := readJSONFile[HumanRequest](path)
 	if os.IsNotExist(err) {
 		return nil, fmt.Errorf("%w: human request %s", ErrNotFound, requestID)
 	}
@@ -468,7 +469,7 @@ func (s *Store) writeRequest(req *HumanRequest) error {
 	if err := validatePathID(req.ID, "request id"); err != nil {
 		return err
 	}
-	return writeYAMLAtomic(s.requestPath(req.WorkspaceKey, req.ID), req, 0o600)
+	return writeJSONAtomic(s.requestPath(req.WorkspaceKey, req.ID), req, 0o600)
 }
 
 func (s *Store) writeResponse(workspaceKey string, response *HumanResponse) error {
@@ -484,7 +485,7 @@ func (s *Store) writeResponse(workspaceKey string, response *HumanResponse) erro
 	if err := validatePathID(response.RequestID, "request id"); err != nil {
 		return err
 	}
-	return writeYAMLAtomic(filepath.Join(s.workspaceDir(workspaceKey), "human-responses", response.ID+".yaml"), response, 0o600)
+	return writeJSONAtomic(filepath.Join(s.workspaceDir(workspaceKey), "human-responses", response.ID+".json"), response, 0o600)
 }
 
 func (s *Store) writeReplayResult(workspaceKey, requestID string, replay *ReplayState) error {
@@ -494,7 +495,7 @@ func (s *Store) writeReplayResult(workspaceKey, requestID string, replay *Replay
 	if err := validatePathID(requestID, "request id"); err != nil {
 		return err
 	}
-	return writeYAMLAtomic(filepath.Join(s.workspaceDir(workspaceKey), "replay-results", requestID+".yaml"), replay, 0o600)
+	return writeJSONAtomic(filepath.Join(s.workspaceDir(workspaceKey), "replay-results", requestID+".json"), replay, 0o600)
 }
 
 func (s *Store) workspaceDir(workspaceKey string) string {
@@ -506,7 +507,7 @@ func (s *Store) requestsDir(workspaceKey string) string {
 }
 
 func (s *Store) requestPath(workspaceKey, requestID string) string {
-	return filepath.Join(s.requestsDir(workspaceKey), strings.TrimSpace(requestID)+".yaml")
+	return filepath.Join(s.requestsDir(workspaceKey), strings.TrimSpace(requestID)+".json")
 }
 
 func validateCreate(input CreateRequest) error {
@@ -577,27 +578,27 @@ func validateResponseKind(kind ResponseKind) error {
 	}
 }
 
-func readYAMLFile[T any](path string) (T, error) {
+func readJSONFile[T any](path string) (T, error) {
 	var value T
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return value, err
 	}
-	if err := yaml.Unmarshal(data, &value); err != nil {
+	if err := json.Unmarshal(data, &value); err != nil {
 		return value, err
 	}
 	return value, nil
 }
 
-func writeYAMLAtomic(path string, value any, perm os.FileMode) error {
+func writeJSONAtomic(path string, value any, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	data, err := yaml.Marshal(value)
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*.yaml")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*.json")
 	if err != nil {
 		return err
 	}

@@ -41,14 +41,14 @@ func TestRunStoreSaveLoadRoundtrip(t *testing.T) {
 	s := NewRunStore(t.TempDir())
 	now := time.Now().UTC()
 	resp := TurnResponse{
-		RunID:      "run-save-1",
-		Status:     "completed",
-		StartedAt:  now,
+		RunID:         "run-save-1",
+		Status:        "completed",
+		StartedAt:     now,
 		FinalResponse: "done",
-		Events:       []RuntimeEvent{{ID: "e1", Kind: "assistant.final", Scope: &RuntimeEventScope{RunID: "run-save-1"}}},
-		AuditEvents:  []AuditEvent{{ID: "a1", Time: now, Action: "tool.call"}},
-		LLMCalls:     []LLMCallRecord{{Model: "deepseek"}},
-		ToolCalls:    []ToolCallRecord{{Name: "read_file"}},
+		Events:        []RuntimeEvent{{ID: "e1", Kind: "assistant.final", Scope: &RuntimeEventScope{RunID: "run-save-1"}}},
+		AuditEvents:   []AuditEvent{{ID: "a1", Time: now, Action: "tool.call"}},
+		LLMCalls:      []LLMCallRecord{{Model: "deepseek"}},
+		ToolCalls:     []ToolCallRecord{{Name: "read_file"}},
 	}
 	if err := s.SaveRun(resp); err != nil {
 		t.Fatalf("SaveRun failed: %v", err)
@@ -67,7 +67,7 @@ func TestRunStoreSaveLoadRoundtrip(t *testing.T) {
 	if err := s.SaveRun(resp); err != nil {
 		t.Fatalf("SaveRun with evolution candidate failed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(s.RunDir("run-evo-1"), "evolution", "candidates", "cand-1.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(s.RunDir("run-evo-1"), "evolution", "candidates", "cand-1.json")); err != nil {
 		t.Fatalf("evolution candidate file not written: %v", err)
 	}
 }
@@ -96,7 +96,7 @@ func TestRunStoreList(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(s.Root(), "stray.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// A dir with no run.yaml must be skipped (Load errors).
+	// A dir with no run.json must be skipped (Load errors).
 	if err := os.MkdirAll(filepath.Join(s.Root(), "bogus"), 0o755); err != nil {
 		t.Fatal(err)
 	}
