@@ -1,5 +1,11 @@
 # Xira Conversation Progress Feed v0
 
+> **状态: Superseded / 历史背景。** 本文保留了旧的全局 EventBus +
+> Forwarder + visibility 设计细节。当前生产契约已变更为 per-chat-key
+> `ChatContext` / `RawEventSink` / sealed Event 渲染，不再有全局
+> Forwarder。当前权威说明见
+> `docs/architecture/xira-runtime-current-contract.zh.md`、`AGENTS.md` 和源码。
+
 > 日期：2026-06-19（2026-06-20 多轮收敛修订）
 >
 > 定位：Xira runtime 到用户聊天界面的过程信息投递设计。

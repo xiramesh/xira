@@ -8,9 +8,9 @@ The private Go implementation lives under `apps/xira/internal`. GUI applications
 must not import these packages directly.
 
 - Xira runtime inspection and management use the HTTP API exposed by `xira serve`.
-- Conversation clients use channel endpoints. XiraGarden talks through the
-  `xiragarden` channel at `/api/v1/channels/xiragarden/messages` and receives
-  channel run events from `/api/v1/channels/xiragarden/events`.
+- Conversation clients use channel endpoints. The current runtime surface is
+  CLI, HTTP API, and configured channel runners (`feishu`, `ilink`,
+  `websocket`).
 - Channel account pairing is controlled by entrypoint APIs while `xira serve` is
   running. For iLink, configure an enabled `ilink` entrypoint with
   `allow_runtime_pairing: true`, then create a QR pairing with:

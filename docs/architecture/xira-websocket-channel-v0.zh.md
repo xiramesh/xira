@@ -67,7 +67,6 @@ apps/xira/internal/api/server.go
 | Endpoint | 角色 |
 |---|---|
 | `/api/v1/events` | 订阅所有 runtime events。 |
-| `/api/v1/channels/xiragarden/events` | 订阅指定 channel 的 runtime events。 |
 | `/api/v1/channels/websocket/messages` | 双向 channel：发消息进 runtime，同时收事件和回复。 |
 
 ### 2.2 连接参数
@@ -174,7 +173,7 @@ Inbound frame 指客户端发给 Xira 的帧。
   "type": "hello",
   "id": "hello_001",
   "data": {
-    "client_id": "xiragarden-local",
+    "client_id": "local-websocket-client",
     "entrypoint_id": "websocket-default",
     "subscribe_events": true,
     "context_defaults": {
@@ -890,9 +889,7 @@ Server:
 | 现有表面 | 保留方式 |
 |---|---|
 | `POST /api/v1/agent-runs` | 保留，适合一次性 HTTP 调用。 |
-| `POST /api/v1/channels/xiragarden/messages` | 保留，XiraGarden 当前兼容入口。 |
 | `WS /api/v1/events` | 保留，通用 event 订阅。 |
-| `WS /api/v1/channels/xiragarden/events` | 保留，XiraGarden channel event 订阅。 |
 | `WS /api/v1/channels/websocket/messages` | 新增，通用双向实时 channel。 |
 | `channelrunner/feishu`、`channelrunner/ilink` | 保留，处理必须由 Xira 主动连出去的平台。 |
 

@@ -87,7 +87,7 @@ func TestNoEmbeddedTUICommand(t *testing.T) {
 	cmd := newRootCommand()
 	for _, sub := range cmd.Commands() {
 		if sub.Name() == "tui" {
-			t.Fatal("xira tui command should not exist; XiraGarden owns the GUI channel")
+			t.Fatal("xira tui command should not exist; runtime UI surfaces are external clients")
 		}
 	}
 }

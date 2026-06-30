@@ -1,5 +1,10 @@
 # 基于 ADK Go 的 Xira 客户交付运行时设计草案
 
+> **状态: Historical draft。** 本文是 2026-06-03 的早期产品/运行时草案；
+> 其中关于 XiraGarden-first GUI / `xiragarden` channel 的规划已经废弃。
+> 当前生产契约以 `docs/architecture/xira-runtime-current-contract.zh.md`、
+> `docs/architecture/xira-channel-contract-v0.zh.md`、`AGENTS.md` 和源码为准。
+
 > 日期：2026-06-03  
 > 定位：新产品 / 新运行时的架构草案，不是 PicoClaw 的重构计划。  
 > 结论：采用 ADK Go 作为 Agent Loop 内核是可行的，但产品边界应该由 Xira Business Runtime 定义。

@@ -9,7 +9,7 @@ invocation:
   aliases:
     - /devrun
     - /dev-flow
-  description: Start or resume a development flow run from chat, CLI, or XiraGarden.
+  description: Start or resume a development flow run from chat, CLI, HTTP, or WebSocket.
 
 inputs:
   required:

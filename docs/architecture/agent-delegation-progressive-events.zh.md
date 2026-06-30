@@ -1,5 +1,10 @@
 # Agent 委派与阶段性事件流设计草案
 
+> **状态: Historical draft。** 本文保留早期事件流 / UI surface 设计背景；
+> 其中涉及 XiraGarden 的迁移假设已经废弃。当前事件投递与 channel 契约以
+> `docs/architecture/xira-runtime-current-contract.zh.md`、
+> `docs/architecture/xira-channel-contract-v0.zh.md`、`AGENTS.md` 和源码为准。
+
 > 日期：2026-06-05
 >
 > 定位：Xira 运行时架构草案。

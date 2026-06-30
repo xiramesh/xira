@@ -1,0 +1,98 @@
+# Xira Runtime Current Contract
+
+> Status: current contract index, 2026-06-30. This file pins the production
+> architecture that supersedes older RFCs mentioning a global EventBus,
+> Forwarder, visibility switch, or removed XiraGarden GUI surface.
+
+## Source of Truth
+
+- `AGENTS.md` is the project-level working contract.
+- `apps/xira/internal/runtime/` and `apps/xira/internal/channelrunner/` are the
+  code source of truth.
+- Older RFCs remain useful for design history only when they are marked
+  `Superseded` or `Historical`.
+
+## Runtime Shape
+
+The runtime path is:
+
+```text
+CLI / HTTP / channel entrypoints
+  -> channelrunner manager
+  -> per-chat-key Router / ChatContext / SpawnCollector
+  -> runtime.Service.RunAgent
+  -> ADK / DeepSeek / tools / HITL / spawn
+  -> file-backed stores
+```
+
+`apps/xiragarden`, the XiraGarden prototype, and the `xiragarden` channel
+endpoints have been removed. They must not be treated as product architecture.
+
+## Event Delivery
+
+There is no per-Service global EventBus, no Forwarder subscription path, and no
+scopeMatcher.
+
+Runtime signal events are recorded first into run history, then delivered through
+context-carried sinks:
+
+- `runtime.EventBus`: receives sealed `runtime.Event` values. Implemented by
+  `progress.ChatContext`.
+- `runtime.RawEventSink`: receives flat `runtime.RuntimeEvent` values for
+  channels that render raw events themselves.
+- Non-signal runtime events are structured logs, not chat progress.
+
+If no sink is present, signal events are logged as dropped. This is expected for
+some detached or stateless resume paths; it is not a recovery mechanism.
+
+## Live-Only Coordination
+
+These context-carried objects are live-turn coordination only:
+
+- `EventBus`
+- `RawEventSink`
+- `SteeringBus`
+- `SpawnBus`
+- `ChildCancelRegistry`
+
+They are not persisted and cannot be reconstructed after process restart by
+themselves. Any feature that must survive restart has to persist its own state in
+the run/session/human-request/flow stores.
+
+## Durable State
+
+Durable state currently lives under `state_dir`:
+
+- agent run records: `RunStore`
+- conversation/session history: `session.Manager`
+- human requests and responses: `humanrequest.Store`
+- flow runs, definitions, artifacts, and flow events: `flow.Store`
+- usage ledger: `UsageStore`
+- channel account/pairing state owned by channel runners
+
+`RunStore` is an audit/history store. It is not a WAL for live event delivery.
+
+## Resume Semantics
+
+HITL resume is stateless with respect to live progress sinks:
+
+- resume runs may have no `EventBus` / `ChatContext`;
+- signal progress during resume may be dropped with a debug log;
+- final delivery is best-effort through `Service.deliverResumeFinal` and the
+  channel `OutboundEmitter`;
+- persisted run/session/human-request state remains the durable source of truth.
+
+Do not describe resume as replaying a live turn or restoring per-chat-key sinks
+unless that capability is explicitly implemented.
+
+## Known Contract Gaps
+
+- Main run IDs are timestamp-based and need uniqueness hardening.
+- Flow step execution policy such as `AllowedTools` is not fully persisted on
+  agent run responses, so some resume paths cannot reconstruct step-local
+  narrowing.
+- Progress quota is shared by parent and spawned children in one ChatContext.
+  This is observable but still coarse.
+- CLI and daemon can both instantiate the runtime over the same `state_dir`;
+  cross-process write semantics need a deliberate contract if multi-process use
+  becomes supported.

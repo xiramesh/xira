@@ -1,7 +1,7 @@
 # Xira Channel Adapter Mapping v0
 
 > 本文是 `docs/architecture/xira-channel-contract-v0.zh.md` 的实现映射说明，
-> 用于把现有 CLI/TUI、XiraGarden、WebSocket、Feishu 和 iLink surface 对齐到
+> 用于把现有 CLI、WebSocket、Feishu 和 iLink surface 对齐到
 > Channel Inbound/Outbound Contract v0。它描述当前行为、目标映射和降级策略；
 > 不要求一次性重写所有 channel runner。
 
@@ -51,8 +51,7 @@ apps/xira/internal/channel
 | Surface | 当前入口 | 当前分类 | 当前 outbound | 未实现 / 保留 |
 |---|---|---|---|---|
 | CLI | `xira agent run` | final-only | `assistant_final` 映射为 stdout final response；`--json` 输出完整 `TurnResponse`。 | `assistant_delta` streaming、inline `interrupt` prompt、proactive `outbound_message`。 |
-| TUI | 无内置 TUI command | not implemented | 无。XiraGarden 是当前 GUI surface。 | 若未来新增 TUI，按 CLI + XiraGarden 的 mapping 实现。 |
-| XiraGarden | `POST /api/v1/channels/xiragarden/messages` + WS events | final-only + runtime-event-stream | HTTP response 是 `assistant_final`；`/events` 是 `runtime_event` stream。 | chat stream `assistant_delta`、proactive `outbound_message` dispatcher、完整 HITL panel。 |
+| TUI | 无内置 TUI command | not implemented | 无。 | 若未来新增 TUI，按 CLI + HTTP/WebSocket contract 实现。 |
 | WebSocket | `GET /api/v1/channels/websocket/messages` | final-only + runtime-event-stream | `ack`、`event`(binding of `runtime_event`)、`response`(binding of `assistant_final`)、`interrupt`、`error`。 | `assistant_delta`、`human_response` resume-over-WS、`outbound_message` 当前 reserve。 |
 | Feishu | `channelrunner/feishu` | final-only | `assistant_final` 发送为卡片或文本消息。 | delta 默认 buffer/drop；`runtime_event` 只进 run log；`interrupt` 尚未平台内展示；无 generic proactive dispatcher。 |
 | iLink | `channelrunner/ilink` | final-only | `assistant_final` 通过 `SendText` 或 `Push` 发送。 | delta 默认 buffer/drop；`runtime_event` 只进 run log；`interrupt` 尚未平台内展示；无 generic proactive dispatcher。 |
@@ -74,22 +73,7 @@ apps/xira/internal/channel
 CLI v0 保持 final-only。若要支持 `assistant_delta`，必须先让 runtime/model 层产生
 增量，而不是在 CLI 里伪造 delta。
 
-### 4.2 XiraGarden
-
-| Contract outbound | 当前映射 | 目标映射 |
-|---|---|---|
-| `ack` | HTTP request 没有单独 ack。 | 发送消息后立即创建 pending chat item。 |
-| `runtime_event` | `WS /api/v1/channels/xiragarden/events`。 | Activity / Run Inspector，保留 child-run correlation。 |
-| `assistant_delta` | 未实现。 | 聊天消息流式 append。 |
-| `assistant_final` | `POST /messages` 返回 `TurnResponse.final_response`。 | Final chat message state。 |
-| `interrupt` | `TurnResponse.interrupt` / human request APIs 可被 UI 使用。 | HITL panel，支持 approve/deny/cancel。 |
-| `outbound_message` | 未实现。 | notification 或 agent/system 主动消息，目标匹配 `xiragarden` channel。 |
-| `error` | HTTP error 或 run failed response。 | Toast/error row + inspector detail。 |
-
-XiraGarden 是 UI client，不应 import `apps/xira/internal`。它通过 HTTP/WebSocket API
-消费 contract binding。
-
-### 4.3 WebSocket
+### 4.2 WebSocket
 
 WebSocket binding 已在 `docs/architecture/xira-websocket-channel-v0.zh.md` 定义。
 当前 PR #17 合入后的能力是：
@@ -150,7 +134,7 @@ resume-over-WS slice。
 
 | 字段 | 说明 |
 |---|---|
-| `channel` | 必填。`xiragarden`、`websocket`、`feishu`、`ilink` 等。 |
+| `channel` | 必填。`websocket`、`feishu`、`ilink` 等。 |
 | `entrypoint_id` | 强烈建议。决定凭证、默认 agent、channel policy。 |
 | `account` | 多账号 channel 的账号或租户维度。 |
 | `channel_app_id` / `bot_id` | 平台 app/bot 选择。 |
@@ -165,7 +149,6 @@ Channel-specific 约束：
 | Channel | 最小 target | 投递说明 |
 |---|---|---|
 | WebSocket | `channel=websocket` + `entrypoint_id` + `chat_id` | 只能投递给当前已连接且匹配 target 的 client；离线队列不属于 v0。 |
-| XiraGarden | `channel=xiragarden` + `chat_id` 或 session identity | UI 通过订阅 feed 接收；需要后续 dispatcher。 |
 | Feishu | `channel=feishu` + `entrypoint_id` + `chat_id` | 使用 entrypoint 凭证发送 chat message。 |
 | iLink | `channel=ilink` + `entrypoint_id` + account/bot + recipient | 有 `context_token` 时可 reply；request-independent 场景通常用 `Push`。 |
 | CLI/TUI | `channel=cli` + local session | v0 不支持；未来可映射成本地 notification。 |

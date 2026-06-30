@@ -1,7 +1,7 @@
 # Xira Channel Inbound/Outbound Contract v0
 
 > 本文定义 Xira 的 transport-neutral channel 通信契约。
-> WebSocket、CLI/TUI、XiraGarden、Feishu、iLink 和未来 channel 都应映射到这套
+> WebSocket、CLI、Feishu、iLink 和未来 channel 都应映射到这套
 > inbound / outbound 语义，而不是各自发明一套消息类型。
 
 ## 1. 定位
@@ -36,7 +36,6 @@ channel transport / adapter
 例如：
 
 - `websocket` 表示通过 Xira inbound WebSocket API 进入 runtime 的会话身份。
-- `xiragarden` 表示 XiraGarden 当前 channel surface。
 - `feishu` / `ilink` 表示对应平台 channel runner 归一化后的会话身份。
 
 不能让一个 transport 请求伪装成另一个 runtime channel。这样会破坏
@@ -549,17 +548,7 @@ WebSocket 语义细节见 `docs/architecture/xira-websocket-channel-v0.zh.md`。
 - `interrupt` -> 通过 `xira human ...` 命令处理，不在 `agent run` 内联 prompt
 - `assistant_delta` / `outbound_message` -> 保留
 
-### 8.3 XiraGarden
-
-当前 XiraGarden 是 final-only + runtime-event-stream：
-
-- `assistant_final` -> `POST /api/v1/channels/xiragarden/messages` 返回的 final response
-- `runtime_event` -> `WS /api/v1/channels/xiragarden/events`
-- `assistant_delta` -> 目标为聊天区流式文本，当前未实现
-- `interrupt` -> 目标为 HITL panel，当前依赖 human request APIs
-- `outbound_message` -> 目标为 notification / 主动消息，当前未实现 dispatcher
-
-### 8.4 Feishu / iLink
+### 8.3 Feishu / iLink
 
 Feishu/iLink 的 channel runner 当前保持 final-only：
 
@@ -633,5 +622,5 @@ apps/xira/internal/messagededupe
 - `assistant_final` 是 request-bound final output，正常每个 `request_id` 一次。
 - `outbound_message` 是 request-independent proactive output，必须带 target。
 - 文档说明 `channel` 是 runtime 身份，不是透明 transport。
-- 文档说明 WebSocket、CLI/TUI、XiraGarden、Feishu/iLink 的映射方式。
+- 文档说明 WebSocket、CLI/TUI、Feishu/iLink 的映射方式。
 - 文档不要求实现 `channelrunner/websocket`。

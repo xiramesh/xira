@@ -1,6 +1,7 @@
 # Xira Per-Chat-Key 架构 RFC v0
 
-- **状态**: Draft / 评审中
+- **状态**: Implemented / Historical RFC。当前权威契约见
+  `docs/architecture/xira-runtime-current-contract.zh.md` 与源码。
 - **日期**: 2026-06-23
 - **作者**: ai-daming（基于 2026-06-23 架构对话）
 - **背景**: 取代 per-Service 全局 EventBus + Forwarder 模型

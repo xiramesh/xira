@@ -46,57 +46,6 @@ func TestAgentRunAPI(t *testing.T) {
 	}
 }
 
-func TestXiraGardenMessageChannelAPI(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	server := NewServer(rt, "127.0.0.1:0")
-	if err := server.StartAsync(ctx); err != nil {
-		t.Fatal(err)
-	}
-	body, _ := json.Marshal(frt.TurnRequest{Message: "hello garden"})
-	resp, err := http.Post(server.URL()+"/api/v1/channels/xiragarden/messages", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", resp.StatusCode)
-	}
-	var run frt.TurnResponse
-	if err := json.NewDecoder(resp.Body).Decode(&run); err != nil {
-		t.Fatal(err)
-	}
-	if run.SessionScope == nil || run.SessionScope.Channel != "xiragarden" {
-		t.Fatalf("session scope = %+v", run.SessionScope)
-	}
-	if run.EntrypointID != "xiragarden-default" {
-		t.Fatalf("entrypoint = %q", run.EntrypointID)
-	}
-	if run.RouteMatchedBy != "entrypoint.implicit" {
-		t.Fatalf("route matched by = %q", run.RouteMatchedBy)
-	}
-}
-
-func TestXiraGardenMessageRejectsMismatchedChannel(t *testing.T) {
-	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	server := NewServer(rt, "127.0.0.1:0")
-	if err := server.StartAsync(ctx); err != nil {
-		t.Fatal(err)
-	}
-	body, _ := json.Marshal(frt.TurnRequest{Message: "hello", Context: channel.NewInboundContext("feishu", "", nil)})
-	resp, err := http.Post(server.URL()+"/api/v1/channels/xiragarden/messages", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d", resp.StatusCode)
-	}
-}
-
 func TestShellTurnAPIIsNotAChannelEntrypoint(t *testing.T) {
 	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())

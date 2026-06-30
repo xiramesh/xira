@@ -250,4 +250,4 @@ stateDir/workspaces/<workspace-key>/
 2. 旧的 repo-root `.xira/` 不自动迁移；只提示，避免静默移动用户数据。
 3. HumanRequest 不压平，继续使用 `stateDir/workspaces/<workspace-key>/{human-requests,human-responses,replay-results}`。
 4. `entrypoints` 统一相对 workspace 解析；旧显式 config-relative 路径不兼容。
-5. XiraGarden 查询 session/run/flow 暂不进入本轮范围。
+5. HTTP/WebSocket 查询 session/run/flow 暂不进入本轮范围。

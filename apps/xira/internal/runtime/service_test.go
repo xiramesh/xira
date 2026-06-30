@@ -837,7 +837,7 @@ func TestRuntimeEventsUseV1EnvelopeWithLegacyFields(t *testing.T) {
 	rt := newTestService(t, Config{StateDir: t.TempDir()})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "please call command",
-		Context: channel.NewInboundContext("xiragarden", "user-1", nil),
+		Context: channel.NewInboundContext("websocket", "user-1", nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -853,10 +853,10 @@ func TestRuntimeEventsUseV1EnvelopeWithLegacyFields(t *testing.T) {
 		if evt.SourceDetail == nil || evt.SourceDetail.Component == "" {
 			t.Fatalf("event missing source_detail: %+v", evt)
 		}
-		if evt.Scope == nil || evt.Scope.RunID != resp.RunID || evt.Scope.AgentID != resp.AgentID || evt.Scope.Channel != "xiragarden" {
+		if evt.Scope == nil || evt.Scope.RunID != resp.RunID || evt.Scope.AgentID != resp.AgentID || evt.Scope.Channel != "websocket" {
 			t.Fatalf("event scope = %+v, want run/agent/channel", evt.Scope)
 		}
-		if got := evt.Payload["channel"]; got != "xiragarden" {
+		if got := evt.Payload["channel"]; got != "websocket" {
 			t.Fatalf("event payload channel = %v", got)
 		}
 		sawCompleted = sawCompleted || evt.Kind == "tool.completed"
@@ -873,8 +873,8 @@ func TestToolStartedEventInputCannotSpoofRuntimeIdentity(t *testing.T) {
 	base := runtimeEventBase{
 		RunID:        runID,
 		AgentID:      agents.DefaultAgentID,
-		EntrypointID: "xiragarden-default",
-		Channel:      "xiragarden",
+		EntrypointID: "websocket-default",
+		Channel:      "websocket",
 		TraceID:      runID,
 	}
 	var events []RuntimeEvent
@@ -903,7 +903,7 @@ func TestToolStartedEventInputCannotSpoofRuntimeIdentity(t *testing.T) {
 	if !ok {
 		t.Fatalf("events missing tool.started: %+v", eventKinds(events))
 	}
-	if evt.Payload["channel"] != "xiragarden" || evt.Payload["run_id"] != runID || evt.Payload["agent_id"] != agents.DefaultAgentID {
+	if evt.Payload["channel"] != "websocket" || evt.Payload["run_id"] != runID || evt.Payload["agent_id"] != agents.DefaultAgentID {
 		t.Fatalf("runtime identity was not authoritative: %+v", evt.Payload)
 	}
 	if evt.Payload["input"] == nil {
@@ -1748,7 +1748,7 @@ func TestAgentProfileSessionDimensionsOverrideDefaultScope(t *testing.T) {
 	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "hello",
-		Context: channel.NewInboundContext("xiragarden", "user-1", map[string]string{
+		Context: channel.NewInboundContext("websocket", "user-1", map[string]string{
 			"chat_id":   "chat-1",
 			"chat_type": "group",
 		}),
@@ -1759,7 +1759,7 @@ func TestAgentProfileSessionDimensionsOverrideDefaultScope(t *testing.T) {
 	if resp.SessionScope == nil {
 		t.Fatal("session scope is nil")
 	}
-	if got := resp.SessionScope.Values["channel"]; got != "channel:xiragarden" {
+	if got := resp.SessionScope.Values["channel"]; got != "channel:websocket" {
 		t.Fatalf("channel scope = %q", got)
 	}
 	if _, ok := resp.SessionScope.Values["sender"]; ok {

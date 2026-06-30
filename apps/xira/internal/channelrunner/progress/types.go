@@ -1,11 +1,12 @@
-// Package progress implements the v0 conversation progress forwarder for IM
-// channels (iLink / Feishu) that lack a runtime event feed.
+// Package progress implements per-chat-key conversation progress delivery for
+// channels (iLink / Feishu / websocket) that need chat-facing progress.
 //
-// It subscribes to the (best-effort, per-Service global) runtime EventBus,
-// keeps read/write decoupled so a slow channel SendText cannot starve event
-// consumption (§8.4), matches events to the inbound request scope with
-// MessageID hard isolation (§8.3), renders allowlisted runtime facts into
-// short chat messages (§10), and throttles/dedupes them (§9).
+// There is no per-Service global EventBus and no Forwarder subscription path.
+// Runtime signal events are delivered point-to-point through context-carried
+// sinks: runtime.EventBus for sealed Event rendering, or runtime.RawEventSink
+// when a channel renders flat RuntimeEvents itself. ChatContext keeps
+// read/write decoupled, renders allowlisted runtime facts into short chat
+// messages, and applies quota/dedupe.
 //
 // v0 delivers:
 //   - progress (counts against MaxMessagesPerTurn): silence notice,
@@ -15,7 +16,7 @@
 //
 // assistant.final is consumed only as a drain signal and is never rendered.
 //
-// See docs/architecture/xira-conversation-progress-feed-v0.zh.md.
+// See docs/architecture/xira-runtime-current-contract.zh.md.
 package progress
 
 import (
@@ -32,7 +33,7 @@ type Message struct {
 }
 
 // Sender delivers a progress Message to a channel. Implementations must be
-// safe for concurrent use by the forwarder's sender goroutine.
+// safe for concurrent use by ChatContext's sender goroutine.
 type Sender interface {
 	SendProgress(ctx context.Context, msg Message) error
 }

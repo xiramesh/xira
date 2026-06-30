@@ -36,7 +36,7 @@ func TestOutboundEnvelopeNormalizesContractFields(t *testing.T) {
 	msg.ID = " out-1 "
 	msg.RequestID = " req-1 "
 	msg.RunID = " run-1 "
-	msg.Source = &InboundContext{Channel: "XiraGarden", ChatID: " chat-1 ", SenderID: " user-1 "}
+	msg.Source = &InboundContext{Channel: "WebSocket", ChatID: " chat-1 ", SenderID: " user-1 "}
 	msg.Target = &InboundContext{Channel: "Feishu", ChatID: " oc-1 ", SenderID: " xira "}
 	msg.Correlation = OutboundCorrelation{
 		TraceID:         " trace-1 ",
@@ -61,7 +61,7 @@ func TestOutboundEnvelopeNormalizesContractFields(t *testing.T) {
 	if normalized.Time.IsZero() {
 		t.Fatal("time should be populated")
 	}
-	if normalized.Source == nil || normalized.Source.Channel != "xiragarden" || normalized.Source.ChatID != "chat-1" || normalized.Source.SenderID != "user-1" {
+	if normalized.Source == nil || normalized.Source.Channel != "websocket" || normalized.Source.ChatID != "chat-1" || normalized.Source.SenderID != "user-1" {
 		t.Fatalf("source not normalized: %+v", normalized.Source)
 	}
 	if normalized.Target == nil || normalized.Target.Channel != "feishu" || normalized.Target.ChatID != "oc-1" || normalized.Target.SenderID != "xira" {

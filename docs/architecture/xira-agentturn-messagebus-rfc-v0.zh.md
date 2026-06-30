@@ -1,6 +1,12 @@
 # Xira AgentTurn + MessageBus 设计总纲 (RFC v0)
 
-- **状态**: Draft / 评审中
+> **状态: Superseded / 历史背景。** 本文描述的是被后续 per-chat-key
+> 架构取代的双 bus / Forwarder / WAL 设想。当前生产契约不是本文：
+> 全局 EventBus 与 Forwarder 已删除，事件通过 context-carried
+> per-chat-key sink 点对点投递；当前权威说明见
+> `docs/architecture/xira-runtime-current-contract.zh.md`、`AGENTS.md` 和源码。
+
+- **状态**: Superseded / 历史背景
 - **里程碑**: [AgentTurn + MessageBus](https://github.com/xiramesh/xira/milestone/1)
 - **Epic issue**: 待补（见本文末「Issue 清单」）
 - **日期**: 2026-06-21

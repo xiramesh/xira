@@ -7,12 +7,11 @@ import "context"
 // the child turn's result (pendingResult) to the sink. The sink is injected via
 // context.Value — same pattern as EventBus and SteeringBus.
 //
-// Phase 3 defines this interface and spawnCore uses it. No production sink
-// implementation exists yet in Phase 3 (fire-and-forget: spawn_turn returns
-// "spawned" and the parent LLM continues; child results land in the sink for
-// future consumers — Phase 4 steering checkpoint / Phase 5 WAL / future
-// wait_turn tool). When no sink is in the context, spawnCore logs Warn and
-// drops the result (no panic — silent drop with Warn, per AGENTS.md §1.1).
+// The production sink is progress.SpawnCollector, injected by Router for each
+// chat key. spawn_turn returns "spawned" immediately and the parent LLM pulls
+// results via poll_turn (SpawnBusPeeper.TryResult); child results are not sent
+// through EventBus. When no sink is in the context, spawnCore logs Warn and
+// drops the result (no panic).
 //
 // This breaks the same dependency shape as EventBus: runtime defines the
 // interface, a downstream package implements it, the runner injects it.

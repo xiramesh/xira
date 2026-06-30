@@ -30,7 +30,6 @@ type ChannelControls interface {
 	DeleteAccount(context.Context, string, string) error
 }
 
-const xiragardenChannel = "xiragarden"
 const websocketChannel = "websocket"
 
 func NewServer(rt *frt.Service, addr string, controls ...ChannelControls) *Server {
@@ -51,7 +50,6 @@ func NewServer(rt *frt.Service, addr string, controls ...ChannelControls) *Serve
 	mux.HandleFunc("/api/v1/agent-runs", s.agentRuns)
 	mux.HandleFunc("/api/v1/human-requests", s.humanRequests)
 	mux.HandleFunc("/api/v1/human-requests/", s.humanRequestByID)
-	mux.HandleFunc("/api/v1/channels/xiragarden/messages", s.xiragardenMessages)
 	mux.HandleFunc("/api/v1/channels/websocket/messages", s.websocketMessages)
 	mux.HandleFunc("/api/v1/entrypoints/", s.entrypointControls)
 	mux.HandleFunc("/api/v1/runs", s.runs)
@@ -135,10 +133,6 @@ func (s *Server) agentRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, resp)
-}
-
-func (s *Server) xiragardenMessages(w http.ResponseWriter, r *http.Request) {
-	s.channelMessages(w, r, xiragardenChannel)
 }
 
 func (s *Server) channelMessages(w http.ResponseWriter, r *http.Request, channelName string) {
