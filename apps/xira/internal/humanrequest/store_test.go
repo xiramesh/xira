@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"encoding/json"
 )
 
 func TestStoreCreateHumanRequestWritesWorkspaceScopedPendingFile(t *testing.T) {
@@ -42,7 +42,7 @@ func TestStoreCreateHumanRequestWritesWorkspaceScopedPendingFile(t *testing.T) {
 	if req.WorkspaceID != "/Users/yinwm/work/flowdeck" || req.WorkspaceKey != "ws_create" {
 		t.Fatalf("workspace fields = %+v", req)
 	}
-	path := filepath.Join(root, "workspaces", "ws_create", "human-requests", "hrq_create.yaml")
+	path := filepath.Join(root, "workspaces", "ws_create", "human-requests", "hrq_create.json")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected request file: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestStoreCreateHumanRequestWritesWorkspaceScopedPendingFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := yaml.Unmarshal(data, &stored); err != nil {
+	if err := json.Unmarshal(data, &stored); err != nil {
 		t.Fatalf("decode stored request: %v\n%s", err, data)
 	}
 	if stored.ID != req.ID || stored.Status != StatusPending || stored.Question != "Need human input?" {
@@ -108,7 +108,7 @@ func TestStoreRejectsPathTraversalRequestIDs(t *testing.T) {
 			t.Fatalf("Create request id %q error = %v, want ErrValidation", requestID, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(root, "outside.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "outside.json")); !os.IsNotExist(err) {
 		t.Fatalf("invalid request id wrote outside file, stat err=%v", err)
 	}
 }
@@ -179,7 +179,7 @@ func TestStoreRejectsPathTraversalRequestIDOnReadResolveAndReplay(t *testing.T) 
 			t.Fatalf("%s malicious request id error = %v, want ErrValidation", check.name, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(root, "workspaces", "hrq_replay_path.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "workspaces", "hrq_replay_path.json")); !os.IsNotExist(err) {
 		t.Fatalf("malicious request id wrote workspace sibling, stat err=%v", err)
 	}
 }
@@ -278,7 +278,7 @@ func TestStoreResolveApprovePersistsResponseAndAudit(t *testing.T) {
 	if len(resolved.Audit) == 0 || resolved.Audit[len(resolved.Audit)-1].FromStatus != StatusPending || resolved.Audit[len(resolved.Audit)-1].ToStatus != StatusResolved {
 		t.Fatalf("audit = %+v", resolved.Audit)
 	}
-	respPath := filepath.Join(root, "workspaces", "ws_resolve", "human-responses", resolved.Response.ID+".yaml")
+	respPath := filepath.Join(root, "workspaces", "ws_resolve", "human-responses", resolved.Response.ID+".json")
 	if _, err := os.Stat(respPath); err != nil {
 		t.Fatalf("expected response file: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestStoreReplayCASPendingRunningCompleted(t *testing.T) {
 	if again.Replay.ResultDigest != completed.Replay.ResultDigest {
 		t.Fatalf("idempotent complete changed replay: before=%+v after=%+v", completed.Replay, again.Replay)
 	}
-	resultPath := filepath.Join(root, "workspaces", "ws_replay", "replay-results", req.ID+".yaml")
+	resultPath := filepath.Join(root, "workspaces", "ws_replay", "replay-results", req.ID+".json")
 	if _, err := os.Stat(resultPath); err != nil {
 		t.Fatalf("expected replay result file: %v", err)
 	}
@@ -685,11 +685,11 @@ func TestStoreLoadCorruptFileReportsErrorButDoesNotPanic(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte(":\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "bad.json"), []byte(":\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err := store.List(context.Background(), ListQuery{WorkspaceKey: "ws_corrupt"})
-	if err == nil || !strings.Contains(err.Error(), "bad.yaml") {
+	if err == nil || !strings.Contains(err.Error(), "bad.json") {
 		t.Fatalf("corrupt list error = %v, want file-specific error", err)
 	}
 }
@@ -717,7 +717,7 @@ func TestStoreAtomicWriteDoesNotLeavePartialFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("Create() succeeded despite request directory being a file")
 	}
-	if _, err := os.Stat(filepath.Join(workspaceDir, "human-requests", "hrq_atomic.yaml")); err == nil {
+	if _, err := os.Stat(filepath.Join(workspaceDir, "human-requests", "hrq_atomic.json")); err == nil {
 		t.Fatal("partial request file exists")
 	}
 }
@@ -848,21 +848,21 @@ func TestOldYAMLWithoutChatKeyReadsAsEmpty(t *testing.T) {
 	if err := os.MkdirAll(reqDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Hand-write a YAML without the chat_key field (mimics pre-upgrade file).
-	oldYAML := strings.NewReader(strings.TrimSpace(`
-id: hrq_old
-workspace_id: /ws
-workspace_key: ws_old
-run_id: run-1
-agent_id: agent-1
-session_id: sess-1
-kind: freeform
-status: pending
-question: legacy?
-dedupe_key: d-old
-created_at: 2026-06-01T00:00:00Z
-`))
-	dec := yaml.NewDecoder(oldYAML)
+	// Hand-write a JSON without the chat_key field (mimics pre-upgrade file).
+	oldJSON := strings.NewReader(`{
+  "id": "hrq_old",
+  "workspace_id": "/ws",
+  "workspace_key": "ws_old",
+  "run_id": "run-1",
+  "agent_id": "agent-1",
+  "session_id": "sess-1",
+  "kind": "freeform",
+  "status": "pending",
+  "question": "legacy?",
+  "dedupe_key": "d-old",
+  "created_at": "2026-06-01T00:00:00Z"
+}`)
+	dec := json.NewDecoder(oldJSON)
 	var hr HumanRequest
 	if err := dec.Decode(&hr); err != nil {
 		t.Fatalf("decode old YAML: %v", err)
@@ -1159,7 +1159,7 @@ func TestCompleteReplayNotRunning(t *testing.T) {
 	}
 }
 
-// TestWriteYAMLAtomicFailure covers writeYAMLAtomic's error branches by
+// TestWriteYAMLAtomicFailure covers writeJSONAtomic's error branches by
 // pointing the store at an unwritable root (parent dir doesn't exist / is a
 // file). This exercises the os.WriteFile / os.Rename failure paths.
 func TestWriteYAMLAtomicFailure(t *testing.T) {
@@ -1181,7 +1181,7 @@ func TestWriteYAMLAtomicFailure(t *testing.T) {
 		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
 	})
 	if err == nil {
-		t.Error("Create on unwritable root should error (writeYAMLAtomic failure path)")
+		t.Error("Create on unwritable root should error (writeJSONAtomic failure path)")
 	}
 	_ = store
 }
@@ -1236,9 +1236,9 @@ func TestBeginReplayErrorBranches(t *testing.T) {
 	_ = req
 }
 
-// TestStoreWriteFailuresOnReadOnlyRoot triggers writeYAMLAtomic failures by
+// TestStoreWriteFailuresOnReadOnlyRoot triggers writeJSONAtomic failures by
 // pointing the store at a path that's a FILE (not a dir) — every write under it
-// fails reliably across OSes (no chmod dependency). Covers writeYAMLAtomic's
+// fails reliably across OSes (no chmod dependency). Covers writeJSONAtomic's
 // os.CreateTemp/os.Rename error branches → writeRequest/writeResponse error return.
 func TestStoreWriteFailuresOnReadOnlyRoot(t *testing.T) {
 	// Create a file; use it as the store root. Any write (Create/Resolve) under
@@ -1251,62 +1251,62 @@ func TestStoreWriteFailuresOnReadOnlyRoot(t *testing.T) {
 	if err != nil {
 		t.Skipf("NewStore(blocker): %v", err)
 	}
-	// Create → writeRequest → writeYAMLAtomic fails (can't mkdir under a file).
+	// Create → writeRequest → writeJSONAtomic fails (can't mkdir under a file).
 	_, err = store.Create(context.Background(), CreateRequest{
 		ID: "x", WorkspaceID: "/ws", WorkspaceKey: "ws", RunID: "r",
 		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
 	})
 	if err == nil {
-		t.Error("Create under file-as-root should fail (writeYAMLAtomic error path)")
+		t.Error("Create under file-as-root should fail (writeJSONAtomic error path)")
 	}
 }
 
-// TestWriteYAMLAtomicErrorBranches covers writeYAMLAtomic's OS error branches
+// TestWriteJSONAtomicErrorBranches covers writeJSONAtomic's OS error branches
 // directly (it's a package-level function, testable without a Store). These
 // branches were the coverage tail: MkdirAll failure (dir is a file), and the
 // success path's Close/Rename.
-func TestWriteYAMLAtomicErrorBranches(t *testing.T) {
+func TestWriteJSONAtomicErrorBranches(t *testing.T) {
 	// MkdirAll fails: Dir(path) is an existing FILE → MkdirAll returns error.
 	blocker := filepath.Join(t.TempDir(), "blocker")
 	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeYAMLAtomic(filepath.Join(blocker, "sub", "f.yaml"), map[string]string{"k": "v"}, 0o600); err == nil {
-		t.Error("writeYAMLAtomic with file-as-dir should fail (MkdirAll error)")
+	if err := writeJSONAtomic(filepath.Join(blocker, "sub", "f.json"), map[string]string{"k": "v"}, 0o600); err == nil {
+		t.Error("writeJSONAtomic with file-as-dir should fail (MkdirAll error)")
 	}
 
 	// Happy path: valid dir → writes + renames → returns nil. Covers Write/Chmod/
 	// Close/Rename success branches.
 	dir := t.TempDir()
-	dst := filepath.Join(dir, "out.yaml")
-	if err := writeYAMLAtomic(dst, map[string]string{"k": "v"}, 0o600); err != nil {
-		t.Fatalf("writeYAMLAtomic happy: %v", err)
+	dst := filepath.Join(dir, "out.json")
+	if err := writeJSONAtomic(dst, map[string]string{"k": "v"}, 0o600); err != nil {
+		t.Fatalf("writeJSONAtomic happy: %v", err)
 	}
 	got, err := os.ReadFile(dst)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got), "k: v") {
-		t.Errorf("written content = %q, want to contain 'k: v'", string(got))
+	if !strings.Contains(string(got), `"k": "v"`) {
+		t.Errorf("written content = %q, want to contain '\"k\": \"v\"' (JSON)", string(got))
 	}
 }
 
-// TestLoadRequestCorruptedFile covers loadRequest's yaml.Unmarshal error branch
+// TestLoadRequestCorruptedFile covers loadRequest's json.Unmarshal error branch
 // (a corrupt YAML file on disk). Was 72.7%.
 func TestLoadRequestCorruptedFile(t *testing.T) {
 	root := t.TempDir()
 	store := newTestStore(t, root)
-	// Hand-write a corrupt YAML into the requests dir.
+	// Hand-write a corrupt JSON into the requests dir.
 	reqDir := filepath.Join(root, "workspaces", "ws_corrupt", "human-requests")
 	if err := os.MkdirAll(reqDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(reqDir, "bad.yaml"), []byte("id: [unclosed"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(reqDir, "bad.json"), []byte("{not valid json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Get → loadRequest → readYAMLFile → yaml.Unmarshal fails.
+	// Get → loadRequest → readJSONFile → json.Unmarshal fails.
 	if _, err := store.Get(context.Background(), "ws_corrupt", "bad"); err == nil {
-		t.Error("Get on corrupt YAML should error (loadRequest unmarshal failure)")
+		t.Error("Get on corrupt JSON should error (loadRequest unmarshal failure)")
 	}
 	// List → listLocked → readYAMLFile on the corrupt file → errors (corrupt
 	// data on disk is surfaced, not silently skipped).

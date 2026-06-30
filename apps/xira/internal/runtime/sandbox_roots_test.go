@@ -94,7 +94,7 @@ func TestEditFileConfirmationGateInAllowRoot(t *testing.T) {
 // must carry the authorized roots so a run artifact answers "which
 // out-of-workspace roots was this run allowed to reach". (The
 // model.policy_resolved runtime event was removed in #43 — roots are read from
-// resp.ModelPolicy, the authoritative source persisted in run.yaml.)
+// resp.ModelPolicy, the authoritative source persisted in run.json.)
 func TestRunSnapshotRecordsSandboxRoots(t *testing.T) {
 	workspace := t.TempDir()
 	allowDir := t.TempDir()

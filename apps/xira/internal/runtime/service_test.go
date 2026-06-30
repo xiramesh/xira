@@ -52,7 +52,7 @@ func TestRunAgentWritesHarnessStore(t *testing.T) {
 		t.Fatalf("route matched by = %q, want entrypoint.implicit", resp.RouteMatchedBy)
 	}
 	runDir := rt.RunStore().RunDir(resp.RunID)
-	for _, name := range []string{"run.yaml", "events.jsonl", "audit.jsonl", "tool_calls.jsonl", "verification.json"} {
+	for _, name := range []string{"run.json", "events.jsonl", "audit.jsonl", "tool_calls.jsonl", "verification.json"} {
 		if _, err := os.Stat(filepath.Join(runDir, name)); err != nil {
 			t.Fatalf("expected %s: %v", name, err)
 		}

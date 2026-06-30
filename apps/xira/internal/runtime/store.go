@@ -10,8 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 type RunStore struct {
@@ -47,8 +45,8 @@ func (s *RunStore) SaveRun(resp TurnResponse) error {
 	if err := s.InitRun(resp.RunID); err != nil {
 		return err
 	}
-	runPath := filepath.Join(s.RunDir(resp.RunID), "run.yaml")
-	data, err := yaml.Marshal(resp)
+	runPath := filepath.Join(s.RunDir(resp.RunID), "run.json")
+	data, err := json.MarshalIndent(resp, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -86,11 +84,11 @@ func (s *RunStore) SaveRun(resp TurnResponse) error {
 		if err := os.MkdirAll(candDir, 0o755); err != nil {
 			return err
 		}
-		cand, err := yaml.Marshal(resp.EvolutionCandidate)
+		cand, err := json.MarshalIndent(resp.EvolutionCandidate, "", "  ")
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(candDir, resp.EvolutionCandidate.ID+".yaml"), cand, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(candDir, resp.EvolutionCandidate.ID+".json"), cand, 0o644); err != nil {
 			return err
 		}
 	}
@@ -123,11 +121,11 @@ func (s *RunStore) List() ([]TurnResponse, error) {
 
 func (s *RunStore) Load(runID string) (TurnResponse, error) {
 	var resp TurnResponse
-	data, err := os.ReadFile(filepath.Join(s.RunDir(runID), "run.yaml"))
+	data, err := os.ReadFile(filepath.Join(s.RunDir(runID), "run.json"))
 	if err != nil {
 		return resp, err
 	}
-	if err := yaml.Unmarshal(data, &resp); err != nil {
+	if err := json.Unmarshal(data, &resp); err != nil {
 		return resp, err
 	}
 	return resp, nil
