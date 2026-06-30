@@ -635,9 +635,33 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 	// xira-chatkey-session-engine-rfc-v0 Step 1). The session owns the
 	// steering retry loop, ChatContext lifecycle, SpawnCollector cleanup, and
 	// child-cancel registry; ilink injects only the channel-specific delivery
-	// (r.send with the original openilink message + account) and dedupe
-	// completion via closures. Behavior is 1:1 equivalent to the previous
-	// inline runTurn closure; the ilink tests verify equivalence.
+	// HITL direct-answer (#92): if this chatKey has a pending HumanRequest,
+	// interpret the user's message as a reply and resolve it — skip new turn.
+	// Checked BEFORE imRenderer.Start() to avoid goroutine leak (imRenderer.Stop
+	// is only called via OnTurnEnd inside session.Handle, which we skip on resolve).
+	// Resume runs async; final comes back via Manager.Emit → ilink.Emit.
+	// Pure-text: user's text is always treated as a free-form answer (no keyword
+	// matching — intent left to the agent). Future: button card → precise kind.
+	if r.hitlResolver != nil {
+		if pending, err := r.hitlResolver.ListPendingHumanRequestsByChatKey(ctx, chatKey.String()); err == nil && len(pending) > 0 {
+			hr := pending[0]
+			kind, msg := progress.ClassifyHITLResponse(content, hr.Kind)
+			if _, err := r.hitlResolver.ResolveHumanRequest(ctx, hr.ID, humanrequest.ResolveRequest{
+				Kind:    kind,
+				Actor:   senderID,
+				Message: msg,
+			}); err == nil {
+				slog.Info("ilink HITL resolved via IM direct answer",
+					"entrypoint_id", r.definition.ID,
+					"account_id", account.record.AccountID,
+					"human_request_id", hr.ID,
+					"response_kind", kind,
+					"sender_id", senderID,
+				)
+				return
+			}
+		}
+	}
 	// IMEventRenderer receives raw RuntimeEvents and renders them to localized
 	// text + quota + dedup (the behavior the old ChatContext baked in). Per-turn
 	// instance. See feishu/runner.go for the same wiring.
@@ -683,30 +707,6 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 			"sender_id", senderID,
 		},
 	})
-	// HITL direct-answer (#92): if this chatKey has a pending HumanRequest,
-	// interpret the user's message as a reply and resolve it — skip new turn.
-	// Resume runs async; final comes back via Manager.Emit → ilink.Emit.
-	// Pure-text approach: user types 同意/拒绝/自由文本. Future: rich message.
-	if r.hitlResolver != nil {
-		if pending, err := r.hitlResolver.ListPendingHumanRequestsByChatKey(ctx, chatKey.String()); err == nil && len(pending) > 0 {
-			hr := pending[0]
-			kind, msg := progress.ClassifyHITLResponse(content, hr.Kind)
-			if _, err := r.hitlResolver.ResolveHumanRequest(ctx, hr.ID, humanrequest.ResolveRequest{
-				Kind:    kind,
-				Actor:   senderID,
-				Message: msg,
-			}); err == nil {
-				slog.Info("ilink HITL resolved via IM direct answer",
-					"entrypoint_id", r.definition.ID,
-					"account_id", account.record.AccountID,
-					"human_request_id", hr.ID,
-					"response_kind", kind,
-					"sender_id", senderID,
-				)
-				return
-			}
-		}
-	}
 	// Route through router (async, non-blocking) or run inline (test/no-Start).
 	session.Handle(ctx, "", content)
 }
