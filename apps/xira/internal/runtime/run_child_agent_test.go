@@ -2,10 +2,15 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/xiramesh/xira/internal/agents"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 )
 
@@ -103,14 +108,92 @@ func TestShortIDIsUniqueish(t *testing.T) {
 	}
 }
 
-// NOTE: RunChildAgent's waiting_human branch (child calls human.request →
-// interrupt collector → status flips) is the HITL-sensitive path the Phase 6a
-// resume-rewire depends on. It is NOT covered by a unit test here because
-// reproducing the ADK-loop interrupt timing with a stubbed LLM is flaky (the
-// stub keeps re-issuing the tool call, looping past any ctx deadline). This
-// path is covered by the live HITL tests (deepseek_hitl_live_test.go,
-// XIRA_DEEPSEEK_LIVE=1) which exercise the real LLM + real interrupt timing.
-// Tracking a deterministic unit test for it as a follow-up.
+func TestRunChildAgentWaitingHumanIsDeterministicWithStubbedModel(t *testing.T) {
+	var modelCalls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := r.Context().Err(); err != nil {
+			return nil, err
+		}
+		modelCalls++
+		if modelCalls > 1 {
+			t.Fatalf("model called again with uncanceled context after child human.request interrupt")
+		}
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(deepSeekToolCallResponseWithArgs("child-human-call-1", "human_request", map[string]any{
+				"kind":     "freeform",
+				"question": "Which rollout window should the child use?",
+			}))),
+		}, nil
+	})}
+	rt := newTestService(t, Config{
+		StateDir:       filepath.Join(t.TempDir(), "state"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+
+	target := agents.BuiltinResearchAssistant()
+	req := childAgentRequest{
+		ParentBase: runtimeEventBase{
+			RunID:                 "parent-child-hitl",
+			AgentID:               agents.BuiltinXiraAssistant().ID,
+			Channel:               "feishu",
+			ChatID:                "oc_child_hitl",
+			ChatType:              "direct",
+			SenderID:              "ou_child_hitl",
+			ConversationSessionID: "conversation-child-hitl",
+		},
+		ParentRunID: "parent-child-hitl",
+		ChildRunID:  "child-waiting-human",
+		ToolCallID:  "spawn-call-1",
+		Target:      target,
+		Message:     "ask the human before continuing",
+		SessionMode: "ephemeral_worker",
+		Depth:       1,
+	}
+
+	resp, err := rt.RunChildAgent(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunChildAgent error: %v", err)
+	}
+	if resp.Status != StatusWaitingHuman {
+		t.Fatalf("status = %q, want %q", resp.Status, StatusWaitingHuman)
+	}
+	if resp.Interrupt == nil || resp.Interrupt.Status != StatusWaitingHuman {
+		t.Fatalf("interrupt = %+v", resp.Interrupt)
+	}
+	if len(resp.HumanRequests) != 1 {
+		t.Fatalf("human_requests = %+v", resp.HumanRequests)
+	}
+	hr := resp.HumanRequests[0]
+	if hr.Status != humanrequest.StatusPending || hr.Question != "Which rollout window should the child use?" {
+		t.Fatalf("human request = %+v", hr)
+	}
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("human.request must suspend, not persist as ordinary child tool transcript: %+v", resp.ToolCalls)
+	}
+	if modelCalls != 1 {
+		t.Fatalf("model calls = %d, want 1", modelCalls)
+	}
+	storedRun, err := rt.RunStore().Load("child-waiting-human")
+	if err != nil {
+		t.Fatalf("load child run: %v", err)
+	}
+	if storedRun.Status != StatusWaitingHuman || len(storedRun.HumanRequests) != 1 {
+		t.Fatalf("stored child run status=%q human_requests=%+v", storedRun.Status, storedRun.HumanRequests)
+	}
+	storedHR, err := rt.GetHumanRequest(context.Background(), hr.ID)
+	if err != nil {
+		t.Fatalf("stored human request: %v", err)
+	}
+	if storedHR.RunID != "child-waiting-human" || storedHR.Status != humanrequest.StatusPending {
+		t.Fatalf("stored human request = %+v", storedHR)
+	}
+}
 
 // TestRunChildAgentPersistsSessionScope verifies the断裂 A fix (issue #68):
 // RunChildAgent MUST build and persist a SessionScope for the child run,

@@ -121,6 +121,9 @@ HITL resume is stateless with respect to live progress sinks:
 - signal progress during resume may be dropped with a debug log;
 - final delivery is best-effort through `Service.deliverResumeFinal` and the
   channel `OutboundEmitter`;
+- websocket resume final delivery requires a live registered websocket
+  connection for the original chat key; there is no offline websocket queue,
+  ack, or reconnect replay contract today;
 - persisted run/session/human-request state remains the durable source of truth.
 
 Do not describe resume as replaying a live turn or restoring per-chat-key sinks

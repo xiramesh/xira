@@ -262,15 +262,15 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 // contextWithRuntimeNativeToolsDisabled): that path's semantic is "the approved
 // tool already ran, you only produce a final," so it needs no tools.
 //
-// # Known gaps on the resume ctx (documented, not fixed here — see option A
-// in issue #68; separate issues track these when they would violate the
-// stateless-resume model):
+// # Stateless resume ctx contract
 //
 //   - EventBus: resume runs in an HTTP/CLI context with no per-chat-key sink
 //     (per 861cf17's stateless-resume model). Signal events during resume are
 //     dropped with a slog.Debug trace (not silent). Hard-wiring a sink would
 //     reintroduce statefulness; the resume is async and the user observes the
 //     final via deliverResumeFinal, not real-time progress.
+//   - Execution policy: persisted on the run and restored below before generate
+//     resumes. Do not reintroduce the old "AllowedTools is missing" gap note.
 func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanrequest.HumanRequest) error {
 	if req == nil || req.Response == nil {
 		return nil

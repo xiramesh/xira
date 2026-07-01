@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -9,6 +10,8 @@ import (
 )
 
 const StatusWaitingHuman = "waiting_human"
+
+var errRuntimeInterrupted = errors.New("runtime interrupted")
 
 type runtimeSuspendCollector struct {
 	mu                 sync.Mutex
@@ -18,6 +21,7 @@ type runtimeSuspendCollector struct {
 }
 
 type runtimeSuspendCollectorKey struct{}
+type runtimeInterruptCancelKey struct{}
 
 func contextWithRuntimeSuspendCollector(ctx context.Context, collector *runtimeSuspendCollector) context.Context {
 	return context.WithValue(ctx, runtimeSuspendCollectorKey{}, collector)
@@ -26,6 +30,17 @@ func contextWithRuntimeSuspendCollector(ctx context.Context, collector *runtimeS
 func runtimeSuspendCollectorFromContext(ctx context.Context) *runtimeSuspendCollector {
 	collector, _ := ctx.Value(runtimeSuspendCollectorKey{}).(*runtimeSuspendCollector)
 	return collector
+}
+
+func contextWithRuntimeInterruptCancel(ctx context.Context, cancel context.CancelFunc) context.Context {
+	return context.WithValue(ctx, runtimeInterruptCancelKey{}, cancel)
+}
+
+func cancelRuntimeOnInterrupt(ctx context.Context) {
+	cancel, _ := ctx.Value(runtimeInterruptCancelKey{}).(context.CancelFunc)
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func newRuntimeSuspendCollector() *runtimeSuspendCollector {

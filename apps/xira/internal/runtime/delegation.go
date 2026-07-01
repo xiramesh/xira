@@ -65,6 +65,7 @@ func (s *Service) runtimeADKTools(
 			"kind":         req.Kind,
 			"tool_call_id": callID,
 		})
+		toolCtx.Actions().SkipSummarization = true
 		return map[string]any{
 			"status":           StatusWaitingHuman,
 			"human_request_id": req.ID,
@@ -103,9 +104,9 @@ func (s *Service) runtimeADKTools(
 
 	// spawn_turn: async child turn spawn (Phase 3, RFC §2.4).
 	spawnTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
-		Name:        spawnTurnToolName,
-		Description: "Asynchronously spawn a child agent turn. Returns immediately with {agent_turn_id, status:spawned}; the child runs in the background. Use this instead of delegate_agent when you do not need to block on the child's result.",
-		InputSchema: spawnTurnInputSchema(),
+		Name:         spawnTurnToolName,
+		Description:  "Asynchronously spawn a child agent turn. Returns immediately with {agent_turn_id, status:spawned}; the child runs in the background. Use this instead of delegate_agent when you do not need to block on the child's result.",
+		InputSchema:  spawnTurnInputSchema(),
 		OutputSchema: objectSchema(),
 	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
 		start := time.Now()
@@ -183,9 +184,9 @@ func (s *Service) runtimeADKTools(
 	// steering checkpoint. The previous wait_turn blocked → broke steering
 	// (PR #53 review). poll_turn peeks instead.
 	pollTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
-		Name:        pollTurnToolName,
-		Description: "Check whether a spawned child agent turn has finished and return its result if so. Pass the agent_turn_id from spawn_turn. Returns immediately: {status:completed/failed, result_summary} when done, or {status:pending} when the child is still running. If pending, do other work and poll again later — do NOT block waiting. When the child is waiting for human input, the response also includes pending_questions: a list of {human_request_id, question} the child needs answered. For each, either answer it yourself via answer_child (passing that human_request_id) or do nothing to let the user answer in this chat.",
-		InputSchema: pollTurnInputSchema(),
+		Name:         pollTurnToolName,
+		Description:  "Check whether a spawned child agent turn has finished and return its result if so. Pass the agent_turn_id from spawn_turn. Returns immediately: {status:completed/failed, result_summary} when done, or {status:pending} when the child is still running. If pending, do other work and poll again later — do NOT block waiting. When the child is waiting for human input, the response also includes pending_questions: a list of {human_request_id, question} the child needs answered. For each, either answer it yourself via answer_child (passing that human_request_id) or do nothing to let the user answer in this chat.",
+		InputSchema:  pollTurnInputSchema(),
 		OutputSchema: objectSchema(),
 	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
 		start := time.Now()
@@ -228,9 +229,9 @@ func (s *Service) runtimeADKTools(
 	// (heavy child resume runs in a detached goroutine) so this tool never
 	// blocks the parent's event loop / steering checkpoint.
 	answerTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
-		Name:        answerChildToolName,
-		Description: "Answer a spawned child agent's question on its behalf. Pass the human_request_id that poll_turn surfaced when the child was waiting_human, plus your answer. The child turn resumes in the background with your answer as the human response, and its result routes back to this chat when done. Use this when a child asks a question you can answer yourself; if you want the user to answer instead, simply do nothing (the child's question escalates to the user in this chat).",
-		InputSchema: answerChildInputSchema(),
+		Name:         answerChildToolName,
+		Description:  "Answer a spawned child agent's question on its behalf. Pass the human_request_id that poll_turn surfaced when the child was waiting_human, plus your answer. The child turn resumes in the background with your answer as the human response, and its result routes back to this chat when done. Use this when a child asks a question you can answer yourself; if you want the user to answer instead, simply do nothing (the child's question escalates to the user in this chat).",
+		InputSchema:  answerChildInputSchema(),
 		OutputSchema: objectSchema(),
 	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
 		callID := strings.TrimSpace(toolCtx.FunctionCallID())
@@ -520,4 +521,3 @@ func (s *Service) releaseChildSlot(parentRunID string) {
 func shortID() string {
 	return strings.ReplaceAll(uuid.NewString()[:8], "-", "")
 }
-

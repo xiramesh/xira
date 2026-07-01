@@ -32,6 +32,10 @@ func (s *Service) generateADK(
 	recordEvent func(kind, source, message string, payload map[string]any),
 	recordAudit func(action, target string, allowed bool, reason string, meta map[string]any),
 ) (string, []ToolCallRecord, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ctx = contextWithRuntimeInterruptCancel(ctx, cancel)
+
 	adkModel, err := deepseek.NewADKModelWithThinking(profile.ModelPolicy.Model, s.deepseek, deepseek.Thinking{Type: thinkingType(profile.ModelPolicy)})
 	if err != nil {
 		return "", nil, err
@@ -50,6 +54,14 @@ func (s *Service) generateADK(
 		Instruction:           instructionText,
 		Tools:                 tools,
 		GenerateContentConfig: generateContentConfig(profile),
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+			func(_ adkagent.CallbackContext, _ *adkmodel.LLMRequest) (*adkmodel.LLMResponse, error) {
+				if collector := runtimeSuspendCollectorFromContext(ctx); collector != nil && collector.HasInterrupt() {
+					return nil, errRuntimeInterrupted
+				}
+				return nil, nil
+			},
+		},
 	})
 	if err != nil {
 		return "", nil, err
@@ -88,6 +100,12 @@ func (s *Service) generateADK(
 	var latestText string
 	for evt, err := range run.Run(ctx, req.Context.SenderID, req.SessionID, genai.NewContentFromText(req.Message, genai.RoleUser), adkRunConfig(profile)) {
 		if err != nil {
+			if collector := runtimeSuspendCollectorFromContext(ctx); collector != nil && collector.HasInterrupt() {
+				recordEvent("adk.suspended", "adk.runner", "ADK runner suspended by runtime interrupt", map[string]any{
+					"agent_id": profile.ID,
+				})
+				return final, toolRecords.snapshot(), nil
+			}
 			return final, toolRecords.snapshot(), err
 		}
 		if evt == nil {
@@ -119,6 +137,34 @@ func (s *Service) generateADK(
 			payload["error_message"] = evt.ErrorMessage
 		}
 		recordEvent("adk.event", "adk.runner", evt.Author, payload)
+		var parts []*genai.Part
+		if evt.Content != nil {
+			parts = evt.Content.Parts
+		}
+		for _, part := range parts {
+			if part == nil || part.FunctionCall == nil || !isHumanRequestToolWireName(part.FunctionCall.Name) {
+				continue
+			}
+			req, err := s.createAgentHumanRequest(ctx, part.FunctionCall.ID, part.FunctionCall.Args)
+			if err != nil {
+				recordAudit("human.request", part.FunctionCall.ID, false, err.Error(), part.FunctionCall.Args)
+				return final, toolRecords.snapshot(), err
+			}
+			recordEvent("human.request.created", "runtime", "human request created", map[string]any{
+				"human_request_id": req.ID,
+				"kind":             req.Kind,
+				"source":           req.Source,
+				"tool_call_id":     req.ToolCallID,
+			})
+			recordAudit("human.request", req.ID, true, "agent requested human input", map[string]any{
+				"kind":         req.Kind,
+				"tool_call_id": req.ToolCallID,
+			})
+			recordEvent("adk.suspended", "adk.runner", "ADK runner suspended by runtime interrupt", map[string]any{
+				"agent_id": profile.ID,
+			})
+			return final, toolRecords.snapshot(), nil
+		}
 		if evt.IsFinalResponse() {
 			final = text
 			if strings.TrimSpace(final) == "" {

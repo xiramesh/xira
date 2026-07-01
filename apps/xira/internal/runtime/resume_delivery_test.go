@@ -20,9 +20,9 @@ import (
 
 // recordingEmitter records every Emit call for assertion.
 type recordingEmitter struct {
-	mu       sync.Mutex
-	calls    []channel.OutboundEnvelope
-	emitErr  error
+	mu      sync.Mutex
+	calls   []channel.OutboundEnvelope
+	emitErr error
 }
 
 func (r *recordingEmitter) Capabilities() channel.CapabilitySet {
@@ -159,6 +159,41 @@ func TestDeliverResumeFinalEmitErrorLoggedNotFatal(t *testing.T) {
 type simpleErr struct{ msg string }
 
 func (e *simpleErr) Error() string { return e.msg }
+
+type attemptedErrorEmitter struct {
+	recordingEmitter
+	err error
+}
+
+func (e *attemptedErrorEmitter) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
+	e.recordingEmitter.Emit(ctx, env)
+	return e.err
+}
+
+func TestDeliverResumeFinalWebsocketNoLiveConnectionIsBestEffort(t *testing.T) {
+	emitter := &attemptedErrorEmitter{err: &simpleErr{"websocket Emit: no live connection for chat \"chat-9\""}}
+	s := &Service{outbound: emitter}
+	run := TurnResponse{
+		RunID:         "ws-resume-1",
+		FinalResponse: "resumed websocket final",
+		Status:        "completed",
+		SessionScope:  scopeWith("websocket", "chat-9", "alice"),
+	}
+
+	s.deliverResumeFinal(context.Background(), run)
+
+	calls := emitter.emitted()
+	if len(calls) != 1 {
+		t.Fatalf("emitter got %d calls, want 1 attempt even when websocket has no live connection", len(calls))
+	}
+	env := calls[0]
+	if env.Target == nil || env.Target.Channel != "websocket" || env.Target.ChatID != "chat-9" || env.Target.SenderID != "alice" {
+		t.Fatalf("target = %+v, want websocket/chat-9/alice", env.Target)
+	}
+	if content, _ := env.Data["content"].(string); content != "resumed websocket final" {
+		t.Fatalf("content = %q, want resumed websocket final", content)
+	}
+}
 
 // TestDeliverResumeFinalNilScopeSkipped verifies a run with no persisted scope
 // cannot be routed (no target channel) and is skipped, not panicked.

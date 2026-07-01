@@ -158,6 +158,7 @@ func (s *Service) createAgentHumanRequest(ctx context.Context, callID string, ar
 		return nil, err
 	}
 	collector.AddHumanRequest(*req, "agent_request")
+	cancelRuntimeOnInterrupt(ctx)
 	return req, nil
 }
 
@@ -215,6 +216,7 @@ func (s *Service) createRuntimeToolGateHumanRequest(ctx context.Context, toolCal
 		Input:  cloneAnyMap(snapshotArgs),
 		Status: StatusWaitingHuman,
 	})
+	cancelRuntimeOnInterrupt(ctx)
 	return req, nil
 }
 
