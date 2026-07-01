@@ -126,8 +126,11 @@ HITL resume is stateless with respect to live progress sinks:
 Do not describe resume as replaying a live turn or restoring per-chat-key sinks
 unless that capability is explicitly implemented.
 
-## Known Contract Gaps
+## Documented Risks
 
-- CLI and daemon can both instantiate the runtime over the same `state_dir`;
-  cross-process write semantics need a deliberate contract if multi-process use
-  becomes supported.
+- `state_dir` is optimized for the normal single-writer runtime shape. CLI and
+  daemon can technically point at the same `state_dir`, but concurrent
+  multi-writer use is not a supported contract today. This is a low-probability
+  risk for local use, but if multi-writer operation becomes a product
+  requirement, add an explicit single-writer lock or move the affected stores to
+  transactional storage before treating it as supported.
