@@ -35,9 +35,11 @@ func newRootCommand() *cobra.Command {
 func newRootCommandWithFactory(serviceFactory func(runtime.Config) (*runtime.Service, error)) *cobra.Command {
 	var configPath string
 	cmd := &cobra.Command{
-		Use:   "xira",
-		Short: "Xira customer delivery runtime",
+		Use:     "xira",
+		Short:   "Xira customer delivery runtime",
+		Version: version.String(),
 	}
+	cmd.SetVersionTemplate(version.String() + "\n")
 	cmd.PersistentFlags().StringVar(&configPath, "config", "xira.yaml", "Runtime instance config path")
 	newRuntime := func() (*runtime.Service, error) {
 		return serviceFactory(runtime.Config{
@@ -58,7 +60,7 @@ func versionCommand() *cobra.Command {
 		Use:   "version",
 		Short: "Print Xira version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", version.Name, version.Version)
+			fmt.Fprintln(cmd.OutOrStdout(), version.String())
 		},
 	}
 }

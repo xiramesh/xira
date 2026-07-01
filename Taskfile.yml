@@ -8,6 +8,16 @@ vars:
   BIN: '{{.BIN | default "bin/xira"}}'
   AGENT: '{{.AGENT | default ""}}'
   MSG: '{{.MSG | default "hello xira"}}'
+  VERSION:
+    sh: |
+      out=$(GOCACHE="{{.GO_CACHE}}" GOPATH="{{.GO_PATH}}" go run ./apps/xira/cmd/xira version)
+      set -- $out
+      printf '%s\n' "$2"
+  COMMIT:
+    sh: git rev-parse --short HEAD
+  BUILD_DATE:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+  LDFLAGS: '-s -w -X github.com/xiramesh/xira/internal/version.Version={{.VERSION}} -X github.com/xiramesh/xira/internal/version.Commit={{.COMMIT}} -X github.com/xiramesh/xira/internal/version.Date={{.BUILD_DATE}}'
 
 env:
   GOCACHE: "{{.GO_CACHE}}"
@@ -50,19 +60,19 @@ tasks:
     desc: Build stripped Xira production binary
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - go build -trimpath -ldflags="-s -w" -o {{.BIN}} ./apps/xira/cmd/xira
+      - go build -trimpath -ldflags="{{.LDFLAGS}}" -o {{.BIN}} ./apps/xira/cmd/xira
 
   build:linux:
     desc: Build stripped Xira Linux amd64 binary
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o {{.BIN_DIR}}/xira-linux-amd64 ./apps/xira/cmd/xira
+      - GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="{{.LDFLAGS}}" -o {{.BIN_DIR}}/xira-linux-amd64 ./apps/xira/cmd/xira
 
   build:windows:
     desc: Build stripped Xira Windows amd64 executable
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o {{.BIN_DIR}}/xira-windows-amd64.exe ./apps/xira/cmd/xira
+      - GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="{{.LDFLAGS}}" -o {{.BIN_DIR}}/xira-windows-amd64.exe ./apps/xira/cmd/xira
 
   version:
     desc: Print Xira version

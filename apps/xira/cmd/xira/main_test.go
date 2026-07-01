@@ -33,6 +33,20 @@ func TestAgentListUsesWorkspaceAgents(t *testing.T) {
 	}
 }
 
+func TestVersionCommandPrintsBuildMetadata(t *testing.T) {
+	out := executeCommand(t, "version")
+	if out != "xira 0.2.0-dev commit=unknown date=unknown\n" {
+		t.Fatalf("version output = %q", out)
+	}
+}
+
+func TestVersionFlagPrintsBuildMetadata(t *testing.T) {
+	out := executeCommand(t, "--version")
+	if out != "xira 0.2.0-dev commit=unknown date=unknown\n" {
+		t.Fatalf("--version output = %q", out)
+	}
+}
+
 func TestAgentRunPrintsFinalResponseByDefault(t *testing.T) {
 	instance := writeCLIFixture(t, "research-assistant")
 	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "agent", "run", "--message", "hi")
