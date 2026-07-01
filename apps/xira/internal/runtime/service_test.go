@@ -377,6 +377,71 @@ func TestToolLogSummariesAvoidLargeContent(t *testing.T) {
 	}
 }
 
+func TestToolLogSummaryEdges(t *testing.T) {
+	if got := toolInputSummary(nil); got != nil {
+		t.Fatalf("empty input summary = %+v, want nil", got)
+	}
+
+	input := toolInputSummary(map[string]any{
+		"args":     []string{"one", "two"},
+		"old_text": "before",
+		"new_text": "after",
+	})
+	if input["args_count"] != 2 || input["old_text_chars"] != 6 || input["new_text_chars"] != 5 {
+		t.Fatalf("input summary = %+v", input)
+	}
+
+	unknown := toolInputSummary(map[string]any{"custom": "value"})
+	if unknown["custom"] != "value" {
+		t.Fatalf("unknown input keys should be preserved, got %+v", unknown)
+	}
+
+	output := toolOutputSummary(map[string]any{"stderr": "boom", "error": "failed"})
+	if output["stderr_chars"] != 4 || output["error"] != "failed" {
+		t.Fatalf("output summary = %+v", output)
+	}
+
+	keysOnly := toolOutputSummary(map[string]any{"z": 1, "a": 2})
+	if got := keysOnly["keys"]; len(got.([]string)) != 2 || got.([]string)[0] != "a" {
+		t.Fatalf("fallback output keys = %+v", keysOnly)
+	}
+}
+
+func TestRuntimeHelperEdges(t *testing.T) {
+	if got := safeToolOutputFileName(" ../bad/name "); got != "bad-name" {
+		t.Fatalf("safe filename = %q", got)
+	}
+	if got := safeToolOutputFileName("///"); got == "" || strings.Contains(got, "/") {
+		t.Fatalf("empty-safe filename = %q", got)
+	}
+
+	if got := previewText("  hello\nworld  ", 5); got != "hello..." {
+		t.Fatalf("preview = %q", got)
+	}
+	if got := previewText("hello", 0); got != "hello" {
+		t.Fatalf("zero-limit preview = %q", got)
+	}
+
+	if channelConflict(" Feishu ", "feishu") {
+		t.Fatal("same channel should not conflict")
+	}
+	if channelConflict("local", "feishu") {
+		t.Fatal("local request channel should not conflict")
+	}
+	if !channelConflict("websocket", "feishu") {
+		t.Fatal("different non-local channels should conflict")
+	}
+
+	for _, value := range []any{3, int64(4), float64(5)} {
+		if _, ok := intFromAny(value); !ok {
+			t.Fatalf("intFromAny(%T) returned !ok", value)
+		}
+	}
+	if _, ok := intFromAny("6"); ok {
+		t.Fatal("string should not be accepted as int")
+	}
+}
+
 func TestToolOutputForModelBoundsCommandStreams(t *testing.T) {
 	output := toolOutputForModel(ToolCallRecord{
 		Name:  "shell.run",

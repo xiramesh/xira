@@ -37,20 +37,20 @@ type Config struct {
 }
 
 type Service struct {
-	agents         *agents.Manager
-	flows          *flow.FlowRegistry
-	skills         *skills.Manager
-	runs           *RunStore
-	entrypoints    *entrypoints.Registry
-	sessions       *fsession.Manager
-	usage          *UsageStore
-	humanRequests  *humanrequest.Store
+	agents        *agents.Manager
+	flows         *flow.FlowRegistry
+	skills        *skills.Manager
+	runs          *RunStore
+	entrypoints   *entrypoints.Registry
+	sessions      *fsession.Manager
+	usage         *UsageStore
+	humanRequests *humanrequest.Store
 	// outbound delivers resumed-run final responses back to the originating IM
 	// channel (RFC #27 — stateless HITL resume). Injected by main.go as the
 	// channel Manager (an OutboundEmitter). nil = resume finals are not
 	// delivered to IM (they're still persisted in the run; backward-compatible
 	// for tests/CLI without a channel manager).
-	outbound channel.OutboundEmitter
+	outbound       channel.OutboundEmitter
 	adkSessions    adksession.Service
 	verifier       verifier
 	evolution      *EvolutionEngine
@@ -366,7 +366,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	req.EntrypointID = req.Context.EntrypointID
 	req.SessionID = allocation.SessionID
 	agentSessionID := fsession.BuildAgentSessionID(req.SessionID, profile.ID)
-	runID := NewRunID(profile.ID, now)
+	runID := NewRunID(profile.ID, req.Context.Channel, now)
 	adkRuntimeSessionID := adkSessionID(agentSessionID, runID+":"+uuid.NewString())
 	scope := allocation.Scope
 	slog.Info("agent run accepted",

@@ -131,9 +131,41 @@ func (s *RunStore) Load(runID string) (TurnResponse, error) {
 	return resp, nil
 }
 
-func NewRunID(agentID string, now time.Time) string {
-	safeAgent := strings.NewReplacer("/", "-", " ", "-").Replace(agentID)
-	return fmt.Sprintf("%s-%s", now.Format("20060102-150405"), safeAgent)
+func NewRunID(agentID, channelName string, now time.Time) string {
+	return fmt.Sprintf("%s-%s-%s-%s",
+		now.Format("20060102-150405"),
+		runIDPart(agentID),
+		runIDPart(channelName),
+		shortID(),
+	)
+}
+
+func runIDPart(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "unknown"
+	}
+	var b strings.Builder
+	lastHyphen := false
+	for _, r := range value {
+		allowed := (r >= 'a' && r <= 'z') ||
+			(r >= '0' && r <= '9') ||
+			r == '.' || r == '_'
+		if allowed {
+			b.WriteRune(r)
+			lastHyphen = false
+			continue
+		}
+		if !lastHyphen {
+			b.WriteByte('-')
+			lastHyphen = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "unknown"
+	}
+	return out
 }
 
 func writeJSONL[T any](path string, values []T) error {

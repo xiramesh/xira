@@ -294,7 +294,7 @@ func (t *serviceSpawnTarget) Run(ctx context.Context, agentID, task string) (Del
 	if !policy.Enabled || !policy.Allows(target.ID) {
 		return DelegateAgentResult{AgentID: agentID, Status: "rejected"}, fmt.Errorf("caller %q is not allowed to spawn %q", t.caller.ID, agentID)
 	}
-	childRunID := NewRunID(target.ID, time.Now()) + "-" + shortID()
+	childRunID := NewRunID(target.ID, t.parentBase.Channel, time.Now())
 	req := childAgentRequest{
 		ParentBase:  t.parentBase,
 		ParentRunID: t.parentRunID,

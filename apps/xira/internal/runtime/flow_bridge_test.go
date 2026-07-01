@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/flow"
@@ -229,6 +230,67 @@ func scopeChatID(scopeChat string) string {
 	return scopeChat
 }
 
+func TestCloneFlowToolInputAllowlistDeepCopies(t *testing.T) {
+	if got := cloneFlowToolInputAllowlist(nil); got != nil {
+		t.Fatalf("nil allowlist = %+v, want nil", got)
+	}
+	in := map[string]map[string][]string{
+		"command.run": {"program": {"git", "go"}},
+	}
+	out := cloneFlowToolInputAllowlist(in)
+	in["command.run"]["program"][0] = "mutated"
+	if out["command.run"]["program"][0] != "git" {
+		t.Fatalf("allowlist was not deep copied: %+v", out)
+	}
+}
+
+func TestMapTurnResponseToFlowCopiesProjection(t *testing.T) {
+	started := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	ended := started.Add(time.Second)
+	resp := TurnResponse{
+		RunID:         "run-1",
+		AgentID:       "agent-1",
+		EntrypointID:  "entry-1",
+		SessionID:     "session-1",
+		Status:        "waiting_human",
+		FinalResponse: "draft",
+		StartedAt:     started,
+		EndedAt:       ended,
+		Artifacts:     []string{"artifact-a"},
+		HumanRequests: []humanrequest.HumanRequest{{
+			ID:     "hrq-1",
+			Source: "tool",
+			Kind:   humanrequest.RequestApproval,
+			Status: humanrequest.StatusPending,
+		}},
+		Interrupt: &RunInterrupt{
+			Status: "waiting_human",
+			Reason: "approval",
+			BlockedBy: []BlockedBy{{
+				Type:           "human_request",
+				HumanRequestID: "hrq-1",
+				RunID:          "run-1",
+				Reason:         "needs approval",
+			}},
+		},
+	}
+	got := mapTurnResponseToFlow(resp)
+	resp.Artifacts[0] = "mutated"
+
+	if got.RunID != "run-1" || got.StartedAt != started || got.EndedAt != ended {
+		t.Fatalf("flow response identity/times wrong: %+v", got)
+	}
+	if len(got.Artifacts) != 1 || got.Artifacts[0] != "artifact-a" {
+		t.Fatalf("artifacts projection wrong: %+v", got.Artifacts)
+	}
+	if len(got.HumanRequests) != 1 || got.HumanRequests[0].Kind != "approval" {
+		t.Fatalf("human request projection wrong: %+v", got.HumanRequests)
+	}
+	if got.Interrupt == nil || len(got.Interrupt.BlockedBy) != 1 || got.Interrupt.BlockedBy[0].HumanRequestID != "hrq-1" {
+		t.Fatalf("interrupt projection wrong: %+v", got.Interrupt)
+	}
+}
+
 // TestFlowBridgeMergesMetadataIntoContextRaw asserts that flow-internal
 // traceability keys (flow_run_id/flow_id/flow_step_id) from
 // AgentTurnRequest.Metadata survive into the TurnRequest.Context.Raw, so they
@@ -337,6 +399,51 @@ func TestFlowBridgePolicyValue(t *testing.T) {
 	run.Input["other"] = "maybe"
 	if v, ok := b.PolicyValue(ctx, run, "other"); !ok || v != "maybe" {
 		t.Fatalf("un-parseable: got v=%v ok=%v", v, ok)
+	}
+}
+
+func TestFlowBridgeNilServiceErrors(t *testing.T) {
+	var b *flowBridge
+	ctx := context.Background()
+	if _, err := b.RunAgent(ctx, flow.AgentTurnRequest{}); err == nil {
+		t.Fatal("nil bridge RunAgent should fail")
+	}
+	if _, err := b.CreateHumanRequest(ctx, flow.CreateHumanRequestInput{}); err == nil {
+		t.Fatal("nil bridge CreateHumanRequest should fail")
+	}
+	if _, err := b.GetHumanRequest(ctx, "hrq-1"); err == nil {
+		t.Fatal("nil bridge GetHumanRequest should fail")
+	}
+	if _, err := b.AgentStepStatus(ctx, nil, flow.Step{}); err == nil {
+		t.Fatal("nil bridge AgentStepStatus should fail")
+	}
+}
+
+func TestFlowBridgeAgentStepStatusLoadsRunStatus(t *testing.T) {
+	rt := newTestService(t, Config{StateDir: filepath.Join(t.TempDir(), "state")})
+	b := newFlowBridge(rt)
+	ctx := context.Background()
+
+	if _, err := b.AgentStepStatus(ctx, &flow.Run{Steps: map[string]flow.StepState{}}, flow.Step{ID: "missing"}); err == nil {
+		t.Fatal("missing step should fail")
+	}
+	run := &flow.Run{Steps: map[string]flow.StepState{
+		"work": {},
+	}}
+	if _, err := b.AgentStepStatus(ctx, run, flow.Step{ID: "work"}); err == nil {
+		t.Fatal("step without agent run id should fail")
+	}
+
+	if err := rt.RunStore().SaveRun(TurnResponse{RunID: "agent-run-1", Status: "completed", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("save agent run: %v", err)
+	}
+	run.Steps["work"] = flow.StepState{AgentRunID: "agent-run-1"}
+	status, err := b.AgentStepStatus(ctx, run, flow.Step{ID: "work"})
+	if err != nil {
+		t.Fatalf("AgentStepStatus: %v", err)
+	}
+	if status != "completed" {
+		t.Fatalf("status = %q, want completed", status)
 	}
 }
 

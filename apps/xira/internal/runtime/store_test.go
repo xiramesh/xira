@@ -3,6 +3,7 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -113,10 +114,30 @@ func TestRunStoreList(t *testing.T) {
 	}
 }
 
-// TestNewRunID covers agent-id sanitization + timestamp format.
+// TestNewRunID covers agent/channel sanitization, timestamp format, and a
+// uniqueness suffix so same-second same-agent runs do not overwrite each other.
 func TestNewRunID(t *testing.T) {
-	id := NewRunID("agent with/slash", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
-	if id != "20260102-030405-agent-with-slash" {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	id := NewRunID("agent with/slash", "Feishu Bot/Prod", now)
+	prefix := "20260102-030405-agent-with-slash-feishu-bot-prod-"
+	if !strings.HasPrefix(id, prefix) {
 		t.Fatalf("run id = %q", id)
+	}
+	suffix := strings.TrimPrefix(id, prefix)
+	if len(suffix) != 8 {
+		t.Fatalf("run id suffix = %q, want 8 chars", suffix)
+	}
+	second := NewRunID("agent with/slash", "Feishu Bot/Prod", now)
+	if second == id {
+		t.Fatalf("same-second run ids should be unique, got %q twice", id)
+	}
+}
+
+func TestNewRunIDUsesUnknownForEmptyParts(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	id := NewRunID("  ", "////", now)
+	prefix := "20260102-030405-unknown-unknown-"
+	if !strings.HasPrefix(id, prefix) {
+		t.Fatalf("run id = %q, want prefix %q", id, prefix)
 	}
 }
