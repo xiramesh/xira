@@ -3,6 +3,8 @@ package flow
 import (
 	"context"
 	"testing"
+
+	"github.com/xiramesh/xira/internal/channel"
 )
 
 // fakeResolver returns canned resolved human requests by id.
@@ -106,6 +108,32 @@ func TestHumanApprovalStepCreatesHumanRequest(t *testing.T) {
 	_, _, hrID := startPausedAtApproval(t, nil)
 	if hrID == "" {
 		t.Fatal("expected non-empty human request id")
+	}
+}
+
+func TestHumanApprovalStepPassesRunContextToHumanRequest(t *testing.T) {
+	creator := newFakeHumanCreator()
+	exec := &AgentExecutor{Human: creator}
+	run := &Run{
+		ID:      "fr_1",
+		FlowID:  "test",
+		Context: &channel.InboundContext{Channel: "feishu", ChatID: "oc_flow", SenderID: "u_flow", ChatType: "group"},
+		Steps:   map[string]StepState{},
+	}
+	step := Step{ID: "approve_design", Executor: Executor{Type: "human_approval", Question: "Approve?"}}
+	result, err := exec.ExecuteStep(context.Background(), run, &Definition{ID: "test"}, step)
+	if err != nil {
+		t.Fatalf("ExecuteStep: %v", err)
+	}
+	if result.Status != StepWaitingHuman {
+		t.Fatalf("status = %q, want waiting_human", result.Status)
+	}
+	if len(creator.created) != 1 {
+		t.Fatalf("created = %d, want 1", len(creator.created))
+	}
+	got := creator.created[0].Context
+	if got.Channel != "feishu" || got.ChatID != "oc_flow" || got.SenderID != "u_flow" {
+		t.Fatalf("created context = %+v, want original trigger identity", got)
 	}
 }
 

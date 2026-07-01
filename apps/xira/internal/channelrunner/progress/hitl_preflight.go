@@ -3,6 +3,7 @@ package progress
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/runtime"
@@ -23,10 +24,14 @@ import (
 // error), returns false (adapter continues to session.Handle).
 //
 // Rules:
-//   - Only agent_request HITLs are eligible (runtime_tool_gate needs precise
-//     approve/deny — button card future or HTTP/CLI).
-//   - The user's text is always treated as ResponseAnswer (no keyword matching;
-//     intent understanding is left to the agent during resume).
+//   - agent_request and flow_human_approval HITLs are eligible for pure-text IM
+//     reply. runtime_tool_gate still needs precise approve/deny — button card
+//     future or HTTP/CLI — because it can execute a tool.
+//   - agent_request stores the user's text as ResponseAnswer + message and
+//     leaves intent understanding to the agent during resume.
+//   - flow_human_approval first matches the text against the request options,
+//     then stores the normalized option id as ResponseAnswer + message. Unknown
+//     text does not resolve the request, so a typo cannot consume the gate.
 //   - Multiple pending HITLs: resolves the most recent one (store sorts by
 //     CreatedAt desc). The rest stay pending.
 //   - resolve error → returns false (don't block the user; start a normal turn).
@@ -40,19 +45,26 @@ func TryResolveHITL(ctx context.Context, resolver runtime.HITLResolver, chatKey 
 	if err != nil || len(pending) == 0 {
 		return false
 	}
-	// Find the most recent agent_request HITL (eligible for IM direct-answer).
-	// runtime_tool_gate HITLs are skipped (need precise approve/deny).
+	// Find the most recent IM-resolvable HITL. runtime_tool_gate HITLs are
+	// skipped (need precise approve/deny).
 	var hr *humanrequest.HumanRequest
 	for i := range pending {
-		if pending[i].Source == "agent_request" {
+		if imResolvableHITLSource(pending[i].Source) {
 			hr = &pending[i]
 			break // pending is sorted by CreatedAt desc, first match is most recent
 		}
 	}
 	if hr == nil {
-		return false // only tool-gate HITLs pending — not eligible for IM text resolve
+		return false // only tool-gate / unsupported HITLs pending
 	}
 	kind, msg := ClassifyHITLResponse(content, hr.Kind)
+	if hr.Source == "flow_human_approval" {
+		signal, ok := flowApprovalSignalFromText(content, hr.Options)
+		if !ok {
+			return false
+		}
+		msg = signal
+	}
 	if _, err := resolver.ResolveHumanRequest(ctx, hr.ID, humanrequest.ResolveRequest{
 		Kind:    kind,
 		Actor:   senderID,
@@ -72,4 +84,34 @@ func TryResolveHITL(ctx context.Context, resolver runtime.HITLResolver, chatKey 
 		"sender_id", senderID,
 	)
 	return true
+}
+
+func imResolvableHITLSource(source string) bool {
+	switch source {
+	case "agent_request", "flow_human_approval":
+		return true
+	default:
+		return false
+	}
+}
+
+func flowApprovalSignalFromText(text string, options []humanrequest.HumanOption) (string, bool) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", false
+	}
+	for _, opt := range options {
+		id := strings.TrimSpace(opt.ID)
+		if id != "" && strings.EqualFold(text, id) {
+			return id, true
+		}
+		label := strings.TrimSpace(opt.Label)
+		if label != "" && strings.EqualFold(text, label) {
+			if id != "" {
+				return id, true
+			}
+			return label, true
+		}
+	}
+	return "", false
 }

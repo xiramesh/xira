@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/flow"
 	"github.com/xiramesh/xira/internal/humanrequest"
 )
@@ -128,6 +129,7 @@ func (b *flowBridge) CreateHumanRequest(ctx context.Context, input flow.CreateHu
 		Options:     options,
 		DedupeKey:   input.DedupeKey,
 		Metadata:    input.Metadata,
+		ChatKey:     chatKeyStringFromInbound(input.Context),
 	})
 	if err != nil {
 		return flow.HumanRequestView{}, err
@@ -155,8 +157,21 @@ func (b *flowBridge) GetHumanRequest(ctx context.Context, requestID string) (flo
 	if req.Response != nil {
 		out.ResponseKind = string(req.Response.Kind)
 		out.ResponseMessage = req.Response.Message
+		if req.Source == flow.SourceFlowHumanApproval && req.Response.Kind == humanrequest.ResponseAnswer {
+			if signal := strings.TrimSpace(req.Response.Message); signal != "" {
+				out.ResponseKind = signal
+			}
+		}
 	}
 	return out, nil
+}
+
+func chatKeyStringFromInbound(ctx channel.InboundContext) string {
+	key := ChatKeyFromInbound(ctx)
+	if key.Channel == "" && key.ChatID == "" && key.SenderID == "" {
+		return ""
+	}
+	return key.String()
 }
 
 // AgentStepStatus satisfies flow.AgentStatusResolver by reloading the backing

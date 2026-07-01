@@ -47,6 +47,7 @@ func (e *AgentExecutor) doHumanApproval(ctx context.Context, run *Run, def *Defi
 		Options:     options,
 		DedupeKey:   toolCallID,
 		Metadata:    metadata,
+		Context:     runContext(run),
 	})
 	if err != nil {
 		return StepExecutionResult{Status: StepFailed, Error: err.Error()}, nil

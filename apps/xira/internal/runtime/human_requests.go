@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
+	"github.com/xiramesh/xira/internal/flow"
 	"github.com/xiramesh/xira/internal/humanrequest"
 )
 
@@ -111,6 +112,15 @@ func (s *Service) ResolveHumanRequest(ctx context.Context, requestID string, inp
 	// interrupts trigger a direct resume (others no-op).
 	if resolved.Source == "agent_request" {
 		if err := s.resumeDirectHumanRequest(ctx, resolved); err != nil {
+			return nil, err
+		}
+	}
+	if resolved.Source == flow.SourceFlowHumanApproval {
+		flowRunID := strings.TrimSpace(resolved.Metadata[flow.MetadataFlowRunID])
+		if flowRunID == "" {
+			return nil, fmt.Errorf("flow human approval %s missing %s metadata", resolved.ID, flow.MetadataFlowRunID)
+		}
+		if _, err := s.ResumeFlow(ctx, flowRunID, resolved.ID); err != nil {
 			return nil, err
 		}
 	}

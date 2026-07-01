@@ -42,6 +42,7 @@ type CreateHumanRequestInput struct {
 	Options     []string
 	DedupeKey   string
 	Metadata    map[string]string
+	Context     channel.InboundContext
 }
 
 // HumanRequestView is the flow-side projection of a created HumanRequest.
@@ -66,10 +67,10 @@ type AgentTurnRequest struct {
 	// Context is the trigger identity inherited from the flow run, so the
 	// agent session lands under the trigger's conversation tree (channel/chat/
 	// sender/space) instead of a forged orchestration channel.
-	Context            channel.InboundContext         `json:"context"`
+	Context channel.InboundContext `json:"context"`
 	// Metadata carries flow-internal correlation keys (flow_run_id/flow_id/
 	// flow_step_id) for traceability; it is distinct from session identity.
-	Metadata           map[string]string              `json:"metadata,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // AgentTurnResponse is the flow-side projection of runtime.TurnResponse. Only
