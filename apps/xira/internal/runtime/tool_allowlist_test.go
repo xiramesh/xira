@@ -77,6 +77,37 @@ func TestValidateRuntimeToolInputAllowlist(t *testing.T) {
 	}
 }
 
+func TestApplyExecutionPolicySnapshotRestoresToolConstraints(t *testing.T) {
+	req := TurnRequest{}
+	applyExecutionPolicySnapshot(&req, ExecutionPolicySnapshot{
+		AllowedToolsSet: true,
+		AllowedTools:    []string{"write_file"},
+		ToolInputAllowlist: map[string]map[string][]string{
+			"write_file": {"path": {"/safe/out.md"}},
+		},
+	})
+	if !req.AllowedToolsSet || len(req.AllowedTools) != 1 || req.AllowedTools[0] != "write_file" {
+		t.Fatalf("restored request tools = %+v", req)
+	}
+	ctx := context.Background()
+	if req.AllowedToolsSet || len(req.AllowedTools) > 0 {
+		ctx = contextWithRuntimeToolAllowlist(ctx, req.AllowedTools)
+	}
+	ctx = contextWithRuntimeToolInputAllowlist(ctx, req.ToolInputAllowlist)
+	if !runtimeToolAllowedFromContext(ctx, "write_file") {
+		t.Fatal("write_file should be allowed after policy restore")
+	}
+	if runtimeToolAllowedFromContext(ctx, "read_file") {
+		t.Fatal("read_file should not be allowed after policy restore")
+	}
+	if err := validateRuntimeToolInputAllowlist(ctx, "write_file", map[string]any{"path": "/etc/passwd"}); err == nil {
+		t.Fatal("disallowed restored path should fail")
+	}
+	if err := validateRuntimeToolInputAllowlist(ctx, "write_file", map[string]any{"path": "/safe/out.md"}); err != nil {
+		t.Fatalf("allowed restored path should pass: %v", err)
+	}
+}
+
 // TestConstrainedToolParameters covers: no allowlist (passthrough), enum
 // injection on properties.
 func TestConstrainedToolParameters(t *testing.T) {

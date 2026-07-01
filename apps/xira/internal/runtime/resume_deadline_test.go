@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -69,10 +70,10 @@ func TestResumeDirectHumanRequestTimesOutAndMarksRunFailed(t *testing.T) {
 	// Seed a waiting_human run + pending HumanRequest (as if a child called
 	// human.request, then the parent answered via answer_child).
 	if err := rt.runs.SaveRun(TurnResponse{
-		RunID:    "child-timeout-1",
-		AgentID:  "xira-assistant",
-		Status:   StatusWaitingHuman,
-		Message:  "deploy",
+		RunID:   "child-timeout-1",
+		AgentID: "xira-assistant",
+		Status:  StatusWaitingHuman,
+		Message: "deploy",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -185,10 +186,10 @@ func TestResumeNormalCompletionUnaffectedByDeadline(t *testing.T) {
 	})
 
 	if err := rt.runs.SaveRun(TurnResponse{
-		RunID:    "child-normal-1",
-		AgentID:  "xira-assistant",
-		Status:   StatusWaitingHuman,
-		Message:  "task",
+		RunID:   "child-normal-1",
+		AgentID: "xira-assistant",
+		Status:  StatusWaitingHuman,
+		Message: "task",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -223,5 +224,63 @@ func TestResumeNormalCompletionUnaffectedByDeadline(t *testing.T) {
 	}
 	if run.Status != "completed" {
 		t.Errorf("run Status = %q, want 'completed' (normal resume must finish, not be cut by the 120s deadline)", run.Status)
+	}
+}
+
+func TestResumeDirectHumanRequestRestoresPersistedExecutionPolicy(t *testing.T) {
+	var sawResume bool
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		sawResume = true
+		if len(req.Tools) != 0 {
+			t.Fatalf("resume exposed tools despite persisted explicit empty policy: %+v", req.Tools)
+		}
+		return deepSeekHTTPResponse(deepSeekTextResponse("resumed without tools")), nil
+	})}
+	rt := newTestService(t, Config{
+		StateDir:       filepath.Join(t.TempDir(), "state"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+
+	if err := rt.runs.SaveRun(TurnResponse{
+		RunID:   "child-policy-1",
+		AgentID: "xira-assistant",
+		Status:  StatusWaitingHuman,
+		Message: "continue without tools",
+		ExecutionPolicy: ExecutionPolicySnapshot{
+			AllowedToolsSet: true,
+			AllowedTools:    []string{},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hr, err := rt.CreateHumanRequest(context.Background(), humanrequest.CreateRequest{
+		WorkspaceID:  rt.workspace,
+		WorkspaceKey: rt.WorkspaceKey(),
+		RunID:        "child-policy-1",
+		AgentID:      "xira-assistant",
+		SessionID:    "session-policy-1",
+		Kind:         humanrequest.RequestFreeform,
+		Question:     "continue?",
+		Source:       "agent_request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hr.Response = &humanrequest.HumanResponse{
+		RequestID: hr.ID,
+		Kind:      humanrequest.ResponseAnswer,
+		Actor:     "parent_agent",
+		Message:   "yes",
+	}
+
+	if err := rt.resumeDirectHumanRequest(context.Background(), hr); err != nil {
+		t.Fatalf("resumeDirectHumanRequest: %v", err)
+	}
+	if !sawResume {
+		t.Fatal("fake model did not receive resume request")
 	}
 }

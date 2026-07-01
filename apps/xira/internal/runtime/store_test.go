@@ -46,10 +46,17 @@ func TestRunStoreSaveLoadRoundtrip(t *testing.T) {
 		Status:        "completed",
 		StartedAt:     now,
 		FinalResponse: "done",
-		Events:        []RuntimeEvent{{ID: "e1", Kind: "assistant.final", Scope: &RuntimeEventScope{RunID: "run-save-1"}}},
-		AuditEvents:   []AuditEvent{{ID: "a1", Time: now, Action: "tool.call"}},
-		LLMCalls:      []LLMCallRecord{{Model: "deepseek"}},
-		ToolCalls:     []ToolCallRecord{{Name: "read_file"}},
+		ExecutionPolicy: ExecutionPolicySnapshot{
+			AllowedToolsSet: true,
+			AllowedTools:    []string{"read_file", "write_file"},
+			ToolInputAllowlist: map[string]map[string][]string{
+				"write_file": {"path": {"out.md"}},
+			},
+		},
+		Events:      []RuntimeEvent{{ID: "e1", Kind: "assistant.final", Scope: &RuntimeEventScope{RunID: "run-save-1"}}},
+		AuditEvents: []AuditEvent{{ID: "a1", Time: now, Action: "tool.call"}},
+		LLMCalls:    []LLMCallRecord{{Model: "deepseek"}},
+		ToolCalls:   []ToolCallRecord{{Name: "read_file"}},
 	}
 	if err := s.SaveRun(resp); err != nil {
 		t.Fatalf("SaveRun failed: %v", err)
@@ -60,6 +67,12 @@ func TestRunStoreSaveLoadRoundtrip(t *testing.T) {
 	}
 	if loaded.RunID != "run-save-1" || loaded.Status != "completed" || loaded.FinalResponse != "done" {
 		t.Fatalf("roundtrip lost fields: %+v", loaded)
+	}
+	if !loaded.ExecutionPolicy.AllowedToolsSet || strings.Join(loaded.ExecutionPolicy.AllowedTools, ",") != "read_file,write_file" {
+		t.Fatalf("roundtrip lost execution policy tools: %+v", loaded.ExecutionPolicy)
+	}
+	if got := loaded.ExecutionPolicy.ToolInputAllowlist["write_file"]["path"][0]; got != "out.md" {
+		t.Fatalf("roundtrip lost execution policy input allowlist: %+v", loaded.ExecutionPolicy.ToolInputAllowlist)
 	}
 
 	// EvolutionCandidate branch: SaveRun creates candidates dir + file.

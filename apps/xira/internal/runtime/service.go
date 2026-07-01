@@ -384,17 +384,18 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		"message_preview", previewText(req.Message, 120),
 	)
 	resp := TurnResponse{
-		RunID:          runID,
-		AgentID:        profile.ID,
-		EntrypointID:   inbound.Context.EntrypointID,
-		SessionID:      req.SessionID,
-		SessionScope:   &scope,
-		RouteMatchedBy: entrypointDecision.MatchedBy,
-		ModelPolicy:    s.modelPolicySnapshotForRun(profile, runInstruction, activeSkillIDs),
-		Message:        req.Message,
-		Status:         "running",
-		StartedAt:      now,
-		Metadata:       req.Context.Raw,
+		RunID:           runID,
+		AgentID:         profile.ID,
+		EntrypointID:    inbound.Context.EntrypointID,
+		SessionID:       req.SessionID,
+		SessionScope:    &scope,
+		RouteMatchedBy:  entrypointDecision.MatchedBy,
+		ModelPolicy:     s.modelPolicySnapshotForRun(profile, runInstruction, activeSkillIDs),
+		ExecutionPolicy: executionPolicySnapshotFromRequest(req),
+		Message:         req.Message,
+		Status:          "running",
+		StartedAt:       now,
+		Metadata:        req.Context.Raw,
 	}
 	eventBase := runtimeEventBase{
 		RunID:                 runID,
@@ -716,6 +717,37 @@ func contextWithRuntimeToolInputAllowlist(ctx context.Context, allowlist map[str
 		}
 	}
 	return context.WithValue(ctx, runtimeToolInputAllowlistContextKey{}, copied)
+}
+
+func executionPolicySnapshotFromRequest(req TurnRequest) ExecutionPolicySnapshot {
+	return ExecutionPolicySnapshot{
+		AllowedToolsSet:    req.AllowedToolsSet,
+		AllowedTools:       append([]string(nil), req.AllowedTools...),
+		ToolInputAllowlist: cloneToolInputAllowlist(req.ToolInputAllowlist),
+	}
+}
+
+func applyExecutionPolicySnapshot(req *TurnRequest, policy ExecutionPolicySnapshot) {
+	if req == nil {
+		return
+	}
+	req.AllowedToolsSet = policy.AllowedToolsSet
+	req.AllowedTools = append([]string(nil), policy.AllowedTools...)
+	req.ToolInputAllowlist = cloneToolInputAllowlist(policy.ToolInputAllowlist)
+}
+
+func cloneToolInputAllowlist(in map[string]map[string][]string) map[string]map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string][]string, len(in))
+	for tool, fields := range in {
+		out[tool] = make(map[string][]string, len(fields))
+		for field, values := range fields {
+			out[tool][field] = append([]string(nil), values...)
+		}
+	}
+	return out
 }
 
 func toolFailureGuardFromContext(ctx context.Context) *toolFailureGuard {

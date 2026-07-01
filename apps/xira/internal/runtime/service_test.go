@@ -817,6 +817,45 @@ func TestRuntimeToolAllowlistCanExplicitlyIncludeNativeTools(t *testing.T) {
 	}
 }
 
+func TestRunAgentPersistsExecutionPolicy(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return deepSeekHTTPResponse(deepSeekTextResponse("policy persisted")), nil
+	})}
+	rt := newTestService(t, Config{
+		StateDir: t.TempDir(),
+		DeepSeekClient: deepseek.New(
+			deepseek.WithBaseURLForTest("http://deepseek.test"),
+			deepseek.WithAPIKey("test-key"),
+			deepseek.WithHTTPClient(client),
+		),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		Message:         "respect this step policy",
+		AllowedToolsSet: true,
+		AllowedTools:    []string{"read_file", "write_file"},
+		ToolInputAllowlist: map[string]map[string][]string{
+			"write_file": {"path": {"output.md"}},
+		},
+		Context: channel.NewInboundContext("test", "user-1", nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.ExecutionPolicy.AllowedToolsSet {
+		t.Fatalf("response execution policy = %+v, want AllowedToolsSet", resp.ExecutionPolicy)
+	}
+	loaded, err := rt.RunStore().Load(resp.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(loaded.ExecutionPolicy.AllowedTools, ",") != "read_file,write_file" {
+		t.Fatalf("persisted allowed tools = %+v", loaded.ExecutionPolicy.AllowedTools)
+	}
+	if got := loaded.ExecutionPolicy.ToolInputAllowlist["write_file"]["path"][0]; got != "output.md" {
+		t.Fatalf("persisted tool input allowlist = %+v", loaded.ExecutionPolicy.ToolInputAllowlist)
+	}
+}
+
 func TestRuntimeToolAllowlistRejectsUndeclaredNativeHumanRequestCall(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		var req deepseek.ChatRequest

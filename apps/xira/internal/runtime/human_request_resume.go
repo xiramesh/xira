@@ -263,18 +263,14 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 // tool already ran, you only produce a final," so it needs no tools.
 //
 // # Known gaps on the resume ctx (documented, not fixed here — see option A
-// in issue #68; separate issues track these as they need schema changes or
-// violate the stateless-resume model):
+// in issue #68; separate issues track these when they would violate the
+// stateless-resume model):
 //
 //   - EventBus: resume runs in an HTTP/CLI context with no per-chat-key sink
 //     (per 861cf17's stateless-resume model). Signal events during resume are
 //     dropped with a slog.Debug trace (not silent). Hard-wiring a sink would
 //     reintroduce statefulness; the resume is async and the user observes the
 //     final via deliverResumeFinal, not real-time progress.
-//   - Flow-step tool allowlist: AllowedTools lives on TurnRequest but is NOT
-//     persisted on the run (TurnResponse), so it cannot be reconstructed here.
-//     The resumed child keeps its target-profile tool set (still bounded);
-//     only the parent's extra flow-step narrowing is lost.
 func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanrequest.HumanRequest) error {
 	if req == nil || req.Response == nil {
 		return nil
@@ -317,6 +313,7 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 			"human_request_id":        req.ID,
 		}),
 	}
+	applyExecutionPolicySnapshot(&resumeReq, run.ExecutionPolicy)
 	base := runtimeEventBase{
 		RunID:                 run.RunID,
 		AgentID:               run.AgentID,
@@ -349,6 +346,10 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 	}
 	resumeCtx := contextWithToolFailureGuard(ctx)
 	resumeCtx = contextWithToolTrace(resumeCtx, run.RunID)
+	if resumeReq.AllowedToolsSet || len(resumeReq.AllowedTools) > 0 {
+		resumeCtx = contextWithRuntimeToolAllowlist(resumeCtx, resumeReq.AllowedTools)
+	}
+	resumeCtx = contextWithRuntimeToolInputAllowlist(resumeCtx, resumeReq.ToolInputAllowlist)
 	// #76: bound the resume turn so a hanging generate (multi-round tool loop)
 	// cannot run unbounded. MaxDurationMS is the delegation ceiling (default
 	// 120s); the ctx-deadline checkpoint in generateADK (service_adk.go)

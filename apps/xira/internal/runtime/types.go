@@ -40,6 +40,7 @@ type TurnResponse struct {
 	SessionScope       *fsession.SessionScope      `json:"session_scope,omitempty" yaml:"session_scope,omitempty"`
 	RouteMatchedBy     string                      `json:"route_matched_by,omitempty" yaml:"route_matched_by,omitempty"`
 	ModelPolicy        ModelPolicySnapshot         `json:"model_policy,omitempty" yaml:"model_policy,omitempty"`
+	ExecutionPolicy    ExecutionPolicySnapshot     `json:"execution_policy,omitempty" yaml:"execution_policy,omitempty"`
 	Message            string                      `json:"message" yaml:"message"`
 	FinalResponse      string                      `json:"final_response" yaml:"final_response"`
 	Status             string                      `json:"status" yaml:"status"`
@@ -56,6 +57,12 @@ type TurnResponse struct {
 	Events             []RuntimeEvent              `json:"events,omitempty" yaml:"events,omitempty"`
 	AuditEvents        []AuditEvent                `json:"audit_events,omitempty" yaml:"audit_events,omitempty"`
 	Metadata           map[string]string           `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+}
+
+type ExecutionPolicySnapshot struct {
+	AllowedToolsSet    bool                           `json:"allowed_tools_set,omitempty" yaml:"allowed_tools_set,omitempty"`
+	AllowedTools       []string                       `json:"allowed_tools,omitempty" yaml:"allowed_tools,omitempty"`
+	ToolInputAllowlist map[string]map[string][]string `json:"tool_input_allowlist,omitempty" yaml:"tool_input_allowlist,omitempty"`
 }
 
 type RunInterrupt struct {
