@@ -55,10 +55,11 @@ type ChatContext struct {
 	stopOnce sync.Once
 
 	// throttle/dedupe/quota state (protected by mu)
-	mu           sync.Mutex
-	progressSent int
-	dedup        map[string]struct{}
-	drained      bool
+	mu                 sync.Mutex
+	parentProgressSent int
+	childProgressSent  int
+	dedup              map[string]struct{}
+	drained            bool
 }
 
 // NewChatContext creates a ChatContext. If Sender is nil, the context is
@@ -214,22 +215,20 @@ func (cc *ChatContext) dispatch(evt runtime.Event) {
 	// queue were accepted before drain and should still be delivered.
 	isWaiting := evt.Kind() == "human.requested"
 
-	// Quota: progress events limited, interaction bypasses.
-	//
-	// KNOWN LIMITATION: the quota is shared across the parent turn AND any
-	// spawned children (child events route to the same ChatContext, RFC #66).
-	// A chatty child can starve the parent's progress within the per-turn cap.
-	// This is acceptable for v0 (the cap is what prevents IM flooding), but a
-	// per-source quota split is a follow-up design. The Debug log below makes
-	// the drop observable for debugging rather than silent (AGENTS.md §2:
-	// silent data loss is the most expensive bug — even intentional drops
-	// deserve a trace).
-	if !isWaiting && cc.policy.MaxMessagesPerTurn > 0 && cc.progressSent >= cc.policy.MaxMessagesPerTurn {
+	child := isChildEvent(evt)
+	limit := progressQuotaLimit(cc.policy, child)
+	sent := cc.parentProgressSent
+	bucket := "parent"
+	if child {
+		sent = cc.childProgressSent
+		bucket = "child"
+	}
+	if !isWaiting && limit > 0 && sent >= limit {
 		cc.mu.Unlock()
 		slog.Debug("chat context progress quota reached; dropping event",
 			"kind", evt.Kind(), "event_id", evt.ID(),
 			"agent_turn", evt.AgentTurnID(), "parent_turn", evt.ParentAgentTurnID(),
-			"sent", cc.progressSent, "cap", cc.policy.MaxMessagesPerTurn)
+			"bucket", bucket, "sent", sent, "cap", limit)
 		return
 	}
 
@@ -242,7 +241,11 @@ func (cc *ChatContext) dispatch(evt runtime.Event) {
 
 	cc.dedup[dedupKey] = struct{}{}
 	if !isWaiting {
-		cc.progressSent++
+		if child {
+			cc.childProgressSent++
+		} else {
+			cc.parentProgressSent++
+		}
 	}
 	cc.mu.Unlock()
 
@@ -300,7 +303,8 @@ func (cc *ChatContext) Reset() {
 
 	// Clear throttle/dedupe/quota state.
 	cc.mu.Lock()
-	cc.progressSent = 0
+	cc.parentProgressSent = 0
+	cc.childProgressSent = 0
 	cc.dedup = make(map[string]struct{})
 	cc.drained = false
 	cc.mu.Unlock()

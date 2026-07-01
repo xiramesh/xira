@@ -28,7 +28,13 @@ func TestSteeringQueueEmpty(t *testing.T) {
 
 func TestSteeringQueueEnqueueDequeue(t *testing.T) {
 	sq := NewSteeringQueue()
+	if sq.HasPending() {
+		t.Fatal("new queue HasPending=true, want false")
+	}
 	sq.Enqueue("等等，换个思路")
+	if !sq.HasPending() {
+		t.Fatal("queue HasPending=false after Enqueue")
+	}
 	msg, ok := sq.TryDequeue()
 	if !ok {
 		t.Fatal("TryDequeue returned ok=false after Enqueue")
@@ -39,6 +45,9 @@ func TestSteeringQueueEnqueueDequeue(t *testing.T) {
 	// Queue should be empty after dequeue.
 	if _, ok := sq.TryDequeue(); ok {
 		t.Error("queue not empty after dequeue")
+	}
+	if sq.HasPending() {
+		t.Fatal("queue HasPending=true after dequeue")
 	}
 }
 

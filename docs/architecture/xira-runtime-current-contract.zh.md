@@ -45,6 +45,19 @@ context-carried sinks:
 If no sink is present, signal events are logged as dropped. This is expected for
 some detached or stateless resume paths; it is not a recovery mechanism.
 
+## Progress Quota
+
+Progress quota applies only to agent progress messages sent to chat. It does
+not count user input, final responses, or `waiting_human` interaction messages.
+
+The default per-turn progress quota is split by source:
+
+- parent/root progress: 3 messages total;
+- spawned-child progress: 2 messages total across all children.
+
+Parent and child progress do not consume each other's quota. This keeps the root
+task visible while still giving spawned children bounded progress visibility.
+
 ## Live-Only Coordination
 
 These context-carried objects are live-turn coordination only:
@@ -115,8 +128,6 @@ unless that capability is explicitly implemented.
 
 ## Known Contract Gaps
 
-- Progress quota is shared by parent and spawned children in one ChatContext.
-  This is observable but still coarse.
 - CLI and daemon can both instantiate the runtime over the same `state_dir`;
   cross-process write semantics need a deliberate contract if multi-process use
   becomes supported.

@@ -13,7 +13,7 @@ import (
 // It receives a flat runtime.RuntimeEvent (via RawEventSink — channelrunner
 // hands it the raw event, NOT a pre-rendered text) and produces the IM-text
 // behavior that ChatContext used to bake in: render to localized text (via
-// RenderEvent) + quota (MaxMessagesPerTurn anti-flood) + dedup (kind+text).
+// RenderEvent) + parent/child progress quotas + dedup (kind+text).
 //
 // Why this exists (RFC chatkey-session): the old ChatContext forced every
 // channel through render→text. That stripped the channel of the choice of how
@@ -47,9 +47,10 @@ type IMEventRenderer struct {
 	policy   Policy
 
 	// per-turn render state
-	mu           sync.Mutex
-	progressSent int
-	dedup        map[string]struct{}
+	mu                 sync.Mutex
+	parentProgressSent int
+	childProgressSent  int
+	dedup              map[string]struct{}
 
 	// ordered send queue + sendLoop (mirrors ChatContext)
 	queueMu   sync.Mutex
@@ -60,9 +61,9 @@ type IMEventRenderer struct {
 }
 
 // NewIMEventRenderer constructs a renderer that sends localized text via send
-// and enforces policy's MaxMessagesPerTurn + dedup. maxChars truncation comes
-// from policy.MaxChars. One instance per active turn; caller MUST call Start()
-// before delivering events and Stop() at turn end.
+// and enforces policy's parent/child progress quotas + dedup. maxChars
+// truncation comes from policy.MaxChars. One instance per active turn; caller
+// MUST call Start() before delivering events and Stop() at turn end.
 func NewIMEventRenderer(send func(ctx context.Context, text string) error, policy Policy) *IMEventRenderer {
 	maxChars := 0
 	if policy.MaxChars > 0 {
@@ -146,17 +147,20 @@ func (r *IMEventRenderer) DeliverRaw(evt runtime.RuntimeEvent) {
 
 	text := ""
 	r.mu.Lock()
-	// Quota: progress events capped at MaxMessagesPerTurn; interaction bypasses.
-	// KNOWN LIMITATION (carried from ChatContext): quota is shared across a
-	// parent turn and its spawned children (child events route to the same
-	// renderer). A chatty child can starve the parent. The Debug log below
-	// keeps the drop observable (AGENTS.md §2: no silent data loss).
-	if !isWaiting && r.policy.MaxMessagesPerTurn > 0 && r.progressSent >= r.policy.MaxMessagesPerTurn {
+	child := isChildEvent(event)
+	limit := progressQuotaLimit(r.policy, child)
+	sent := r.parentProgressSent
+	bucket := "parent"
+	if child {
+		sent = r.childProgressSent
+		bucket = "child"
+	}
+	if !isWaiting && limit > 0 && sent >= limit {
 		r.mu.Unlock()
 		slog.Debug("im renderer progress quota reached; dropping event",
 			"kind", event.Kind(), "event_id", event.ID(),
 			"agent_turn", event.AgentTurnID(), "parent_turn", event.ParentAgentTurnID(),
-			"sent", r.progressSent, "cap", r.policy.MaxMessagesPerTurn)
+			"bucket", bucket, "sent", sent, "cap", limit)
 		return
 	}
 	// Dedup: same kind + rendered text.
@@ -167,7 +171,11 @@ func (r *IMEventRenderer) DeliverRaw(evt runtime.RuntimeEvent) {
 	}
 	r.dedup[dedupKey] = struct{}{}
 	if !isWaiting {
-		r.progressSent++
+		if child {
+			r.childProgressSent++
+		} else {
+			r.parentProgressSent++
+		}
 	}
 	text = msg.Text
 	r.mu.Unlock()

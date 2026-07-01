@@ -74,6 +74,15 @@ func flatMsg(kind, msg string) runtime.RuntimeEvent {
 	}
 }
 
+func flatStatus(runID, parentRunID, msg string) runtime.RuntimeEvent {
+	evt := flatMsg("assistant.status", msg)
+	evt.RunID = runID
+	if parentRunID != "" {
+		evt.Correlation = &runtime.RuntimeEventCorrelation{ParentRunID: parentRunID}
+	}
+	return evt
+}
+
 // --- tests ---
 
 // TestIMRendererRendersFailedAndTimeout: agent.delegate.failed + timeout render
@@ -106,10 +115,10 @@ func TestIMRendererThrottleProgressButNotInteraction(t *testing.T) {
 
 	// interaction first (bypasses quota), then 3 progress (2 distinct text +
 	// 1 dup) → 2 delivered + the interaction = 3 total.
-	r.DeliverRaw(flatMsg("run.waiting_human", "confirm A"))                           // interaction
+	r.DeliverRaw(flatMsg("run.waiting_human", "confirm A")) // interaction
 	r.DeliverRaw(flat("agent.delegate.failed", map[string]any{"error": "fail"}))
 	r.DeliverRaw(flat("agent.delegate.timeout", map[string]any{"error": "timeout"})) // distinct text
-	r.DeliverRaw(flat("agent.delegate.failed", map[string]any{"error": "other"}))   // dup text of "fail" → deduped
+	r.DeliverRaw(flat("agent.delegate.failed", map[string]any{"error": "other"}))    // dup text of "fail" → deduped
 
 	r.waitSends()
 	got := cap.snapshot()
@@ -148,6 +157,29 @@ func TestIMRendererQuotaCapsProgress(t *testing.T) {
 	got := cap.snapshot()
 	if len(got) != 2 {
 		t.Errorf("delivered %d, want 2 (quota cap)", len(got))
+	}
+}
+
+func TestIMRendererQuotaSplitsParentAndChild(t *testing.T) {
+	cap := &rendererCapture{}
+	r := newStartedRenderer(t, cap.send, Policy{
+		MaxParentProgressMessagesPerTurn: 2,
+		MaxChildProgressMessagesPerTurn:  1,
+	})
+
+	r.DeliverRaw(flatStatus("aturn_parent", "", "父：分析需求"))
+	r.DeliverRaw(flatStatus("aturn_parent", "", "父：编写方案"))
+	r.DeliverRaw(flatStatus("aturn_child", "aturn_parent", "子：搜索资料"))
+	r.DeliverRaw(flatStatus("aturn_parent", "", "父：整理结论"))            // parent full
+	r.DeliverRaw(flatStatus("aturn_child", "aturn_parent", "子：补充搜索")) // child full
+
+	r.waitSends()
+	got := cap.snapshot()
+	if len(got) != 3 {
+		t.Fatalf("delivered %d, want 3 (parent bucket 2 + child bucket 1): %+v", len(got), got)
+	}
+	if !strings.Contains(got[2], "子：搜索资料") {
+		t.Fatalf("child progress should survive full parent bucket, got %+v", got)
 	}
 }
 

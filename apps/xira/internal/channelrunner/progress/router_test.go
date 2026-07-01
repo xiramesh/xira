@@ -65,6 +65,65 @@ func TestRouterActiveTurnSteersSecondMessage(t *testing.T) {
 	close(block)
 }
 
+func TestRouterRouteStartAbortAndActiveRequestID(t *testing.T) {
+	router := NewRouter()
+	key := runtime.ChatKey{Channel: "websocket", ChatID: "c1", SenderID: "u1"}
+
+	if got := router.ActiveRequestID(key); got != "" {
+		t.Fatalf("unknown ActiveRequestID = %q, want empty", got)
+	}
+
+	started := make(chan string, 1)
+	outcome := router.Route(key, "req-1", "first", context.Background(), func(_ runtime.ChatKey, msg string, _ context.Context) {
+		started <- msg
+	})
+	if outcome.Steered {
+		t.Fatal("first Route steered, want started outcome")
+	}
+	if got := router.ActiveRequestID(key); got != "req-1" {
+		t.Fatalf("active request id = %q, want req-1", got)
+	}
+	outcome.Start()
+	outcome.Start() // idempotent
+	select {
+	case msg := <-started:
+		if msg != "first" {
+			t.Fatalf("started msg = %q, want first", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Route.Start did not invoke turn")
+	}
+	waitInactive(t, router, key)
+
+	aborted := router.Route(key, "req-2", "second", context.Background(), func(runtime.ChatKey, string, context.Context) {
+		t.Fatal("aborted route should not start")
+	})
+	if got := router.ActiveRequestID(key); got != "req-2" {
+		t.Fatalf("active request id before abort = %q, want req-2", got)
+	}
+	aborted.Abort()
+	aborted.Abort() // idempotent
+	if got := router.ActiveRequestID(key); got != "" {
+		t.Fatalf("active request id after abort = %q, want empty", got)
+	}
+
+	block := make(chan struct{})
+	defer close(block)
+	held := router.Route(key, "req-3", "third", context.Background(), func(runtime.ChatKey, string, context.Context) {
+		<-block
+	})
+	held.Start()
+	steered := router.Route(key, "req-4", "interject", context.Background(), func(runtime.ChatKey, string, context.Context) {
+		t.Fatal("steered route should not start")
+	})
+	if !steered.Steered || steered.ActiveRequestID != "req-3" {
+		t.Fatalf("steered outcome = %+v, want ActiveRequestID req-3", steered)
+	}
+	if msgs := router.SteeringQueue(key).DrainAll(); len(msgs) != 1 || msgs[0] != "interject" {
+		t.Fatalf("steering queue = %+v, want [interject]", msgs)
+	}
+}
+
 func TestRouterTurnCompletesThenNewTurnStarts(t *testing.T) {
 	key := runtime.ChatKey{Channel: "ilink", ChatID: "c1", SenderID: "u1"}
 	var callCount int
@@ -329,6 +388,17 @@ func TestRouterIsActiveReportsTurnState(t *testing.T) {
 	// Unknown key → false.
 	if router.IsActive(runtime.ChatKey{Channel: "test", ChatID: "other", SenderID: "u1"}) {
 		t.Error("IsActive=true for a key that was never Handle'd")
+	}
+}
+
+func waitInactive(t *testing.T, router *Router, key runtime.ChatKey) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && router.IsActive(key) {
+		time.Sleep(time.Millisecond)
+	}
+	if router.IsActive(key) {
+		t.Fatal("router stayed active")
 	}
 }
 
