@@ -113,7 +113,8 @@ func (r *Runner) Channel() string {
 
 func (r *Runner) Start(ctx context.Context) error {
 	dispatcher := larkdispatcher.NewEventDispatcher(r.verify, r.encryptKey).
-		OnP2MessageReceiveV1(r.handleMessageReceive)
+		OnP2MessageReceiveV1(r.handleMessageReceive).
+		OnP2MessageReadV1(r.handleMessageRead)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	domain := lark.FeishuBaseUrl
@@ -158,6 +159,39 @@ func (r *Runner) Stop(context.Context) error {
 	if cancel != nil {
 		cancel()
 	}
+	return nil
+}
+
+// handleMessageRead is the sink for im.message.message_read_v1 (message-read
+// receipts). xira does not yet consume read state — this handler exists so the
+// lark SDK stops emitting "not found handler" errors on every read event the
+// app is subscribed to. When we want to use read receipts (analytics, "user
+// has seen the reply" signals, etc.), extend the body here.
+func (r *Runner) handleMessageRead(_ context.Context, event *larkim.P2MessageReadV1) error {
+	if event == nil || event.Event == nil {
+		return nil
+	}
+	data := event.Event
+	var readerID string
+	if data.Reader != nil && data.Reader.ReaderId != nil {
+		if id := data.Reader.ReaderId.OpenId; id != nil {
+			readerID = *id
+		} else if id := data.Reader.ReaderId.UserId; id != nil {
+			readerID = *id
+		} else if id := data.Reader.ReaderId.UnionId; id != nil {
+			readerID = *id
+		}
+	}
+	var readTime string
+	if data.Reader != nil && data.Reader.ReadTime != nil {
+		readTime = *data.Reader.ReadTime
+	}
+	slog.Info("feishu message read event received",
+		"entrypoint_id", r.definition.ID,
+		"reader_id", readerID,
+		"read_time", readTime,
+		"message_ids", len(data.MessageIdList),
+	)
 	return nil
 }
 

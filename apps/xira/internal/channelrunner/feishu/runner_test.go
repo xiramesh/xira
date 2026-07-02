@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -132,3 +133,66 @@ func TestRunnerMessageDedupeKeyIncludesEntrypoint(t *testing.T) {
 		t.Fatalf("empty message id dedupe key = %q", got)
 	}
 }
+
+// handleMessageRead is the sink for im.message.message_read_v1 (message-read
+// receipts). xira does not yet consume read receipts; for now it just logs and
+// returns nil so the SDK stops emitting "not found handler" errors on every
+// read event. When we want to use read state, extend this method.
+func TestRunnerHandlesMessageReadEvent(t *testing.T) {
+	runner := &Runner{definition: entrypoints.Definition{ID: "feishu-default"}}
+
+	// nil / partial payloads must be a safe no-op (mirrors handleMessageReceive
+	// nil-guard discipline), never a panic.
+	if err := runner.handleMessageRead(context.Background(), nil); err != nil {
+		t.Fatalf("nil event returned err = %v", err)
+	}
+	if err := runner.handleMessageRead(context.Background(), &larkim.P2MessageReadV1{}); err != nil {
+		t.Fatalf("empty event returned err = %v", err)
+	}
+
+	// A populated event must return nil (handled = swallowed) rather than an
+	// error; the contract is "we accept the receipt silently for now".
+	readerID := "ou_reader"
+	readTime := "1609484183000"
+	msgID := "om_read_1"
+	evt := &larkim.P2MessageReadV1{
+		Event: &larkim.P2MessageReadV1Data{
+			Reader: &larkim.EventMessageReader{
+				ReaderId: &larkim.UserId{OpenId: &readerID},
+				ReadTime: &readTime,
+			},
+			MessageIdList: []string{msgID},
+		},
+	}
+	if err := runner.handleMessageRead(context.Background(), evt); err != nil {
+		t.Fatalf("populated event returned err = %v", err)
+	}
+
+	// Reader id resolution: open_id is preferred, then user_id, then union_id.
+	// Each form must resolve without error.
+	for name, uid := range map[string]*larkim.UserId{
+		"user_id":  {UserId: ptr("u_user")},
+		"union_id": {UnionId: ptr("on_union")},
+	} {
+		e := &larkim.P2MessageReadV1{
+			Event: &larkim.P2MessageReadV1Data{
+				Reader: &larkim.EventMessageReader{ReaderId: uid},
+			},
+		}
+		if err := runner.handleMessageRead(context.Background(), e); err != nil {
+			t.Fatalf("%s reader id returned err = %v", name, err)
+		}
+	}
+
+	// Reader present but no readable id at all (all nil) must still be safe.
+	noIDEvt := &larkim.P2MessageReadV1{
+		Event: &larkim.P2MessageReadV1Data{
+			Reader: &larkim.EventMessageReader{ReaderId: &larkim.UserId{}},
+		},
+	}
+	if err := runner.handleMessageRead(context.Background(), noIDEvt); err != nil {
+		t.Fatalf("nil reader id returned err = %v", err)
+	}
+}
+
+func ptr(s string) *string { return &s }
