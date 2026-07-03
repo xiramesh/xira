@@ -76,6 +76,48 @@ func (s *Service) runtimeADKTools(
 	}
 	out = append(out, humanRequestTool)
 
+	// #107: human.interpret — agent 理解用户回复后,声明它答的是哪个 pending HR。
+	// 镜像 answer_child 的异步 resolve,但加四项校验(source/chatKey/存在/无歧义)。
+	// 不 suspend run(非破坏性),resolve 在后台 goroutine 跑。ChatKey 由 runtime
+	// 从 ctx 填(防模型伪造跨 chat)。详见 human_interpret.go。
+	humanInterpretTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
+		Name:         humanInterpretToolName,
+		Description:  "Declare that the user's reply answers a specific pending HumanRequest (from the Pending Human Requests summary). Resolves it in the background. Use ONLY for agent_request or flow_human_approval requests whose request_id appeared in the summary — never for runtime_tool_gate. If the user's reply is ambiguous across multiple pending requests, ask for clarification instead of calling this tool.",
+		InputSchema:  humanInterpretInputSchema(),
+		OutputSchema: objectSchema(),
+	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
+		callID := strings.TrimSpace(toolCtx.FunctionCallID())
+		spec := sanitizeHumanInterpretInput(args)
+		// ChatKey 从当前 turn ctx 取(runtime 权威),不从模型 args 取(防伪造)。
+		spec.ChatKey = chatKeyStringFromContext(ctx)
+		out := executeHumanInterpret(ctx, s, spec)
+		// #107 审计(review W1):interpret 是 prompt injection 首要目标(直接
+		// 触发 resolve),必须留 trail。记调用 + 校验结果(通过=interpreting /
+		// 拒=rejected)。对齐 human.request 的 recordEvent+recordAudit(delegation.go:58-67)。
+		status, _ := out["status"].(string)
+		errReason, _ := out["error"].(string)
+		recordEvent("human.interpret", "runtime", "agent interpret "+status, map[string]any{
+			"human_request_id": spec.RequestID,
+			"signal":           spec.Signal,
+			"status":           status,
+			"chat_key":         spec.ChatKey,
+			"tool_call_id":     callID,
+			"reasoning":        spec.Reasoning,
+			"error":            errReason,
+		})
+		recordAudit("human.interpret", spec.RequestID, status == "interpreting",
+			"agent interpreted pending request: "+status, map[string]any{
+				"signal":       spec.Signal,
+				"tool_call_id": callID,
+				"chat_key":     spec.ChatKey,
+			})
+		return out, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, humanInterpretTool)
+
 	statusTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
 		Name:         statusToolName,
 		Description:  "Emit a user-readable progress status event. The message is an event only and is not final answer content.",

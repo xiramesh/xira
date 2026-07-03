@@ -2243,3 +2243,65 @@ func TestRealDeepSeekRunAgentSeesPendingHITL(t *testing.T) {
 	}
 	t.Logf("live model saw pending HITL: reply references %q", marker)
 }
+
+// TestRealDeepSeekHumanInterpretResolvesPending verifies #107's behavioral
+// contract with a real model: when a pending agent_request HR is visible (via
+// #106's hydration), the agent can call human.interpret to resolve it, and the
+// async resume fires (HR reaches resolved, run reaches terminal). This proves
+// the full chain: #106 injects summary → model understands → #107 interpret
+// → async resolve → resume. Unit tests only prove the wiring; this proves the
+// model actually drives it.
+func TestRealDeepSeekHumanInterpretResolvesPending(t *testing.T) {
+	rt := newLiveDeepSeekHITLService(t, false)
+	ctx := context.Background()
+	const chatKey = "test/live-user/live-user"
+	if err := rt.runs.SaveRun(TurnResponse{RunID: "run-pending-interpret", AgentID: "xira-assistant", Status: StatusWaitingHuman}); err != nil {
+		t.Fatal(err)
+	}
+	hr, err := rt.CreateHumanRequest(ctx, humanrequest.CreateRequest{
+		WorkspaceID:  rt.workspace,
+		WorkspaceKey: rt.WorkspaceKey(),
+		RunID:        "run-pending-interpret",
+		AgentID:      "xira-assistant",
+		SessionID:    "session-pending-interpret",
+		Kind:         humanrequest.RequestFreeform,
+		Question:     "Should I deploy to production ZEPHYR-43?",
+		Source:       "agent_request",
+		ChatKey:      chatKey,
+	})
+	if err != nil {
+		t.Fatalf("CreateHumanRequest: %v", err)
+	}
+	// Direct instruction (live smoke convention): tell the model to use
+	// human.interpret to answer the pending request. The model must read the
+	// injected summary (which contains the request_id), then call interpret.
+	resp, err := rt.RunAgent(ctx, TurnRequest{
+		Message: "Yes, approve the pending deployment request. Use the human.interpret tool with the request_id from the Pending Human Requests summary and signal approve.",
+		Context: channel.NewInboundContext("test", "live-user", nil),
+	})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	t.Logf("RunAgent status=%q final=%q", resp.Status, truncate(resp.FinalResponse, 120))
+	// Poll: the interpret tool's async resolve should flip the HR to resolved.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		got, gerr := rt.GetHumanRequest(ctx, hr.ID)
+		if gerr == nil && got.Status == humanrequest.StatusResolved {
+			if got.Response == nil || got.Response.Kind != humanrequest.ResponseApprove {
+				t.Fatalf("HR resolved but response = %+v, want approve", got.Response)
+			}
+			t.Logf("live human.interpret resolved HR %s with approve", hr.ID)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("live model did not resolve pending HR %s via human.interpret within timeout (status=%q)", hr.ID, resp.Status)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
