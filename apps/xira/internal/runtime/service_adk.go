@@ -294,6 +294,22 @@ func adkEventFromSessionMessage(msg fsession.Message, agentID string) (*adksessi
 	}
 	contentChars := utf8.RuneCountInString(msg.Content)
 	switch kind {
+	case fsession.MessageKindHumanRequest, fsession.MessageKindHumanResponse:
+		// #106: skip PENDING HITL messages so the bare question does not leak
+		// into the next turn's model context — injectPendingHITLSummary (called
+		// from RunAgent) already provides a structured "Pending Human Requests"
+		// block in the user message. Without this skip, the pending question
+		// would ALSO reappear here as a de-contextualized assistant text,
+		// duplicating the summary and confusing the model.
+		//
+		// Only run_status=waiting_human (the run paused on this HITL and never
+		// resumed) is skipped. Resolved HITL (run_status=completed/failed — the
+		// run resumed and finished) is kept as history text so later turns in
+		// the same session retain "the user already answered X".
+		if rs, _ := msg.Metadata["run_status"].(string); rs == StatusWaitingHuman {
+			return nil, 0, false
+		}
+		return textSessionEvent(msg, agentID, event, contentChars)
 	case fsession.MessageKindToolCall:
 		name := strings.TrimSpace(msg.ToolName)
 		if name == "" || name == "exec" {
@@ -327,17 +343,24 @@ func adkEventFromSessionMessage(msg fsession.Message, agentID string) (*adksessi
 		event.LLMResponse = adkmodel.LLMResponse{Content: content}
 		return event, contentChars, true
 	default:
-		var role genai.Role = genai.RoleModel
-		event.Author = agentID
-		if strings.TrimSpace(msg.Role) == "user" {
-			role = genai.RoleUser
-			event.Author = "user"
-		}
-		event.LLMResponse = adkmodel.LLMResponse{
-			Content: genai.NewContentFromText(msg.Content, role),
-		}
-		return event, contentChars, true
+		return textSessionEvent(msg, agentID, event, contentChars)
 	}
+}
+
+// textSessionEvent renders a session message as a plain text ADK event (the
+// default hydration path for non-tool messages, and for resolved HITL messages
+// after #106's pending-skip). Role/author are derived from msg.Role.
+func textSessionEvent(msg fsession.Message, agentID string, event *adksession.Event, contentChars int) (*adksession.Event, int, bool) {
+	var role genai.Role = genai.RoleModel
+	event.Author = agentID
+	if strings.TrimSpace(msg.Role) == "user" {
+		role = genai.RoleUser
+		event.Author = "user"
+	}
+	event.LLMResponse = adkmodel.LLMResponse{
+		Content: genai.NewContentFromText(msg.Content, role),
+	}
+	return event, contentChars, true
 }
 
 func (s *Service) adkTools(

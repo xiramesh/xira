@@ -490,6 +490,24 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	// register themselves with the per-chat-key cancel registry and be
 	// canceled when this turn is steered (RFC #67).
 	ctx = WithChatKey(ctx, ChatKeyFromInbound(req.Context))
+	// #106: inject pending HITL summary into the user message so the agent
+	// knows what human input is currently awaiting an answer for this chatKey.
+	// This is the "agent 理解" entry point — without it the model has no idea a
+	// HITL is waiting and cannot interpret whether the user's reply answers it.
+	// Only RunAgent injects; resume/child turns are untouched (their chatKey or
+	// resolved-HITL semantics differ, see human_request_hydration.go).
+	pending, herr := s.ListPendingHumanRequestsByChatKey(ctx, chatKeyStringFromContext(ctx))
+	if herr != nil {
+		// Fail-open: store error should not block the turn. But log it — a
+		// silent return here leaves the agent blind to pending HITL with no
+		// trace, which is the worst kind of failure to debug (§2 silent data
+		// loss). The turn proceeds without the summary; the user can still
+		// resolve HITL via HTTP/CLI.
+		slog.Warn("pending HITL hydration skipped: store lookup failed (agent runs blind to pending HITL this turn)",
+			"run_id", runID, "error", herr)
+	} else if len(pending) > 0 {
+		agentReq.Message = injectPendingHITLSummary(agentReq.Message, pending)
+	}
 	ctx = rtools.WithRunDir(ctx, s.runs.RunDir(runID))
 	ctx = s.withLLMInstrumentation(ctx, llmInstrumentationInput{
 		RunID:          runID,
