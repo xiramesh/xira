@@ -188,6 +188,8 @@ func (s *Service) resumeRunAfterApprovedToolOutput(ctx context.Context, req *hum
 		UserMessage: resumeMessage,
 	})
 	resumeCtx = rtools.WithRunDir(resumeCtx, s.runs.RunDir(run.RunID))
+	// #114: re-attach chatKey (see direct path above + withChatKeyFromRequest doc).
+	resumeCtx = withChatKeyFromRequest(resumeCtx, req)
 	resumeCtx = s.withLLMInstrumentation(resumeCtx, llmInstrumentationInput{
 		RunID:          run.RunID,
 		AgentID:        profile.ID,
@@ -367,6 +369,10 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 		UserMessage: resumeMessage,
 	})
 	resumeCtx = rtools.WithRunDir(resumeCtx, s.runs.RunDir(run.RunID))
+	// #114: re-attach chatKey so resume turn can chain-interpret (#107) and
+	// hydrate pending HITL (#106). Sourced from req.ChatKey (NOT SessionScope —
+	// see withChatKeyFromRequest doc for the lossy-transform CRITICAL).
+	resumeCtx = withChatKeyFromRequest(resumeCtx, req)
 	resumeCtx = s.withLLMInstrumentation(resumeCtx, llmInstrumentationInput{
 		RunID:          run.RunID,
 		AgentID:        profile.ID,
@@ -473,4 +479,35 @@ func responseActor(response *humanrequest.HumanResponse) string {
 		return "human"
 	}
 	return strings.TrimSpace(response.Actor)
+}
+
+// withChatKeyFromRequest re-attaches the chatKey to a resume ctx from the
+// HumanRequest being resolved (#114). Used by both resume paths so the resume
+// turn can chain-interpret (#107 human.interpret reads chatKeyStringFromContext).
+//
+// # Data source choice (PR #115 review CRITICAL)
+//
+// We use req.ChatKey (the request's first-class persisted field), NOT
+// SessionScope. The two look symmetric but have different semantics:
+//   - SessionScope lowercases its values (manager.go:155/170) and applies
+//     canonicalSenderID rewriting (manager.go:344-355). Both are lossy
+//     transforms that can diverge from the original chatKey string.
+//   - The store compares ListByChatKey with a case-sensitive string equality
+//     (store.go:430). A lowercased or canonical-rewritten chatKey silently
+//     fails to match → chain-interpret rejected → silent data loss.
+//
+// req.ChatKey is the exact value the store compares against (it was set from
+// chatKeyStringFromContext at HR creation, same source the store query uses).
+// Parsing it back to a ChatKey via ParseChatKey is lossless. If req.ChatKey is
+// empty (older HRs without the field, or flow #112 gap), we leave ctx
+// unchanged — same as pre-#114, hydration/interpret gracefully no-op.
+func withChatKeyFromRequest(ctx context.Context, req *humanrequest.HumanRequest) context.Context {
+	if req == nil {
+		return ctx
+	}
+	key, ok := ParseChatKey(req.ChatKey)
+	if !ok {
+		return ctx
+	}
+	return WithChatKey(ctx, key)
 }

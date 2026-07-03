@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/xiramesh/xira/internal/channel"
 )
@@ -43,6 +44,26 @@ func ChatKeyFromInbound(ic channel.InboundContext) ChatKey {
 // String returns a stable, human-readable representation for logging/debugging.
 func (k ChatKey) String() string {
 	return fmt.Sprintf("%s/%s/%s", k.Channel, k.ChatID, k.SenderID)
+}
+
+// ParseChatKey is the inverse of (ChatKey).String(): it splits "channel/chat/sender"
+// back into a ChatKey. It uses SplitN with limit 3 so a SenderID containing "/"
+// (rare but possible) is preserved in the third field. Returns ok=false if the
+// string has fewer than 3 segments (not a valid chatKey string form).
+//
+// Used by the resume paths (#114) to recover the ChatKey from a persisted
+// HumanRequest.ChatKey string — the authoritative source, since that is the
+// exact value the store compares against (ListByChatKey). Recovering from
+// SessionScope instead would be lossy: SessionScope lowercases its values and
+// applies canonicalSenderID rewriting, both of which can diverge from the
+// original ChatKey string and silently break the equality check.
+func ParseChatKey(s string) (ChatKey, bool) {
+	s = strings.TrimSpace(s)
+	parts := strings.SplitN(s, "/", 3)
+	if len(parts) < 3 {
+		return ChatKey{}, false
+	}
+	return ChatKey{Channel: parts[0], ChatID: parts[1], SenderID: parts[2]}, true
 }
 
 // --- chatKey context propagation ---
