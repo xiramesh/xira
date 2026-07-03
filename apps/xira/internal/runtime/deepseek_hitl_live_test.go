@@ -2198,3 +2198,48 @@ func TestRealDeepSeekFlowRegistryStartsByID(t *testing.T) {
 	}
 	t.Logf("registry flow session messages persisted at %s", messagesPath)
 }
+
+// TestRealDeepSeekRunAgentSeesPendingHITL verifies #106's behavioral contract
+// with a real model: when a chatKey has a pending HumanRequest, a fresh
+// RunAgent turn's reply must demonstrate the model SAW the pending request
+// (not just that the summary was injected — the unit test covers injection).
+// We seed a distinctive question and assert the model's reply references it.
+func TestRealDeepSeekRunAgentSeesPendingHITL(t *testing.T) {
+	rt := newLiveDeepSeekHITLService(t, false)
+	ctx := context.Background()
+	// Use a distinctive pending question with a made-up token the model would
+	// only know from the injected summary (it is NOT in the user message).
+	const marker = "ZEPHYR-42"
+	chatKey := "test/live-user/live-user"
+	if err := rt.runs.SaveRun(TurnResponse{RunID: "run-pending-live", AgentID: "xira-assistant", Status: StatusWaitingHuman}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.CreateHumanRequest(ctx, humanrequest.CreateRequest{
+		WorkspaceID:  rt.workspace,
+		WorkspaceKey: rt.WorkspaceKey(),
+		RunID:        "run-pending-live",
+		AgentID:      "xira-assistant",
+		SessionID:    "session-pending-live",
+		Kind:         humanrequest.RequestFreeform,
+		Question:     "Which " + marker + " deployment window should I use?",
+		Source:       "agent_request",
+		ChatKey:      chatKey,
+	}); err != nil {
+		t.Fatalf("CreateHumanRequest: %v", err)
+	}
+	resp, err := rt.RunAgent(ctx, TurnRequest{
+		Message: "What is currently waiting on me?",
+		Context: channel.NewInboundContext("test", "live-user", nil),
+	})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	// The model's reply must reference the pending question (by the marker
+	// token), proving it consumed the injected summary. If the summary never
+	// reached the model context, the model has no way to know about marker.
+	reply := strings.ToLower(resp.FinalResponse)
+	if !strings.Contains(reply, strings.ToLower(marker)) {
+		t.Fatalf("live model reply did not reference pending HITL marker %q — summary may not have reached model context.\nstatus=%q reply=%q", marker, resp.Status, resp.FinalResponse)
+	}
+	t.Logf("live model saw pending HITL: reply references %q", marker)
+}
