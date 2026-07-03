@@ -155,6 +155,7 @@ func (s *Service) generateADK(
 				"kind":             req.Kind,
 				"source":           req.Source,
 				"tool_call_id":     req.ToolCallID,
+				"question":         req.Question, // #109: LLM-written question, surfaced to IM via humanRequestedQuestion
 			})
 			recordAudit("human.request", req.ID, true, "agent requested human input", map[string]any{
 				"kind":         req.Kind,
@@ -418,13 +419,20 @@ func (s *Service) adkTools(
 			}
 			rec.Output["human_request_id"] = req.ID
 			recordTool(rec)
-			recordEvent("human.request.created", "runtime", "runtime tool confirmation required", map[string]any{
+			payload := map[string]any{
 				"human_request_id": req.ID,
 				"kind":             req.Kind,
 				"source":           req.Source,
 				"tool":             name,
 				"tool_call_id":     callID,
-			})
+			}
+			// #109: include a readable target (e.g. file basename) so the IM
+			// rendering can show "确认执行 write_file: task-...md" instead of the
+			// raw "runtime tool confirmation required".
+			if target := actionTargetSummary(req.ActionSnapshot); target != "" {
+				payload["target"] = target
+			}
+			recordEvent("human.request.created", "runtime", "runtime tool confirmation required", payload)
 			recordAudit("human.request", req.ID, true, "runtime tool confirmation required", map[string]any{
 				"tool":         name,
 				"tool_call_id": callID,

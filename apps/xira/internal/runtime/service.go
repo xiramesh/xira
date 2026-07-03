@@ -970,6 +970,7 @@ func (s *Service) generateNativeDeepSeek(
 				"kind":             req.Kind,
 				"source":           req.Source,
 				"tool_call_id":     req.ToolCallID,
+				"question":         req.Question, // #109
 			})
 			recordAudit("human.request", req.ID, true, "agent requested human input", map[string]any{
 				"kind":         req.Kind,
@@ -1100,13 +1101,17 @@ func (s *Service) executeToolCall(
 			return rec
 		}
 		rec.Output["human_request_id"] = req.ID
-		recordEvent("human.request.created", "runtime", "runtime tool confirmation required", map[string]any{
+		payload := map[string]any{
 			"human_request_id": req.ID,
 			"kind":             req.Kind,
 			"source":           req.Source,
 			"tool":             rec.Name,
 			"tool_call_id":     rec.ID,
-		})
+		}
+		if target := actionTargetSummary(req.ActionSnapshot); target != "" {
+			payload["target"] = target
+		}
+		recordEvent("human.request.created", "runtime", "runtime tool confirmation required", payload)
 		recordAudit("human.request", req.ID, true, "runtime tool confirmation required", map[string]any{
 			"tool":         rec.Name,
 			"tool_call_id": rec.ID,
