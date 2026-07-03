@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -84,7 +85,7 @@ func EventFromRuntime(evt RuntimeEvent) (Event, bool) {
 			AgentTurnIDVal:       base.turnID,
 			ParentAgentTurnIDVal: base.parent,
 			TimestampVal:         base.ts,
-			Question:             evt.Message,
+			Question:             humanRequestedQuestion(evt),
 		}, true
 
 	// --- progress: assistant status / final ---
@@ -185,6 +186,38 @@ func mapRunFinished(evt RuntimeEvent, base eventIdentity) (Event, bool) {
 			"status", status, "event_id", evt.ID, "run_id", evt.RunID)
 		return nil, false
 	}
+}
+
+// humanRequestedQuestion derives the user-facing question for a HumanRequested
+// Event from the RuntimeEvent payload (#109). Priority:
+//  1. payload "summary" — set by run.waiting_human (waitingHumanSummary, already
+//     the real question text from HumanRequest.Question).
+//  2. payload "question" — set by human.request.created for agent_request
+//     (the LLM-written natural-language question).
+//  3. payload "tool" + optional "target" — set by human.request.created for
+//     runtime_tool_gate; rendered as "确认执行 <tool>: <target>" (e.g.
+//     "确认执行 write_file: vault/work/.../task.md") rather than the raw
+//     internal "runtime tool confirmation required" message.
+//  4. evt.Message — fallback (preserves old behavior when payload is empty).
+//
+// Without this, users saw internal log strings like "runtime tool confirmation
+// required" / "agent run waiting for human input" instead of the actual
+// question — see #105 缺口 D / #109.
+func humanRequestedQuestion(evt RuntimeEvent) string {
+	if s := strings.TrimSpace(stringField(evt, "summary")); s != "" {
+		return s
+	}
+	if q := strings.TrimSpace(stringField(evt, "question")); q != "" {
+		return q
+	}
+	tool := strings.TrimSpace(stringField(evt, "tool"))
+	if tool != "" {
+		if target := strings.TrimSpace(stringField(evt, "target")); target != "" {
+			return "确认执行 " + tool + ": " + target
+		}
+		return "确认执行 " + tool
+	}
+	return evt.Message
 }
 
 // eventIdentity carries the common identity fields extracted from RuntimeEvent.

@@ -457,3 +457,55 @@ func humanOptionsFromAny(value any) []humanrequest.HumanOption {
 		return nil
 	}
 }
+
+// actionTargetSummary extracts a short human-readable target from a
+// runtime_tool_gate ActionSnapshot's arguments, for surfacing in events /
+// IM rendering (#109). Returns "" when no recognizable target is present
+// (caller falls back to tool name only).
+//
+// Per-tool extraction (best-effort, not exhaustive):
+//   - write_file / edit_file: the "path" argument
+//   - command.run: the "program" argument
+//   - shell.run: the "command" argument (truncated)
+//
+// Only the leaf path segment is kept (basename) to keep the IM message short
+// and avoid leaking full workspace paths.
+func actionTargetSummary(snapshot *humanrequest.ActionSnapshot) string {
+	if snapshot == nil || len(snapshot.Arguments) == 0 {
+		return ""
+	}
+	args := snapshot.Arguments
+	tool := strings.TrimSpace(snapshot.ToolName)
+	var raw string
+	switch tool {
+	case "write_file", "edit_file":
+		raw = stringArg(args, "path")
+	case "command.run":
+		raw = stringArg(args, "program")
+	case "shell.run":
+		// shell commands are a single opaque string that frequently carries
+		// inline credentials in practice (Bearer tokens, -p password, URL-embedded
+		// keys, AWS env vars). Unlike path/program, there is no safe substring —
+		// any prefix can leak a secret, and the basename logic below does not
+		// apply (commands rarely contain path separators). Render nothing: the
+		// user sees "确认执行 shell.run" and inspects the full command via the
+		// private HTTP/CLI channel. (PR #116 review WARNING.)
+		return ""
+	default:
+		return ""
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	// Keep basename (leaf segment) for brevity; full path leaks workspace layout
+	// and bloats the IM message.
+	if idx := strings.LastIndexAny(raw, "/\\"); idx >= 0 && idx < len(raw)-1 {
+		return raw[idx+1:]
+	}
+	// shell commands can be long — truncate.
+	if len(raw) > 60 {
+		return raw[:60] + "..."
+	}
+	return raw
+}
