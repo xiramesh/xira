@@ -58,8 +58,20 @@ func TryResolveHITL(ctx context.Context, resolver runtime.HITLResolver, chatKey 
 		return false // only tool-gate / unsupported HITLs pending
 	}
 	kind, msg := ClassifyHITLResponse(content, hr.Kind)
-	if hr.Source == "flow_human_approval" {
-		signal, ok := flowApprovalSignalFromText(content, hr.Options)
+	// #108: any HITL with Options (agent_request OR flow_human_approval) goes
+	// through structured option matching — the user is choosing from a known
+	// set. Match → resolve with the option id; no match → return false so the
+	// message enters the agent turn (#106 hydration + #107 interpret) for
+	// intent understanding. HITLs without Options (freeform questions) skip
+	// this and resolve the text directly as an answer (legacy #92 behavior).
+	//
+	// This is source-neutral: an option is an option regardless of whether the
+	// request originated from a flow human_approval step or an agent's
+	// human.request call. The earlier `source == flow_human_approval` special
+	// case was an asymmetry bug (#105 缺口 A) — flow HITLs matched options
+	// but agent HITLs resolved any text, which was the "答不上/对不齐" root cause.
+	if len(hr.Options) > 0 {
+		signal, ok := matchHumanOption(content, hr.Options)
 		if !ok {
 			return false
 		}
@@ -95,7 +107,16 @@ func imResolvableHITLSource(source string) bool {
 	}
 }
 
-func flowApprovalSignalFromText(text string, options []humanrequest.HumanOption) (string, bool) {
+// matchHumanOption checks whether the user's text selects one of the request's
+// options (by id or label, case-insensitive). Returns the normalized option id
+// (or label when no id) and true on match; ("", false) when the text doesn't
+// match any option — caller treats that as "no structured resolve, fall through
+// to agent turn".
+//
+// Renamed from flowApprovalSignalFromText (#108): the logic is source-neutral,
+// applicable to any HITL that carries Options (flow_human_approval AND
+// agent_request). The old name implied flow-only.
+func matchHumanOption(text string, options []humanrequest.HumanOption) (string, bool) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "", false
