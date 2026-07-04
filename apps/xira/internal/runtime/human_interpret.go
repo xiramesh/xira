@@ -18,8 +18,7 @@ import (
 // resolve 模式(executeAnswerChild, answer_child.go),但加四项校验:
 //
 //  1. request 存在且 pending(防伪造 request_id / injection)
-//  2. source 允许(agent_request / flow_human_approval 允许;
-//     runtime_tool_gate 拒——基线 4:强制型必须 transport-structured)
+//  2. source 允许(agent_request / flow_human_approval 允许;其他拒)
 //  3. chatKey 匹配(HR.ChatKey == 当前 turn chatKey,防跨 chat 注入)
 //  4. 无歧义(单次一个 request_id;signal 合法)
 //
@@ -100,11 +99,8 @@ func validateHumanInterpret(ctx context.Context, s *Service, in humanInterpretIn
 	if existing.Status != humanrequest.StatusPending {
 		return nil, fmt.Errorf("human request %q is already %s, cannot interpret", in.RequestID, existing.Status)
 	}
-	// 校验 2: source 允许——runtime_tool_gate 拒(基线 4)。
-	if existing.Source == "runtime_tool_gate" {
-		return nil, fmt.Errorf("runtime_tool_gate human request %q cannot be resolved via interpret (requires transport-structured approve/deny)", in.RequestID)
-	}
-	// agent_request / flow_human_approval 允许;其他未知 source 也拒(白名单)。
+	// 校验 2: source 白名单——agent_request / flow_human_approval 允许;
+	// 其他未知 source 拒。
 	if existing.Source != "agent_request" && existing.Source != "flow_human_approval" {
 		return nil, fmt.Errorf("human request %q has unsupported source %q for interpret", in.RequestID, existing.Source)
 	}

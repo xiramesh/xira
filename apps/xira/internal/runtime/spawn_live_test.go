@@ -130,7 +130,7 @@ func (c *liveTestSpawnCollector) HasResult() bool {
 	return len(c.results) > 0
 }
 
-func (c *liveTestSpawnCollector) count() int    { return len(c.results) }
+func (c *liveTestSpawnCollector) count() int { return len(c.results) }
 func (c *liveTestSpawnCollector) latest() (PendingResult, bool) {
 	if len(c.results) == 0 {
 		return PendingResult{}, false

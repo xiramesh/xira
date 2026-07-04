@@ -208,9 +208,9 @@ func TestFeishuSecondMessageSteersIntoQueue(t *testing.T) {
 	turnActive := make(chan struct{})
 	turnRelease := make(chan struct{})
 	rt.hold = func(unblock chan struct{}) {
-		close(turnActive)        // signal: turn has started
-		<-turnRelease            // hold the turn open
-		close(unblock)           // then let RunAgent return
+		close(turnActive) // signal: turn has started
+		<-turnRelease     // hold the turn open
+		close(unblock)    // then let RunAgent return
 	}
 	runner := newFeishuTestRunner(t, rt)
 

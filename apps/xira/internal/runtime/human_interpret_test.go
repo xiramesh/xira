@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +15,7 @@ import (
 // (source 允许 / chatKey 匹配 / request 存在 pending / 无歧义)。校验在
 // 同步阶段做,通过才进异步 resolve;不通过同步 rejected。绝不嵌套 turn。
 //
-// 这些测试 pin 四项校验 + 异步不阻塞 + 基线 4(runtime_tool_gate 拒)。
+// 这些测试 pin 四项校验 + 异步不阻塞 + source 白名单。
 
 // seedPendingHRForInterpret 预置一个 waiting_human run + pending HR,供
 // interpret 校验/resolve。返回创建的 HR。chatKey 控制是否匹配当前 turn。
@@ -27,7 +26,7 @@ func seedPendingHRForInterpret(t *testing.T, rt *Service, runID, source, chatKey
 		t.Fatalf("SaveRun: %v", err)
 	}
 	kind := humanrequest.RequestFreeform
-	if source == "runtime_tool_gate" || source == "flow_human_approval" {
+	if source == "flow_human_approval" {
 		kind = humanrequest.RequestApproval
 	}
 	hr, err := rt.CreateHumanRequest(ctx, humanrequest.CreateRequest{
@@ -84,32 +83,6 @@ func TestExecuteHumanInterpretApprovesAgentRequest(t *testing.T) {
 	}
 	// 等异步 resume 跑完(run 进 terminal),避免 TempDir 竞态。
 	waitForRunTerminal(t, rt, "run-ar-1", 5*time.Second)
-}
-
-// TestExecuteHumanInterpretRejectsRuntimeToolGate: 基线 4 — runtime_tool_gate
-// 不接受 interpret(必须走 transport-structured)。同步 rejected,不 resolve。
-func TestExecuteHumanInterpretRejectsRuntimeToolGate(t *testing.T) {
-	rt := newTestService(t, configWithStateDir(t))
-	const chatKey = "feishu/chat-1/user-1"
-	hr := seedPendingHRForInterpret(t, rt, "run-gate-1", "runtime_tool_gate", chatKey)
-
-	out := executeHumanInterpret(context.Background(), rt, humanInterpretInput{
-		RequestID: hr.ID,
-		Signal:    "approve",
-		ChatKey:   chatKey,
-	})
-	if out["status"] != "rejected" {
-		t.Fatalf("status = %v, want 'rejected' for runtime_tool_gate (baseline 4)", out["status"])
-	}
-	reason, _ := out["error"].(string)
-	if !strings.Contains(strings.ToLower(reason), "runtime_tool_gate") && !strings.Contains(strings.ToLower(reason), "tool_gate") {
-		t.Errorf("rejection reason should mention runtime_tool_gate, got %q", reason)
-	}
-	// 确认没 resolve
-	got, err := rt.GetHumanRequest(context.Background(), hr.ID)
-	if err != nil || got.Status != humanrequest.StatusPending {
-		t.Fatalf("runtime_tool_gate HR should stay pending, got status=%v err=%v", got.Status, err)
-	}
 }
 
 // TestExecuteHumanInterpretRejectsWrongChatKey: HR.ChatKey ≠ 当前 turn chatKey
@@ -199,8 +172,8 @@ func TestExecuteHumanInterpretRejectsInvalidSignal(t *testing.T) {
 }
 
 // TestExecuteHumanInterpretRejectsUnsupportedSource: source 既不是
-// agent_request/flow_human_approval,也不是 runtime_tool_gate(未知 source)→
-// rejected(白名单:只允许两种已知 IM-resolvable source)。
+// agent_request/flow_human_approval(未知 source)→ rejected
+// (白名单:只允许两种已知 IM-resolvable source)。
 func TestExecuteHumanInterpretRejectsUnsupportedSource(t *testing.T) {
 	rt := newTestService(t, configWithStateDir(t))
 	const chatKey = "feishu/chat-1/user-1"
@@ -234,10 +207,10 @@ func TestExecuteHumanInterpretRejectsEmptyHRChatKey(t *testing.T) {
 func TestSanitizeHumanInterpretInput(t *testing.T) {
 	in := sanitizeHumanInterpretInput(map[string]any{
 		"request_id": "  hrq_123  ",
-		"signal":      "approve",
-		"reasoning":   "  user agreed  ",
-		"chat_key":    "should-be-ignored", // ChatKey 不从 args 取(runtime 填)
-		"bogus":       "ignored",
+		"signal":     "approve",
+		"reasoning":  "  user agreed  ",
+		"chat_key":   "should-be-ignored", // ChatKey 不从 args 取(runtime 填)
+		"bogus":      "ignored",
 	})
 	if in.RequestID != "hrq_123" {
 		t.Errorf("RequestID = %q, want hrq_123 (trimmed)", in.RequestID)

@@ -18,10 +18,8 @@ import (
 //     text), so it only affects the current RunAgent turn — resume and child
 //     delegation turns are untouched (their chatKey/semantics differ, and
 //     resume already carries resolved-HITL context in its own message).
-//   - Sensitive ActionSnapshot fields (tool arguments, file contents from a
-//     runtime_tool_gate) are NEVER included — only request_id, source, kind,
-//     question, and options. The agent gets enough to recognize/quote the
-//     pending request, not the data inside the gated action.
+//   - Only request_id, source, kind, question, and options are surfaced. The
+//     agent gets enough to recognize/quote the pending request.
 
 // pendingHITLSummaryMarker is the stable heading the tests and downstream pin
 // on. It is rendered exactly once per turn when ≥1 pending HITL is injected.
@@ -30,11 +28,6 @@ const pendingHITLSummaryMarker = "# Pending Human Requests"
 // injectPendingHITLSummary appends a structured "Pending Human Requests"
 // block to the user message when there are pending HITL requests for this
 // chatKey. If pending is empty, msg is returned unchanged.
-//
-// The block intentionally excludes ActionSnapshot arguments: a runtime_tool_gate
-// on write_file must not leak the file contents into the agent context. Only
-// the tool name is surfaced (so the agent can reference what kind of action is
-// gated), plus request_id / source / kind / question / options.
 func injectPendingHITLSummary(msg string, pending []humanrequest.HumanRequest) string {
 	msg = strings.TrimSpace(msg)
 	if len(pending) == 0 {
@@ -55,9 +48,7 @@ func injectPendingHITLSummary(msg string, pending []humanrequest.HumanRequest) s
 }
 
 // formatPendingHumanRequest renders a single pending request as one numbered
-// line. It deliberately omits ActionSnapshot.Arguments — only the tool name
-// (from ActionSnapshot.ToolName) is kept so the agent can reference the gated
-// action type without seeing its (possibly sensitive) inputs.
+// line. It surfaces source, question, options, and request_id.
 func formatPendingHumanRequest(n string, hr humanrequest.HumanRequest) string {
 	var b strings.Builder
 	b.WriteString(n)
@@ -69,14 +60,6 @@ func formatPendingHumanRequest(n string, hr humanrequest.HumanRequest) string {
 	b.WriteString(source)
 	b.WriteString("] ")
 	b.WriteString(strings.TrimSpace(hr.Question))
-	// For runtime_tool_gate, surface the tool name (not its arguments) so the
-	// agent can reference the gated action. This is the only ActionSnapshot
-	// field exposed.
-	if hr.ActionSnapshot != nil && strings.TrimSpace(hr.ActionSnapshot.ToolName) != "" {
-		b.WriteString(" (tool: ")
-		b.WriteString(strings.TrimSpace(hr.ActionSnapshot.ToolName))
-		b.WriteString(")")
-	}
 	// Options, if any — so the agent can guide the user and #108's option
 	// matching has the same surface visible.
 	if len(hr.Options) > 0 {

@@ -11,17 +11,17 @@ import (
 // These satisfy DevRun's branch expressions.
 func devRunStepOutputs() map[string]map[string]any {
 	return map[string]map[string]any{
-		"select_issue": {"selected_issue": map[string]any{"status": "selected"}, "selection_reason": "fits", "risk_level": "low"},
-		"intake":       {"task_spec": "spec", "acceptance_criteria": "criteria"},
-		"design":       {"design_doc": "doc", "implementation_plan": "plan", "verification_plan": "vplan"},
+		"select_issue":   {"selected_issue": map[string]any{"status": "selected"}, "selection_reason": "fits", "risk_level": "low"},
+		"intake":         {"task_spec": "spec", "acceptance_criteria": "criteria"},
+		"design":         {"design_doc": "doc", "implementation_plan": "plan", "verification_plan": "vplan"},
 		"prepare_branch": {"branch": "xira/devrun-branch"},
-		"implement":    {"change_summary": "summary", "changed_files": []any{"a.go"}, "risk_notes": "none"},
-		"verify":       {"verification_result": map[string]any{"status": "passed"}},
-		"create_pr":    {"pr": map[string]any{"url": "https://example/pr/1"}},
-		"review":       {"review_report": "report", "blocking_findings_count": 0, "merge_recommendation": "approve"},
-		"fix":          {"fix_summary": "fixed", "changed_files": []any{"a.go"}},
-		"merge":        {"merge_result": "merged"},
-		"report":       {"final_report": "done", "residual_risks": "none"},
+		"implement":      {"change_summary": "summary", "changed_files": []any{"a.go"}, "risk_notes": "none"},
+		"verify":         {"verification_result": map[string]any{"status": "passed"}},
+		"create_pr":      {"pr": map[string]any{"url": "https://example/pr/1"}},
+		"review":         {"review_report": "report", "blocking_findings_count": 0, "merge_recommendation": "approve"},
+		"fix":            {"fix_summary": "fixed", "changed_files": []any{"a.go"}},
+		"merge":          {"merge_result": "merged"},
+		"report":         {"final_report": "done", "residual_risks": "none"},
 	}
 }
 

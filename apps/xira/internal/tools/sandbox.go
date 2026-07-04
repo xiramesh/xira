@@ -95,14 +95,20 @@ func mergeRoots(groups ...[]string) []string {
 
 // pathWithinRoots reports whether a cleaned absolute path is equal to or
 // nested under any of the given roots. A root must already be absolute.
+//
+// Symlink safety (#110 follow-up): both the path and the roots are resolved
+// through EvalSymlinks (on the longest existing prefix, so writing a new file
+// under an existing directory still works) before comparison. Without this,
+// a symlink inside a root pointing outside (e.g. workspace/evil -> /etc)
+// would let an agent write outside the boundary by traversing the symlink.
 func pathWithinRoots(absPath string, roots []string) bool {
-	absPath = filepath.Clean(absPath)
+	resolvedPath := resolveSymlinkSafe(absPath)
 	for _, root := range roots {
-		root = filepath.Clean(root)
-		if absPath == root {
+		resolvedRoot := resolveSymlinkSafe(filepath.Clean(root))
+		if resolvedPath == resolvedRoot {
 			return true
 		}
-		rel, err := filepath.Rel(root, absPath)
+		rel, err := filepath.Rel(resolvedRoot, resolvedPath)
 		if err != nil {
 			continue
 		}
@@ -115,4 +121,38 @@ func pathWithinRoots(absPath string, roots []string) bool {
 		return true
 	}
 	return false
+}
+
+// resolveSymlinkSafe resolves symlinks in a path, tolerating non-existent
+// final segments (write_file creates new files whose path doesn't exist yet).
+// It resolves the longest existing prefix and rejoins the non-existent tail,
+// so an in-bound write to a brand-new file is still recognized as in-bound
+// while a symlink earlier in the path is still resolved.
+func resolveSymlinkSafe(p string) string {
+	p = filepath.Clean(p)
+	// Fast path: whole path exists, resolve it directly.
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	// Walk up until an existing ancestor, resolve that, then re-append the
+	// non-existent tail. This mirrors how realpath -m handles missing segments.
+	dir := p
+	tail := ""
+	for dir != "" && dir != "/" && dir != "." {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			if tail == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, tail)
+		}
+		tail = filepath.Join(filepath.Base(dir), tail)
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	// Nothing in the path exists; return cleaned form (no symlink to resolve).
+	return p
 }

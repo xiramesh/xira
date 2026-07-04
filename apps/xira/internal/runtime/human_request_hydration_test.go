@@ -44,7 +44,7 @@ func seedPendingHumanRequest(t *testing.T, rt *Service, runID, question, source 
 		t.Fatalf("SaveRun waiting_human: %v", err)
 	}
 	kind := humanrequest.RequestFreeform
-	if source == "runtime_tool_gate" || source == "flow_human_approval" {
+	if source == "flow_human_approval" {
 		kind = humanrequest.RequestApproval
 	}
 	hr, err := rt.CreateHumanRequest(ctx, humanrequest.CreateRequest{
@@ -138,62 +138,6 @@ func TestRunAgentNoPendingNoInjection(t *testing.T) {
 	}
 	if !strings.Contains(msg, "hello there") {
 		t.Errorf("user message missing original text.\nmessage: %s", msg)
-	}
-}
-
-// TestPendingHITLSummaryExcludesSensitiveFields proves the summary does not
-// leak ActionSnapshot arguments (e.g. file contents from a runtime_tool_gate)
-// into the agent context — only request_id/question/options/source/kind.
-func TestPendingHITLSummaryExcludesSensitiveFields(t *testing.T) {
-	rt := newTestService(t, Config{StateDir: filepath.Join(t.TempDir(), "state")})
-	ctx := context.Background()
-	// Seed a runtime_tool_gate pending request WITH an ActionSnapshot carrying
-	// sensitive tool arguments (simulating write_file content).
-	if err := rt.runs.SaveRun(TurnResponse{RunID: "run-gate-1", AgentID: "xira-assistant", Status: StatusWaitingHuman}); err != nil {
-		t.Fatal(err)
-	}
-	sensitiveContent := "TOP SECRET file contents that must not leak"
-	hr, err := rt.CreateHumanRequest(ctx, humanrequest.CreateRequest{
-		WorkspaceID:  rt.workspace,
-		WorkspaceKey: rt.WorkspaceKey(),
-		RunID:        "run-gate-1",
-		AgentID:      "xira-assistant",
-		SessionID:    "session-gate-1",
-		Kind:         humanrequest.RequestApproval,
-		Question:     "Approve write_file?",
-		Source:       "runtime_tool_gate",
-		ChatKey:      chatKeyForTestUser(),
-		ActionSnapshot: &humanrequest.ActionSnapshot{
-			ToolName: "write_file",
-			Arguments: map[string]any{
-				"path":    "/secret/path.md",
-				"content": sensitiveContent,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateHumanRequest: %v", err)
-	}
-	_ = hr
-
-	var captured deepseek.ChatRequest
-	rt.deepseek = capturingClient(t, &captured)
-
-	if _, err := rt.RunAgent(context.Background(), TurnRequest{
-		Message: "go ahead",
-		Context: channel.NewInboundContext("test", "user-1", nil),
-	}); err != nil {
-		t.Fatalf("RunAgent: %v", err)
-	}
-	msg := lastUserMessage(captured.Messages)
-	if strings.Contains(msg, sensitiveContent) {
-		t.Errorf("pending summary LEAKED ActionSnapshot content into agent context.\nmessage: %s", msg)
-	}
-	if strings.Contains(msg, "/secret/path.md") {
-		t.Errorf("pending summary leaked ActionSnapshot path into agent context.\nmessage: %s", msg)
-	}
-	if !strings.Contains(msg, "write_file") {
-		t.Errorf("pending summary should mention tool name write_file.\nmessage: %s", msg)
 	}
 }
 

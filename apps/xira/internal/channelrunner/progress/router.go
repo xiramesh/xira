@@ -102,12 +102,15 @@ func (r *Router) Handle(key runtime.ChatKey, requestID, msg string, parentCtx co
 // message will correctly see it as steered.
 //
 // Steered: enqueued into the active turn's queue (an interjection); reply comes
-// 	via that turn's OnTurnResult. ActiveRequestID is the active turn's request_id
-// 	(cited in the steered ack so the client knows which request_id the terminal
-// 	will carry).
+//
+//	via that turn's OnTurnResult. ActiveRequestID is the active turn's request_id
+//	(cited in the steered ack so the client knows which request_id the terminal
+//	will carry).
+//
 // Started: active=true, requestID recorded; the caller MUST call Start() to run
-// 	the turn (after addActive + ack). If the caller aborts, it must call Abort()
-// 	to release the entry.
+//
+//	the turn (after addActive + ack). If the caller aborts, it must call Abort()
+//	to release the entry.
 type RoutingOutcome struct {
 	Steered         bool
 	ActiveRequestID string // valid when Steered

@@ -4,6 +4,12 @@
 > 分支：`feature/agent-hitl-v0`
 > 目标：先定义 agent-first 场景下的运行时边界能力：HITL、agent delegation、suspend/resume，再让 Flow Run Kernel 复用同一套能力。
 
+> ⚠️ **部分废弃（#110, 2026-07-04）**：本文档中 **`runtime_tool_gate`** 相关设计（强制型 approval、`RequireConfirmation` gate、`ActionSnapshot`、snapshot replay、replay execution mode）已**从代码中完整移除**。
+>
+> 原因：`allow_roots` 是硬边界（边界内放行 / 越界 sandbox 拒绝），gate 对有 path 的工具（write_file/edit_file）是冗余的二次防护，对无 path 的工具（shell.run）从未启用（RequireConfirmation=false）。gate 在实际部署里只制造死锁（IM 通道无法 resolve tool_gate），不提供价值。业界（Codex workspace-write / Aider / Hermes）均不在 workspace 边界内逐次审批写操作。
+>
+> **仍有效**的部分：`agent_request`（协作型 HITL）、`flow_human_approval`（flow 审批 step）、HumanRequest/HumanResponse 数据模型、suspend/resume、agent delegation。阅读时请跳过 runtime_tool_gate / ActionSnapshot / replay 相关段落。
+
 ## 摘要
 
 Agent Runtime Boundary v0 定义三件基础能力：

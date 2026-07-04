@@ -36,7 +36,7 @@ type HumanRequestResolver interface {
 //   - for explicit flow_human_approval: maps the response to an
 //     approval_signal output slot, marks the step completed, evaluates the
 //     transition (approve/revise/cancel/reject map per the step's branches);
-//   - for agent_request / runtime_tool_gate: assumes the runtime has already
+//   - for agent_request: assumes the runtime has already
 //     resumed the agent run through ResolveHumanRequest; reloads the step and
 //     only proceeds if the agent run has reached a terminal status. WATCH:
 //     Flow must not double-resume the agent run.
@@ -100,7 +100,7 @@ func (k *Kernel) resume(ctx context.Context, flowRunID, humanRequestID string) (
 	switch resolved.Source {
 	case SourceFlowHumanApproval:
 		return k.resumeExplicitApproval(ctx, run, def, defStep, resolved)
-	case SourceAgentRequest, SourceRuntimeToolGate:
+	case SourceAgentRequest:
 		return k.resumeAgentGenerated(ctx, run, def, defStep, resolved)
 	default:
 		// Unknown source: treat as explicit-approval-style mapping so callers

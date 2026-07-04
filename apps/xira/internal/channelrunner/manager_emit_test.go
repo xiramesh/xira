@@ -23,8 +23,8 @@ type mockEmitRunner struct {
 	emitErr error
 }
 
-func (m *mockEmitRunner) ID() string     { return m.id }
-func (m *mockEmitRunner) Channel() string { return m.ch }
+func (m *mockEmitRunner) ID() string                  { return m.id }
+func (m *mockEmitRunner) Channel() string             { return m.ch }
 func (m *mockEmitRunner) Start(context.Context) error { return nil }
 func (m *mockEmitRunner) Stop(context.Context) error  { return nil }
 
@@ -122,10 +122,10 @@ func TestManagerEmitRunnerNotEmitter(t *testing.T) {
 
 type bareRunner struct{ id, ch string }
 
-func (b *bareRunner) ID() string                       { return b.id }
-func (b *bareRunner) Channel() string                  { return b.ch }
-func (b *bareRunner) Start(context.Context) error      { return nil }
-func (b *bareRunner) Stop(context.Context) error       { return nil }
+func (b *bareRunner) ID() string                  { return b.id }
+func (b *bareRunner) Channel() string             { return b.ch }
+func (b *bareRunner) Start(context.Context) error { return nil }
+func (b *bareRunner) Stop(context.Context) error  { return nil }
 
 // TestManagerEmitNilSafe verifies Emit on a nil/empty Manager is a clear error,
 // not a panic (resume may run before any channel is configured).

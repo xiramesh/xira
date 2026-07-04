@@ -45,7 +45,7 @@ func TestTryResolveHITLResolvesFlowHumanApprovalFromIMText(t *testing.T) {
 
 func TestTryResolveHITLPrefersMostRecentIMResolvableRequest(t *testing.T) {
 	resolver := &fakeHITLResolver{pending: []humanrequest.HumanRequest{
-		{ID: "hrq_tool", Source: "runtime_tool_gate", Kind: humanrequest.RequestApproval},
+		{ID: "hrq_tool", Source: "unsupported_source", Kind: humanrequest.RequestApproval},
 		{ID: "hrq_flow", Source: "flow_human_approval", Kind: humanrequest.RequestApproval, Options: []humanrequest.HumanOption{{ID: "approve", Label: "approve"}}},
 		{ID: "hrq_agent", Source: "agent_request", Kind: humanrequest.RequestFreeform},
 	}}

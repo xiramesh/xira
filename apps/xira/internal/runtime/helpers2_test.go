@@ -79,8 +79,8 @@ func TestUsageStoreAppendCalls(t *testing.T) {
 func TestSummarizeUsage(t *testing.T) {
 	cost := 1.5
 	resp := TurnResponse{
-		RunID:    "run-sum-1",
-		AgentID:  "agent-1",
+		RunID:   "run-sum-1",
+		AgentID: "agent-1",
 		LLMCalls: []LLMCallRecord{
 			{Model: "deepseek", Status: "completed", PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15, UsageSource: "provider", Cost: &cost, Currency: "usd"},
 			{Model: "deepseek", Status: "failed", PromptTokens: 0, CompletionTokens: 0, TotalTokens: 0, UsageSource: "missing", RequestIndex: 7},

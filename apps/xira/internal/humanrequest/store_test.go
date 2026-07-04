@@ -113,7 +113,7 @@ func TestStoreRejectsPathTraversalRequestIDs(t *testing.T) {
 	}
 }
 
-func TestStoreRejectsPathTraversalRequestIDOnReadResolveAndReplay(t *testing.T) {
+func TestStoreRejectsPathTraversalRequestIDOnReadAndResolve(t *testing.T) {
 	root := t.TempDir()
 	store := newTestStore(t, root)
 	req := mustCreateHumanRequest(t, store, CreateRequest{
@@ -126,14 +126,6 @@ func TestStoreRejectsPathTraversalRequestIDOnReadResolveAndReplay(t *testing.T) 
 		ToolCallID:   "tool-1",
 		Kind:         RequestApproval,
 		Question:     "approve?",
-		ActionSnapshot: &ActionSnapshot{
-			ToolName:   "write_file",
-			Arguments:  map[string]any{"path": "ok.txt"},
-			RunID:      "run-1",
-			AgentID:    "agent-1",
-			SessionID:  "session-1",
-			ToolCallID: "tool-1",
-		},
 	})
 	resolved, err := store.Resolve(context.Background(), ResolveRequest{
 		WorkspaceKey: "ws_replay_path",
@@ -144,9 +136,7 @@ func TestStoreRejectsPathTraversalRequestIDOnReadResolveAndReplay(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Resolve valid request: %v", err)
 	}
-	if _, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_replay_path", RequestID: resolved.ID, Owner: "worker", LeaseDuration: time.Minute}); err != nil {
-		t.Fatalf("BeginReplay valid request: %v", err)
-	}
+	_ = resolved
 
 	badID := "../" + req.ID
 	checks := []struct {
@@ -159,18 +149,6 @@ func TestStoreRejectsPathTraversalRequestIDOnReadResolveAndReplay(t *testing.T) 
 		}},
 		{name: "Resolve", run: func() error {
 			_, err := store.Resolve(context.Background(), ResolveRequest{WorkspaceKey: "ws_replay_path", RequestID: badID, Kind: ResponseAnswer, Message: "no"})
-			return err
-		}},
-		{name: "BeginReplay", run: func() error {
-			_, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_replay_path", RequestID: badID, Owner: "worker", LeaseDuration: time.Minute})
-			return err
-		}},
-		{name: "CompleteReplay", run: func() error {
-			_, err := store.CompleteReplay(context.Background(), CompleteReplayRequest{WorkspaceKey: "ws_replay_path", RequestID: badID, Owner: "worker", ResultDigest: "sha256:test"})
-			return err
-		}},
-		{name: "FailReplay", run: func() error {
-			_, err := store.FailReplay(context.Background(), FailReplayRequest{WorkspaceKey: "ws_replay_path", RequestID: badID, Owner: "worker", Error: "failed"})
 			return err
 		}},
 	}
@@ -247,15 +225,14 @@ func TestStoreResolveApprovePersistsResponseAndAudit(t *testing.T) {
 	root := t.TempDir()
 	store := newTestStore(t, root)
 	req := mustCreateHumanRequest(t, store, CreateRequest{
-		ID:             "hrq_approve",
-		WorkspaceID:    "workspace",
-		WorkspaceKey:   "ws_resolve",
-		RunID:          "run-approve",
-		AgentID:        "agent-1",
-		SessionID:      "session-1",
-		Kind:           RequestApproval,
-		Question:       "Approve?",
-		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
+		ID:           "hrq_approve",
+		WorkspaceID:  "workspace",
+		WorkspaceKey: "ws_resolve",
+		RunID:        "run-approve",
+		AgentID:      "agent-1",
+		SessionID:    "session-1",
+		Kind:         RequestApproval,
+		Question:     "Approve?",
 	})
 
 	resolved, err := store.Resolve(context.Background(), ResolveRequest{
@@ -284,18 +261,17 @@ func TestStoreResolveApprovePersistsResponseAndAudit(t *testing.T) {
 	}
 }
 
-func TestStoreResolveDenyPersistsResponseAndPreventsReplay(t *testing.T) {
+func TestStoreResolveDenyPersistsResponse(t *testing.T) {
 	store := newTestStore(t, t.TempDir())
 	req := mustCreateHumanRequest(t, store, CreateRequest{
-		ID:             "hrq_deny",
-		WorkspaceID:    "workspace",
-		WorkspaceKey:   "ws_deny",
-		RunID:          "run-deny",
-		AgentID:        "agent-1",
-		SessionID:      "session-1",
-		Kind:           RequestApproval,
-		Question:       "Approve?",
-		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
+		ID:           "hrq_deny",
+		WorkspaceID:  "workspace",
+		WorkspaceKey: "ws_deny",
+		RunID:        "run-deny",
+		AgentID:      "agent-1",
+		SessionID:    "session-1",
+		Kind:         RequestApproval,
+		Question:     "Approve?",
 	})
 	resolved, err := store.Resolve(context.Background(), ResolveRequest{
 		WorkspaceKey: "ws_deny",
@@ -310,32 +286,19 @@ func TestStoreResolveDenyPersistsResponseAndPreventsReplay(t *testing.T) {
 	if resolved.Response == nil || resolved.Response.Kind != ResponseDeny {
 		t.Fatalf("response = %+v", resolved.Response)
 	}
-	if resolved.Replay == nil || resolved.Replay.Status != ReplayDenied {
-		t.Fatalf("replay state = %+v", resolved.Replay)
-	}
-	_, err = store.BeginReplay(context.Background(), ReplayLeaseRequest{
-		WorkspaceKey:  "ws_deny",
-		RequestID:     req.ID,
-		Owner:         "worker-1",
-		LeaseDuration: time.Minute,
-	})
-	if !errors.Is(err, ErrConflict) {
-		t.Fatalf("BeginReplay after deny error = %v, want ErrConflict", err)
-	}
 }
 
 func TestStoreResolveCancelPersistsCanceledSignal(t *testing.T) {
 	store := newTestStore(t, t.TempDir())
 	req := mustCreateHumanRequest(t, store, CreateRequest{
-		ID:             "hrq_cancel",
-		WorkspaceID:    "workspace",
-		WorkspaceKey:   "ws_cancel",
-		RunID:          "run-cancel",
-		AgentID:        "agent-1",
-		SessionID:      "session-1",
-		Kind:           RequestApproval,
-		Question:       "Approve?",
-		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
+		ID:           "hrq_cancel",
+		WorkspaceID:  "workspace",
+		WorkspaceKey: "ws_cancel",
+		RunID:        "run-cancel",
+		AgentID:      "agent-1",
+		SessionID:    "session-1",
+		Kind:         RequestApproval,
+		Question:     "Approve?",
 	})
 	resolved, err := store.Resolve(context.Background(), ResolveRequest{
 		WorkspaceKey: "ws_cancel",
@@ -349,9 +312,6 @@ func TestStoreResolveCancelPersistsCanceledSignal(t *testing.T) {
 	}
 	if resolved.Response == nil || resolved.Response.Kind != ResponseCancel {
 		t.Fatalf("response = %+v", resolved.Response)
-	}
-	if resolved.Replay == nil || resolved.Replay.Status != ReplayCanceled {
-		t.Fatalf("replay state = %+v", resolved.Replay)
 	}
 }
 
@@ -496,185 +456,6 @@ func TestStoreShowMissingRequestReturnsNotFound(t *testing.T) {
 	}
 	if _, err := store.Get(context.Background(), "ws_wrong", req.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("wrong workspace error = %v, want ErrNotFound", err)
-	}
-}
-
-func TestStoreReplayCASPendingRunningCompleted(t *testing.T) {
-	root := t.TempDir()
-	store := newTestStore(t, root)
-	req := mustCreateHumanRequest(t, store, CreateRequest{
-		ID:             "hrq_replay",
-		WorkspaceID:    "workspace",
-		WorkspaceKey:   "ws_replay",
-		RunID:          "run-replay",
-		AgentID:        "agent-1",
-		SessionID:      "session-1",
-		Kind:           RequestApproval,
-		Question:       "Replay?",
-		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
-	})
-	leased, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{
-		WorkspaceKey:  "ws_replay",
-		RequestID:     req.ID,
-		Owner:         "worker-1",
-		LeaseDuration: time.Minute,
-		Now:           time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if leased.Replay == nil || leased.Replay.Status != ReplayRunning || leased.Replay.LeaseOwner != "worker-1" {
-		t.Fatalf("lease replay = %+v", leased.Replay)
-	}
-	_, err = store.BeginReplay(context.Background(), ReplayLeaseRequest{
-		WorkspaceKey:  "ws_replay",
-		RequestID:     req.ID,
-		Owner:         "worker-2",
-		LeaseDuration: time.Minute,
-		Now:           time.Date(2026, 6, 15, 10, 0, 30, 0, time.UTC),
-	})
-	if !errors.Is(err, ErrConflict) {
-		t.Fatalf("second BeginReplay error = %v, want ErrConflict", err)
-	}
-	completed, err := store.CompleteReplay(context.Background(), CompleteReplayRequest{
-		WorkspaceKey:    "ws_replay",
-		RequestID:       req.ID,
-		Owner:           "worker-1",
-		ResultDigest:    "sha256:result",
-		IdempotencyKey:  "idem-1",
-		CompletedAt:     time.Date(2026, 6, 15, 10, 0, 45, 0, time.UTC),
-		ResultReference: "runs/run-replay/tool_calls.jsonl",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if completed.Replay == nil || completed.Replay.Status != ReplayCompleted || completed.Replay.ResultDigest != "sha256:result" {
-		t.Fatalf("completed replay = %+v", completed.Replay)
-	}
-	again, err := store.CompleteReplay(context.Background(), CompleteReplayRequest{
-		WorkspaceKey:    "ws_replay",
-		RequestID:       req.ID,
-		Owner:           "worker-1",
-		ResultDigest:    "sha256:result",
-		IdempotencyKey:  "idem-1",
-		CompletedAt:     time.Date(2026, 6, 15, 10, 0, 46, 0, time.UTC),
-		ResultReference: "runs/run-replay/tool_calls.jsonl",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again.Replay.ResultDigest != completed.Replay.ResultDigest {
-		t.Fatalf("idempotent complete changed replay: before=%+v after=%+v", completed.Replay, again.Replay)
-	}
-	resultPath := filepath.Join(root, "workspaces", "ws_replay", "replay-results", req.ID+".json")
-	if _, err := os.Stat(resultPath); err != nil {
-		t.Fatalf("expected replay result file: %v", err)
-	}
-}
-
-func TestStoreReplayLeaseCanRecoverAfterCrash(t *testing.T) {
-	store := newTestStore(t, t.TempDir())
-	req := mustCreateHumanRequest(t, store, CreateRequest{
-		ID:             "hrq_recover",
-		WorkspaceID:    "workspace",
-		WorkspaceKey:   "ws_recover",
-		RunID:          "run-recover",
-		AgentID:        "agent-1",
-		SessionID:      "session-1",
-		Kind:           RequestApproval,
-		Question:       "Replay?",
-		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
-	})
-	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
-	if _, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_recover", RequestID: req.ID, Owner: "worker-1", LeaseDuration: time.Minute, Now: start}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_recover", RequestID: req.ID, Owner: "worker-2", LeaseDuration: time.Minute, Now: start.Add(30 * time.Second)}); !errors.Is(err, ErrConflict) {
-		t.Fatalf("early recovery error = %v, want ErrConflict", err)
-	}
-	recovered, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_recover", RequestID: req.ID, Owner: "worker-2", LeaseDuration: time.Minute, Now: start.Add(2 * time.Minute)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recovered.Replay == nil || recovered.Replay.LeaseOwner != "worker-2" {
-		t.Fatalf("recovered replay = %+v", recovered.Replay)
-	}
-}
-
-func TestReplayLeaseRecoveryAfterCrash(t *testing.T) {
-	store := newTestStore(t, t.TempDir())
-	req := mustCreateHumanRequest(t, store, CreateRequest{
-		ID:             "hrq_exact_recover",
-		WorkspaceID:    "workspace",
-		WorkspaceKey:   "ws_exact_recover",
-		RunID:          "run-recover",
-		AgentID:        "agent-1",
-		SessionID:      "session-1",
-		Kind:           RequestApproval,
-		Question:       "Replay?",
-		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
-	})
-	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
-	if _, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_exact_recover", RequestID: req.ID, Owner: "worker-1", LeaseDuration: time.Minute, Now: start}); err != nil {
-		t.Fatal(err)
-	}
-	recovered, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{WorkspaceKey: "ws_exact_recover", RequestID: req.ID, Owner: "worker-2", LeaseDuration: time.Minute, Now: start.Add(2 * time.Minute)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recovered.Replay == nil || recovered.Replay.Status != ReplayRunning || recovered.Replay.LeaseOwner != "worker-2" {
-		t.Fatalf("recovered replay = %+v", recovered.Replay)
-	}
-}
-
-func TestReplayRecordsAuditTrail(t *testing.T) {
-	store := newTestStore(t, t.TempDir())
-	req := mustCreateHumanRequest(t, store, CreateRequest{
-		ID:             "hrq_replay_audit",
-		WorkspaceID:    "workspace",
-		WorkspaceKey:   "ws_replay_audit",
-		RunID:          "run-replay-audit",
-		AgentID:        "agent-1",
-		SessionID:      "session-1",
-		Kind:           RequestApproval,
-		Question:       "Replay?",
-		ActionSnapshot: &ActionSnapshot{ToolName: "test.echo", Arguments: map[string]any{"message": "hello"}},
-	})
-	if _, err := store.Resolve(context.Background(), ResolveRequest{
-		WorkspaceKey: "ws_replay_audit",
-		RequestID:    req.ID,
-		Kind:         ResponseApprove,
-		Actor:        "human-1",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{
-		WorkspaceKey:  "ws_replay_audit",
-		RequestID:     req.ID,
-		Owner:         "worker-1",
-		LeaseDuration: time.Minute,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	completed, err := store.CompleteReplay(context.Background(), CompleteReplayRequest{
-		WorkspaceKey:    "ws_replay_audit",
-		RequestID:       req.ID,
-		Owner:           "worker-1",
-		ResultDigest:    "sha256:result",
-		ResultReference: "runs/run-replay-audit/tool_calls.jsonl",
-		IdempotencyKey:  "audit-idem",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	actions := map[string]bool{}
-	for _, record := range completed.Audit {
-		actions[record.Action] = true
-	}
-	for _, action := range []string{"human_request.created", "human_request.resolved", "human_request.replay_started", "human_request.replay_completed"} {
-		if !actions[action] {
-			t.Fatalf("audit missing %s: %+v", action, completed.Audit)
-		}
 	}
 }
 
@@ -983,58 +764,6 @@ func TestStoreCreateValidationErrors(t *testing.T) {
 	}
 }
 
-// TestFailReplayValidation covers FailReplay's error branches (invalid workspace,
-// invalid request id, empty owner, no replay state, replay not running).
-func TestFailReplayValidation(t *testing.T) {
-	store := newTestStore(t, t.TempDir())
-	// Create a request WITH an action snapshot so it has a Replay state.
-	req := mustCreateHumanRequest(t, store, CreateRequest{
-		ID: "hrq_fr", WorkspaceID: "/ws", WorkspaceKey: "ws_fr", RunID: "r",
-		AgentID: "a", SessionID: "s", Kind: RequestApproval, Question: "q",
-		ActionSnapshot: &ActionSnapshot{ToolName: "t", RunID: "r"},
-	})
-	// Begin replay first so FailReplay can act on it.
-	beginReq, err := store.BeginReplay(context.Background(), ReplayLeaseRequest{
-		WorkspaceKey: "ws_fr", RequestID: "hrq_fr", Owner: "tester",
-	})
-	if err != nil {
-		t.Fatalf("BeginReplay: %v", err)
-	}
-	_ = beginReq
-
-	// Bad workspace key.
-	if _, err := store.FailReplay(context.Background(), FailReplayRequest{
-		WorkspaceKey: "../bad", RequestID: "hrq_fr", Owner: "tester", Error: "x",
-	}); err == nil {
-		t.Error("FailReplay bad workspace should error")
-	}
-	// Empty owner.
-	if _, err := store.FailReplay(context.Background(), FailReplayRequest{
-		WorkspaceKey: "ws_fr", RequestID: "hrq_fr", Owner: "", Error: "x",
-	}); err == nil {
-		t.Error("FailReplay empty owner should error")
-	}
-	// Not-found request.
-	if _, err := store.FailReplay(context.Background(), FailReplayRequest{
-		WorkspaceKey: "ws_fr", RequestID: "ghost", Owner: "tester", Error: "x",
-	}); err == nil {
-		t.Error("FailReplay ghost request should error")
-	}
-	// Happy path: fail the running replay.
-	if _, err := store.FailReplay(context.Background(), FailReplayRequest{
-		WorkspaceKey: "ws_fr", RequestID: "hrq_fr", Owner: "tester", Error: "done",
-	}); err != nil {
-		t.Errorf("FailReplay happy path: %v", err)
-	}
-	// Fail again → replay not running (conflict).
-	if _, err := store.FailReplay(context.Background(), FailReplayRequest{
-		WorkspaceKey: "ws_fr", RequestID: "hrq_fr", Owner: "tester", Error: "x",
-	}); err == nil {
-		t.Error("FailReplay on non-running replay should error")
-	}
-	_ = req
-}
-
 // TestWorkspaceKeyFor covers the trivial WorkspaceKeyFor (was 0%).
 func TestWorkspaceKeyFor(t *testing.T) {
 	got := WorkspaceKeyFor("team-a")
@@ -1102,8 +831,7 @@ func TestCloneStringMapEdgeCases(t *testing.T) {
 }
 
 // TestResolveWriteResponseAndLoad covers Resolve (which calls writeResponse +
-// loadRequest) and its error branches. Also exercises CompleteReplay's
-// not-running branch.
+// loadRequest) and its error branches.
 func TestResolveWriteResponseAndLoad(t *testing.T) {
 	store := newTestStore(t, t.TempDir())
 	ctx := context.Background()
@@ -1142,23 +870,6 @@ func TestResolveWriteResponseAndLoad(t *testing.T) {
 	_ = req
 }
 
-// TestCompleteReplayNotRunning covers CompleteReplay's "replay not running"
-// conflict branch (create a request, don't begin replay, try complete → error).
-func TestCompleteReplayNotRunning(t *testing.T) {
-	store := newTestStore(t, t.TempDir())
-	mustCreateHumanRequest(t, store, CreateRequest{
-		ID: "hrq_cr", WorkspaceID: "/ws", WorkspaceKey: "ws_cr", RunID: "r",
-		AgentID: "a", SessionID: "s", Kind: RequestApproval, Question: "q",
-		ActionSnapshot: &ActionSnapshot{ToolName: "t", RunID: "r"},
-	})
-	// CompleteReplay without BeginReplay → replay not running error.
-	if _, err := store.CompleteReplay(context.Background(), CompleteReplayRequest{
-		WorkspaceKey: "ws_cr", RequestID: "hrq_cr", ResultReference: "ok",
-	}); err == nil {
-		t.Error("CompleteReplay without BeginReplay should error (not running)")
-	}
-}
-
 // TestWriteYAMLAtomicFailure covers writeJSONAtomic's error branches by
 // pointing the store at an unwritable root (parent dir doesn't exist / is a
 // file). This exercises the os.WriteFile / os.Rename failure paths.
@@ -1194,46 +905,6 @@ func TestLoadRequestMissing(t *testing.T) {
 	if err == nil {
 		t.Error("Get missing request should error")
 	}
-}
-
-// TestBeginReplayErrorBranches covers BeginReplay's validation + state checks
-// (no snapshot, already running, not found) — was 77%.
-func TestBeginReplayErrorBranches(t *testing.T) {
-	store := newTestStore(t, t.TempDir())
-	ctx := context.Background()
-	// Request WITHOUT action snapshot → BeginReplay rejects (no snapshot).
-	mustCreateHumanRequest(t, store, CreateRequest{
-		ID: "hrq_nosnap", WorkspaceID: "/ws", WorkspaceKey: "ws_br", RunID: "r",
-		AgentID: "a", SessionID: "s", Kind: RequestFreeform, Question: "q",
-	})
-	if _, err := store.BeginReplay(ctx, ReplayLeaseRequest{
-		WorkspaceKey: "ws_br", RequestID: "hrq_nosnap", Owner: "o",
-	}); err == nil {
-		t.Error("BeginReplay on request without snapshot should error")
-	}
-	// Not-found request.
-	if _, err := store.BeginReplay(ctx, ReplayLeaseRequest{
-		WorkspaceKey: "ws_br", RequestID: "ghost", Owner: "o",
-	}); err == nil {
-		t.Error("BeginReplay ghost should error")
-	}
-	// Request WITH snapshot → BeginReplay succeeds; second BeginReplay → conflict (already running).
-	req := mustCreateHumanRequest(t, store, CreateRequest{
-		ID: "hrq_snap", WorkspaceID: "/ws", WorkspaceKey: "ws_br", RunID: "r2",
-		AgentID: "a", SessionID: "s", Kind: RequestApproval, Question: "q",
-		ActionSnapshot: &ActionSnapshot{ToolName: "t", RunID: "r2"},
-	})
-	if _, err := store.BeginReplay(ctx, ReplayLeaseRequest{
-		WorkspaceKey: "ws_br", RequestID: "hrq_snap", Owner: "o",
-	}); err != nil {
-		t.Fatalf("BeginReplay happy: %v", err)
-	}
-	if _, err := store.BeginReplay(ctx, ReplayLeaseRequest{
-		WorkspaceKey: "ws_br", RequestID: "hrq_snap", Owner: "o2",
-	}); err == nil {
-		t.Error("BeginReplay twice should error (already running)")
-	}
-	_ = req
 }
 
 // TestStoreWriteFailuresOnReadOnlyRoot triggers writeJSONAtomic failures by

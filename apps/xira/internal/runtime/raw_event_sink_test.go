@@ -24,9 +24,9 @@ func (c *captureSink) DeliverRaw(evt RuntimeEvent) {
 func TestDispatchEventDeliversRawToSink(t *testing.T) {
 	sink := &captureSink{}
 	evt := RuntimeEvent{
-		ID:     "evt-1",
-		Kind:   "agent.delegate.failed",
-		RunID:  "run-1",
+		ID:      "evt-1",
+		Kind:    "agent.delegate.failed",
+		RunID:   "run-1",
 		Payload: map[string]any{"error": "boom"},
 	}
 	ctx := WithRawEventSink(context.Background(), sink)
@@ -163,7 +163,7 @@ func TestChildToolConstraintCtxStripsSteeringBus(t *testing.T) {
 // lives in progress.SteeringQueue; runtime only sees the interface).
 type fakeSteeringBus struct{}
 
-func (fakeSteeringBus) Enqueue(string)                  {}
-func (fakeSteeringBus) TryDequeue() (string, bool)      { return "", false }
-func (fakeSteeringBus) DrainAll() []string              { return nil }
-func (fakeSteeringBus) HasPending() bool                { return false }
+func (fakeSteeringBus) Enqueue(string)             {}
+func (fakeSteeringBus) TryDequeue() (string, bool) { return "", false }
+func (fakeSteeringBus) DrainAll() []string         { return nil }
+func (fakeSteeringBus) HasPending() bool           { return false }

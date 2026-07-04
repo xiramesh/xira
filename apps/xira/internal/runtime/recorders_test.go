@@ -74,7 +74,7 @@ func assertUniqueRecorderIDs(t *testing.T, label string, total int, idAt func(in
 // and on a recorder with a nil resp (covers the early-return arms left at 80%).
 func TestRuntimeRecordersNilGuards(t *testing.T) {
 	var nilRec *runRecorder
-	nilRec.appendEvent(RuntimeEvent{Kind: "x"})      // must not panic
+	nilRec.appendEvent(RuntimeEvent{Kind: "x"}) // must not panic
 	nilRec.appendAudit(AuditEvent{Action: "x"})
 	nilRec.appendLLMCall(LLMCallRecord{Model: "m"})
 

@@ -34,54 +34,6 @@ func TestRealDeepSeekHITLHumanRequestTool(t *testing.T) {
 	}
 }
 
-func TestRealDeepSeekHITLRequireConfirmationSnapshot(t *testing.T) {
-	rt := newLiveDeepSeekHITLService(t, true)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{
-		Message: "Live HITL smoke: call write_file exactly once with path `hitl-live-smoke.txt` and content `hitl-live-smoke`. Do not answer normally.",
-		Context: channel.NewInboundContext("test", "live-user", nil),
-	})
-	if err != nil {
-		t.Fatalf("RunAgent() error = %v", err)
-	}
-	if resp.Status != StatusWaitingHuman || len(resp.HumanRequests) != 1 {
-		t.Fatalf("live confirmation response status=%q human_requests=%d final=%q tool_calls=%+v", resp.Status, len(resp.HumanRequests), resp.FinalResponse, resp.ToolCalls)
-	}
-	req := resp.HumanRequests[0]
-	if req.ActionSnapshot == nil || req.ActionSnapshot.ToolName != "write_file" {
-		t.Fatalf("live action snapshot = %+v", req.ActionSnapshot)
-	}
-	if _, err := rt.ResolveHumanRequest(context.Background(), req.ID, humanrequestApprove("live-smoke")); err != nil {
-		t.Fatalf("approve live snapshot replay: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(rt.workspace, "hitl-live-smoke.txt")); err != nil {
-		t.Fatalf("live approved write_file target missing: %v", err)
-	}
-}
-
-func TestRealDeepSeekHITLRespondsAfterApprovedToolOutput(t *testing.T) {
-	rt := newLiveDeepSeekHITLService(t, true)
-	resp, err := rt.RunAgent(context.Background(), TurnRequest{
-		Message: "Live HITL smoke: call write_file exactly once with path `hitl-live-final.txt` and content `hitl-live-final`, then wait for approval.",
-		Context: channel.NewInboundContext("test", "live-user", nil),
-	})
-	if err != nil {
-		t.Fatalf("RunAgent() error = %v", err)
-	}
-	if resp.Status != StatusWaitingHuman || len(resp.HumanRequests) != 1 || resp.HumanRequests[0].ActionSnapshot == nil {
-		t.Fatalf("live confirmation response status=%q human_requests=%d final=%q", resp.Status, len(resp.HumanRequests), resp.FinalResponse)
-	}
-	if _, err := rt.ResolveHumanRequest(context.Background(), resp.HumanRequests[0].ID, humanrequestApprove("live-smoke")); err != nil {
-		t.Fatalf("approve live snapshot replay: %v", err)
-	}
-	resumed, err := rt.RunStore().Load(resp.RunID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resumed.Status != "completed" || strings.TrimSpace(resumed.FinalResponse) == "" {
-		t.Fatalf("live run after approved tool output status=%q final=%q tool_calls=%+v", resumed.Status, resumed.FinalResponse, resumed.ToolCalls)
-	}
-}
-
 func TestRealDeepSeekFlowAgentStepCompletes(t *testing.T) {
 	rt := newLiveDeepSeekHITLService(t, false)
 	flowPath := filepath.Join(t.TempDir(), "flow.yaml")
