@@ -1640,9 +1640,10 @@ func (s *Service) composeInstructionText(profile agents.Profile, skillBlocks []s
 	}
 	tools := s.toolRegistry(profile).List()
 	identity := fmt.Sprintf(
-		"Current Xira agent: %s (%s).\nThis agent profile and runtime instruction are authoritative. If prior assistant messages or model defaults conflict with this agent identity, follow the current profile and correct the conflict. When asked who you are or which agent is active, answer as this Xira agent; do not identify as the underlying model provider unless the user explicitly asks about the model provider.",
+		"Current Xira agent: %s (%s).\nThis agent profile and runtime instruction are authoritative. If prior assistant messages or model defaults conflict with this agent identity, follow the current profile and correct the conflict. When asked who you are or which agent is active, answer as this Xira agent; do not identify as the underlying model provider unless the user explicitly asks about the model provider.\nCurrent date: %s (use this for `created`/`updated`/`review_at`/Decision Log entries when the user does not specify a date).",
 		profile.ID,
 		profile.Name,
+		time.Now().Format("2006-01-02"),
 	)
 	var capability string
 	if len(tools) == 0 {

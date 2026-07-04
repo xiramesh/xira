@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	adksession "google.golang.org/adk/session"
 	adktool "google.golang.org/adk/tool"
@@ -1479,6 +1480,12 @@ func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
 	}
 	if !strings.Contains(systemInstruction, "Current Xira agent: xira-assistant (Xira Assistant).") {
 		t.Fatalf("system instruction missing runtime identity: %q", systemInstruction)
+	}
+	// Runtime identity must inject the current date so agents can stamp
+	// created/updated/review_at/Decision Log with the real date (not a stale
+	// one copied from an existing file). Format: YYYY-MM-DD.
+	if !strings.Contains(systemInstruction, "Current date:") || !strings.Contains(systemInstruction, time.Now().Format("2006-01-02")) {
+		t.Fatalf("system instruction missing current date injection: %q", systemInstruction)
 	}
 	if gotReq.Messages[1].Role != "user" || gotReq.Messages[1].Content != "hi" {
 		t.Fatalf("user message = %+v", gotReq.Messages[1])
