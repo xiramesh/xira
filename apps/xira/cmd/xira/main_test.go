@@ -35,14 +35,14 @@ func TestAgentListUsesWorkspaceAgents(t *testing.T) {
 
 func TestVersionCommandPrintsBuildMetadata(t *testing.T) {
 	out := executeCommand(t, "version")
-	if out != "xira 0.3.0 commit=unknown date=unknown\n" {
+	if out != "xira 0.4.0 commit=unknown date=unknown\n" {
 		t.Fatalf("version output = %q", out)
 	}
 }
 
 func TestVersionFlagPrintsBuildMetadata(t *testing.T) {
 	out := executeCommand(t, "--version")
-	if out != "xira 0.3.0 commit=unknown date=unknown\n" {
+	if out != "xira 0.4.0 commit=unknown date=unknown\n" {
 		t.Fatalf("--version output = %q", out)
 	}
 }
