@@ -210,7 +210,7 @@ func (s *ChatKeySession) runTurn(_ runtime.ChatKey, turnMsg string, turnCtx cont
 	// SendProgress. Created per turn (same lifetime as the steering retry loop).
 	policy := DefaultPolicy()
 	chatCtx := NewChatContext(turnCtx, ChatContextConfig{
-		Sender:   SenderFunc(func(ctx context.Context, m Message) error {
+		Sender: SenderFunc(func(ctx context.Context, m Message) error {
 			return s.cfg.SendProgress(ctx, m.Text)
 		}),
 		MaxChars: policy.MaxChars,

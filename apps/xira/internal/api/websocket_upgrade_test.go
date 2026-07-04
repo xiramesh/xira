@@ -407,7 +407,7 @@ func (c *testWSControls) ListAccounts(string) ([]channelcontrol.AccountSnapshot,
 	return nil, nil
 }
 func (c *testWSControls) DeleteAccount(context.Context, string, string) error { return nil }
-func (c *testWSControls) WSRunner() *wschannel.Runner                             { return c.runner }
+func (c *testWSControls) WSRunner() *wschannel.Runner                         { return c.runner }
 
 func writeWebSocketFrame(t *testing.T, conn *websocket.Conn, frame any) {
 	t.Helper()

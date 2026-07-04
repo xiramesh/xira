@@ -2,15 +2,11 @@ package runtime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
-	"gopkg.in/yaml.v3"
 
 	"github.com/xiramesh/xira/internal/flow"
 	"github.com/xiramesh/xira/internal/humanrequest"
@@ -97,17 +93,6 @@ func (s *Service) ResolveHumanRequest(ctx context.Context, requestID string, inp
 	if err != nil {
 		return nil, err
 	}
-	if resolved.Response != nil && resolved.Response.Kind == humanrequest.ResponseApprove && resolved.ActionSnapshot != nil {
-		resolved, err = s.replayApprovedActionSnapshot(ctx, resolved)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if resolved.Response != nil && resolved.ActionSnapshot != nil && (resolved.Response.Kind == humanrequest.ResponseDeny || resolved.Response.Kind == humanrequest.ResponseCancel) {
-		if err := s.materializeRejectedActionSnapshot(resolved); err != nil {
-			return nil, err
-		}
-	}
 	// Resume the run after the human response. Only agent-request-sourced
 	// interrupts trigger a direct resume (others no-op).
 	if resolved.Source == "agent_request" {
@@ -172,192 +157,6 @@ func (s *Service) createAgentHumanRequest(ctx context.Context, callID string, ar
 	return req, nil
 }
 
-func (s *Service) createRuntimeToolGateHumanRequest(ctx context.Context, toolCallID, toolName string, args map[string]any) (*humanrequest.HumanRequest, error) {
-	exec, ok := runExecutionFromContext(ctx)
-	if !ok {
-		return nil, fmt.Errorf("runtime tool gate requires execution context")
-	}
-	collector := runtimeSuspendCollectorFromContext(ctx)
-	if collector == nil {
-		return nil, fmt.Errorf("runtime tool gate requires suspend collector")
-	}
-	toolCallID = strings.TrimSpace(toolCallID)
-	if toolCallID == "" {
-		toolCallID = uuid.NewString()
-	}
-	snapshotArgs, err := canonicalActionSnapshotArguments(args)
-	if err != nil {
-		return nil, fmt.Errorf("canonicalize action snapshot arguments: %w", err)
-	}
-	contextHash, err := digestAny(snapshotArgs)
-	if err != nil {
-		return nil, fmt.Errorf("marshal action snapshot arguments: %w", err)
-	}
-	req, err := s.CreateHumanRequest(ctx, humanrequest.CreateRequest{
-		WorkspaceID:  s.workspace,
-		WorkspaceKey: s.WorkspaceKey(),
-		RunID:        exec.Base.RunID,
-		AgentID:      exec.Profile.ID,
-		SessionID:    exec.Base.ConversationSessionID,
-		ToolCallID:   toolCallID,
-		Source:       "runtime_tool_gate",
-		Kind:         humanrequest.RequestApproval,
-		Question:     "Approve tool call " + strings.TrimSpace(toolName) + "?",
-		DedupeKey:    "runtime_tool_gate:" + exec.Base.RunID + ":" + toolCallID + ":" + strings.TrimSpace(toolName),
-		ChatKey:      chatKeyStringFromContext(ctx),
-		ActionSnapshot: &humanrequest.ActionSnapshot{
-			ToolName:    strings.TrimSpace(toolName),
-			Arguments:   snapshotArgs,
-			RunID:       exec.Base.RunID,
-			AgentID:     exec.Profile.ID,
-			SessionID:   exec.Base.ConversationSessionID,
-			ToolCallID:  toolCallID,
-			ContextHash: contextHash,
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	collector.AddHumanRequest(*req, "runtime_tool_gate")
-	collector.SuspendToolCall(SuspendedToolCall{
-		ID:     toolCallID,
-		RunID:  exec.Base.RunID,
-		Name:   strings.TrimSpace(toolName),
-		Input:  cloneAnyMap(snapshotArgs),
-		Status: StatusWaitingHuman,
-	})
-	cancelRuntimeOnInterrupt(ctx)
-	return req, nil
-}
-
-func (s *Service) replayApprovedActionSnapshot(ctx context.Context, req *humanrequest.HumanRequest) (*humanrequest.HumanRequest, error) {
-	if req == nil || req.ActionSnapshot == nil {
-		return req, nil
-	}
-	owner := "runtime-replay"
-	leased, err := s.humanRequests.BeginReplay(ctx, humanrequest.ReplayLeaseRequest{
-		WorkspaceKey:  s.WorkspaceKey(),
-		RequestID:     req.ID,
-		Owner:         owner,
-		LeaseDuration: 5 * time.Minute,
-	})
-	if err != nil {
-		return nil, err
-	}
-	profile, ok := s.agents.Get(leased.ActionSnapshot.AgentID)
-	if !ok {
-		return nil, s.failApprovedActionReplay(ctx, req.ID, owner, fmt.Errorf("replay agent profile %q not found", leased.ActionSnapshot.AgentID))
-	}
-	if err := validateActionSnapshotDigest(leased.ActionSnapshot); err != nil {
-		return nil, s.failApprovedActionReplay(ctx, req.ID, owner, err)
-	}
-	registry := s.toolRegistry(profile)
-	output, execErr := registry.Execute(ctx, leased.ActionSnapshot.ToolName, cloneAnyMap(leased.ActionSnapshot.Arguments))
-	if execErr != nil {
-		return nil, s.failApprovedActionReplay(ctx, req.ID, owner, execErr)
-	}
-	if err := s.materializeApprovedActionSnapshotOutput(leased, output); err != nil {
-		return nil, s.failApprovedActionReplay(ctx, req.ID, owner, err)
-	}
-	digest, err := digestAny(output)
-	if err != nil {
-		return nil, s.failApprovedActionReplay(ctx, req.ID, owner, fmt.Errorf("marshal replay output: %w", err))
-	}
-	completed, err := s.humanRequests.CompleteReplay(ctx, humanrequest.CompleteReplayRequest{
-		WorkspaceKey:    s.WorkspaceKey(),
-		RequestID:       req.ID,
-		Owner:           owner,
-		ResultDigest:    digest,
-		ResultReference: "tool:" + leased.ActionSnapshot.ToolName,
-		IdempotencyKey:  req.Response.IdempotencyKey,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := s.resumeRunAfterApprovedToolOutput(ctx, completed, output); err != nil {
-		return nil, err
-	}
-	return completed, nil
-}
-
-func (s *Service) failApprovedActionReplay(ctx context.Context, requestID, owner string, replayErr error) error {
-	if replayErr == nil {
-		return nil
-	}
-	if s == nil || s.humanRequests == nil {
-		return replayErr
-	}
-	_, failErr := s.humanRequests.FailReplay(ctx, humanrequest.FailReplayRequest{
-		WorkspaceKey: s.WorkspaceKey(),
-		RequestID:    requestID,
-		Owner:        owner,
-		Error:        replayErr.Error(),
-	})
-	if failErr != nil {
-		return fmt.Errorf("%w; additionally failed to persist replay failure: %v", replayErr, failErr)
-	}
-	return replayErr
-}
-
-func (s *Service) materializeRejectedActionSnapshot(req *humanrequest.HumanRequest) error {
-	if s == nil || s.runs == nil || req == nil || req.Response == nil || req.ActionSnapshot == nil {
-		return nil
-	}
-	run, err := s.runs.Load(req.ActionSnapshot.RunID)
-	if err != nil {
-		return err
-	}
-	status := "denied"
-	if req.Response.Kind == humanrequest.ResponseCancel {
-		status = "canceled"
-	}
-	now := time.Now()
-	replaced := false
-	for i := range run.ToolCalls {
-		if run.ToolCalls[i].ID != req.ActionSnapshot.ToolCallID {
-			continue
-		}
-		if run.ToolCalls[i].Output == nil {
-			run.ToolCalls[i].Output = map[string]any{}
-		}
-		run.ToolCalls[i].Output["status"] = status
-		run.ToolCalls[i].Output["human_request_id"] = req.ID
-		run.ToolCalls[i].Output["message"] = strings.TrimSpace(req.Response.Message)
-		run.ToolCalls[i].Error = strings.TrimSpace(req.Response.Message)
-		run.ToolCalls[i].EndedAt = now
-		replaced = true
-		break
-	}
-	if !replaced {
-		run.ToolCalls = append(run.ToolCalls, ToolCallRecord{
-			ID:    req.ActionSnapshot.ToolCallID,
-			RunID: req.ActionSnapshot.RunID,
-			Name:  req.ActionSnapshot.ToolName,
-			Input: cloneAnyMap(req.ActionSnapshot.Arguments),
-			Output: map[string]any{
-				"status":           status,
-				"human_request_id": req.ID,
-				"message":          strings.TrimSpace(req.Response.Message),
-			},
-			Error:     strings.TrimSpace(req.Response.Message),
-			StartedAt: now,
-			EndedAt:   now,
-		})
-	}
-	run.Status = "failed"
-	run.Interrupt = nil
-	replaceRunHumanRequest(&run, *req)
-	if run.Metadata == nil {
-		run.Metadata = map[string]string{}
-	}
-	if req.Response.Kind == humanrequest.ResponseCancel {
-		run.Metadata["error_type"] = "canceled"
-	}
-	run.VerificationResult = VerificationResult{Status: "failed", Checks: []string{"human_response_" + string(req.Response.Kind)}}
-	run.EndedAt = now
-	return s.runs.SaveRun(run)
-}
-
 func isHumanRequestToolWireName(name string) bool {
 	name = strings.TrimSpace(name)
 	return name == "human.request" || name == "human_request"
@@ -389,44 +188,6 @@ func cloneAnyMapDeep(in map[string]any) map[string]any {
 	return out
 }
 
-func digestAny(value any) (string, error) {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
-}
-
-func canonicalActionSnapshotArguments(args map[string]any) (map[string]any, error) {
-	if args == nil {
-		return nil, nil
-	}
-	data, err := yaml.Marshal(args)
-	if err != nil {
-		return nil, err
-	}
-	var out map[string]any
-	if err := yaml.Unmarshal(data, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func validateActionSnapshotDigest(snapshot *humanrequest.ActionSnapshot) error {
-	if snapshot == nil || strings.TrimSpace(snapshot.ContextHash) == "" {
-		return nil
-	}
-	got, err := digestAny(snapshot.Arguments)
-	if err != nil {
-		return fmt.Errorf("marshal snapshot arguments: %w", err)
-	}
-	if got != snapshot.ContextHash {
-		return fmt.Errorf("snapshot arguments changed: got %s want %s", got, snapshot.ContextHash)
-	}
-	return nil
-}
-
 func humanOptionsFromAny(value any) []humanrequest.HumanOption {
 	switch v := value.(type) {
 	case []humanrequest.HumanOption:
@@ -456,56 +217,4 @@ func humanOptionsFromAny(value any) []humanrequest.HumanOption {
 	default:
 		return nil
 	}
-}
-
-// actionTargetSummary extracts a short human-readable target from a
-// runtime_tool_gate ActionSnapshot's arguments, for surfacing in events /
-// IM rendering (#109). Returns "" when no recognizable target is present
-// (caller falls back to tool name only).
-//
-// Per-tool extraction (best-effort, not exhaustive):
-//   - write_file / edit_file: the "path" argument
-//   - command.run: the "program" argument
-//   - shell.run: the "command" argument (truncated)
-//
-// Only the leaf path segment is kept (basename) to keep the IM message short
-// and avoid leaking full workspace paths.
-func actionTargetSummary(snapshot *humanrequest.ActionSnapshot) string {
-	if snapshot == nil || len(snapshot.Arguments) == 0 {
-		return ""
-	}
-	args := snapshot.Arguments
-	tool := strings.TrimSpace(snapshot.ToolName)
-	var raw string
-	switch tool {
-	case "write_file", "edit_file":
-		raw = stringArg(args, "path")
-	case "command.run":
-		raw = stringArg(args, "program")
-	case "shell.run":
-		// shell commands are a single opaque string that frequently carries
-		// inline credentials in practice (Bearer tokens, -p password, URL-embedded
-		// keys, AWS env vars). Unlike path/program, there is no safe substring —
-		// any prefix can leak a secret, and the basename logic below does not
-		// apply (commands rarely contain path separators). Render nothing: the
-		// user sees "确认执行 shell.run" and inspects the full command via the
-		// private HTTP/CLI channel. (PR #116 review WARNING.)
-		return ""
-	default:
-		return ""
-	}
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	// Keep basename (leaf segment) for brevity; full path leaks workspace layout
-	// and bloats the IM message.
-	if idx := strings.LastIndexAny(raw, "/\\"); idx >= 0 && idx < len(raw)-1 {
-		return raw[idx+1:]
-	}
-	// shell commands can be long — truncate.
-	if len(raw) > 60 {
-		return raw[:60] + "..."
-	}
-	return raw
 }

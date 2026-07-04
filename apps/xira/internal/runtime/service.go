@@ -1084,40 +1084,6 @@ func (s *Service) executeToolCall(
 		"input": rec.Input,
 	})
 	recordAudit("tool.call", rec.Name, true, "tool allowed by profile", rec.Input)
-	if def, ok := registry.GetDefinition(rec.Name); ok && def.Policy.RequireConfirmation {
-		req, err := s.createRuntimeToolGateHumanRequest(ctx, rec.ID, rec.Name, rec.Input)
-		rec.EndedAt = time.Now()
-		rec.Output = map[string]any{
-			"status":           StatusWaitingHuman,
-			"human_request_id": "",
-		}
-		if err != nil {
-			rec.Error = err.Error()
-			recordEvent("human.request.failed", "runtime", "runtime tool confirmation request failed", map[string]any{
-				"tool":  rec.Name,
-				"error": err.Error(),
-			})
-			recordAudit("human.request", rec.ID, false, err.Error(), map[string]any{"tool": rec.Name})
-			return rec
-		}
-		rec.Output["human_request_id"] = req.ID
-		payload := map[string]any{
-			"human_request_id": req.ID,
-			"kind":             req.Kind,
-			"source":           req.Source,
-			"tool":             rec.Name,
-			"tool_call_id":     rec.ID,
-		}
-		if target := actionTargetSummary(req.ActionSnapshot); target != "" {
-			payload["target"] = target
-		}
-		recordEvent("human.request.created", "runtime", "runtime tool confirmation required", payload)
-		recordAudit("human.request", req.ID, true, "runtime tool confirmation required", map[string]any{
-			"tool":         rec.Name,
-			"tool_call_id": rec.ID,
-		})
-		return rec
-	}
 	var output map[string]any
 	var err error
 	if guard := toolFailureGuardFromContext(ctx); guard != nil && guard.shouldBlock(rec.Name, rec.Input) {

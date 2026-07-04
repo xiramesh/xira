@@ -19,23 +19,23 @@ const (
 )
 
 type profileFrontmatter struct {
-	ID           string             `yaml:"id"`
-	Name         string             `yaml:"name"`
-	Version      string             `yaml:"version"`
-	Description  string             `yaml:"description"`
-	ModelPolicy  ModelPolicy        `yaml:"model_policy"`
-	Context      ContextPolicy      `yaml:"context"`
-	Skills       []string           `yaml:"skills"`
-	MCPServers   []string           `yaml:"mcp_servers"`
+	ID            string             `yaml:"id"`
+	Name          string             `yaml:"name"`
+	Version       string             `yaml:"version"`
+	Description   string             `yaml:"description"`
+	ModelPolicy   ModelPolicy        `yaml:"model_policy"`
+	Context       ContextPolicy      `yaml:"context"`
+	Skills        []string           `yaml:"skills"`
+	MCPServers    []string           `yaml:"mcp_servers"`
 	Tools         []string           `yaml:"tools"`
 	AllowRoots    []string           `yaml:"allow_roots,omitempty"`
 	ReadonlyRoots []string           `yaml:"readonly_roots,omitempty"`
 	Session       SessionPolicy      `yaml:"session"`
-	Permissions  Permissions        `yaml:"permissions"`
-	Delegation   DelegationPolicy   `yaml:"delegation"`
-	Verification VerificationPolicy `yaml:"verification"`
-	Artifacts    ArtifactPolicy     `yaml:"artifacts"`
-	Evolution    EvolutionPolicy    `yaml:"evolution"`
+	Permissions   Permissions        `yaml:"permissions"`
+	Delegation    DelegationPolicy   `yaml:"delegation"`
+	Verification  VerificationPolicy `yaml:"verification"`
+	Artifacts     ArtifactPolicy     `yaml:"artifacts"`
+	Evolution     EvolutionPolicy    `yaml:"evolution"`
 }
 
 func LoadFromWorkspace(workspaceRoot string) (*Manager, error) {

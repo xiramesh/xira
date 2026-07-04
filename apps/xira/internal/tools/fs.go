@@ -82,7 +82,14 @@ func (t *WriteFileTool) Description() string {
 	return "Create or overwrite a UTF-8 text file in the Xira workspace or configured sandbox roots."
 }
 func (t *WriteFileTool) Policy() ToolPolicy {
-	return ToolPolicy{Risk: "high", RequireConfirmation: true}
+	// #110: write_file no longer gates on RequireConfirmation. allow_roots is a
+	// hard boundary — in-bound writes execute directly (Codex workspace-write /
+	// Aider model), out-of-bound writes are rejected by the sandbox
+	// (resolveWriteArgPath → pathWithinRoots, "path must stay within allowed
+	// roots"). gate was redundant double-protection that only triggered inside
+	// the boundary (where writes should pass) and deadlocked IM channels
+	// (runtime_tool_gate has no IM resolve path). Risk stays "high" for audit.
+	return ToolPolicy{Risk: "high"}
 }
 func (t *WriteFileTool) Parameters() map[string]any {
 	return map[string]any{
@@ -166,7 +173,9 @@ func (t *EditFileTool) Description() string {
 	return "Replace one exact text occurrence in an existing file within the workspace or configured sandbox roots."
 }
 func (t *EditFileTool) Policy() ToolPolicy {
-	return ToolPolicy{Risk: "high", RequireConfirmation: true}
+	// #110: see WriteFileTool.Policy — edit_file no longer gates. allow_roots
+	// boundary is the protection; gate was redundant and deadlocked IM.
+	return ToolPolicy{Risk: "high"}
 }
 func (t *EditFileTool) Parameters() map[string]any {
 	return map[string]any{

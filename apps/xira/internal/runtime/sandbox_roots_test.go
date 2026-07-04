@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -55,16 +56,30 @@ func newSandboxConfirmationRuntime(t *testing.T, workspace string, client *http.
 	})
 }
 
-// TestEditFileConfirmationGateInAllowRoot guards B1: once edit_file can reach an
-// allow_root, it still goes through the HITL confirmation gate (same as
-// write_file), and does not execute before approval.
-func TestEditFileConfirmationGateInAllowRoot(t *testing.T) {
+// TestEditFileExecutesDirectlyInAllowRoot guards #110: edit_file no longer goes
+// through a confirmation gate. allow_roots is a hard boundary — an in-bound
+// edit executes directly (the file is modified) and does NOT produce a
+// waiting_human interrupt or human request.
+func TestEditFileExecutesDirectlyInAllowRoot(t *testing.T) {
 	workspace := t.TempDir()
 	allowDir := t.TempDir()
 	targetPath := filepath.Join(allowDir, "target.txt")
 	writeFile(t, targetPath, "original line")
 
-	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		// First call: emit edit_file. After edit executes, the loop calls again
+		// with a tool result — return a final to end the turn. Pre-#110 the
+		// gate broke this loop by entering waiting_human; now edit completes
+		// and the model must produce a final.
+		var req deepseek.ChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if hasToolResponse(req.Messages) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(deepSeekTextResponse("edit done"))),
+			}, nil
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -79,14 +94,15 @@ func TestEditFileConfirmationGateInAllowRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
-	if resp.Status != StatusWaitingHuman {
-		t.Fatalf("status = %q, want waiting_human: edit_file must hit the confirmation gate in allow_roots", resp.Status)
+	if resp.Status == StatusWaitingHuman {
+		t.Fatalf("status = waiting_human: edit_file must NOT gate in allow_roots (#110); human_requests=%+v", resp.HumanRequests)
 	}
-	if len(resp.HumanRequests) != 1 || resp.HumanRequests[0].Source != "runtime_tool_gate" {
-		t.Fatalf("human_requests = %+v", resp.HumanRequests)
+	if len(resp.HumanRequests) != 0 {
+		t.Fatalf("edit_file produced a human request (%+v) — gate should be gone (#110)", resp.HumanRequests)
 	}
-	if data, _ := os.ReadFile(targetPath); string(data) != "original line" {
-		t.Fatalf("edit_file executed before approval, content = %q", string(data))
+	// In-bound edit executed directly (allow_roots boundary permits it).
+	if data, _ := os.ReadFile(targetPath); !strings.Contains(string(data), "changed") {
+		t.Fatalf("edit_file did not execute in-bound; content = %q", string(data))
 	}
 }
 

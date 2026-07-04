@@ -49,10 +49,10 @@ type Message struct {
 }
 
 const (
-	MessageKindMessage      = "message"
-	MessageKindToolCall     = "tool_call"
-	MessageKindToolResult   = "tool_result"
-	MessageKindHumanRequest = "human_request"  // agent paused to ask a human (the question/options)
+	MessageKindMessage       = "message"
+	MessageKindToolCall      = "tool_call"
+	MessageKindToolResult    = "tool_result"
+	MessageKindHumanRequest  = "human_request"  // agent paused to ask a human (the question/options)
 	MessageKindHumanResponse = "human_response" // a human's answer (approve/deny/cancel/answer + actor + message)
 )
 

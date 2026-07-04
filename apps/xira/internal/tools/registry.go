@@ -31,8 +31,7 @@ type Definition struct {
 }
 
 type ToolPolicy struct {
-	Risk                string
-	RequireConfirmation bool
+	Risk string
 }
 
 type PolicyProvider interface {

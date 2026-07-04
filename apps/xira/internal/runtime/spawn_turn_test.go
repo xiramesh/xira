@@ -291,8 +291,8 @@ func TestSanitizeSpawnTurnInput(t *testing.T) {
 
 	// Input with unsupported fields: reported but spec still extracted.
 	spec, clean, unsupported = sanitizeSpawnTurnInput(map[string]any{
-		"agent_id":    "research-assistant",
-		"task":        "find evidence",
+		"agent_id":        "research-assistant",
+		"task":            "find evidence",
 		"max_duration_ms": 5000, // not yet supported in Phase 3
 	})
 	if spec.AgentID != "research-assistant" {
@@ -391,10 +391,10 @@ func (noopEventBus) Deliver(evt Event) {}
 // noopSteeringBus is a no-op SteeringBus for the same purpose.
 type noopSteeringBus struct{}
 
-func (noopSteeringBus) Enqueue(string)               {}
-func (noopSteeringBus) TryDequeue() (string, bool)   { return "", false }
-func (noopSteeringBus) DrainAll() []string           { return nil }
-func (noopSteeringBus) HasPending() bool             { return false }
+func (noopSteeringBus) Enqueue(string)             {}
+func (noopSteeringBus) TryDequeue() (string, bool) { return "", false }
+func (noopSteeringBus) DrainAll() []string         { return nil }
+func (noopSteeringBus) HasPending() bool           { return false }
 
 // TestSpawnCoreChildPanicRecovered verifies C1: a panicking child turn is
 // recovered by the detached goroutine. spawnCore must return normally and

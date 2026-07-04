@@ -25,8 +25,7 @@ import (
 //
 // Rules:
 //   - agent_request and flow_human_approval HITLs are eligible for pure-text IM
-//     reply. runtime_tool_gate still needs precise approve/deny — button card
-//     future or HTTP/CLI — because it can execute a tool.
+//     reply.
 //   - agent_request stores the user's text as ResponseAnswer + message and
 //     leaves intent understanding to the agent during resume.
 //   - flow_human_approval first matches the text against the request options,
@@ -45,8 +44,7 @@ func TryResolveHITL(ctx context.Context, resolver runtime.HITLResolver, chatKey 
 	if err != nil || len(pending) == 0 {
 		return false
 	}
-	// Find the most recent IM-resolvable HITL. runtime_tool_gate HITLs are
-	// skipped (need precise approve/deny).
+	// Find the most recent IM-resolvable HITL.
 	var hr *humanrequest.HumanRequest
 	for i := range pending {
 		if imResolvableHITLSource(pending[i].Source) {
@@ -55,7 +53,7 @@ func TryResolveHITL(ctx context.Context, resolver runtime.HITLResolver, chatKey 
 		}
 	}
 	if hr == nil {
-		return false // only tool-gate / unsupported HITLs pending
+		return false // no IM-resolvable HITL pending
 	}
 	kind, msg := ClassifyHITLResponse(content, hr.Kind)
 	// #108: any HITL with Options (agent_request OR flow_human_approval) goes

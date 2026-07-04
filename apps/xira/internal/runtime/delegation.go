@@ -82,7 +82,7 @@ func (s *Service) runtimeADKTools(
 	// 从 ctx 填(防模型伪造跨 chat)。详见 human_interpret.go。
 	humanInterpretTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
 		Name:         humanInterpretToolName,
-		Description:  "Declare that the user's reply answers a specific pending HumanRequest (from the Pending Human Requests summary). Resolves it in the background. Use ONLY for agent_request or flow_human_approval requests whose request_id appeared in the summary — never for runtime_tool_gate. If the user's reply is ambiguous across multiple pending requests, ask for clarification instead of calling this tool.",
+		Description:  "Declare that the user's reply answers a specific pending HumanRequest (from the Pending Human Requests summary). Resolves it in the background. Use ONLY for agent_request or flow_human_approval requests whose request_id appeared in the summary. If the user's reply is ambiguous across multiple pending requests, ask for clarification instead of calling this tool.",
 		InputSchema:  humanInterpretInputSchema(),
 		OutputSchema: objectSchema(),
 	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {

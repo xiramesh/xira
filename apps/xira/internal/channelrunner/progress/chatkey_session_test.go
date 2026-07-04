@@ -501,11 +501,11 @@ func TestSessionDedupeForgetOnRunError(t *testing.T) {
 	rt := newFakeRuntime(fakeRuntimeStep{err: errors.New("boom")})
 	router := NewRouter()
 	cfg := ChatKeySessionConfig{
-		Runtime:      rt,
-		EntrypointID: "ep1",
-		Inbound:      testInbound(),
-		SendProgress: captureDeliverer(&[]string{}),
-		SendFinal:    captureDeliverer(&[]string{}),
+		Runtime:        rt,
+		EntrypointID:   "ep1",
+		Inbound:        testInbound(),
+		SendProgress:   captureDeliverer(&[]string{}),
+		SendFinal:      captureDeliverer(&[]string{}),
 		DedupeComplete: func() { completeCalls++ },
 		DedupeForget:   func() { forgetCalls++ },
 	}
@@ -529,11 +529,11 @@ func TestSessionDedupeForgetOnSendFinalError(t *testing.T) {
 	})
 	router := NewRouter()
 	cfg := ChatKeySessionConfig{
-		Runtime:      rt,
-		EntrypointID: "ep1",
-		Inbound:      testInbound(),
-		SendProgress: captureDeliverer(&[]string{}),
-		SendFinal: func(_ context.Context, _ string) error { return errors.New("send failed") },
+		Runtime:        rt,
+		EntrypointID:   "ep1",
+		Inbound:        testInbound(),
+		SendProgress:   captureDeliverer(&[]string{}),
+		SendFinal:      func(_ context.Context, _ string) error { return errors.New("send failed") },
 		DedupeComplete: func() { completeCalls++ },
 		DedupeForget:   func() { forgetCalls++ },
 	}
@@ -558,11 +558,11 @@ func TestSessionEmptyFinalCountsAsSuccessForDedupe(t *testing.T) {
 	})
 	router := NewRouter()
 	cfg := ChatKeySessionConfig{
-		Runtime:      rt,
-		EntrypointID: "ep1",
-		Inbound:      testInbound(),
-		SendProgress: captureDeliverer(&[]string{}),
-		SendFinal:    captureDeliverer(&[]string{}),
+		Runtime:        rt,
+		EntrypointID:   "ep1",
+		Inbound:        testInbound(),
+		SendProgress:   captureDeliverer(&[]string{}),
+		SendFinal:      captureDeliverer(&[]string{}),
 		DedupeComplete: func() { completeCalls++ },
 		DedupeForget:   func() { forgetCalls++ },
 	}

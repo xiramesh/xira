@@ -54,11 +54,10 @@ const (
 
 // HumanRequestSource enumerates the source values Flow writes onto the
 // HumanRequests it creates or observes. Only Flow-owned explicit approvals
-// use SourceFlowHumanApproval; the other two are produced by the agent runtime.
+// use SourceFlowHumanApproval; the other is produced by the agent runtime.
 const (
 	SourceFlowHumanApproval = "flow_human_approval"
 	SourceAgentRequest      = "agent_request"
-	SourceRuntimeToolGate   = "runtime_tool_gate"
 )
 
 // Metadata keys Flow writes onto HumanRequests in v0. See ASSUMPTION-FLOW-003.
@@ -283,26 +282,26 @@ type RetryPolicy struct {
 
 // Run is one durable instance of a Definition.
 type Run struct {
-	SchemaVersion        string               `yaml:"schema_version" json:"schema_version"`
-	ID                   string               `yaml:"flow_run_id" json:"flow_run_id"`
-	FlowID               string               `yaml:"flow_id" json:"flow_id"`
-	FlowVersion          string               `yaml:"flow_version" json:"flow_version"`
-	Status               RunStatus            `yaml:"status" json:"status"`
-	CurrentStepID        string               `yaml:"current_step_id,omitempty" json:"current_step_id,omitempty"`
-	EntrypointID         string               `yaml:"entrypoint_id,omitempty" json:"entrypoint_id,omitempty"`
-	Input                map[string]string    `yaml:"input,omitempty" json:"input,omitempty"`
+	SchemaVersion string            `yaml:"schema_version" json:"schema_version"`
+	ID            string            `yaml:"flow_run_id" json:"flow_run_id"`
+	FlowID        string            `yaml:"flow_id" json:"flow_id"`
+	FlowVersion   string            `yaml:"flow_version" json:"flow_version"`
+	Status        RunStatus         `yaml:"status" json:"status"`
+	CurrentStepID string            `yaml:"current_step_id,omitempty" json:"current_step_id,omitempty"`
+	EntrypointID  string            `yaml:"entrypoint_id,omitempty" json:"entrypoint_id,omitempty"`
+	Input         map[string]string `yaml:"input,omitempty" json:"input,omitempty"`
 	// Context is the trigger identity (channel/chat/sender/space) of whoever
 	// started this flow run. It persists into flow_run.yaml so cross-process
 	// Advance/Resume can propagate it to agent steps — keeping flow-invoked
 	// agent sessions under the same conversation tree as the direct trigger.
 	Context              *channel.InboundContext `yaml:"context,omitempty" json:"context,omitempty"`
-	Steps                map[string]StepState `yaml:"steps,omitempty" json:"steps,omitempty"`
-	PendingSignals       []string             `yaml:"pending_signals,omitempty" json:"pending_signals,omitempty"`
-	PendingHumanRequests []string             `yaml:"pending_human_requests,omitempty" json:"pending_human_requests,omitempty"`
-	Artifacts            []ArtifactRef        `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
-	EventsRef            string               `yaml:"events_ref,omitempty" json:"events_ref,omitempty"`
-	CreatedAt            time.Time            `yaml:"created_at" json:"created_at"`
-	UpdatedAt            time.Time            `yaml:"updated_at" json:"updated_at"`
+	Steps                map[string]StepState    `yaml:"steps,omitempty" json:"steps,omitempty"`
+	PendingSignals       []string                `yaml:"pending_signals,omitempty" json:"pending_signals,omitempty"`
+	PendingHumanRequests []string                `yaml:"pending_human_requests,omitempty" json:"pending_human_requests,omitempty"`
+	Artifacts            []ArtifactRef           `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
+	EventsRef            string                  `yaml:"events_ref,omitempty" json:"events_ref,omitempty"`
+	CreatedAt            time.Time               `yaml:"created_at" json:"created_at"`
+	UpdatedAt            time.Time               `yaml:"updated_at" json:"updated_at"`
 }
 
 // StepState is the persisted state of one step inside a Run.

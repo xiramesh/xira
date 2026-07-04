@@ -41,8 +41,8 @@ func (c *recordingClient) Push(_ context.Context, _, content string) (string, er
 	c.mu.Unlock()
 	return "client-id", nil
 }
-func (c *recordingClient) Token() string    { return c.token }
-func (c *recordingClient) BaseURL() string  { return c.baseURL }
+func (c *recordingClient) Token() string   { return c.token }
+func (c *recordingClient) BaseURL() string { return c.baseURL }
 func (c *recordingClient) contents() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -55,7 +55,7 @@ func (f ilinkRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func dsText(text string) string {
 	b, _ := json.Marshal(map[string]any{
-		"model": "deepseek-v4-flash",
+		"model":   "deepseek-v4-flash",
 		"choices": []map[string]any{{"finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": text}}},
 	})
 	return string(b)
@@ -94,12 +94,12 @@ func newProgressTestRunner(t *testing.T, respond func(*http.Request) string) (*R
 
 func userTextMsg(text string) openilink.WeixinMessage {
 	return openilink.WeixinMessage{
-		MessageID:  42,
-		MessageType: openilink.MsgTypeUser,
-		FromUserID: "wxid-user",
-		SessionID:  "session-1",
+		MessageID:    42,
+		MessageType:  openilink.MsgTypeUser,
+		FromUserID:   "wxid-user",
+		SessionID:    "session-1",
 		ContextToken: "ctx-token",
-		ItemList:   []openilink.MessageItem{{Type: openilink.ItemText, TextItem: &openilink.TextItem{Text: text}}},
+		ItemList:     []openilink.MessageItem{{Type: openilink.ItemText, TextItem: &openilink.TextItem{Text: text}}},
 	}
 }
 

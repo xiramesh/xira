@@ -87,17 +87,17 @@ func executePollTurn(ctx context.Context, childID string) map[string]any {
 	sink := SpawnBusFromContext(ctx)
 	if sink == nil {
 		return map[string]any{
-			"status":         "unavailable",
-			"child_turn_id":  childID,
-			"error":          "no spawn result sink in context (spawn results not collectable on this turn)",
+			"status":        "unavailable",
+			"child_turn_id": childID,
+			"error":         "no spawn result sink in context (spawn results not collectable on this turn)",
 		}
 	}
 	peeper, ok := sink.(SpawnBusPeeper)
 	if !ok {
 		return map[string]any{
-			"status":         "unavailable",
-			"child_turn_id":  childID,
-			"error":          "spawn result sink does not support polling",
+			"status":        "unavailable",
+			"child_turn_id": childID,
+			"error":         "spawn result sink does not support polling",
 		}
 	}
 

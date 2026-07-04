@@ -101,7 +101,7 @@ func newTestRunner(t *testing.T, rt frt.Runtime) *Runner {
 
 // capturedFrames records every outboundFrame written, protected by a mutex.
 type capturedFrames struct {
-	mu    sync.Mutex
+	mu     sync.Mutex
 	frames []outboundFrame
 }
 
@@ -182,8 +182,14 @@ func TestRunnerConcurrentSameChatDoesNotRace(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); runner.handleMessage(ctx, msg1, "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write)) }()
-	go func() { defer wg.Done(); runner.handleMessage(ctx, msg2, "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write)) }()
+	go func() {
+		defer wg.Done()
+		runner.handleMessage(ctx, msg1, "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write))
+	}()
+	go func() {
+		defer wg.Done()
+		runner.handleMessage(ctx, msg2, "websocket-default", caps.write, addActive, removeActive, registerConnForTest(runner, caps.write))
+	}()
 
 	time.Sleep(50 * time.Millisecond) // let both dispatch
 	gmu.Lock()

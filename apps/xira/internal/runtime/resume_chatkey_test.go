@@ -116,5 +116,3 @@ func TestResumeDirectHumanRequestSetsChatKeyOnCtx(t *testing.T) {
 	}
 	waitForRunTerminal(t, rt, "resume-ck-smoke-1", 2*time.Second)
 }
-
-

@@ -219,18 +219,16 @@ func TestExecuteAnswerChildRejectsUnknownRequest(t *testing.T) {
 // "completed" via a real model call (proving it could still generate), not a
 // tool-less "I can't do anything" failure.
 //
-// The sibling path (resumeRunAfterApprovedToolOutput) strips tools + disables
-// native tools — a regression that flips THIS path to do the same would break
 // #68 (the child could never finish its task after the parent answers).
 func TestAnswerChildResumeKeepsChildWorking(t *testing.T) {
 	rt := newAnswerChildTestService(t)
 	ctx := context.Background()
 
 	if err := rt.runs.SaveRun(TurnResponse{
-		RunID:    "child-working-1",
-		AgentID:  "xira-assistant",
-		Status:   StatusWaitingHuman,
-		Message:  "deploy",
+		RunID:   "child-working-1",
+		AgentID: "xira-assistant",
+		Status:  StatusWaitingHuman,
+		Message: "deploy",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -272,4 +270,3 @@ func TestAnswerChildResumeKeepsChildWorking(t *testing.T) {
 	}
 	t.Fatalf("child run did not reach a terminal status within timeout — resume did not fire")
 }
-

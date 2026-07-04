@@ -159,9 +159,9 @@ func TestExecutePollTurnChildWaitingHumanSurfacesQuestion(t *testing.T) {
 		"spawn:asking": {
 			TurnID: "spawn:asking",
 			Result: DelegateAgentResult{
-				AgentID:  "research",
-				Status:   StatusWaitingHuman,
-				Summary:  "child needs input",
+				AgentID: "research",
+				Status:  StatusWaitingHuman,
+				Summary: "child needs input",
 				PendingQuestions: []PendingQuestion{
 					{Question: "Which deployment window should I target?", HumanRequestID: "hr-ask-001"},
 				},

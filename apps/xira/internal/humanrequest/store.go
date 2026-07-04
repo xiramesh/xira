@@ -69,31 +69,27 @@ func (s *Store) Create(ctx context.Context, input CreateRequest) (*HumanRequest,
 		return nil, err
 	}
 	req := &HumanRequest{
-		ID:             id,
-		WorkspaceID:    strings.TrimSpace(input.WorkspaceID),
-		WorkspaceKey:   strings.TrimSpace(input.WorkspaceKey),
-		RunID:          strings.TrimSpace(input.RunID),
-		AgentID:        strings.TrimSpace(input.AgentID),
-		SessionID:      strings.TrimSpace(input.SessionID),
-		ToolCallID:     strings.TrimSpace(input.ToolCallID),
-		Source:         strings.TrimSpace(input.Source),
-		Kind:           input.Kind,
-		Status:         StatusPending,
-		Question:       strings.TrimSpace(input.Question),
-		Options:        append([]HumanOption(nil), input.Options...),
-		ActionSnapshot: cloneActionSnapshot(input.ActionSnapshot),
-		DedupeKey:      strings.TrimSpace(input.DedupeKey),
-		ChatKey:        strings.TrimSpace(input.ChatKey),
-		CreatedAt:      now,
-		Metadata:       cloneStringMap(input.Metadata),
+		ID:           id,
+		WorkspaceID:  strings.TrimSpace(input.WorkspaceID),
+		WorkspaceKey: strings.TrimSpace(input.WorkspaceKey),
+		RunID:        strings.TrimSpace(input.RunID),
+		AgentID:      strings.TrimSpace(input.AgentID),
+		SessionID:    strings.TrimSpace(input.SessionID),
+		ToolCallID:   strings.TrimSpace(input.ToolCallID),
+		Source:       strings.TrimSpace(input.Source),
+		Kind:         input.Kind,
+		Status:       StatusPending,
+		Question:     strings.TrimSpace(input.Question),
+		Options:      append([]HumanOption(nil), input.Options...),
+		DedupeKey:    strings.TrimSpace(input.DedupeKey),
+		ChatKey:      strings.TrimSpace(input.ChatKey),
+		CreatedAt:    now,
+		Metadata:     cloneStringMap(input.Metadata),
 		Audit: []AuditRecord{{
 			Time:     now,
 			Action:   "human_request.created",
 			ToStatus: StatusPending,
 		}},
-	}
-	if req.ActionSnapshot != nil {
-		req.Replay = &ReplayState{Status: ReplayPending, UpdatedAt: now}
 	}
 	if err := s.writeRequest(req); err != nil {
 		return nil, err
@@ -143,16 +139,6 @@ func (s *Store) Resolve(ctx context.Context, input ResolveRequest) (*HumanReques
 	req.Status = StatusResolved
 	req.ResolvedAt = &now
 	req.Response = response
-	if req.Replay != nil {
-		switch input.Kind {
-		case ResponseDeny:
-			req.Replay.Status = ReplayDenied
-			req.Replay.UpdatedAt = now
-		case ResponseCancel:
-			req.Replay.Status = ReplayCanceled
-			req.Replay.UpdatedAt = now
-		}
-	}
 	req.Audit = append(req.Audit, AuditRecord{
 		Time:       now,
 		Actor:      response.Actor,
@@ -222,167 +208,6 @@ func (s *Store) ListByChatKey(ctx context.Context, workspaceKey, chatKey string)
 		Status:       StatusPending,
 		ChatKey:      chatKey,
 	})
-}
-
-func (s *Store) BeginReplay(ctx context.Context, input ReplayLeaseRequest) (*HumanRequest, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := validateWorkspaceKey(input.WorkspaceKey); err != nil {
-		return nil, err
-	}
-	if err := validatePathID(input.RequestID, "request id"); err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(input.Owner) == "" {
-		return nil, fmt.Errorf("%w: owner is required", ErrValidation)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	req, err := s.loadRequest(input.WorkspaceKey, input.RequestID)
-	if err != nil {
-		return nil, err
-	}
-	if req.Replay == nil {
-		return nil, fmt.Errorf("%w: request has no replay snapshot", ErrConflict)
-	}
-	now := input.Now
-	if now.IsZero() {
-		now = time.Now()
-	}
-	duration := input.LeaseDuration
-	if duration <= 0 {
-		duration = 5 * time.Minute
-	}
-	switch req.Replay.Status {
-	case ReplayPending, ReplayFailed:
-	case ReplayRunning:
-		if req.Replay.LeaseUntil != nil && now.Before(*req.Replay.LeaseUntil) {
-			return nil, fmt.Errorf("%w: replay lease held by %s", ErrConflict, req.Replay.LeaseOwner)
-		}
-	case ReplayCompleted, ReplayDenied, ReplayCanceled:
-		return nil, fmt.Errorf("%w: replay is %s", ErrConflict, req.Replay.Status)
-	default:
-		return nil, fmt.Errorf("%w: replay status %q cannot start", ErrConflict, req.Replay.Status)
-	}
-	leaseUntil := now.Add(duration)
-	req.Replay.Status = ReplayRunning
-	req.Replay.LeaseOwner = strings.TrimSpace(input.Owner)
-	req.Replay.LeaseUntil = &leaseUntil
-	req.Replay.UpdatedAt = now
-	req.Audit = append(req.Audit, AuditRecord{
-		Time:   now,
-		Actor:  req.Replay.LeaseOwner,
-		Action: "human_request.replay_started",
-	})
-	if err := s.writeRequest(req); err != nil {
-		return nil, err
-	}
-	return req, nil
-}
-
-func (s *Store) CompleteReplay(ctx context.Context, input CompleteReplayRequest) (*HumanRequest, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := validateWorkspaceKey(input.WorkspaceKey); err != nil {
-		return nil, err
-	}
-	if err := validatePathID(input.RequestID, "request id"); err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(input.Owner) == "" {
-		return nil, fmt.Errorf("%w: owner is required", ErrValidation)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	req, err := s.loadRequest(input.WorkspaceKey, input.RequestID)
-	if err != nil {
-		return nil, err
-	}
-	now := input.CompletedAt
-	if now.IsZero() {
-		now = time.Now()
-	}
-	idem := strings.TrimSpace(input.IdempotencyKey)
-	if req.Replay != nil && req.Replay.Status == ReplayCompleted {
-		if idem != "" && req.Replay.IdempotencyKey == idem {
-			return req, nil
-		}
-		return nil, fmt.Errorf("%w: replay already completed", ErrConflict)
-	}
-	if req.Replay == nil || req.Replay.Status != ReplayRunning {
-		return nil, fmt.Errorf("%w: replay is not running", ErrConflict)
-	}
-	if req.Replay.LeaseOwner != strings.TrimSpace(input.Owner) {
-		return nil, fmt.Errorf("%w: replay lease held by %s", ErrConflict, req.Replay.LeaseOwner)
-	}
-	req.Replay.Status = ReplayCompleted
-	req.Replay.LeaseUntil = nil
-	req.Replay.ResultDigest = strings.TrimSpace(input.ResultDigest)
-	req.Replay.ResultReference = strings.TrimSpace(input.ResultReference)
-	req.Replay.IdempotencyKey = idem
-	req.Replay.UpdatedAt = now
-	req.Audit = append(req.Audit, AuditRecord{
-		Time:   now,
-		Actor:  strings.TrimSpace(input.Owner),
-		Action: "human_request.replay_completed",
-	})
-	if err := s.writeReplayResult(req.WorkspaceKey, req.ID, req.Replay); err != nil {
-		return nil, err
-	}
-	if err := s.writeRequest(req); err != nil {
-		return nil, err
-	}
-	return req, nil
-}
-
-func (s *Store) FailReplay(ctx context.Context, input FailReplayRequest) (*HumanRequest, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := validateWorkspaceKey(input.WorkspaceKey); err != nil {
-		return nil, err
-	}
-	if err := validatePathID(input.RequestID, "request id"); err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(input.Owner) == "" {
-		return nil, fmt.Errorf("%w: owner is required", ErrValidation)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	req, err := s.loadRequest(input.WorkspaceKey, input.RequestID)
-	if err != nil {
-		return nil, err
-	}
-	if req.Replay == nil || req.Replay.Status != ReplayRunning {
-		return nil, fmt.Errorf("%w: replay is not running", ErrConflict)
-	}
-	if req.Replay.LeaseOwner != strings.TrimSpace(input.Owner) {
-		return nil, fmt.Errorf("%w: replay lease held by %s", ErrConflict, req.Replay.LeaseOwner)
-	}
-	now := input.FailedAt
-	if now.IsZero() {
-		now = time.Now()
-	}
-	req.Replay.Status = ReplayFailed
-	req.Replay.LeaseUntil = nil
-	req.Replay.Error = strings.TrimSpace(input.Error)
-	req.Replay.UpdatedAt = now
-	req.Audit = append(req.Audit, AuditRecord{
-		Time:    now,
-		Actor:   strings.TrimSpace(input.Owner),
-		Action:  "human_request.replay_failed",
-		Message: req.Replay.Error,
-	})
-	if err := s.writeRequest(req); err != nil {
-		return nil, err
-	}
-	return req, nil
 }
 
 func (s *Store) findPendingDuplicate(input CreateRequest) (*HumanRequest, bool, error) {
@@ -486,16 +311,6 @@ func (s *Store) writeResponse(workspaceKey string, response *HumanResponse) erro
 		return err
 	}
 	return writeJSONAtomic(filepath.Join(s.workspaceDir(workspaceKey), "human-responses", response.ID+".json"), response, 0o600)
-}
-
-func (s *Store) writeReplayResult(workspaceKey, requestID string, replay *ReplayState) error {
-	if err := validateWorkspaceKey(workspaceKey); err != nil {
-		return err
-	}
-	if err := validatePathID(requestID, "request id"); err != nil {
-		return err
-	}
-	return writeJSONAtomic(filepath.Join(s.workspaceDir(workspaceKey), "replay-results", requestID+".json"), replay, 0o600)
 }
 
 func (s *Store) workspaceDir(workspaceKey string) string {
@@ -629,20 +444,6 @@ func writeJSONAtomic(path string, value any, perm os.FileMode) error {
 	}
 	cleanup = false
 	return nil
-}
-
-func cloneActionSnapshot(in *ActionSnapshot) *ActionSnapshot {
-	if in == nil {
-		return nil
-	}
-	out := *in
-	if in.Arguments != nil {
-		out.Arguments = map[string]any{}
-		for key, value := range in.Arguments {
-			out.Arguments[key] = value
-		}
-	}
-	return &out
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

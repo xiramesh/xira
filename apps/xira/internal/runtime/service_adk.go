@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 	"unicode/utf8"
 
-	"github.com/google/uuid"
 	adkagent "google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	adkmodel "google.golang.org/adk/model"
@@ -389,56 +387,6 @@ func (s *Service) adkTools(
 		if input == nil {
 			input = map[string]any{}
 		}
-		def, _ := registry.GetDefinition(name)
-		if def.Policy.RequireConfirmation {
-			callID := strings.TrimSpace(toolCtx.FunctionCallID())
-			if callID == "" {
-				callID = uuid.NewString()
-			}
-			rec := ToolCallRecord{
-				ID:        callID,
-				Name:      name,
-				Input:     cloneAnyMap(input),
-				StartedAt: time.Now(),
-				EndedAt:   time.Now(),
-				Output: map[string]any{
-					"status":           StatusWaitingHuman,
-					"human_request_id": "",
-				},
-			}
-			if err := validateRuntimeToolInputAllowlist(ctx, name, input); err != nil {
-				rec.Error = err.Error()
-				recordTool(rec)
-				return toolOutputForModel(rec), nil
-			}
-			req, err := s.createRuntimeToolGateHumanRequest(ctx, callID, name, input)
-			if err != nil {
-				rec.Error = err.Error()
-				recordTool(rec)
-				return toolOutputForModel(rec), nil
-			}
-			rec.Output["human_request_id"] = req.ID
-			recordTool(rec)
-			payload := map[string]any{
-				"human_request_id": req.ID,
-				"kind":             req.Kind,
-				"source":           req.Source,
-				"tool":             name,
-				"tool_call_id":     callID,
-			}
-			// #109: include a readable target (e.g. file basename) so the IM
-			// rendering can show "确认执行 write_file: task-...md" instead of the
-			// raw "runtime tool confirmation required".
-			if target := actionTargetSummary(req.ActionSnapshot); target != "" {
-				payload["target"] = target
-			}
-			recordEvent("human.request.created", "runtime", "runtime tool confirmation required", payload)
-			recordAudit("human.request", req.ID, true, "runtime tool confirmation required", map[string]any{
-				"tool":         name,
-				"tool_call_id": callID,
-			})
-			return toolOutputForModel(rec), nil
-		}
 		call := deepseek.ToolCall{
 			ID:   strings.TrimSpace(toolCtx.FunctionCallID()),
 			Type: "function",
@@ -462,9 +410,6 @@ func (s *Service) adkTools(
 			Description:  def.Description,
 			InputSchema:  rtools.SchemaFromMap(parameters),
 			OutputSchema: def.OutputSchema,
-			RequireConfirmationProvider: func(_ map[string]any) bool {
-				return false
-			},
 		}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
 			return run(toolCtx, def.Name, args)
 		})

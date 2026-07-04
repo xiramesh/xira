@@ -45,12 +45,12 @@ func TestHumanRequestCreateGetList(t *testing.T) {
 	}
 
 	created, err := svc.CreateHumanRequest(ctx, humanrequest.CreateRequest{
-		RunID:      runID,
-		AgentID:    "agent-1",
-		SessionID:  "session-1",
+		RunID:       runID,
+		AgentID:     "agent-1",
+		SessionID:   "session-1",
 		WorkspaceID: "ws-1",
-		Question:   "confirm?",
-		Kind:       humanrequest.RequestFreeform,
+		Question:    "confirm?",
+		Kind:        humanrequest.RequestFreeform,
 	})
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)

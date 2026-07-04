@@ -53,7 +53,7 @@ type CreateRunRequest struct {
 	CurrentStepID string
 	Input         map[string]string
 	// Context is the persisted trigger identity for this run (see Run.Context).
-	Context       *channel.InboundContext
+	Context *channel.InboundContext
 }
 
 // CreateRun persists a new flow run.

@@ -86,58 +86,6 @@ func TestCloneAnyMap(t *testing.T) {
 	}
 }
 
-// TestCanonicalActionSnapshotArguments covers nil / roundtrip / error.
-func TestCanonicalActionSnapshotArguments(t *testing.T) {
-	if got, err := canonicalActionSnapshotArguments(nil); err != nil || got != nil {
-		t.Fatalf("nil args: got=%v err=%v", got, err)
-	}
-	got, err := canonicalActionSnapshotArguments(map[string]any{"x": 1, "y": "z"})
-	if err != nil {
-		t.Fatalf("valid args error: %v", err)
-	}
-	if got["x"] != 1 || got["y"] != "z" {
-		t.Fatalf("roundtrip lost keys: %v", got)
-	}
-}
-
-// TestDigestAny covers the sha256 digest format + determinism.
-func TestDigestAny(t *testing.T) {
-	d1, err := digestAny(map[string]any{"a": 1})
-	if err != nil {
-		t.Fatalf("digest error: %v", err)
-	}
-	if !strings.HasPrefix(d1, "sha256:") || len(d1) <= len("sha256:") {
-		t.Fatalf("digest not sha256-prefixed: %q", d1)
-	}
-	// Same input -> same digest; different input -> different digest.
-	d2, _ := digestAny(map[string]any{"a": 1})
-	if d1 != d2 {
-		t.Fatalf("digest not deterministic")
-	}
-	d3, _ := digestAny(map[string]any{"a": 2})
-	if d1 == d3 {
-		t.Fatalf("different inputs produced same digest")
-	}
-}
-
-// TestValidateActionSnapshotDigest covers nil/empty-hash (skip) / match / mismatch.
-func TestValidateActionSnapshotDigest(t *testing.T) {
-	if err := validateActionSnapshotDigest(nil); err != nil {
-		t.Fatalf("nil snapshot should pass")
-	}
-	if err := validateActionSnapshotDigest(&humanrequest.ActionSnapshot{}); err != nil {
-		t.Fatalf("empty ContextHash should pass")
-	}
-	args := map[string]any{"x": 1}
-	hash, _ := digestAny(args)
-	if err := validateActionSnapshotDigest(&humanrequest.ActionSnapshot{ContextHash: hash, Arguments: args}); err != nil {
-		t.Fatalf("matching digest should pass: %v", err)
-	}
-	if err := validateActionSnapshotDigest(&humanrequest.ActionSnapshot{ContextHash: "sha256:deadbeef", Arguments: args}); err == nil {
-		t.Fatalf("mismatched digest should fail")
-	}
-}
-
 // TestHumanOptionsFromAny covers each type arm + non-map element skip.
 func TestHumanOptionsFromAny(t *testing.T) {
 	// Typed slice arm.
