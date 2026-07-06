@@ -26,10 +26,12 @@ type runtimeEventBase struct {
 	AgentSessionID        string
 	ChatID                string
 	ChatType              string
+	ChatName              string
 	TopicID               string
 	SpaceID               string
 	SpaceType             string
 	SenderID              string
+	SenderName            string
 	MessageID             string
 	ReplyToMessageID      string
 	ReplyToSenderID       string
@@ -90,6 +92,14 @@ func inboundContextFromScope(scope *fsession.SessionScope, raw map[string]string
 	// and outbound delivery addresses a non-existent user (e.g. ilink resume
 	// delivering to ToUserID="ilink:wxid_abc"). PR #71 review CRITICAL.
 	ctx.SenderID = scopeValueID(scope.Values["sender"])
+	// Names travel alongside Values (scope.Names) but are not encoded as
+	// "<type>:<id>" — they're plain display strings. Restore as-is. Empty when
+	// the scope predates the Names field (older persisted sessions) or when the
+	// channel runner didn't supply names.
+	if scope.Names != nil {
+		ctx.ChatName = scope.Names["chat_name"]
+		ctx.SenderName = scope.Names["sender_name"]
+	}
 	return channel.NormalizeInboundContext(ctx)
 }
 

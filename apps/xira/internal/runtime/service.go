@@ -409,10 +409,12 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		AgentSessionID:        agentSessionID,
 		ChatID:                inbound.Context.ChatID,
 		ChatType:              inbound.Context.ChatType,
+		ChatName:              inbound.Context.ChatName,
 		TopicID:               inbound.Context.TopicID,
 		SpaceID:               inbound.Context.SpaceID,
 		SpaceType:             inbound.Context.SpaceType,
 		SenderID:              inbound.Context.SenderID,
+		SenderName:            inbound.Context.SenderName,
 		MessageID:             inbound.Context.MessageID,
 		ReplyToMessageID:      inbound.Context.ReplyToMessageID,
 		ReplyToSenderID:       inbound.Context.ReplyToSenderID,
@@ -1695,7 +1697,9 @@ func formatConversationContext(inbound channel.InboundContext) string {
 	channel := sanitizeInlineField(inbound.Channel)
 	chatID := sanitizeInlineField(inbound.ChatID)
 	chatType := sanitizeInlineField(inbound.ChatType)
+	chatName := sanitizeInlineField(inbound.ChatName)
 	senderID := sanitizeInlineField(inbound.SenderID)
+	senderName := sanitizeInlineField(inbound.SenderName)
 	if channel == "" && chatID == "" && senderID == "" {
 		return ""
 	}
@@ -1710,8 +1714,14 @@ func formatConversationContext(inbound channel.InboundContext) string {
 			lines = append(lines, "Chat: "+chatID)
 		}
 	}
+	if chatName != "" {
+		lines = append(lines, "ChatName: "+chatName)
+	}
 	if senderID != "" {
 		lines = append(lines, "Sender: "+senderID)
+	}
+	if senderName != "" {
+		lines = append(lines, "SenderName: "+senderName)
 	}
 	return strings.Join(lines, "\n")
 }

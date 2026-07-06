@@ -23,6 +23,12 @@ type SessionScope struct {
 	Account      string            `json:"account,omitempty" yaml:"account,omitempty"`
 	Dimensions   []string          `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
 	Values       map[string]string `json:"values,omitempty" yaml:"values,omitempty"`
+	// Names carries per-sender / per-chat display names that travel with the
+	// scope for resume hydration (inboundContextFromScope) but do NOT
+	// participate in session isolation. Crucially Names is independent of
+	// Dimensions/Values — it must never feed scopeSignature, or existing
+	// sessions would re-hash and break. Pinned by TestScopeSignatureExcludesNames.
+	Names map[string]string `json:"names,omitempty" yaml:"names,omitempty"`
 }
 
 type AllocationInput struct {
@@ -173,6 +179,19 @@ func BuildScope(ctx channel.InboundContext, policy routing.SessionPolicy) Sessio
 	if len(values) > 0 {
 		scope.Dimensions = sortedKeys(values)
 		scope.Values = values
+	}
+	// Names travel with the scope for resume hydration but do NOT participate
+	// in session isolation (not in Dimensions, not in scopeSignature). Keep
+	// this independence — see TestScopeSignatureExcludesNames.
+	names := map[string]string{}
+	if chatName := strings.TrimSpace(ctx.ChatName); chatName != "" {
+		names["chat_name"] = chatName
+	}
+	if senderName := strings.TrimSpace(ctx.SenderName); senderName != "" {
+		names["sender_name"] = senderName
+	}
+	if len(names) > 0 {
+		scope.Names = names
 	}
 	return scope
 }

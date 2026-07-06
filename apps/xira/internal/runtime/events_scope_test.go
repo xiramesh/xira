@@ -3,6 +3,8 @@ package runtime
 import (
 	"testing"
 
+	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/routing"
 	fsession "github.com/xiramesh/xira/internal/session"
 )
 
@@ -99,5 +101,49 @@ func TestInboundContextFromScopeNilScopeRawOnly(t *testing.T) {
 	got := inboundContextFromScope(nil, raw)
 	if got.Raw["context_token"] != "tok-1" {
 		t.Errorf("raw context_token lost: %+v", got.Raw)
+	}
+}
+
+// TestInboundContextFromScopeRestoresNames verifies the resume path restores
+// ChatName / SenderName from scope.Names. Uses a REAL BuildScope product (not
+// a hand-rolled scope) so the round-trip covers the actual persist → restore
+// transform — per AGENTS.md §5.4, test data should be the real transform output,
+// not scrubbed clean values that bypass canonicalization.
+func TestInboundContextFromScopeRestoresNames(t *testing.T) {
+	// Build a scope via the real manager path so Names is populated exactly as
+	// production would (not hand-forged).
+	ctx := channel.NewInboundContext("feishu", "user-9", map[string]string{
+		"chat_id":      "chat-7",
+		"chat_type":    "group",
+		"chat_name":    "工作群",
+		"sender_name":  "张三",
+	})
+	policy := routing.SessionPolicy{Dimensions: []string{"chat", "sender"}}
+	scope := fsession.BuildScope(ctx, policy)
+	if scope.Names == nil {
+		t.Fatal("precondition: BuildScope didn't populate Names")
+	}
+	got := inboundContextFromScope(&scope, nil)
+	if got.ChatName != "工作群" {
+		t.Errorf("ChatName = %q, want 工作群 (must restore from scope.Names)", got.ChatName)
+	}
+	if got.SenderName != "张三" {
+		t.Errorf("SenderName = %q, want 张三 (must restore from scope.Names)", got.SenderName)
+	}
+}
+
+// TestInboundContextFromScopeNilNames verifies the resume path doesn't crash
+// and produces empty names when scope.Names is nil (older persisted sessions
+// that predate the Names field, or scopes from runs where no names were
+// captured). This is the backward-compatibility path.
+func TestInboundContextFromScopeNilNames(t *testing.T) {
+	scope := &fsession.SessionScope{
+		Channel: "feishu",
+		Values:  map[string]string{"sender": "user-1"},
+		// Names intentionally nil — simulates legacy persisted scope.
+	}
+	got := inboundContextFromScope(scope, nil)
+	if got.ChatName != "" || got.SenderName != "" {
+		t.Errorf("expected empty names for nil Names scope, got ChatName=%q SenderName=%q", got.ChatName, got.SenderName)
 	}
 }

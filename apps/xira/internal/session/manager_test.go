@@ -297,3 +297,70 @@ func TestManagerLoadsLegacyFlatConversationSessionPath(t *testing.T) {
 		t.Fatalf("legacy history = %+v", history)
 	}
 }
+
+// TestBuildScopeIncludesNames verifies BuildScope captures chat_name /
+// sender_name into scope.Names (so they survive persistence and can be
+// restored on resume via inboundContextFromScope).
+func TestBuildScopeIncludesNames(t *testing.T) {
+	ctx := channel.NewInboundContext("feishu", "user-1", map[string]string{
+		"chat_id":      "chat-1",
+		"chat_type":    "group",
+		"chat_name":    "工作群",
+		"sender_name":  "张三",
+	})
+	policy := routing.SessionPolicy{Dimensions: []string{"chat", "sender"}}
+	scope := BuildScope(ctx, policy)
+	if scope.Names == nil {
+		t.Fatal("scope.Names = nil, want populated names map")
+	}
+	if got := scope.Names["chat_name"]; got != "工作群" {
+		t.Errorf("scope.Names[chat_name] = %q, want %q", got, "工作群")
+	}
+	if got := scope.Names["sender_name"]; got != "张三" {
+		t.Errorf("scope.Names[sender_name] = %q, want %q", got, "张三")
+	}
+}
+
+// TestBuildScopeOmitsEmptyNames verifies that when no name fields are present,
+// scope.Names is not populated (keeps the zero-value scope clean for backward
+// compatibility with older persisted scopes that predate the Names field).
+func TestBuildScopeOmitsEmptyNames(t *testing.T) {
+	ctx := channel.NewInboundContext("feishu", "user-1", map[string]string{
+		"chat_id":   "chat-1",
+		"chat_type": "group",
+	})
+	policy := routing.SessionPolicy{Dimensions: []string{"chat", "sender"}}
+	scope := BuildScope(ctx, policy)
+	if scope.Names != nil {
+		t.Errorf("scope.Names = %+v, want nil when no names present", scope.Names)
+	}
+}
+
+// TestScopeSignatureExcludesNames is the CRITICAL regression: Names must not
+// feed scopeSignature, otherwise adding/removing a name would re-hash the
+// session id and break resume for every existing conversation. Two scopes
+// identical except for Names must produce identical signatures.
+func TestScopeSignatureExcludesNames(t *testing.T) {
+	ctx := channel.NewInboundContext("feishu", "user-1", map[string]string{
+		"chat_id":     "chat-1",
+		"chat_type":   "group",
+		"chat_name":   "工作群",
+		"sender_name": "张三",
+	})
+	policy := routing.SessionPolicy{Dimensions: []string{"chat", "sender"}}
+	scopeWithNames := BuildScope(ctx, policy)
+
+	// Strip names to simulate a scope from before Names existed.
+	scopeNoNames := scopeWithNames
+	scopeNoNames.Names = nil
+
+	sigWith := scopeSignature(scopeWithNames)
+	sigWithout := scopeSignature(scopeNoNames)
+	if sigWith != sigWithout {
+		t.Fatalf("scopeSignature changed when Names toggled — session id would break:\nwith:    %s\nwithout: %s", sigWith, sigWithout)
+	}
+	// And BuildSessionID must be stable too (it wraps scopeSignature).
+	if BuildSessionID(scopeWithNames) != BuildSessionID(scopeNoNames) {
+		t.Fatalf("BuildSessionID changed when Names toggled — resume would break")
+	}
+}

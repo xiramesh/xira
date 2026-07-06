@@ -10,10 +10,12 @@ type InboundContext struct {
 	BotID            string            `json:"bot_id,omitempty" yaml:"bot_id,omitempty"`
 	ChatID           string            `json:"chat_id" yaml:"chat_id"`
 	ChatType         string            `json:"chat_type,omitempty" yaml:"chat_type,omitempty"`
+	ChatName         string            `json:"chat_name,omitempty" yaml:"chat_name,omitempty"`
 	TopicID          string            `json:"topic_id,omitempty" yaml:"topic_id,omitempty"`
 	SpaceID          string            `json:"space_id,omitempty" yaml:"space_id,omitempty"`
 	SpaceType        string            `json:"space_type,omitempty" yaml:"space_type,omitempty"`
 	SenderID         string            `json:"sender_id" yaml:"sender_id"`
+	SenderName       string            `json:"sender_name,omitempty" yaml:"sender_name,omitempty"`
 	MessageID        string            `json:"message_id,omitempty" yaml:"message_id,omitempty"`
 	Mentioned        bool              `json:"mentioned,omitempty" yaml:"mentioned,omitempty"`
 	ReplyToMessageID string            `json:"reply_to_message_id,omitempty" yaml:"reply_to_message_id,omitempty"`
@@ -67,12 +69,14 @@ func NewInboundContextWithEntrypoint(channelName, entrypointID, userID string, m
 	if ctx.ChatType == "" {
 		ctx.ChatType = "direct"
 	}
+	ctx.ChatName = firstMetadata(metadata, "chat_name")
 	ctx.TopicID = firstMetadata(metadata, "topic_id", "thread_id")
 	ctx.SpaceID = firstMetadata(metadata, "space_id", "tenant_id", "workspace_id")
 	ctx.SpaceType = firstMetadata(metadata, "space_type")
 	ctx.MessageID = firstMetadata(metadata, "message_id")
 	ctx.ReplyToMessageID = firstMetadata(metadata, "reply_to_message_id")
 	ctx.ReplyToSenderID = firstMetadata(metadata, "reply_to_sender_id")
+	ctx.SenderName = firstMetadata(metadata, "sender_name")
 	ctx.Mentioned = strings.EqualFold(firstMetadata(metadata, "mentioned"), "true")
 	return NormalizeInboundContext(ctx)
 }
@@ -85,10 +89,12 @@ func NormalizeInboundContext(ctx InboundContext) InboundContext {
 	ctx.BotID = strings.TrimSpace(ctx.BotID)
 	ctx.ChatID = strings.TrimSpace(ctx.ChatID)
 	ctx.ChatType = normalizedOrDefault(ctx.ChatType, "direct")
+	ctx.ChatName = strings.TrimSpace(ctx.ChatName)
 	ctx.TopicID = strings.TrimSpace(ctx.TopicID)
 	ctx.SpaceID = strings.TrimSpace(ctx.SpaceID)
 	ctx.SpaceType = strings.TrimSpace(ctx.SpaceType)
 	ctx.SenderID = strings.TrimSpace(ctx.SenderID)
+	ctx.SenderName = strings.TrimSpace(ctx.SenderName)
 	ctx.MessageID = strings.TrimSpace(ctx.MessageID)
 	ctx.ReplyToMessageID = strings.TrimSpace(ctx.ReplyToMessageID)
 	ctx.ReplyToSenderID = strings.TrimSpace(ctx.ReplyToSenderID)
