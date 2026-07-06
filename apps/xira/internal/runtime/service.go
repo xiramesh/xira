@@ -352,7 +352,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	if !ok {
 		return TurnResponse{}, fmt.Errorf("agent profile %q not found", entrypointDecision.AgentID)
 	}
-	runInstruction, activeSkillIDs, err := s.instructionTextForRun(profile)
+	runInstruction, activeSkillIDs, err := s.instructionTextForRun(profile, req.Context)
 	if err != nil {
 		return TurnResponse{}, err
 	}
@@ -1611,13 +1611,17 @@ func (s *Service) toolRegistry(profile agents.Profile) *rtools.Registry {
 }
 
 func (s *Service) instructionText(profile agents.Profile) string {
+	// Note: this path is used for InstructionHash (usage.go / modelPolicySnapshot).
+	// It deliberately passes an empty InboundContext so the Conversation Context
+	// block is omitted — the hash must be per-profile stable, not per-sender.
+	// See TestInstructionHashStableAcrossSenders.
 	if skillText := s.skillInstructionText(profile); skillText != "" {
-		return s.composeInstructionText(profile, []string{skillText})
+		return s.composeInstructionText(profile, []string{skillText}, channel.InboundContext{})
 	}
-	return s.composeInstructionText(profile, nil)
+	return s.composeInstructionText(profile, nil, channel.InboundContext{})
 }
 
-func (s *Service) instructionTextForRun(profile agents.Profile) (string, []string, error) {
+func (s *Service) instructionTextForRun(profile agents.Profile, inbound channel.InboundContext) (string, []string, error) {
 	activeSkills, activeSkillIDs, err := s.activateSkills(profile, profile.Skills)
 	if err != nil {
 		return "", nil, err
@@ -1626,10 +1630,10 @@ func (s *Service) instructionTextForRun(profile agents.Profile) (string, []strin
 	for _, skill := range activeSkills {
 		blocks = append(blocks, skill.InstructionBlock())
 	}
-	return s.composeInstructionText(profile, blocks), activeSkillIDs, nil
+	return s.composeInstructionText(profile, blocks, inbound), activeSkillIDs, nil
 }
 
-func (s *Service) composeInstructionText(profile agents.Profile, skillBlocks []string) string {
+func (s *Service) composeInstructionText(profile agents.Profile, skillBlocks []string, inbound channel.InboundContext) string {
 	base := strings.TrimSpace(profile.InstructionText())
 	if skillText := strings.TrimSpace(strings.Join(skillBlocks, "\n\n")); skillText != "" {
 		if base == "" {
@@ -1645,16 +1649,62 @@ func (s *Service) composeInstructionText(profile agents.Profile, skillBlocks []s
 		profile.Name,
 		time.Now().Format("2006-01-02"),
 	)
+	conversation := formatConversationContext(inbound)
 	var capability string
 	if len(tools) == 0 {
 		capability = "Available tools: none.\nOnly claim capabilities you can perform without tools."
 	} else {
 		capability = "Available tools: " + strings.Join(tools, ", ") + ".\nOnly claim capabilities you can perform with these tools.\nIf a needed tool is available, use it before claiming you cannot access the data. Only say a tool is unavailable or restricted when no appropriate tool exists or an attempted tool call returns an error; when that happens, mention the actual tool error."
 	}
-	if base == "" {
-		return "# Runtime Identity\n\n" + identity + "\n\n# Runtime Capabilities\n\n" + capability
+	// Order: Identity (who I am) → Conversation Context (who/where I'm talking to)
+	// → Capabilities (what I can do). Conversation Context is omitted when the
+	// inbound carries no identity (e.g. hash path in instructionText above).
+	var sections []string
+	sections = append(sections, "# Runtime Identity\n\n"+identity)
+	if conversation != "" {
+		sections = append(sections, "# Conversation Context\n\n"+conversation)
 	}
-	return base + "\n\n# Runtime Identity\n\n" + identity + "\n\n# Runtime Capabilities\n\n" + capability
+	sections = append(sections, "# Runtime Capabilities\n\n"+capability)
+	body := strings.Join(sections, "\n\n")
+	if base == "" {
+		return body
+	}
+	return base + "\n\n" + body
+}
+
+// formatConversationContext renders the "# Conversation Context" body (without
+// the H1 heading) from the inbound identity. Returns "" when no identity is
+// present (e.g. zero-value InboundContext on the InstructionHash path), so the
+// whole section is omitted by the caller.
+//
+// Fields come from InboundContext as-is (IDs only, no display names — name
+// injection is a follow-up). NormalizeInboundContext guarantees ChatID and
+// ChatType have fallback values for real inbound traffic; the empty checks
+// here defend against zero-value contexts on the hash path and direct
+// construction bypassing the normalizer.
+func formatConversationContext(inbound channel.InboundContext) string {
+	channel := strings.TrimSpace(inbound.Channel)
+	chatID := strings.TrimSpace(inbound.ChatID)
+	chatType := strings.TrimSpace(inbound.ChatType)
+	senderID := strings.TrimSpace(inbound.SenderID)
+	if channel == "" && chatID == "" && senderID == "" {
+		return ""
+	}
+	var lines []string
+	if channel != "" {
+		lines = append(lines, "Channel: "+channel)
+	}
+	if chatID != "" {
+		if chatType != "" {
+			lines = append(lines, fmt.Sprintf("Chat: %s (type: %s)", chatID, chatType))
+		} else {
+			lines = append(lines, "Chat: "+chatID)
+		}
+	}
+	if senderID != "" {
+		lines = append(lines, "Sender: "+senderID)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (s *Service) activateSkills(profile agents.Profile, skillIDs []string) ([]skills.Skill, []string, error) {

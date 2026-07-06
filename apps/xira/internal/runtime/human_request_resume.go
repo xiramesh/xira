@@ -192,7 +192,7 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 	}, recordEvent, func(call LLMCallRecord) {
 		llmCalls = append(llmCalls, call)
 	})
-	instruction, _, err := s.instructionTextForRun(profile)
+	instruction, _, err := s.instructionTextForRun(profile, resumeReq.Context)
 	if err != nil {
 		return err
 	}

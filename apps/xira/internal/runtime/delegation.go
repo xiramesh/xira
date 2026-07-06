@@ -463,7 +463,7 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 	}, recordChildEvent, func(call LLMCallRecord) {
 		resp.LLMCalls = append(resp.LLMCalls, call)
 	})
-	childInstruction, _, activationErr := s.instructionTextForRun(req.Target)
+	childInstruction, _, activationErr := s.instructionTextForRun(req.Target, childReq.Context)
 	var final string
 	var toolCalls []ToolCallRecord
 	var runErr error

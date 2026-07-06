@@ -148,7 +148,7 @@ func TestGenerateAbortsWhenContextAlreadyCancelled(t *testing.T) {
 	if !ok {
 		t.Fatal("default agent not found")
 	}
-	instruction, _, err := rt.instructionTextForRun(profile)
+	instruction, _, err := rt.instructionTextForRun(profile, channel.NewInboundContext("test", "user-1", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
