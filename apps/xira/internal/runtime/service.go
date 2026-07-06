@@ -1682,11 +1682,20 @@ func (s *Service) composeInstructionText(profile agents.Profile, skillBlocks []s
 // ChatType have fallback values for real inbound traffic; the empty checks
 // here defend against zero-value contexts on the hash path and direct
 // construction bypassing the normalizer.
+//
+// Trust boundary: InboundContext fields are UNTRUSTED. HTTP API and websocket
+// clients can carry arbitrary context, so a chat_id/sender_id containing
+// "\n\n# Runtime Capabilities" could otherwise escape into a new prompt
+// section and inject instructions (prompt-injection vector — see PR #130
+// review). sanitizeInlineField collapses control chars (newlines, CR, tab,
+// vertical tab, form feed, NUL) to single spaces and strips "# " heading
+// markers, so each field renders as a single line that cannot start a new
+// prompt section regardless of its content.
 func formatConversationContext(inbound channel.InboundContext) string {
-	channel := strings.TrimSpace(inbound.Channel)
-	chatID := strings.TrimSpace(inbound.ChatID)
-	chatType := strings.TrimSpace(inbound.ChatType)
-	senderID := strings.TrimSpace(inbound.SenderID)
+	channel := sanitizeInlineField(inbound.Channel)
+	chatID := sanitizeInlineField(inbound.ChatID)
+	chatType := sanitizeInlineField(inbound.ChatType)
+	senderID := sanitizeInlineField(inbound.SenderID)
 	if channel == "" && chatID == "" && senderID == "" {
 		return ""
 	}
@@ -1705,6 +1714,47 @@ func formatConversationContext(inbound channel.InboundContext) string {
 		lines = append(lines, "Sender: "+senderID)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// sanitizeInlineField cleans an untrusted InboundContext field so it is safe
+// to embed in a prompt section. It:
+//  1. Replaces all ASCII control chars (including \n \r \t \v \f and below
+//     0x20, plus 0x7f DEL) with a single space — preventing newline escapes
+//     that would start a new prompt line / section.
+//  2. Collapses runs of whitespace to a single space.
+//  3. Trims outer whitespace.
+//  4. Strips leading "#" so a field starting with "# Runtime Identity" cannot
+//     masquerade as a markdown heading (interior "#" is preserved — only the
+//     leading-position heading-prefix form is dangerous).
+//
+// We deliberately do NOT strip interior substrings like "Available tools" or
+// "Ignore previous" — those would be attacker-chosen text and we shouldn't
+// pretend to enumerate them. The structural defenses (no newline, no leading
+// "# ") are enough: the field ends up as a single line of opaque data, not
+// instructions the model parses.
+func sanitizeInlineField(s string) string {
+	if s == "" {
+		return ""
+	}
+	// Replace control chars (including \n \r \t \v \f and DEL) with space.
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			b.WriteRune(' ')
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	cleaned := b.String()
+	// Collapse runs of whitespace.
+	cleaned = strings.Join(strings.Fields(cleaned), " ")
+	// Strip leading "#" so a field can't open with a heading marker. Interior
+	// "#" is harmless (no newline to start a section with it).
+	for strings.HasPrefix(cleaned, "#") {
+		cleaned = strings.TrimSpace(cleaned[1:])
+	}
+	return cleaned
 }
 
 func (s *Service) activateSkills(profile agents.Profile, skillIDs []string) ([]skills.Skill, []string, error) {
