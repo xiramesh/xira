@@ -41,14 +41,17 @@ type HITLResolver interface {
 // even when they aren't explicitly listed. nil = owner concept not configured
 // (#121 only: allowlist-only auth, owner bypass disabled).
 //
-// *Service will satisfy this implicitly once #122 implements IsOwner; until
-// then the interface exists so channel-runner code is forward-compatible
-// (no signature churn when #122 lands). No compile-time assertion yet —
-// IsOwner is not implemented on *Service today.
+// IsOwner takes entrypointID (not channel) because a channel can host multiple
+// entrypoints (e.g. feishu-expense-bot + feishu-leave-bot both on "feishu"),
+// each with its own owner. The earlier draft (#134) used channel, but that
+// would let one entrypoint's owner bypass another entrypoint's allowlist —
+// a cross-entrypoint privilege escalation. entrypointID scopes the lookup
+// to exactly the entrypoint the runner is handling.
 type OwnerResolver interface {
-	IsOwner(ctx context.Context, senderID, channel string) bool
+	IsOwner(ctx context.Context, senderID, entrypointID string) bool
 }
 
-// Compile-time assertions: *Service implements Runtime + HITLResolver.
+// Compile-time assertions: *Service implements Runtime + HITLResolver + OwnerResolver.
 var _ Runtime = (*Service)(nil)
 var _ HITLResolver = (*Service)(nil)
+var _ OwnerResolver = (*Service)(nil)

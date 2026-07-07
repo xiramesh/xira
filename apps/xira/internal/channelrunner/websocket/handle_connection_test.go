@@ -314,6 +314,22 @@ func TestPrepareTurnSenderAuthorization(t *testing.T) {
 	if prepared.ignoreReason != "" {
 		t.Errorf("authorized sender ignoreReason = %q, want empty", prepared.ignoreReason)
 	}
+	// Owner bypass: unauthorized sender + owner resolver → handle=true.
+	// Pin entrypointID propagation (#139 review): resolver must receive
+	// definition.ID, not channel "websocket".
+	owner := &wsStubOwner{}
+	runner.ownerResolver = owner
+	frame, data = mkFrame("ou_owner")
+	prepared, errFrame = runner.prepareTurn(frame, data, "ws-allowlist")
+	if errFrame != nil {
+		t.Fatalf("unexpected errFrame for owner bypass: %+v", errFrame)
+	}
+	if !prepared.handle {
+		t.Error("owner should bypass allowlist (handle=true)")
+	}
+	if owner.LastEntrypointID != "ws-allowlist" {
+		t.Errorf("owner resolver received entrypointID = %q, want 'ws-allowlist' (definition.ID, not channel)", owner.LastEntrypointID)
+	}
 }
 
 // TestRunnerSetOwnerResolver covers the setter (nil-safe + value injection).
@@ -324,7 +340,7 @@ func TestRunnerSetOwnerResolver(t *testing.T) {
 	if r.ownerResolver != nil {
 		t.Error("SetOwnerResolver(nil) should leave field nil")
 	}
-	owner := wsStubOwner("ou_x")
+	owner := &wsStubOwner{}
 	r.SetOwnerResolver(owner)
 	if r.ownerResolver == nil {
 		t.Error("SetOwnerResolver(stub) should set field non-nil")
@@ -340,10 +356,15 @@ func TestRunnerSetHITLResolver(t *testing.T) {
 	}
 }
 
-// wsStubOwner implements frt.OwnerResolver for websocket tests.
-type wsStubOwner string
+// wsStubOwner implements frt.OwnerResolver for websocket tests. Records the
+// entrypointID so integration tests can assert runners pass definition.ID,
+// not channel. See PR #139 review.
+type wsStubOwner struct {
+	LastEntrypointID string
+}
 
-func (s wsStubOwner) IsOwner(_ context.Context, _, _ string) bool {
+func (s *wsStubOwner) IsOwner(_ context.Context, _, entrypointID string) bool {
+	s.LastEntrypointID = entrypointID
 	return true
 }
 

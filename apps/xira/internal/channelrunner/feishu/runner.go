@@ -250,7 +250,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		// Both gates use AND; report whichever applies (sender auth takes
 		// precedence — even an @mentioned unauthorized sender is still rejected).
 		reason := "unmentioned_group_message"
-		if !r.definition.AllowsSender(senderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), senderID, "feishu")) {
+		if !r.definition.AllowsSender(senderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), senderID, r.definition.ID)) {
 			reason = "sender_not_authorized"
 		}
 		slog.Info("feishu message ignored",
@@ -418,7 +418,7 @@ func isAuthorizedSender(senderID string, definition entrypoints.Definition, owne
 	if owner == nil {
 		return false
 	}
-	return owner.IsOwner(context.Background(), senderID, "feishu")
+	return owner.IsOwner(context.Background(), senderID, definition.ID)
 }
 
 func (r *Runner) buildMetadata(message *larkim.EventMessage, sender *larkim.EventSender, chatType, messageType string) map[string]string {

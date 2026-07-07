@@ -188,3 +188,37 @@ func TestNormalizeDefinitionEmptyAllowedSenderIDs(t *testing.T) {
 		t.Errorf("empty input should stay empty, got %v", normalized.AllowedSenderIDs)
 	}
 }
+
+// TestNormalizeDefinitionTrimsOwnerID covers OwnerID trim in normalizeDefinition.
+func TestNormalizeDefinitionTrimsOwnerID(t *testing.T) {
+	raw := Definition{OwnerID: "  ou_owner  "}
+	normalized := normalizeDefinition(raw, "xira-assistant")
+	if normalized.OwnerID != "ou_owner" {
+		t.Errorf("OwnerID = %q, want 'ou_owner' (trimmed)", normalized.OwnerID)
+	}
+	// empty stays empty.
+	if got := normalizeDefinition(Definition{}, "x").OwnerID; got != "" {
+		t.Errorf("empty OwnerID should stay empty, got %q", got)
+	}
+}
+
+// TestRegistryDefinitionByID covers the Definition(id) lookup method (#122).
+func TestRegistryDefinitionByID(t *testing.T) {
+	registry := NewRegistry("xira-assistant", []Definition{{
+		ID: "ep-owner", Channel: "feishu", DefaultAgentID: "xira-assistant", OwnerID: "ou_owner",
+	}})
+	def, ok := registry.Definition("ep-owner")
+	if !ok {
+		t.Fatal("expected to find ep-owner")
+	}
+	if def.OwnerID != "ou_owner" {
+		t.Errorf("OwnerID = %q, want ou_owner", def.OwnerID)
+	}
+	if _, ok := registry.Definition("nonexistent"); ok {
+		t.Error("nonexistent entrypoint should return ok=false")
+	}
+	// trim applied on lookup.
+	if _, ok := registry.Definition("  ep-owner  "); !ok {
+		t.Error("Definition() should trim whitespace in id")
+	}
+}

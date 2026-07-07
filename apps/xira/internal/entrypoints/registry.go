@@ -25,6 +25,7 @@ type Definition struct {
 	DefaultAgentID                    string                `json:"default_agent" yaml:"default_agent"`
 	AllowedAgentIDs                   []string              `json:"allowed_agents,omitempty" yaml:"allowed_agents,omitempty"`
 	AllowedSenderIDs                  []string              `json:"allowed_senders,omitempty" yaml:"allowed_senders,omitempty"`
+	OwnerID                           string                `json:"owner,omitempty" yaml:"owner,omitempty"`
 	SessionPolicy                     routing.SessionPolicy `json:"session,omitempty" yaml:"session,omitempty"`
 	AppSecret                         string                `json:"app_secret,omitempty" yaml:"app_secret,omitempty"`
 	AppSecretEnv                      string                `json:"app_secret_env,omitempty" yaml:"app_secret_env,omitempty"`
@@ -124,6 +125,17 @@ func (r *Registry) Definitions() []Definition {
 	out := make([]Definition, len(r.definitions))
 	copy(out, r.definitions)
 	return out
+}
+
+// Definition returns the entrypoint definition by ID. ok=false if not found.
+// Used by Service.IsOwner (#122) to look up an entrypoint's declared owner
+// without going through full Resolve (which also resolves agent IDs).
+func (r *Registry) Definition(id string) (Definition, bool) {
+	if r == nil {
+		return Definition{}, false
+	}
+	def, ok := r.byID[strings.TrimSpace(id)]
+	return def, ok
 }
 
 func (r *Registry) matchContext(ctx channel.InboundContext) (Definition, bool) {
@@ -279,6 +291,7 @@ func normalizeDefinition(definition Definition, defaultAgentID string) Definitio
 		allowedSenders = append(allowedSenders, senderID)
 	}
 	definition.AllowedSenderIDs = allowedSenders
+	definition.OwnerID = strings.TrimSpace(definition.OwnerID)
 	definition.SessionPolicy = routing.NormalizeSessionPolicy(definition.SessionPolicy)
 	return definition
 }
