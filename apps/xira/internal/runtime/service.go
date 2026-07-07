@@ -295,6 +295,29 @@ func (s *Service) Entrypoints() []entrypoints.Definition {
 	return s.entrypoints.Definitions()
 }
 
+// IsOwner reports whether senderID is the declared owner of entrypointID (#122).
+// Owner is per-entrypoint (Definition.OwnerID), declared in entrypoints.yaml,
+// read-only after config load. Empty OwnerID = no owner (A 配置), returns false
+// for any sender. Used by channel runners to let the owner bypass the sender
+// allowlist (#121) even when not explicitly listed.
+//
+// coverage: contract (100% required) — owner determination is a security gate.
+func (s *Service) IsOwner(_ context.Context, senderID, entrypointID string) bool {
+	if s == nil || s.entrypoints == nil {
+		return false
+	}
+	senderID = strings.TrimSpace(senderID)
+	entrypointID = strings.TrimSpace(entrypointID)
+	if senderID == "" || entrypointID == "" {
+		return false
+	}
+	def, ok := s.entrypoints.Definition(entrypointID)
+	if !ok {
+		return false
+	}
+	return def.OwnerID == senderID // strict equality, NOT glob (identity, not pattern)
+}
+
 func (s *Service) Status() map[string]any {
 	return map[string]any{
 		"name":           "xira",

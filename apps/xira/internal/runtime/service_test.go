@@ -2954,3 +2954,73 @@ func TestResumeAfterHumanResponsePersistsAnswer(t *testing.T) {
 		t.Fatalf("session history missing resume final response; got %+v", history)
 	}
 }
+
+// TestServiceIsOwner (#122) verifies Service.IsOwner — the contract:
+//   - owner match (senderID == Definition.OwnerID, entrypointID matches) → true
+//   - sender mismatch → false
+//   - entrypoint not found → false
+//   - empty sender / entrypointID → false
+//   - entrypoint with no owner (A 配置) → false for any sender
+//   - entrypointID is scoped (owner of ep-A is NOT owner of ep-B)
+//
+// coverage: contract (100% required) — IsOwner is a security gate.
+func TestServiceIsOwner(t *testing.T) {
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+entrypoints: entrypoints.yaml
+`)
+	// Two feishu entrypoints on the SAME channel, different owners — pins the
+	// cross-entrypoint privilege-escalation fix (entrypointID, not channel).
+	// Plus one entrypoint with no owner (A 配置).
+	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
+  - id: feishu-expense
+    channel: feishu
+    default_agent: xira-assistant
+    owner: ou_finance
+  - id: feishu-leave
+    channel: feishu
+    default_agent: xira-assistant
+    owner: ou_hr
+  - id: feishu-public
+    channel: feishu
+    default_agent: xira-assistant
+`)
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
+
+	// owner match.
+	if !rt.IsOwner(context.Background(), "ou_finance", "feishu-expense") {
+		t.Error("ou_finance should be owner of feishu-expense")
+	}
+	// sender mismatch.
+	if rt.IsOwner(context.Background(), "ou_other", "feishu-expense") {
+		t.Error("ou_other should NOT be owner of feishu-expense")
+	}
+	// CRITICAL: cross-entrypoint — ou_finance is NOT owner of feishu-leave,
+	// even though both are on "feishu" channel. This is the bug the entrypointID
+	// signature change (vs channel) fixes.
+	if rt.IsOwner(context.Background(), "ou_finance", "feishu-leave") {
+		t.Error("ou_finance (owner of expense) should NOT be owner of feishu-leave — cross-entrypoint escalation")
+	}
+	// entrypoint not found.
+	if rt.IsOwner(context.Background(), "ou_finance", "nonexistent") {
+		t.Error("IsOwner for nonexistent entrypoint should be false")
+	}
+	// empty sender.
+	if rt.IsOwner(context.Background(), "", "feishu-expense") {
+		t.Error("empty senderID should be false")
+	}
+	// empty entrypointID.
+	if rt.IsOwner(context.Background(), "ou_finance", "") {
+		t.Error("empty entrypointID should be false")
+	}
+	// entrypoint with no owner (A 配置) → false for any sender.
+	if rt.IsOwner(context.Background(), "anyone", "feishu-public") {
+		t.Error("entrypoint with no owner should return false for any sender")
+	}
+	// nil receiver guard.
+	var nilSvc *Service
+	if nilSvc.IsOwner(context.Background(), "ou_finance", "feishu-expense") {
+		t.Error("nil Service.IsOwner should return false, not panic")
+	}
+}

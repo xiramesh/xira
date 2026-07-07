@@ -596,7 +596,7 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 	)
 	if !shouldHandleMessage(chatType, senderID, r.definition, r.ownerResolver) {
 		reason := "unmentioned_group_message"
-		if !r.definition.AllowsSender(senderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), senderID, "ilink")) {
+		if !r.definition.AllowsSender(senderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), senderID, r.definition.ID)) {
 			reason = "sender_not_authorized"
 		}
 		slog.Info("ilink group message ignored",
@@ -961,7 +961,7 @@ func isAuthorizedSender(senderID string, definition entrypoints.Definition, owne
 	if owner == nil {
 		return false
 	}
-	return owner.IsOwner(context.Background(), senderID, "ilink")
+	return owner.IsOwner(context.Background(), senderID, definition.ID)
 }
 
 func chatID(msg openilink.WeixinMessage) string {

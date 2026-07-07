@@ -801,7 +801,7 @@ func (r *Runner) prepareTurn(frame inboundFrame, data messageData, defaultEntryp
 		// Internal-only reason for slog (排障). NEVER reaches the client ack —
 		// handleMessage sends a generic "unmentioned_group_message" reason so
 		// unauthorized senders can't distinguish auth-reject from mention-reject.
-		if !definition.AllowsSender(ctx.SenderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), ctx.SenderID, ctx.Channel)) {
+		if !definition.AllowsSender(ctx.SenderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), ctx.SenderID, definition.ID)) {
 			ignoreReason = "sender_not_authorized"
 		} else {
 			ignoreReason = "unmentioned_group_message"
@@ -853,7 +853,7 @@ func shouldHandle(ctx channel.InboundContext, definition entrypoints.Definition,
 }
 
 // isAuthorizedSender checks the sender allowlist (#121) with optional owner
-// bypass (#122). Channel is read from ctx.Channel (websocket clients set it).
+// bypass (#122). entrypointID from definition.ID scopes the owner lookup.
 func isAuthorizedSender(ctx channel.InboundContext, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
 	if definition.AllowsSender(ctx.SenderID) {
 		return true
@@ -861,7 +861,7 @@ func isAuthorizedSender(ctx channel.InboundContext, definition entrypoints.Defin
 	if owner == nil {
 		return false
 	}
-	return owner.IsOwner(context.Background(), ctx.SenderID, ctx.Channel)
+	return owner.IsOwner(context.Background(), ctx.SenderID, definition.ID)
 }
 
 func (req *activeRequest) acceptEvent(evt frt.RuntimeEvent) bool {
