@@ -160,6 +160,10 @@ func TestFeishuConcurrentSameChatDoesNotRace(t *testing.T) {
 	if got := rt.maxSeen(); got > 1 {
 		t.Errorf("max concurrent RunAgent for SAME chat = %d, want <= 1 (2nd should steer, not race)", got)
 	}
+	// Wait for the async runTurn goroutine to finish before TempDir cleanup.
+	// Without this, the goroutine can still be writing to the state dir when
+	// t.TempDir() RemoveAll runs → "directory not empty" (flaky on slow CI).
+	waitTurnInactive(t, runner, chatKeyFor(chatID, senderID))
 }
 
 // TestFeishuConcurrentDifferentChatsDoRunInParallel: two messages to DIFFERENT
@@ -199,6 +203,9 @@ func TestFeishuConcurrentDifferentChatsDoRunInParallel(t *testing.T) {
 	if got := rt.maxSeen(); got < 2 {
 		t.Errorf("max concurrent RunAgent for DIFFERENT chats = %d, want >= 2 (per-chatKey isolation must allow parallel)", got)
 	}
+	// Wait for both async runTurn goroutines before TempDir cleanup (#137).
+	waitTurnInactive(t, runner, chatKeyFor("oc_chat1", "userA"))
+	waitTurnInactive(t, runner, chatKeyFor("oc_chat2", "userB"))
 }
 
 // TestFeishuSecondMessageSteersIntoQueue: when a turn is active for chatKey,
@@ -353,7 +360,9 @@ func TestFeishuRejectsUnauthorizedSenderSilently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleMessageReceive authorized sender error: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond) // RunAgent is async via ChatKeySession
+	// Wait for the async turn to complete (more reliable than time.Sleep,
+	// also prevents TempDir cleanup race on slow CI — #137).
+	waitTurnInactive(t, runner, chatKeyFor("c1", "ou_allowed"))
 	if rt.maxSeen() != 1 {
 		t.Fatalf("RunAgent should be called once for authorized sender, got %d", rt.maxSeen())
 	}
