@@ -217,7 +217,43 @@ Body.
 }
 
 func TestRepositoryWorkspaceDamingAgentCanExecuteFiles(t *testing.T) {
-	workspace := filepath.Clean("../../../../workspace")
+	// Self-contained: construct a daming-agent profile in a temp workspace
+	// instead of reading the repo's workspace/agents/daming-agent/ (which is
+	// .gitignore'd and absent in CI — see #137). The profile content mirrors
+	// the real daming-agent PROFILE.md so the assertions stay meaningful.
+	workspace := t.TempDir()
+	writeAgentProfile(t, workspace, "daming-agent", `---
+id: daming-agent
+name: Daming Agent
+version: 0.1.0
+description: iLink-facing execution assistant for Daming.
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-flash
+  stream: true
+  temperature: 0.2
+tools:
+  - command.run
+  - shell.run
+  - tool_output.read
+  - read_file
+  - search_file
+  - write_file
+  - list_dir
+  - edit_file
+session:
+  dimensions:
+    - chat
+    - sender
+verification:
+  default_checks:
+    - final_response_non_empty
+---
+# Operating Contract
+
+You can execute commands via command.run (with timeout_seconds) and shell.run.
+Use tool_output.read to read stdout_preview / stderr_preview when truncated.
+`, "# Daming Soul")
 	manager, err := LoadFromWorkspace(workspace)
 	if err != nil {
 		t.Fatalf("LoadFromWorkspace(%s) error = %v", workspace, err)

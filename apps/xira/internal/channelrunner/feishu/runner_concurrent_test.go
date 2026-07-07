@@ -230,6 +230,12 @@ func TestFeishuSecondMessageSteersIntoQueue(t *testing.T) {
 	// Release turn 1 so the goroutine can finish.
 	close(turnRelease)
 
+	// Wait for turn 1 to become inactive before asserting + letting TempDir
+	// cleanup run. Without this, the async goroutine can still be writing to
+	// the state dir when t.TempDir() tries to RemoveAll → "directory not empty"
+	// (flaky on slow CI runners — see #137).
+	waitTurnInactive(t, runner, chatKeyFor(chatID, senderID))
+
 	// The steered interjection must be sitting in the SteeringQueue.
 	sq := runner.router.SteeringQueue(chatKeyFor(chatID, senderID))
 	msgs := sq.DrainAll()
