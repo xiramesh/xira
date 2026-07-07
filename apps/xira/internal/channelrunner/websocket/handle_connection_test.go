@@ -324,7 +324,7 @@ func TestRunnerSetOwnerResolver(t *testing.T) {
 	if r.ownerResolver != nil {
 		t.Error("SetOwnerResolver(nil) should leave field nil")
 	}
-	owner := wsStubOwner("ou_x")
+	owner := &wsStubOwner{}
 	r.SetOwnerResolver(owner)
 	if r.ownerResolver == nil {
 		t.Error("SetOwnerResolver(stub) should set field non-nil")
@@ -340,10 +340,15 @@ func TestRunnerSetHITLResolver(t *testing.T) {
 	}
 }
 
-// wsStubOwner implements frt.OwnerResolver for websocket tests.
-type wsStubOwner string
+// wsStubOwner implements frt.OwnerResolver for websocket tests. Records the
+// entrypointID so integration tests can assert runners pass definition.ID,
+// not channel. See PR #139 review.
+type wsStubOwner struct {
+	LastEntrypointID string
+}
 
-func (s wsStubOwner) IsOwner(_ context.Context, _, _ string) bool {
+func (s *wsStubOwner) IsOwner(_ context.Context, _, entrypointID string) bool {
+	s.LastEntrypointID = entrypointID
 	return true
 }
 

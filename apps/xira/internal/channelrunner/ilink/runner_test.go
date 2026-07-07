@@ -304,7 +304,7 @@ func TestIlinkShouldHandleMessageSenderAllowlist(t *testing.T) {
 		t.Error("sender not in allowlist + no owner should be rejected")
 	}
 	// sender not in allowlist + owner yes → pass.
-	if !shouldHandleMessage("group", "wxid_owner", allowlist, ilinkStubOwner("wxid_owner")) {
+	if !shouldHandleMessage("group", "wxid_owner", allowlist, &ilinkStubOwner{ownerSenderID: "wxid_owner"}) {
 		t.Error("owner should bypass allowlist")
 	}
 	// group with respond_to_unmentioned=false → reject regardless of allowlist.
@@ -321,11 +321,17 @@ func TestIlinkShouldHandleMessageSenderAllowlist(t *testing.T) {
 	}
 }
 
-// ilinkStubOwner implements frt.OwnerResolver for ilink tests.
-type ilinkStubOwner string
+// ilinkStubOwner implements frt.OwnerResolver for ilink tests. Records the
+// entrypointID param so integration tests can assert runners pass
+// definition.ID, not channel. See PR #139 review.
+type ilinkStubOwner struct {
+	ownerSenderID    string
+	LastEntrypointID string
+}
 
-func (s ilinkStubOwner) IsOwner(_ context.Context, senderID, _ string) bool {
-	return senderID == string(s)
+func (s *ilinkStubOwner) IsOwner(_ context.Context, senderID, entrypointID string) bool {
+	s.LastEntrypointID = entrypointID
+	return senderID == s.ownerSenderID
 }
 
 // TestRunnerSetOwnerResolver covers the setter (nil-safe + value injection).
@@ -335,7 +341,7 @@ func TestRunnerSetOwnerResolver(t *testing.T) {
 	if r.ownerResolver != nil {
 		t.Error("SetOwnerResolver(nil) should leave field nil")
 	}
-	owner := ilinkStubOwner("wxid_x")
+	owner := &ilinkStubOwner{ownerSenderID: "wxid_x"}
 	r.SetOwnerResolver(owner)
 	if r.ownerResolver == nil {
 		t.Error("SetOwnerResolver(stub) should set field non-nil")

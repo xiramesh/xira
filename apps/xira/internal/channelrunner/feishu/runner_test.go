@@ -89,7 +89,7 @@ func TestShouldHandleMessageSenderAllowlist(t *testing.T) {
 		t.Error("sender not in allowlist + no owner should be rejected")
 	}
 	// sender not in allowlist + owner says yes → pass.
-	if !shouldHandleMessage("group", true, "ou_owner", allowlist, stubOwnerResolver("ou_owner")) {
+	if !shouldHandleMessage("group", true, "ou_owner", allowlist, &stubOwnerResolver{ownerSenderID: "ou_owner"}) {
 		t.Error("owner should bypass allowlist")
 	}
 	// mention gate fails + sender in allowlist → still reject (AND).
@@ -103,11 +103,18 @@ func TestShouldHandleMessageSenderAllowlist(t *testing.T) {
 }
 
 // stubOwnerResolver implements frt.OwnerResolver for tests. It returns true
-// only for the single configured owner senderID.
-type stubOwnerResolver string
+// only for the configured owner senderID. The third param (entrypointID) is
+// recorded into LastEntrypointID so integration tests can assert runners pass
+// definition.ID (not a channel name) — owner bypass is a privilege boundary.
+// See PR #139 review: pin that runners pass entrypoint ID, not channel.
+type stubOwnerResolver struct {
+	ownerSenderID    string
+	LastEntrypointID string
+}
 
-func (s stubOwnerResolver) IsOwner(_ context.Context, senderID, _ string) bool {
-	return senderID == string(s)
+func (s *stubOwnerResolver) IsOwner(_ context.Context, senderID, entrypointID string) bool {
+	s.LastEntrypointID = entrypointID
+	return senderID == s.ownerSenderID
 }
 
 func TestMessageDeduperRejectsInFlightDuplicate(t *testing.T) {
@@ -254,7 +261,7 @@ func TestRunnerSetOwnerResolver(t *testing.T) {
 	if r.ownerResolver != nil {
 		t.Error("SetOwnerResolver(nil) should leave field nil")
 	}
-	owner := stubOwnerResolver("ou_x")
+	owner := &stubOwnerResolver{ownerSenderID: "ou_x"}
 	r.SetOwnerResolver(owner)
 	if r.ownerResolver == nil {
 		t.Error("SetOwnerResolver(stub) should set field non-nil")

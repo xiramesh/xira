@@ -264,6 +264,12 @@ func (r *Runner) CreatePairing(ctx context.Context) (channelcontrol.PairingSnaps
 	r.mu.Lock()
 	r.pairings[pairingID] = state
 	runCtx := r.runCtx
+	// Copy snapshot under the lock: pollPairing goroutine (started below) will
+	// call updatePairing which writes state.snapshot under r.mu. Returning
+	// state.snapshot outside the lock would race with that write (CI caught
+	// this via -race in TestCreatePairingExpires). Copy while locked, return
+	// the copy.
+	result := state.snapshot
 	r.mu.Unlock()
 	if runCtx == nil {
 		runCtx = context.Background()
@@ -271,12 +277,12 @@ func (r *Runner) CreatePairing(ctx context.Context) (channelcontrol.PairingSnaps
 	slog.Info("ilink pairing created",
 		"entrypoint_id", r.definition.ID,
 		"pairing_id", pairingID,
-		"qrcode", state.snapshot.QRCode,
-		"qr_image_content", state.snapshot.QRImageContent,
+		"qrcode", result.QRCode,
+		"qr_image_content", result.QRImageContent,
 		"base_url", state.baseURL,
 	)
 	go r.pollPairing(runCtx, client, pairingID)
-	return state.snapshot, nil
+	return result, nil
 }
 
 func (r *Runner) GetPairing(pairingID string) (channelcontrol.PairingSnapshot, error) {
