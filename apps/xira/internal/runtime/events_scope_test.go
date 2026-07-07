@@ -113,10 +113,10 @@ func TestInboundContextFromScopeRestoresNames(t *testing.T) {
 	// Build a scope via the real manager path so Names is populated exactly as
 	// production would (not hand-forged).
 	ctx := channel.NewInboundContext("feishu", "user-9", map[string]string{
-		"chat_id":      "chat-7",
-		"chat_type":    "group",
-		"chat_name":    "工作群",
-		"sender_name":  "张三",
+		"chat_id":     "chat-7",
+		"chat_type":   "group",
+		"chat_name":   "工作群",
+		"sender_name": "张三",
 	})
 	policy := routing.SessionPolicy{Dimensions: []string{"chat", "sender"}}
 	scope := fsession.BuildScope(ctx, policy)

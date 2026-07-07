@@ -312,14 +312,14 @@ func TestRunChildAgentPreservesNamesInChildContext(t *testing.T) {
 	caller := agents.BuiltinXiraAssistant()
 	target := agents.BuiltinResearchAssistant()
 	parentBase := runtimeEventBase{
-		RunID:       "parent-named-1",
-		AgentID:     caller.ID,
-		Channel:     "feishu",
-		ChatID:      "chat-9",
-		ChatType:    "group",
-		ChatName:    "工作群",
-		SenderID:    "user-42",
-		SenderName:  "张三",
+		RunID:      "parent-named-1",
+		AgentID:    caller.ID,
+		Channel:    "feishu",
+		ChatID:     "chat-9",
+		ChatType:   "group",
+		ChatName:   "工作群",
+		SenderID:   "user-42",
+		SenderName: "张三",
 	}
 	req := childAgentRequest{
 		ParentBase:  parentBase,

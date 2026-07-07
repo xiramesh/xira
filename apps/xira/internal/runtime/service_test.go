@@ -1584,12 +1584,12 @@ func TestRunAgentInjectsConversationContextWithNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := channel.NormalizeInboundContext(channel.InboundContext{
-		Channel:     "feishu",
-		ChatID:      "chat-1",
-		ChatType:    "group",
-		ChatName:    "工作群",
-		SenderID:    "user-42",
-		SenderName:  "张三",
+		Channel:    "feishu",
+		ChatID:     "chat-1",
+		ChatType:   "group",
+		ChatName:   "工作群",
+		SenderID:   "user-42",
+		SenderName: "张三",
 	})
 	if _, err := rt.RunAgent(context.Background(), TurnRequest{
 		Message: "hi",
