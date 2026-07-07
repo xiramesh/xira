@@ -12,6 +12,7 @@ import (
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
+	fsession "github.com/xiramesh/xira/internal/session"
 )
 
 // run_child_agent_test.go: RunChildAgent is the shared child-run entry point
@@ -282,5 +283,169 @@ func TestRunChildAgentPersistsSessionScope(t *testing.T) {
 	}
 	if reconstructed.SenderID != parentSender {
 		t.Errorf("reconstructed SenderID = %q, want %q (canonical prefix must strip)", reconstructed.SenderID, parentSender)
+	}
+}
+
+// TestRunChildAgentPreservesNamesInChildContext (PR #132 review): a child run
+// spawned by RunChildAgent must inherit ChatName / SenderName (and the
+// already-important ChatID / SenderID) from parentBase. Before the fix,
+// delegation.go's child InboundContext literal omitted name fields, and the
+// resume path's runtimeEventBase omitted ALL context fields except Channel —
+// so a resumed run that spawned a child lost names AND chat/sender IDs before
+// the child prompt was built. This test pins the child-side inheritance;
+// TestResumeDirectHumanRequestPropagatesContextToBase pins the resume-side
+// construction.
+func TestRunChildAgentPreservesNamesInChildContext(t *testing.T) {
+	var capturedChildReq deepseek.ChatRequest
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		capturedChildReq = req
+		return deepSeekHTTPResponse(deepSeekTextResponse("child done")), nil
+	})}
+	rt := newTestService(t, Config{
+		StateDir:       t.TempDir(),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	caller := agents.BuiltinXiraAssistant()
+	target := agents.BuiltinResearchAssistant()
+	parentBase := runtimeEventBase{
+		RunID:       "parent-named-1",
+		AgentID:     caller.ID,
+		Channel:     "feishu",
+		ChatID:      "chat-9",
+		ChatType:    "group",
+		ChatName:    "工作群",
+		SenderID:    "user-42",
+		SenderName:  "张三",
+	}
+	req := childAgentRequest{
+		ParentBase:  parentBase,
+		ParentRunID: "parent-named-1",
+		ChildRunID:  "child-named-1",
+		ToolCallID:  "call-1",
+		Target:      target,
+		Message:     "research task",
+		SessionMode: "ephemeral_worker",
+		Depth:       1,
+	}
+	if _, err := rt.RunChildAgent(context.Background(), req); err != nil {
+		t.Fatalf("RunChildAgent error: %v", err)
+	}
+	if len(capturedChildReq.Messages) < 1 {
+		t.Fatal("no messages captured from child LLM call")
+	}
+	systemInstruction, ok := capturedChildReq.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("system message content type = %T", capturedChildReq.Messages[0].Content)
+	}
+	// Child must inherit the parent's identity — names AND ids.
+	for _, want := range []string{
+		"Channel: feishu",
+		"Chat: chat-9 (type: group)",
+		"ChatName: 工作群",
+		"Sender: user-42",
+		"SenderName: 张三",
+	} {
+		if !strings.Contains(systemInstruction, want) {
+			t.Errorf("child system instruction missing %q\n--- instruction ---\n%s", want, systemInstruction)
+		}
+	}
+}
+
+// TestResumeDirectHumanRequestPropagatesContextToBase (PR #132 review): the
+// resume path must build runtimeEventBase from the FULLY restored
+// resumeReq.Context — not just Channel. Before the fix, resume's base omitted
+// ChatID/SenderID/ChatName/SenderName, so a resumed run that spawned a child
+// lost ALL context fields before the child prompt was built. This test seeds
+// a waiting_human run whose SessionScope carries Names, resumes it, and
+// verifies the resumed run's own system instruction contains the restored
+// names AND chat/sender ids (proving resumeReq.Context was fully populated,
+// which is the source the fixed base reads from).
+func TestResumeDirectHumanRequestPropagatesContextToBase(t *testing.T) {
+	var capturedResumeReq deepseek.ChatRequest
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return nil, err
+		}
+		capturedResumeReq = req
+		return deepSeekHTTPResponse(deepSeekTextResponse("resumed")), nil
+	})}
+	rt := newTestService(t, Config{
+		StateDir:       filepath.Join(t.TempDir(), "state"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	// Seed a waiting_human run whose SessionScope carries chat_id/sender_id
+	// (encoded as "<type>:<id>") AND Names (display names).
+	scope := &fsession.SessionScope{
+		Version:      1,
+		EntrypointID: "ep-resume",
+		Channel:      "feishu",
+		Values: map[string]string{
+			"chat":   "group:chat-9",
+			"sender": "feishu:user-42",
+		},
+		Names: map[string]string{
+			"chat_name":   "工作群",
+			"sender_name": "张三",
+		},
+	}
+	if err := rt.runs.SaveRun(TurnResponse{
+		RunID:        "run-resume-1",
+		AgentID:      "xira-assistant",
+		EntrypointID: "ep-resume",
+		Status:       StatusWaitingHuman,
+		Message:      "need input",
+		SessionID:    "session-resume-1",
+		SessionScope: scope,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hr, err := rt.CreateHumanRequest(context.Background(), humanrequest.CreateRequest{
+		WorkspaceID:  rt.workspace,
+		WorkspaceKey: rt.WorkspaceKey(),
+		RunID:        "run-resume-1",
+		AgentID:      "xira-assistant",
+		SessionID:    "session-resume-1",
+		Kind:         humanrequest.RequestFreeform,
+		Question:     "continue?",
+		Source:       "agent_request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hr.Response = &humanrequest.HumanResponse{
+		RequestID: hr.ID,
+		Kind:      humanrequest.ResponseAnswer,
+		Actor:     "user-42",
+		Message:   "yes",
+	}
+	if err := rt.resumeDirectHumanRequest(context.Background(), hr); err != nil {
+		t.Fatalf("resumeDirectHumanRequest: %v", err)
+	}
+	if len(capturedResumeReq.Messages) < 1 {
+		t.Fatal("no messages captured from resume LLM call")
+	}
+	systemInstruction, ok := capturedResumeReq.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("system message content type = %T", capturedResumeReq.Messages[0].Content)
+	}
+	// The resumed run's own system instruction must reflect the fully restored
+	// context — names AND the de-prefixed ids (chat-9 / user-42, not group:chat-9
+	// / feishu:user-42). This proves resumeReq.Context is complete, which is
+	// the source the fixed runtimeEventBase reads from.
+	for _, want := range []string{
+		"Channel: feishu",
+		"Chat: chat-9 (type: group)",
+		"ChatName: 工作群",
+		"Sender: user-42",
+		"SenderName: 张三",
+	} {
+		if !strings.Contains(systemInstruction, want) {
+			t.Errorf("resumed run system instruction missing %q\n--- instruction ---\n%s", want, systemInstruction)
+		}
 	}
 }

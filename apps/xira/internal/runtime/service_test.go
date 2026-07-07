@@ -1683,6 +1683,21 @@ func TestFormatConversationContextOmitsEmptyFields(t *testing.T) {
 			want: []string{"Channel: feishu", "Chat: chat-1 (type: group)", "Sender: user-42"},
 			bad:  []string{"ChatName:", "SenderName:"},
 		},
+		{
+			// Edge case: name present but NO id at all. NormalizeInboundContext
+			// guarantees SenderID is never empty (always "local-user"), so this
+			// only arises from direct construction bypassing the normalizer
+			// (e.g. InstructionHash path). The early-return in
+			// formatConversationContext checks IDs only, so a name-only context
+			// collapses to "" — names are descriptive, they don't stand alone.
+			name: "only name no id (collapses to empty)",
+			ctx: channel.InboundContext{
+				ChatName:   "工作群",
+				SenderName: "张三",
+			},
+			want: nil,
+			bad:  []string{"ChatName:", "SenderName:", "Channel:", "Chat:", "Sender:"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
