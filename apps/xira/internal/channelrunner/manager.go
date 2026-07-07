@@ -131,6 +131,26 @@ func (m *Manager) SetHITLResolver(resolver runtime.HITLResolver) {
 	}
 }
 
+// SetOwnerResolver injects the owner-query capability into all channel runners
+// (#122). Until #122 implements Service.IsOwner, this is a no-op when called
+// with nil (the default). Runners use it to let the owner bypass the sender
+// allowlist (#121).
+func (m *Manager) SetOwnerResolver(resolver runtime.OwnerResolver) {
+	if m == nil {
+		return
+	}
+	for _, runner := range m.runners {
+		switch r := runner.(type) {
+		case *feishu.Runner:
+			r.SetOwnerResolver(resolver)
+		case *ilink.Runner:
+			r.SetOwnerResolver(resolver)
+		case *websocket.Runner:
+			r.SetOwnerResolver(resolver)
+		}
+	}
+}
+
 func (m *Manager) CreatePairing(ctx context.Context, entrypointID string) (channelcontrol.PairingSnapshot, error) {
 	controller, err := m.pairingController(entrypointID)
 	if err != nil {

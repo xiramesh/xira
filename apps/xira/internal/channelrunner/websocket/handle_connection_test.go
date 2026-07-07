@@ -11,6 +11,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
@@ -260,5 +261,56 @@ func TestHandleConnectionBadJSON(t *testing.T) {
 	d, _ := f.Data.(map[string]any)
 	if code, _ := d["code"].(string); code != "bad_json" {
 		t.Errorf("code = %q, want bad_json", code)
+	}
+}
+
+// TestPrepareTurnSenderAuthorization (#121): when AllowedSenderIDs is set,
+// prepareTurn must mark the turn as not-handled with reason
+// "sender_not_authorized" for senders outside the list. Authorized senders
+// get handle=true. Unlike feishu/ilink (silent ignore), websocket still acks
+// with status:"ignored" + the reason — pinned by the ignoreReason field.
+func TestPrepareTurnSenderAuthorization(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.entrypoints = []entrypoints.Definition{{
+		ID:               "ws-allowlist",
+		Channel:          "websocket",
+		AllowedSenderIDs: []string{"ou_allowed"},
+	}}
+	runner, err := NewRunner(entrypoints.Definition{ID: "ws-allowlist", Channel: "websocket"}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	runner.runtime = rt
+	mkFrame := func(senderID string) (inboundFrame, messageData) {
+		data := messageData{
+			Message: "hi",
+			Context: channel.InboundContext{ChatID: "c1", SenderID: senderID, Channel: "websocket", ChatType: "p2p"},
+		}
+		raw, _ := json.Marshal(data)
+		return inboundFrame{Type: "message", ID: "om_sa", Data: raw}, data
+	}
+	// Unauthorized sender → handle=false + reason.
+	frame, data := mkFrame("ou_blocked")
+	prepared, errFrame := runner.prepareTurn(frame, data, "ws-allowlist")
+	if errFrame != nil {
+		t.Fatalf("unexpected errFrame for unauthorized sender: %+v", errFrame)
+	}
+	if prepared.handle {
+		t.Error("unauthorized sender should have handle=false")
+	}
+	if prepared.ignoreReason != "sender_not_authorized" {
+		t.Errorf("ignoreReason = %q, want sender_not_authorized", prepared.ignoreReason)
+	}
+	// Authorized sender → handle=true, no ignore reason.
+	frame, data = mkFrame("ou_allowed")
+	prepared, errFrame = runner.prepareTurn(frame, data, "ws-allowlist")
+	if errFrame != nil {
+		t.Fatalf("unexpected errFrame for authorized sender: %+v", errFrame)
+	}
+	if !prepared.handle {
+		t.Error("authorized sender should have handle=true")
+	}
+	if prepared.ignoreReason != "" {
+		t.Errorf("authorized sender ignoreReason = %q, want empty", prepared.ignoreReason)
 	}
 }

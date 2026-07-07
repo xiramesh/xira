@@ -278,3 +278,63 @@ func (f *fakeClient) Token() string {
 func (f *fakeClient) BaseURL() string {
 	return f.baseURL
 }
+
+// TestIlinkShouldHandleMessageSenderAllowlist (#121): ilink's mention gate has
+// no "mentioned" param (protocol has no mention concept), so only the group
+// config + sender auth apply. Mirrors feishu's TestShouldHandleMessageSenderAllowlist.
+func TestIlinkShouldHandleMessageSenderAllowlist(t *testing.T) {
+	allowlist := entrypoints.Definition{
+		RespondToUnmentionedGroupMessages: true,
+		AllowedSenderIDs:                  []string{"wxid_allowed"},
+	}
+	// empty allowlist + respond-all → allow all (backward compat).
+	respondAll := entrypoints.Definition{RespondToUnmentionedGroupMessages: true}
+	if !shouldHandleMessage("group", "wxid_anyone", respondAll, nil) {
+		t.Error("empty allowlist + respond-all should allow any sender")
+	}
+	// sender in allowlist → pass.
+	if !shouldHandleMessage("group", "wxid_allowed", allowlist, nil) {
+		t.Error("sender in allowlist should pass")
+	}
+	// sender not in allowlist + no owner → reject.
+	if shouldHandleMessage("group", "wxid_blocked", allowlist, nil) {
+		t.Error("sender not in allowlist + no owner should be rejected")
+	}
+	// sender not in allowlist + owner yes → pass.
+	if !shouldHandleMessage("group", "wxid_owner", allowlist, ilinkStubOwner("wxid_owner")) {
+		t.Error("owner should bypass allowlist")
+	}
+	// group with respond_to_unmentioned=false → reject regardless of allowlist.
+	strict := entrypoints.Definition{AllowedSenderIDs: []string{"wxid_allowed"}}
+	if shouldHandleMessage("group", "wxid_allowed", strict, nil) {
+		t.Error("respond_to_unmentioned=false should reject even if sender in allowlist")
+	}
+	// direct (non-group) → mention gate passes, sender auth still applies.
+	if !shouldHandleMessage("direct", "wxid_allowed", allowlist, nil) {
+		t.Error("direct message from allowed sender should pass")
+	}
+	if shouldHandleMessage("direct", "wxid_blocked", allowlist, nil) {
+		t.Error("direct message from blocked sender should be rejected")
+	}
+}
+
+// ilinkStubOwner implements frt.OwnerResolver for ilink tests.
+type ilinkStubOwner string
+
+func (s ilinkStubOwner) IsOwner(_ context.Context, senderID, _ string) bool {
+	return senderID == string(s)
+}
+
+// TestRunnerSetOwnerResolver covers the setter (nil-safe + value injection).
+func TestRunnerSetOwnerResolver(t *testing.T) {
+	r := &Runner{}
+	r.SetOwnerResolver(nil) // must not panic on nil receiver guard
+	if r.ownerResolver != nil {
+		t.Error("SetOwnerResolver(nil) should leave field nil")
+	}
+	owner := ilinkStubOwner("wxid_x")
+	r.SetOwnerResolver(owner)
+	if r.ownerResolver == nil {
+		t.Error("SetOwnerResolver(stub) should set field non-nil")
+	}
+}

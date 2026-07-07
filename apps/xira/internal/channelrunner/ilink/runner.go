@@ -73,7 +73,10 @@ type Runner struct {
 	runtime    *frt.Service
 	// hitlResolver, when non-nil, lets ilink resolve pending HITL directly
 	// from IM text replies (#92). nil = HITL direct-answer disabled.
-	hitlResolver    frt.HITLResolver
+	hitlResolver frt.HITLResolver
+	// ownerResolver, when non-nil, lets the owner bypass the sender allowlist
+	// (#121). nil = owner concept not configured (allowlist-only auth).
+	ownerResolver   frt.OwnerResolver
 	stateDir        string
 	baseURL         string
 	allowPairing    bool
@@ -92,6 +95,13 @@ type Runner struct {
 func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
 	if r != nil {
 		r.hitlResolver = resolver
+	}
+}
+
+// SetOwnerResolver injects the owner-query capability (#122). nil = allowlist-only auth.
+func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
+	if r != nil {
+		r.ownerResolver = resolver
 	}
 }
 
@@ -584,14 +594,18 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		"content_chars", utf8.RuneCountInString(content),
 		"content_preview", previewText(content, 120),
 	)
-	if !shouldHandleMessage(chatType, r.definition) {
+	if !shouldHandleMessage(chatType, senderID, r.definition, r.ownerResolver) {
+		reason := "unmentioned_group_message"
+		if !r.definition.AllowsSender(senderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), senderID, "ilink")) {
+			reason = "sender_not_authorized"
+		}
 		slog.Info("ilink group message ignored",
 			"entrypoint_id", r.definition.ID,
 			"account_id", account.record.AccountID,
 			"chat_id", chatID,
 			"message_id", messageID,
 			"sender_id", senderID,
-			"reason", "unmentioned_group_message",
+			"reason", reason,
 			"respond_to_unmentioned_group_messages", r.definition.RespondToUnmentionedGroupMessages,
 		)
 		return
@@ -924,11 +938,30 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func shouldHandleMessage(chatType string, definition entrypoints.Definition) bool {
+// shouldHandleMessage decides whether ilink should process an inbound message.
+// Two gates (AND): mention gate + sender authorization (#121). ilink protocol
+// has no mention concept, so the mention gate only checks the
+// RespondToUnmentionedGroupMessages config for group messages.
+func shouldHandleMessage(chatType, senderID string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
 	if chatType != "group" {
+		return isAuthorizedSender(senderID, definition, owner)
+	}
+	if !definition.RespondToUnmentionedGroupMessages {
+		return false
+	}
+	return isAuthorizedSender(senderID, definition, owner)
+}
+
+// isAuthorizedSender checks the sender allowlist (#121) with optional owner
+// bypass (#122). owner == nil means allowlist-only auth.
+func isAuthorizedSender(senderID string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
+	if definition.AllowsSender(senderID) {
 		return true
 	}
-	return definition.RespondToUnmentionedGroupMessages
+	if owner == nil {
+		return false
+	}
+	return owner.IsOwner(context.Background(), senderID, "ilink")
 }
 
 func chatID(msg openilink.WeixinMessage) string {

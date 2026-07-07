@@ -44,20 +44,68 @@ func TestBuildMarkdownCard(t *testing.T) {
 
 func TestShouldHandleMessageRespectsGroupMentionPolicy(t *testing.T) {
 	defaultDefinition := entrypoints.Definition{}
-	if !shouldHandleMessage("direct", false, defaultDefinition) {
+	// Backward-compat: empty AllowedSenderIDs → allowlist always passes, so
+	// behavior is unchanged (mention gate only). Use a fixed sender for all calls.
+	if !shouldHandleMessage("direct", false, "ou_1", defaultDefinition, nil) {
 		t.Fatal("direct messages should be handled")
 	}
-	if !shouldHandleMessage("group", true, defaultDefinition) {
+	if !shouldHandleMessage("group", true, "ou_1", defaultDefinition, nil) {
 		t.Fatal("mentioned group messages should be handled")
 	}
-	if shouldHandleMessage("group", false, defaultDefinition) {
+	if shouldHandleMessage("group", false, "ou_1", defaultDefinition, nil) {
 		t.Fatal("unmentioned group messages should be ignored by default")
 	}
 
 	respondAllGroups := entrypoints.Definition{RespondToUnmentionedGroupMessages: true}
-	if !shouldHandleMessage("group", false, respondAllGroups) {
+	if !shouldHandleMessage("group", false, "ou_1", respondAllGroups, nil) {
 		t.Fatal("unmentioned group messages should be handled when configured")
 	}
+}
+
+// TestShouldHandleMessageSenderAllowlist covers the #121 sender authorization
+// gate that's AND-combined with the mention gate. Cases:
+//   - empty allowlist = allow all (backward compat)
+//   - sender in allowlist → pass
+//   - sender not in allowlist + no owner → reject
+//   - sender not in allowlist + owner says yes → pass (owner bypass, #122)
+//   - mention gate fails + sender in allowlist → still reject (AND)
+func TestShouldHandleMessageSenderAllowlist(t *testing.T) {
+	allowlist := entrypoints.Definition{
+		RespondToUnmentionedGroupMessages: true, // ensure mention gate passes, isolate allowlist
+		AllowedSenderIDs:                  []string{"ou_allowed"},
+	}
+	// empty allowlist → allow all.
+	if !shouldHandleMessage("group", true, "ou_anyone", entrypoints.Definition{}, nil) {
+		t.Error("empty allowlist should allow any mentioned sender")
+	}
+	// sender in allowlist → pass.
+	if !shouldHandleMessage("group", true, "ou_allowed", allowlist, nil) {
+		t.Error("sender in allowlist should pass")
+	}
+	// sender not in allowlist + no owner → reject.
+	if shouldHandleMessage("group", true, "ou_blocked", allowlist, nil) {
+		t.Error("sender not in allowlist + no owner should be rejected")
+	}
+	// sender not in allowlist + owner says yes → pass.
+	if !shouldHandleMessage("group", true, "ou_owner", allowlist, stubOwnerResolver("ou_owner")) {
+		t.Error("owner should bypass allowlist")
+	}
+	// mention gate fails + sender in allowlist → still reject (AND).
+	strictGroup := entrypoints.Definition{
+		RespondToUnmentionedGroupMessages: false,
+		AllowedSenderIDs:                  []string{"ou_allowed"},
+	}
+	if shouldHandleMessage("group", false, "ou_allowed", strictGroup, nil) {
+		t.Error("mention gate fail should reject even if sender is in allowlist (AND)")
+	}
+}
+
+// stubOwnerResolver implements frt.OwnerResolver for tests. It returns true
+// only for the single configured owner senderID.
+type stubOwnerResolver string
+
+func (s stubOwnerResolver) IsOwner(_ context.Context, senderID, _ string) bool {
+	return senderID == string(s)
 }
 
 func TestMessageDeduperRejectsInFlightDuplicate(t *testing.T) {
@@ -196,3 +244,17 @@ func TestRunnerHandlesMessageReadEvent(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// TestRunnerSetOwnerResolver covers the setter (nil-safe + value injection).
+func TestRunnerSetOwnerResolver(t *testing.T) {
+	r := &Runner{}
+	r.SetOwnerResolver(nil) // nil-safe
+	if r.ownerResolver != nil {
+		t.Error("SetOwnerResolver(nil) should leave field nil")
+	}
+	owner := stubOwnerResolver("ou_x")
+	r.SetOwnerResolver(owner)
+	if r.ownerResolver == nil {
+		t.Error("SetOwnerResolver(stub) should set field non-nil")
+	}
+}

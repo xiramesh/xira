@@ -118,6 +118,10 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 			// Inject HITL resolve capability so IM channels (feishu/ilink) can
 			// resolve pending HITL from text replies (#92 — HITL IM direct answer).
 			channelRunners.SetHITLResolver(rt)
+			// Inject owner-query capability (#122). Until #122 implements
+			// Service.IsOwner, this passes a nil-typed interface (no-op for
+			// runners: allowlist-only auth, owner bypass disabled).
+			channelRunners.SetOwnerResolver(nil)
 			defer func() {
 				stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel()
