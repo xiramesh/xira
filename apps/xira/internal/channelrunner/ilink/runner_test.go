@@ -303,9 +303,18 @@ func TestIlinkShouldHandleMessageSenderAllowlist(t *testing.T) {
 	if shouldHandleMessage("group", "wxid_blocked", allowlist, nil) {
 		t.Error("sender not in allowlist + no owner should be rejected")
 	}
-	// sender not in allowlist + owner yes → pass.
-	if !shouldHandleMessage("group", "wxid_owner", allowlist, &ilinkStubOwner{ownerSenderID: "wxid_owner"}) {
+	// sender not in allowlist + owner yes → pass. Pin entrypointID propagation (#139 review).
+	ownerDef := entrypoints.Definition{
+		ID:                                "ilink-owner-test",
+		RespondToUnmentionedGroupMessages: true,
+		AllowedSenderIDs:                  []string{"wxid_allowed"},
+	}
+	owner := &ilinkStubOwner{ownerSenderID: "wxid_owner"}
+	if !shouldHandleMessage("group", "wxid_owner", ownerDef, owner) {
 		t.Error("owner should bypass allowlist")
+	}
+	if owner.LastEntrypointID != "ilink-owner-test" {
+		t.Errorf("owner resolver received entrypointID = %q, want %q (definition.ID, not channel)", owner.LastEntrypointID, ownerDef.ID)
 	}
 	// group with respond_to_unmentioned=false → reject regardless of allowlist.
 	strict := entrypoints.Definition{AllowedSenderIDs: []string{"wxid_allowed"}}

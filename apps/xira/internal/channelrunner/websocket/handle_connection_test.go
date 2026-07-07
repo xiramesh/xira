@@ -314,6 +314,22 @@ func TestPrepareTurnSenderAuthorization(t *testing.T) {
 	if prepared.ignoreReason != "" {
 		t.Errorf("authorized sender ignoreReason = %q, want empty", prepared.ignoreReason)
 	}
+	// Owner bypass: unauthorized sender + owner resolver → handle=true.
+	// Pin entrypointID propagation (#139 review): resolver must receive
+	// definition.ID, not channel "websocket".
+	owner := &wsStubOwner{}
+	runner.ownerResolver = owner
+	frame, data = mkFrame("ou_owner")
+	prepared, errFrame = runner.prepareTurn(frame, data, "ws-allowlist")
+	if errFrame != nil {
+		t.Fatalf("unexpected errFrame for owner bypass: %+v", errFrame)
+	}
+	if !prepared.handle {
+		t.Error("owner should bypass allowlist (handle=true)")
+	}
+	if owner.LastEntrypointID != "ws-allowlist" {
+		t.Errorf("owner resolver received entrypointID = %q, want 'ws-allowlist' (definition.ID, not channel)", owner.LastEntrypointID)
+	}
 }
 
 // TestRunnerSetOwnerResolver covers the setter (nil-safe + value injection).

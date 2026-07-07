@@ -88,9 +88,20 @@ func TestShouldHandleMessageSenderAllowlist(t *testing.T) {
 	if shouldHandleMessage("group", true, "ou_blocked", allowlist, nil) {
 		t.Error("sender not in allowlist + no owner should be rejected")
 	}
-	// sender not in allowlist + owner says yes → pass.
-	if !shouldHandleMessage("group", true, "ou_owner", allowlist, &stubOwnerResolver{ownerSenderID: "ou_owner"}) {
+	// sender not in allowlist + owner says yes → pass. Also pin that the
+	// owner resolver receives definition.ID (entrypoint ID), not a channel
+	// name — owner bypass is a privilege boundary (#139 review).
+	ownerDef := entrypoints.Definition{
+		ID:                                "feishu-owner-test",
+		RespondToUnmentionedGroupMessages: true,
+		AllowedSenderIDs:                  []string{"ou_allowed"},
+	}
+	owner := &stubOwnerResolver{ownerSenderID: "ou_owner"}
+	if !shouldHandleMessage("group", true, "ou_owner", ownerDef, owner) {
 		t.Error("owner should bypass allowlist")
+	}
+	if owner.LastEntrypointID != "feishu-owner-test" {
+		t.Errorf("owner resolver received entrypointID = %q, want %q (definition.ID, not channel)", owner.LastEntrypointID, ownerDef.ID)
 	}
 	// mention gate fails + sender in allowlist → still reject (AND).
 	strictGroup := entrypoints.Definition{
