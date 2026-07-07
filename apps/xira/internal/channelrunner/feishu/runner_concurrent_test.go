@@ -312,3 +312,43 @@ type failingRuntime struct{}
 func (failingRuntime) RunAgent(context.Context, frt.TurnRequest) (frt.TurnResponse, error) {
 	return frt.TurnResponse{}, errors.New("simulated RunAgent failure")
 }
+
+// TestFeishuRejectsUnauthorizedSenderSilently (#121): when AllowedSenderIDs is
+// set and a sender outside the list messages the bot, the message is silently
+// ignored (handleMessageReceive returns nil) and RunAgent is NEVER called.
+// This pins the dedupe-before + silent-ignore contract.
+func TestFeishuRejectsUnauthorizedSenderSilently(t *testing.T) {
+	rt := newFakeRuntime()
+	def := entrypoints.Definition{
+		ID:               "feishu-allowlist",
+		Channel:          "feishu",
+		AppID:            "cli_test_app",
+		AppSecret:        "test_secret",
+		AllowedSenderIDs: []string{"ou_allowed"},
+	}
+	runner, err := NewRunner(def, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	runner.runtime = rt
+	runner.client = lark.NewClient("cli_test_app", "test_secret",
+		lark.WithOpenBaseUrl("http://127.0.0.1:9"),
+	)
+	// Sender NOT in allowlist, no ownerResolver → must be rejected.
+	err = runner.handleMessageReceive(context.Background(), makeP2Message("c1", "ou_blocked", "m1", "hi"))
+	if err != nil {
+		t.Fatalf("handleMessageReceive returned error for unauthorized sender (should be silent nil): %v", err)
+	}
+	if rt.maxSeen() != 0 {
+		t.Fatalf("RunAgent was called %d times for unauthorized sender (should be 0)", rt.maxSeen())
+	}
+	// Sanity: authorized sender DOES trigger RunAgent.
+	err = runner.handleMessageReceive(context.Background(), makeP2Message("c1", "ou_allowed", "m2", "hi"))
+	if err != nil {
+		t.Fatalf("handleMessageReceive authorized sender error: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond) // RunAgent is async via ChatKeySession
+	if rt.maxSeen() != 1 {
+		t.Fatalf("RunAgent should be called once for authorized sender, got %d", rt.maxSeen())
+	}
+}

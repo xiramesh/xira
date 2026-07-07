@@ -11,6 +11,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
@@ -260,5 +261,156 @@ func TestHandleConnectionBadJSON(t *testing.T) {
 	d, _ := f.Data.(map[string]any)
 	if code, _ := d["code"].(string); code != "bad_json" {
 		t.Errorf("code = %q, want bad_json", code)
+	}
+}
+
+// TestPrepareTurnSenderAuthorization (#121): when AllowedSenderIDs is set,
+// prepareTurn must mark the turn as not-handled for senders outside the list.
+// The internal ignoreReason field is "sender_not_authorized" (for slog only).
+// The client-visible ack does NOT carry this reason — it's generic
+// "unmentioned_group_message" (see TestHandleConnectionUnauthorizedSenderGenericAck).
+// This test pins the internal field; the ack-reason contract is pinned separately.
+func TestPrepareTurnSenderAuthorization(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.entrypoints = []entrypoints.Definition{{
+		ID:               "ws-allowlist",
+		Channel:          "websocket",
+		AllowedSenderIDs: []string{"ou_allowed"},
+	}}
+	runner, err := NewRunner(entrypoints.Definition{ID: "ws-allowlist", Channel: "websocket"}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	runner.runtime = rt
+	mkFrame := func(senderID string) (inboundFrame, messageData) {
+		data := messageData{
+			Message: "hi",
+			Context: channel.InboundContext{ChatID: "c1", SenderID: senderID, Channel: "websocket", ChatType: "p2p"},
+		}
+		raw, _ := json.Marshal(data)
+		return inboundFrame{Type: "message", ID: "om_sa", Data: raw}, data
+	}
+	// Unauthorized sender → handle=false + reason.
+	frame, data := mkFrame("ou_blocked")
+	prepared, errFrame := runner.prepareTurn(frame, data, "ws-allowlist")
+	if errFrame != nil {
+		t.Fatalf("unexpected errFrame for unauthorized sender: %+v", errFrame)
+	}
+	if prepared.handle {
+		t.Error("unauthorized sender should have handle=false")
+	}
+	if prepared.ignoreReason != "sender_not_authorized" {
+		t.Errorf("ignoreReason = %q, want sender_not_authorized", prepared.ignoreReason)
+	}
+	// Authorized sender → handle=true, no ignore reason.
+	frame, data = mkFrame("ou_allowed")
+	prepared, errFrame = runner.prepareTurn(frame, data, "ws-allowlist")
+	if errFrame != nil {
+		t.Fatalf("unexpected errFrame for authorized sender: %+v", errFrame)
+	}
+	if !prepared.handle {
+		t.Error("authorized sender should have handle=true")
+	}
+	if prepared.ignoreReason != "" {
+		t.Errorf("authorized sender ignoreReason = %q, want empty", prepared.ignoreReason)
+	}
+}
+
+// TestRunnerSetOwnerResolver covers the setter (nil-safe + value injection).
+// Previously 0% — directly relevant to #121.
+func TestRunnerSetOwnerResolver(t *testing.T) {
+	r := &Runner{}
+	r.SetOwnerResolver(nil)
+	if r.ownerResolver != nil {
+		t.Error("SetOwnerResolver(nil) should leave field nil")
+	}
+	owner := wsStubOwner("ou_x")
+	r.SetOwnerResolver(owner)
+	if r.ownerResolver == nil {
+		t.Error("SetOwnerResolver(stub) should set field non-nil")
+	}
+}
+
+// TestRunnerSetHITLResolver covers the HITL setter (nil-safe). Previously 0%.
+func TestRunnerSetHITLResolver(t *testing.T) {
+	r := &Runner{}
+	r.SetHITLResolver(nil)
+	if r.hitlResolver != nil {
+		t.Error("SetHITLResolver(nil) should leave field nil")
+	}
+}
+
+// wsStubOwner implements frt.OwnerResolver for websocket tests.
+type wsStubOwner string
+
+func (s wsStubOwner) IsOwner(_ context.Context, _, _ string) bool {
+	return true
+}
+
+// TestShouldHandleGroupMentionedAuthorized covers shouldHandle's group branch
+// (mentioned=true + authorized sender → handle). Previously only p2p was
+// tested via TestPrepareTurnSenderAuthorization.
+func TestShouldHandleGroupMentionedAuthorized(t *testing.T) {
+	ctx := channel.InboundContext{
+		ChatType:  "group",
+		Mentioned: true,
+		SenderID:  "ou_ok",
+		Channel:   "websocket",
+	}
+	def := entrypoints.Definition{AllowedSenderIDs: []string{"ou_ok"}}
+	if !shouldHandle(ctx, def, nil) {
+		t.Error("mentioned + authorized group message should be handled")
+	}
+	// group + not mentioned + respond-to-unmentioned=true → handled (if authed).
+	def2 := entrypoints.Definition{RespondToUnmentionedGroupMessages: true, AllowedSenderIDs: []string{"ou_ok"}}
+	if !shouldHandle(ctx, def2, nil) {
+		t.Error("respond-all + authorized should be handled")
+	}
+	// group + not mentioned + respond-to-unmentioned=false → not handled.
+	ctxNotMentioned := ctx
+	ctxNotMentioned.Mentioned = false
+	if shouldHandle(ctxNotMentioned, entrypoints.Definition{}, nil) {
+		t.Error("unmentioned group + no respond-all should be ignored")
+	}
+}
+
+// TestHandleConnectionUnauthorizedSenderGenericAck (PR #134 review): when an
+// unauthorized sender messages the bot via websocket, the ack must NOT reveal
+// auth-failure — it returns the same generic "unmentioned_group_message"
+// reason as the mention-gate path. The real reason stays in server logs only.
+// This prevents leaking bot/auth existence to unauthorized clients.
+func TestHandleConnectionUnauthorizedSenderGenericAck(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.entrypoints = []entrypoints.Definition{{
+		ID:               "websocket-default",
+		Channel:          "websocket",
+		AllowedSenderIDs: []string{"ou_allowed"},
+	}}
+	srv := newWSLoopbackServer(t, rt)
+	defer srv.close()
+	c := srv.dial(t)
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	// Unauthorized sender sends a message.
+	data := messageData{
+		Message: "hi",
+		Context: channel.InboundContext{ChatID: "c1", SenderID: "ou_blocked", Channel: "websocket"},
+	}
+	raw, _ := json.Marshal(data)
+	writeFrameClient(t, c, inboundFrame{Type: "message", ID: "om_unauth", Data: raw})
+	f := readFrameClient(t, c)
+	d, _ := f.Data.(map[string]any)
+	status, _ := d["status"].(string)
+	reason, _ := d["reason"].(string)
+	if status != "ignored" {
+		t.Fatalf("ack status = %q, want ignored", status)
+	}
+	// CRITICAL: reason must NOT reveal auth failure. It must be the generic
+	// mention-gate reason, indistinguishable from a normal ignore.
+	if reason == "sender_not_authorized" {
+		t.Errorf("ack reason leaked auth failure: %q — must be generic", reason)
+	}
+	if reason != "unmentioned_group_message" {
+		t.Errorf("ack reason = %q, want generic 'unmentioned_group_message'", reason)
 	}
 }

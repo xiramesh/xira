@@ -41,11 +41,16 @@ type Runner struct {
 	// from IM text replies (#92). Injected by main.go from *frt.Service.
 	// nil = HITL direct-answer disabled (messages always start a new turn).
 	hitlResolver frt.HITLResolver
-	appID        string
-	appSecret    string
-	verify       string
-	encryptKey   string
-	client       *lark.Client
+	// ownerResolver, when non-nil, lets the owner bypass the sender allowlist
+	// (#121) even when not explicitly listed. Injected by main.go from
+	// *frt.Service once #122 implements IsOwner. nil = owner concept not
+	// configured (allowlist-only auth).
+	ownerResolver frt.OwnerResolver
+	appID         string
+	appSecret     string
+	verify        string
+	encryptKey    string
+	client        *lark.Client
 
 	mu       sync.Mutex
 	cancel   context.CancelFunc
@@ -60,6 +65,15 @@ type Runner struct {
 func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
 	if r != nil {
 		r.hitlResolver = resolver
+	}
+}
+
+// SetOwnerResolver injects the owner-query capability (#122). When non-nil,
+// the owner bypasses the sender allowlist (#121) even when not listed.
+// nil = owner concept not configured (allowlist-only auth).
+func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
+	if r != nil {
+		r.ownerResolver = resolver
 	}
 }
 
@@ -231,14 +245,21 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		"content_chars", utf8.RuneCountInString(content),
 		"content_preview", previewText(content, 120),
 	)
-	if !shouldHandleMessage(chatType, mentioned, r.definition) {
+	if !shouldHandleMessage(chatType, mentioned, senderID, r.definition, r.ownerResolver) {
+		// Distinguish the two gates for log clarity: mention gate vs sender auth.
+		// Both gates use AND; report whichever applies (sender auth takes
+		// precedence — even an @mentioned unauthorized sender is still rejected).
+		reason := "unmentioned_group_message"
+		if !r.definition.AllowsSender(senderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), senderID, "feishu")) {
+			reason = "sender_not_authorized"
+		}
 		slog.Info("feishu message ignored",
 			"entrypoint_id", r.definition.ID,
 			"chat_id", chatID,
 			"chat_type", chatType,
 			"message_id", messageID,
 			"sender_id", senderID,
-			"reason", "unmentioned_group_message",
+			"reason", reason,
 			"respond_to_unmentioned_group_messages", r.definition.RespondToUnmentionedGroupMessages,
 		)
 		return nil
@@ -371,14 +392,33 @@ func (r *Runner) messageDedupeKey(messageID string) string {
 	return strings.TrimSpace(r.definition.ID) + ":" + messageID
 }
 
-func shouldHandleMessage(chatType string, mentioned bool, definition entrypoints.Definition) bool {
+// shouldHandleMessage decides whether feishu should process an inbound message.
+// Two orthogonal gates, both must pass (AND):
+//  1. mention gate: group messages need @bot unless RespondToUnmentionedGroupMessages.
+//  2. sender authorization (#121): sender must be in AllowedSenderIDs (glob),
+//     OR pass the owner check when ownerResolver is non-nil. Empty allowlist
+//     = allow all (backward compat).
+func shouldHandleMessage(chatType string, mentioned bool, senderID string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
 	if chatType != "group" {
+		// p2p/direct: mention gate always passes; still check sender auth.
+		return isAuthorizedSender(senderID, definition, owner)
+	}
+	if !mentioned && !definition.RespondToUnmentionedGroupMessages {
+		return false
+	}
+	return isAuthorizedSender(senderID, definition, owner)
+}
+
+// isAuthorizedSender checks the sender allowlist (#121) with optional owner
+// bypass (#122). owner == nil OR IsOwner == false means allowlist-only auth.
+func isAuthorizedSender(senderID string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
+	if definition.AllowsSender(senderID) {
 		return true
 	}
-	if mentioned {
-		return true
+	if owner == nil {
+		return false
 	}
-	return definition.RespondToUnmentionedGroupMessages
+	return owner.IsOwner(context.Background(), senderID, "feishu")
 }
 
 func (r *Runner) buildMetadata(message *larkim.EventMessage, sender *larkim.EventSender, chatType, messageType string) map[string]string {

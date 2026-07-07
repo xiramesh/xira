@@ -36,6 +36,19 @@ type HITLResolver interface {
 	ResolveHumanRequest(ctx context.Context, requestID string, input humanrequest.ResolveRequest) (*humanrequest.HumanRequest, error)
 }
 
+// OwnerResolver is the injectable subset of *Service for owner queries (#122).
+// Channel runners use it to let the owner bypass the sender allowlist (#121)
+// even when they aren't explicitly listed. nil = owner concept not configured
+// (#121 only: allowlist-only auth, owner bypass disabled).
+//
+// *Service will satisfy this implicitly once #122 implements IsOwner; until
+// then the interface exists so channel-runner code is forward-compatible
+// (no signature churn when #122 lands). No compile-time assertion yet —
+// IsOwner is not implemented on *Service today.
+type OwnerResolver interface {
+	IsOwner(ctx context.Context, senderID, channel string) bool
+}
+
 // Compile-time assertions: *Service implements Runtime + HITLResolver.
 var _ Runtime = (*Service)(nil)
 var _ HITLResolver = (*Service)(nil)

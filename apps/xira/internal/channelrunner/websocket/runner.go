@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -97,11 +98,12 @@ type activeRequest struct {
 // Runner is the websocket channel runner. One instance per websocket
 // entrypoint, registered in channelrunner.Manager alongside ilink/feishu.
 type Runner struct {
-	definition   entrypoints.Definition
-	runtime      frt.Runtime
-	hitlResolver frt.HITLResolver
-	router       *progress.Router
-	dedupe       *dedupe.MessageDeduper
+	definition    entrypoints.Definition
+	runtime       frt.Runtime
+	hitlResolver  frt.HITLResolver
+	ownerResolver frt.OwnerResolver
+	router        *progress.Router
+	dedupe        *dedupe.MessageDeduper
 
 	// conns is the per-Runner connection registry (RFC chatkey-session Step 3b).
 	// It maps a ChatKey to its single live connection, so outbound delivery
@@ -165,6 +167,13 @@ func (r *Runner) Channel() string { return "websocket" }
 func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
 	if r != nil {
 		r.hitlResolver = resolver
+	}
+}
+
+// SetOwnerResolver injects the owner-query capability (#122). nil = allowlist-only auth.
+func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
+	if r != nil {
+		r.ownerResolver = resolver
 	}
 }
 
@@ -549,6 +558,18 @@ func (r *Runner) handleMessage(
 		return
 	}
 	if !prepared.handle {
+		// Internal reason goes to logs only — never expose auth-failure specifics
+		// to the client. The ack returns a generic reason indistinguishable from
+		// the mention-gate path, so an unauthorized sender cannot tell whether
+		// they were rejected for auth vs just not-mentioned. See PR #134 review.
+		if prepared.ignoreReason != "" {
+			slog.Info("websocket message ignored",
+				"entrypoint_id", prepared.turn.EntrypointID,
+				"chat_id", prepared.eventContext.ChatID,
+				"sender_id", prepared.eventContext.SenderID,
+				"reason", prepared.ignoreReason,
+			)
+		}
 		_ = writeFrame(outboundFrame{
 			Type:      "ack",
 			ID:        "srv_ack_" + requestID,
@@ -713,6 +734,7 @@ type preparedTurn struct {
 	dedupeKey    string
 	messageID    string
 	handle       bool
+	ignoreReason string // populated when handle==false (unmentioned_group_message | sender_not_authorized)
 }
 
 func (r *Runner) prepareTurn(frame inboundFrame, data messageData, defaultEntrypointID string) (preparedTurn, *outboundFrame) {
@@ -773,7 +795,18 @@ func (r *Runner) prepareTurn(frame inboundFrame, data messageData, defaultEntryp
 	}
 	ctx.MessageID = messageID
 	eventCtx.MessageID = messageID
-	handle := shouldHandle(ctx, definition)
+	handle := shouldHandle(ctx, definition, r.ownerResolver)
+	ignoreReason := ""
+	if !handle {
+		// Internal-only reason for slog (排障). NEVER reaches the client ack —
+		// handleMessage sends a generic "unmentioned_group_message" reason so
+		// unauthorized senders can't distinguish auth-reject from mention-reject.
+		if !definition.AllowsSender(ctx.SenderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), ctx.SenderID, ctx.Channel)) {
+			ignoreReason = "sender_not_authorized"
+		} else {
+			ignoreReason = "unmentioned_group_message"
+		}
+	}
 	return preparedTurn{
 		turn: frt.TurnRequest{
 			EntrypointID: runEntrypointID,
@@ -786,6 +819,7 @@ func (r *Runner) prepareTurn(frame inboundFrame, data messageData, defaultEntryp
 		dedupeKey:    dedupeKey(effectiveEntrypointID, messageID),
 		messageID:    messageID,
 		handle:       handle,
+		ignoreReason: ignoreReason,
 	}, nil
 }
 
@@ -806,11 +840,28 @@ func (r *Runner) findEntrypoint(entrypointID string) (entrypoints.Definition, bo
 	return entrypoints.Definition{}, false
 }
 
-func shouldHandle(ctx channel.InboundContext, definition entrypoints.Definition) bool {
+// shouldHandle decides whether websocket should process an inbound message.
+// Two gates (AND): mention gate + sender authorization (#121).
+func shouldHandle(ctx channel.InboundContext, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
 	if normalizeChannel(ctx.ChatType) != "group" {
+		return isAuthorizedSender(ctx, definition, owner)
+	}
+	if !ctx.Mentioned && !definition.RespondToUnmentionedGroupMessages {
+		return false
+	}
+	return isAuthorizedSender(ctx, definition, owner)
+}
+
+// isAuthorizedSender checks the sender allowlist (#121) with optional owner
+// bypass (#122). Channel is read from ctx.Channel (websocket clients set it).
+func isAuthorizedSender(ctx channel.InboundContext, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
+	if definition.AllowsSender(ctx.SenderID) {
 		return true
 	}
-	return ctx.Mentioned || definition.RespondToUnmentionedGroupMessages
+	if owner == nil {
+		return false
+	}
+	return owner.IsOwner(context.Background(), ctx.SenderID, ctx.Channel)
 }
 
 func (req *activeRequest) acceptEvent(evt frt.RuntimeEvent) bool {
