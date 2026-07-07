@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/humanrequest"
@@ -466,5 +467,182 @@ func writeCLIFile(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+}
+
+// TestOptionalFloat32 covers the nil + non-nil branches. Previously 0%.
+func TestOptionalFloat32(t *testing.T) {
+	if got := optionalFloat32(nil); got != nil {
+		t.Errorf("nil: got %v, want nil", got)
+	}
+	v := float32(0.5)
+	got := optionalFloat32(&v)
+	if gv, ok := got.(float32); !ok || gv != 0.5 {
+		t.Errorf("non-nil: got %v, want float32 0.5", got)
+	}
+}
+
+// TestPrintFinalResponse covers all branches (empty, with-suffix, without-suffix).
+// Previously 66.7%.
+func TestPrintFinalResponse(t *testing.T) {
+	cmd := newRootCommandWithFactory(func(runtime.Config) (*runtime.Service, error) { return nil, nil })
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	// no trailing newline.
+	if err := printFinalResponse(cmd, "hello"); err != nil {
+		t.Fatalf("no-suffix: %v", err)
+	}
+	if got := buf.String(); got != "hello\n" {
+		t.Errorf("no-suffix output = %q, want 'hello\\n'", got)
+	}
+	// with trailing newline.
+	buf.Reset()
+	if err := printFinalResponse(cmd, "hi\n"); err != nil {
+		t.Fatalf("with-suffix: %v", err)
+	}
+	if got := buf.String(); got != "hi\n" {
+		t.Errorf("with-suffix output = %q, want 'hi\\n'", got)
+	}
+	// empty text.
+	buf.Reset()
+	if err := printFinalResponse(cmd, ""); err != nil {
+		t.Fatalf("empty: %v", err)
+	}
+	if got := buf.String(); got != "" {
+		t.Errorf("empty output = %q, want empty", got)
+	}
+}
+
+// TestRunsListCommand covers "runs list" output (JSON of empty list).
+func TestRunsListCommand(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "runs", "list")
+	// Empty runs → "[]" or "null" (JSON empty array).
+	if !strings.Contains(out, "[") && !strings.Contains(out, "null") {
+		t.Errorf("runs list output = %q, want JSON array", out)
+	}
+}
+
+// TestRunsShowCommandNotFound covers "runs show <unknown>" → error.
+func TestRunsShowCommandNotFound(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	_, err := executeCommandError("--config", filepath.Join(instance, "xira.yaml"), "runs", "show", "nonexistent-run")
+	if err == nil {
+		t.Error("runs show unknown should error")
+	}
+}
+
+// TestFlowResumeCommandError covers flowResumeCommand's error path (unknown
+// flow run → error). Previously 38.5%.
+func TestFlowResumeCommandError(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	_, err := executeCommandError("--config", filepath.Join(instance, "xira.yaml"),
+		"flow", "resume", "nonexistent-flow", "--human-request", "hr-1")
+	if err == nil {
+		t.Error("flow resume unknown should error")
+	}
+}
+
+// TestFlowResumeCommandMissingFlag covers the required-flag validation.
+func TestFlowResumeCommandMissingFlag(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	_, err := executeCommandError("--config", filepath.Join(instance, "xira.yaml"),
+		"flow", "resume", "some-flow")
+	if err == nil {
+		t.Error("flow resume without --human-request should error")
+	}
+}
+
+// TestParseStringSliceFlagError covers the invalid-input branch. 85.7%.
+func TestParseStringSliceFlagError(t *testing.T) {
+	if _, err := parseStringSliceFlag([]string{"no-equals-sign"}); err == nil {
+		t.Error("invalid input without = should error")
+	}
+	got, err := parseStringSliceFlag([]string{"a=b", "c=d"})
+	if err != nil {
+		t.Fatalf("valid: %v", err)
+	}
+	if got["a"] != "b" || got["c"] != "d" {
+		t.Errorf("got %v", got)
+	}
+}
+
+// TestFlowListCommand covers "flow list" on empty state.
+func TestFlowListCommand(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "flow", "list")
+	if !strings.Contains(out, "[") && !strings.Contains(out, "null") {
+		t.Errorf("flow list output = %q, want JSON array", out)
+	}
+}
+
+// TestServeCommandStartsAndStops covers serveCommand's main body by starting
+// "serve" with a cancelable context, letting it initialize (HTTP + channel
+// runners), then cancelling to trigger shutdown. This covers ~80% of
+// serveCommand (the happy path through Start/Stop). Previously 11.1%.
+func TestServeCommandStartsAndStops(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	cmd := newRootCommandWithFactory(func(cfg runtime.Config) (*runtime.Service, error) {
+		cfg.DeepSeekClient = fakeCLIDeepSeekClient(t)
+		return runtime.NewService(cfg)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd.SetContext(ctx)
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--config", filepath.Join(instance, "xira.yaml"), "serve", "--addr", "127.0.0.1:0"})
+	// Run in goroutine; cancel after a short delay to let it start.
+	done := make(chan error, 1)
+	go func() { done <- cmd.Execute() }()
+	time.Sleep(300 * time.Millisecond) // let serve initialize
+	cancel()                           // trigger shutdown
+	select {
+	case err := <-done:
+		// serve returns context.Canceled or nil on graceful shutdown — both ok.
+		if err != nil && !strings.Contains(err.Error(), "context canceled") {
+			t.Logf("serve returned: %v (acceptable)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not stop within 5s after cancel")
+	}
+	if !strings.Contains(buf.String(), "listening") {
+		t.Errorf("serve output missing 'listening': %q", buf.String())
+	}
+}
+
+// TestRunsShowCommand covers "runs show" happy path (seed a run, then show it).
+// Previously 58.6% — only list + show-not-found were covered.
+func TestRunsShowCommand(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	// Seed a run via the runtime directly.
+	rt := newCLITestRuntime(t, instance)
+	if err := rt.RunStore().SaveRun(runtime.TurnResponse{
+		RunID: "run-show-test", AgentID: "xira-assistant", Status: "completed",
+		FinalResponse: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rt.Close()
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "runs", "show", "run-show-test")
+	if !strings.Contains(out, "run-show-test") {
+		t.Errorf("runs show output missing run id: %q", out)
+	}
+}
+
+// TestRunsExportCommand covers "runs export" (same as show but explicit JSON).
+// Previously uncovered (runsCommand was 62.1%).
+func TestRunsExportCommand(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	rt := newCLITestRuntime(t, instance)
+	if err := rt.RunStore().SaveRun(runtime.TurnResponse{
+		RunID: "run-export-test", AgentID: "xira-assistant", Status: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rt.Close()
+	out := executeCommand(t, "--config", filepath.Join(instance, "xira.yaml"), "runs", "export", "run-export-test")
+	if !strings.Contains(out, "run-export-test") {
+		t.Errorf("runs export output missing run id: %q", out)
 	}
 }

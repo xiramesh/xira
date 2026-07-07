@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/entrypoints"
 
+	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
@@ -256,5 +258,286 @@ func TestRunnerSetOwnerResolver(t *testing.T) {
 	r.SetOwnerResolver(owner)
 	if r.ownerResolver == nil {
 		t.Error("SetOwnerResolver(stub) should set field non-nil")
+	}
+}
+
+// TestExtractSenderID covers the priority order: user_id > open_id > union_id
+// + nil guards. Previously 33.3%.
+func TestExtractSenderID(t *testing.T) {
+	if got := extractSenderID(nil); got != "" {
+		t.Errorf("extractSenderID(nil) = %q, want empty", got)
+	}
+	if got := extractSenderID(&larkim.EventSender{}); got != "" {
+		t.Errorf("extractSenderID(empty) = %q, want empty", got)
+	}
+	// user_id wins over open_id.
+	sender := &larkim.EventSender{SenderId: &larkim.UserId{
+		UserId: strPtr("u1"),
+		OpenId: strPtr("o1"),
+	}}
+	if got := extractSenderID(sender); got != "u1" {
+		t.Errorf("user_id priority: got %q, want u1", got)
+	}
+	// open_id when no user_id.
+	sender.SenderId.UserId = nil
+	if got := extractSenderID(sender); got != "o1" {
+		t.Errorf("open_id fallback: got %q, want o1", got)
+	}
+	// union_id when no user_id/open_id.
+	sender.SenderId.OpenId = nil
+	sender.SenderId.UnionId = strPtr("un1")
+	if got := extractSenderID(sender); got != "un1" {
+		t.Errorf("union_id fallback: got %q, want un1", got)
+	}
+}
+
+// TestFirstJSONStringField covers JSON content field extraction.
+// Previously 0%.
+func TestFirstJSONStringField(t *testing.T) {
+	if got := firstJSONStringField("not json", "text"); got != "" {
+		t.Errorf("invalid json: got %q, want empty", got)
+	}
+	if got := firstJSONStringField(`{"text":"hello"}`, "text"); got != "hello" {
+		t.Errorf("basic field: got %q, want hello", got)
+	}
+	// First matching field wins.
+	if got := firstJSONStringField(`{"a":"1","b":"2"}`, "a", "b"); got != "1" {
+		t.Errorf("first-match: got %q, want 1", got)
+	}
+	// Fallback to second field.
+	if got := firstJSONStringField(`{"b":"2"}`, "a", "b"); got != "2" {
+		t.Errorf("fallback: got %q, want 2", got)
+	}
+	// Empty value skipped.
+	if got := firstJSONStringField(`{"a":""}`, "a", "b"); got != "" {
+		t.Errorf("empty value: got %q, want empty", got)
+	}
+}
+
+// TestNormalizeChatType covers the p2p/direct → direct normalization.
+func TestNormalizeChatType(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"p2p", "direct"}, {"direct", "direct"}, {"P2P", "direct"},
+		{" group ", "group"}, {"", "group"}, {"unknown", "group"},
+	} {
+		if got := normalizeChatType(c.in); got != c.want {
+			t.Errorf("normalizeChatType(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestStringValue covers the nil-safe string dereference.
+func TestStringValue(t *testing.T) {
+	if got := stringValue(nil); got != "" {
+		t.Errorf("stringValue(nil) = %q, want empty", got)
+	}
+	if got := stringValue(strPtr("  hi  ")); got != "hi" {
+		t.Errorf("stringValue trims: got %q, want hi", got)
+	}
+}
+
+// TestFeishuRunnerIDChannelSetters covers ID()/Channel()/SetHITLResolver/
+// SetOwnerResolver on a constructed runner. Previously 0%.
+func TestFeishuRunnerIDChannelSetters(t *testing.T) {
+	runner, err := NewRunner(entrypoints.Definition{
+		ID:        "feishu-id-test",
+		Channel:   "feishu",
+		AppID:     "cli_x",
+		AppSecret: "secret",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	if runner.ID() != "feishu-id-test" {
+		t.Errorf("ID() = %q, want feishu-id-test", runner.ID())
+	}
+	if runner.Channel() != "feishu" {
+		t.Errorf("Channel() = %q, want feishu", runner.Channel())
+	}
+	// SetHITLResolver nil-safe.
+	runner.SetHITLResolver(nil)
+	if runner.hitlResolver != nil {
+		t.Error("SetHITLResolver(nil) should leave field nil")
+	}
+}
+
+// TestFeishuCapabilities covers Capabilities() (previously 0%, single statement).
+func TestFeishuCapabilities(t *testing.T) {
+	runner, err := NewRunner(entrypoints.Definition{
+		ID: "feishu-cap", Channel: "feishu", AppID: "cli_x", AppSecret: "s",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	caps := runner.Capabilities()
+	hasCap := func(c channel.Capability) bool {
+		for _, x := range caps {
+			if x == c {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasCap(channel.CapabilityProactiveOutbound) {
+		t.Error("missing CapabilityProactiveOutbound")
+	}
+	if !hasCap(channel.CapabilityInteractiveHumanResponse) {
+		t.Error("missing CapabilityInteractiveHumanResponse")
+	}
+}
+
+// TestFeishuEmitErrorPaths covers Emit's validation branches (nil target,
+// empty chat_id, empty content, unknown type). All should return errors.
+// The happy path requires a real lark API call (covered by integration tests).
+func TestFeishuEmitErrorPaths(t *testing.T) {
+	runner, err := NewRunner(entrypoints.Definition{
+		ID: "feishu-emit", Channel: "feishu", AppID: "cli_x", AppSecret: "s",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	ctx := context.Background()
+	// nil target.
+	if err := runner.Emit(ctx, channel.OutboundEnvelope{}); err == nil {
+		t.Error("Emit with nil target should error")
+	}
+	// empty chat_id.
+	if err := runner.Emit(ctx, channel.OutboundEnvelope{Target: &channel.InboundContext{}}); err == nil {
+		t.Error("Emit with empty chat_id should error")
+	}
+	// empty content.
+	if err := runner.Emit(ctx, channel.OutboundEnvelope{
+		Target: &channel.InboundContext{ChatID: "c1"},
+		Data:   map[string]any{"content": "  "},
+	}); err == nil {
+		t.Error("Emit with empty content should error")
+	}
+	// unknown type (with content).
+	if err := runner.Emit(ctx, channel.OutboundEnvelope{
+		Type:   channel.OutboundType("unknown"),
+		Target: &channel.InboundContext{ChatID: "c1"},
+		Data:   map[string]any{"content": "hi"},
+	}); err == nil {
+		t.Error("Emit with unknown type should error")
+	}
+}
+
+// TestFeishuStartStop covers Start + Stop lifecycle. Start spawns a lark ws
+// client goroutine (connection fails in background — fake app_id, logged not
+// fatal). Stop cancels the context and clears state. Both functions were 0%.
+func TestFeishuStartStop(t *testing.T) {
+	runner, err := NewRunner(entrypoints.Definition{
+		ID:        "feishu-start",
+		Channel:   "feishu",
+		AppID:     "cli_test",
+		AppSecret: "secret",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runner.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Verify wsClient + cancel were set.
+	runner.mu.Lock()
+	hasClient := runner.wsClient != nil
+	hasCancel := runner.cancel != nil
+	runner.mu.Unlock()
+	if !hasClient || !hasCancel {
+		t.Fatal("Start should set wsClient and cancel")
+	}
+	// Stop must clear both + call cancel.
+	if err := runner.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	runner.mu.Lock()
+	clearedClient := runner.wsClient == nil
+	clearedCancel := runner.cancel == nil
+	runner.mu.Unlock()
+	if !clearedClient || !clearedCancel {
+		t.Error("Stop should clear wsClient and cancel")
+	}
+	// Stop without Start (cancel==nil) must not panic.
+	runner2, err := NewRunner(entrypoints.Definition{
+		ID: "feishu-nostart", Channel: "feishu", AppID: "cli_x", AppSecret: "s",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	if err := runner2.Stop(ctx); err != nil {
+		t.Errorf("Stop without Start should be no-op, got: %v", err)
+	}
+}
+
+// TestExtractContent covers all message type branches. Previously 41.7%.
+func TestExtractContent(t *testing.T) {
+	// empty content.
+	if got := extractContent(larkim.MsgTypeText, ""); got != "" {
+		t.Errorf("empty content: got %q, want empty", got)
+	}
+	// text type with valid JSON.
+	if got := extractContent(larkim.MsgTypeText, `{"text":"hello"}`); got != "hello" {
+		t.Errorf("text JSON: got %q, want hello", got)
+	}
+	// text type with invalid JSON → fallback to raw.
+	if got := extractContent(larkim.MsgTypeText, "raw text"); got != "raw text" {
+		t.Errorf("text raw fallback: got %q, want 'raw text'", got)
+	}
+	// image type.
+	if got := extractContent(larkim.MsgTypeImage, `{}`); got != "[image]" {
+		t.Errorf("image: got %q, want [image]", got)
+	}
+	// file type → firstJSONStringField.
+	if got := extractContent(larkim.MsgTypeFile, `{"file_name":"doc.pdf"}`); got != "doc.pdf" {
+		t.Errorf("file: got %q, want doc.pdf", got)
+	}
+	// audio type.
+	if got := extractContent(larkim.MsgTypeAudio, `{}`); got != "[audio]" {
+		t.Errorf("audio: got %q, want [audio]", got)
+	}
+	// media type.
+	if got := extractContent(larkim.MsgTypeMedia, `{}`); got != "[video]" {
+		t.Errorf("media: got %q, want [video]", got)
+	}
+	// unknown type → raw content.
+	if got := extractContent("custom", "payload"); got != "payload" {
+		t.Errorf("unknown: got %q, want payload", got)
+	}
+}
+
+// TestFeishuSendError covers send/sendText/sendCard error paths by redirecting
+// the lark client to a closed port (connection refused). Previously these
+// functions were ~55% — the success branch needs real API; error branch is
+// covered here.
+func TestFeishuSendError(t *testing.T) {
+	runner, err := NewRunner(entrypoints.Definition{
+		ID: "feishu-send", Channel: "feishu", AppID: "cli_test", AppSecret: "s",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	// Redirect to closed port → Create returns connection error.
+	runner.client = lark.NewClient("cli_test", "s", lark.WithOpenBaseUrl("http://127.0.0.1:9"))
+	ctx := context.Background()
+	// sendText path (via Emit happy path: type + content present, but API fails).
+	err = runner.Emit(ctx, channel.OutboundEnvelope{
+		Type:   channel.OutboundAssistantFinal,
+		Target: &channel.InboundContext{ChatID: "c1"},
+		Data:   map[string]any{"content": "hello"},
+	})
+	if err == nil {
+		t.Error("Emit to closed port should return error")
+	}
+	// sendCard path (unknown envelope type routes to... actually unknown errors
+	// before send. Test sendCard directly via proactive_message with markdown).
+	err = runner.Emit(ctx, channel.OutboundEnvelope{
+		Type:   channel.OutboundProactiveMessage,
+		Target: &channel.InboundContext{ChatID: "c1"},
+		Data:   map[string]any{"content": "**markdown**"},
+	})
+	if err == nil {
+		t.Error("Emit proactive to closed port should return error")
 	}
 }

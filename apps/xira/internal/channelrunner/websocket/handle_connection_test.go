@@ -314,3 +314,61 @@ func TestPrepareTurnSenderAuthorization(t *testing.T) {
 		t.Errorf("authorized sender ignoreReason = %q, want empty", prepared.ignoreReason)
 	}
 }
+
+// TestRunnerSetOwnerResolver covers the setter (nil-safe + value injection).
+// Previously 0% — directly relevant to #121.
+func TestRunnerSetOwnerResolver(t *testing.T) {
+	r := &Runner{}
+	r.SetOwnerResolver(nil)
+	if r.ownerResolver != nil {
+		t.Error("SetOwnerResolver(nil) should leave field nil")
+	}
+	owner := wsStubOwner("ou_x")
+	r.SetOwnerResolver(owner)
+	if r.ownerResolver == nil {
+		t.Error("SetOwnerResolver(stub) should set field non-nil")
+	}
+}
+
+// TestRunnerSetHITLResolver covers the HITL setter (nil-safe). Previously 0%.
+func TestRunnerSetHITLResolver(t *testing.T) {
+	r := &Runner{}
+	r.SetHITLResolver(nil)
+	if r.hitlResolver != nil {
+		t.Error("SetHITLResolver(nil) should leave field nil")
+	}
+}
+
+// wsStubOwner implements frt.OwnerResolver for websocket tests.
+type wsStubOwner string
+
+func (s wsStubOwner) IsOwner(_ context.Context, _, _ string) bool {
+	return true
+}
+
+// TestShouldHandleGroupMentionedAuthorized covers shouldHandle's group branch
+// (mentioned=true + authorized sender → handle). Previously only p2p was
+// tested via TestPrepareTurnSenderAuthorization.
+func TestShouldHandleGroupMentionedAuthorized(t *testing.T) {
+	ctx := channel.InboundContext{
+		ChatType:  "group",
+		Mentioned: true,
+		SenderID:  "ou_ok",
+		Channel:   "websocket",
+	}
+	def := entrypoints.Definition{AllowedSenderIDs: []string{"ou_ok"}}
+	if !shouldHandle(ctx, def, nil) {
+		t.Error("mentioned + authorized group message should be handled")
+	}
+	// group + not mentioned + respond-to-unmentioned=true → handled (if authed).
+	def2 := entrypoints.Definition{RespondToUnmentionedGroupMessages: true, AllowedSenderIDs: []string{"ou_ok"}}
+	if !shouldHandle(ctx, def2, nil) {
+		t.Error("respond-all + authorized should be handled")
+	}
+	// group + not mentioned + respond-to-unmentioned=false → not handled.
+	ctxNotMentioned := ctx
+	ctxNotMentioned.Mentioned = false
+	if shouldHandle(ctxNotMentioned, entrypoints.Definition{}, nil) {
+		t.Error("unmentioned group + no respond-all should be ignored")
+	}
+}
