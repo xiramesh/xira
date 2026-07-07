@@ -116,3 +116,75 @@ func TestRegistryUsesImplicitEntrypointWhenUnconfigured(t *testing.T) {
 		t.Fatalf("agent = %q", decision.AgentID)
 	}
 }
+
+// TestDefinitionAllowsSender covers the AllowsSender contract: glob matching
+// via path.Match, empty = allow-all, empty sender rejected, bad pattern
+// skipped (not fail-open). See #121.
+func TestDefinitionAllowsSender(t *testing.T) {
+	cases := []struct {
+		name     string
+		senders  []string
+		senderID string
+		want     bool
+	}{
+		{"empty allowlist allows any non-empty sender", nil, "ou_anyone", true},
+		{"star matches any non-empty sender", []string{"*"}, "ou_anyone", true},
+		// CRITICAL (PR #134 review): path.Match("*", "a/b") returns false because
+		// "*" doesn't match "/". But sender IDs CAN contain "/" (chatkey_test
+		// pins "sender with slash preserved"). The "*" special-case in AllowsSender
+		// must bypass path.Match so that explicit ["*"] stays equivalent to empty
+		// allowlist. Without the special case this returns false (silent reject).
+		{"star matches sender containing slash", []string{"*"}, "a/b", true},
+		{"empty allowlist matches sender containing slash", nil, "a/b", true},
+		{"exact match passes", []string{"ou_abc"}, "ou_abc", true},
+		{"exact mismatch rejects", []string{"ou_abc"}, "ou_def", false},
+		{"glob prefix matches (future expansion)", []string{"ou_*"}, "ou_abc", true},
+		{"glob prefix non-match rejects", []string{"ou_*"}, "wxid_abc", false},
+		{"empty senderID rejected even with star", []string{"*"}, "", false},
+		{"empty senderID rejected with empty allowlist too", nil, "", false},
+		{"malformed pattern skipped not fail-open", []string{"[bad"}, "ou_abc", false},
+		{"first match wins (star + exact)", []string{"*", "ou_abc"}, "anyone", true},
+		{"senderID trimmed before match", []string{"ou_abc"}, "  ou_abc  ", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := Definition{AllowedSenderIDs: c.senders}
+			if got := d.AllowsSender(c.senderID); got != c.want {
+				t.Errorf("AllowsSender(%q) with senders=%v = %v, want %v", c.senderID, c.senders, got, c.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeDefinitionDedupesAllowedSenderIDs verifies normalizeDefinition
+// trims, dedupes, and drops empty entries — mirroring AllowedAgentIDs handling.
+func TestNormalizeDefinitionDedupesAllowedSenderIDs(t *testing.T) {
+	raw := Definition{
+		AllowedSenderIDs: []string{
+			"ou_abc",
+			"  ou_abc  ", // dup after trim
+			"",
+			"   ",
+			"ou_def",
+			"*",
+		},
+	}
+	normalized := normalizeDefinition(raw, "xira-assistant")
+	want := []string{"ou_abc", "ou_def", "*"}
+	if len(normalized.AllowedSenderIDs) != len(want) {
+		t.Fatalf("got %v, want %v", normalized.AllowedSenderIDs, want)
+	}
+	for i, v := range want {
+		if normalized.AllowedSenderIDs[i] != v {
+			t.Errorf("AllowedSenderIDs[%d] = %q, want %q (full: %v)", i, normalized.AllowedSenderIDs[i], v, normalized.AllowedSenderIDs)
+		}
+	}
+}
+
+// TestNormalizeDefinitionEmptyAllowedSenderIDs verifies empty stays empty (not nil-ish junk).
+func TestNormalizeDefinitionEmptyAllowedSenderIDs(t *testing.T) {
+	normalized := normalizeDefinition(Definition{}, "xira-assistant")
+	if len(normalized.AllowedSenderIDs) != 0 {
+		t.Errorf("empty input should stay empty, got %v", normalized.AllowedSenderIDs)
+	}
+}

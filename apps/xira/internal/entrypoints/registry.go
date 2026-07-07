@@ -2,6 +2,7 @@ package entrypoints
 
 import (
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/xiramesh/xira/internal/channel"
@@ -23,6 +24,7 @@ type Definition struct {
 	StateDir                          string                `json:"state_dir,omitempty" yaml:"state_dir,omitempty"`
 	DefaultAgentID                    string                `json:"default_agent" yaml:"default_agent"`
 	AllowedAgentIDs                   []string              `json:"allowed_agents,omitempty" yaml:"allowed_agents,omitempty"`
+	AllowedSenderIDs                  []string              `json:"allowed_senders,omitempty" yaml:"allowed_senders,omitempty"`
 	SessionPolicy                     routing.SessionPolicy `json:"session,omitempty" yaml:"session,omitempty"`
 	AppSecret                         string                `json:"app_secret,omitempty" yaml:"app_secret,omitempty"`
 	AppSecretEnv                      string                `json:"app_secret_env,omitempty" yaml:"app_secret_env,omitempty"`
@@ -159,6 +161,44 @@ func (d Definition) AllowsAgent(agentID string) bool {
 	return false
 }
 
+// AllowsSender reports whether senderID is authorized to use this entrypoint.
+// Matching uses path.Match (glob): "ou_*", or exact IDs.
+//
+// Special case: bare "*" is handled BEFORE path.Match. Go's path.Match
+// defines "*" to match only non-"/" characters, so path.Match("*", "a/b")
+// returns false — but sender IDs CAN contain "/" (chatkey_test pins
+// "sender with slash preserved"). Without this special case, an explicit
+// allowed_senders: ["*"] would silently reject senders that an empty
+// allowlist (functionally equivalent per the contract) would accept.
+// The special case makes "*" truly equivalent to "allow any non-empty sender".
+//
+//   - Empty senderID → rejected.
+//   - Empty AllowedSenderIDs → allow all (backward compat, matches AllowedAgentIDs).
+//   - pattern == "*" → allow any non-empty sender (bypasses path.Match).
+//   - Other patterns → path.Match; malformed (ErrBadPattern) skipped, not fail-open.
+func (d Definition) AllowsSender(senderID string) bool {
+	senderID = strings.TrimSpace(senderID)
+	if senderID == "" {
+		return false
+	}
+	if len(d.AllowedSenderIDs) == 0 {
+		return true
+	}
+	for _, pattern := range d.AllowedSenderIDs {
+		if pattern == "*" {
+			return true // bypass path.Match — see comment above
+		}
+		ok, err := path.Match(pattern, senderID)
+		if err != nil {
+			continue // ErrBadPattern: skip, do not fail-open
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (d Definition) matches(ctx channel.InboundContext) bool {
 	if d.Channel != ctx.Channel {
 		return false
@@ -225,6 +265,20 @@ func normalizeDefinition(definition Definition, defaultAgentID string) Definitio
 		allowed = append(allowed, agentID)
 	}
 	definition.AllowedAgentIDs = allowed
+	allowedSenders := make([]string, 0, len(definition.AllowedSenderIDs))
+	seenSenders := map[string]struct{}{}
+	for _, senderID := range definition.AllowedSenderIDs {
+		senderID = strings.TrimSpace(senderID)
+		if senderID == "" {
+			continue
+		}
+		if _, ok := seenSenders[senderID]; ok {
+			continue
+		}
+		seenSenders[senderID] = struct{}{}
+		allowedSenders = append(allowedSenders, senderID)
+	}
+	definition.AllowedSenderIDs = allowedSenders
 	definition.SessionPolicy = routing.NormalizeSessionPolicy(definition.SessionPolicy)
 	return definition
 }

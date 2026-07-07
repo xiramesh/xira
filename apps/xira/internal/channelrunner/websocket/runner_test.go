@@ -41,6 +41,9 @@ type fakeRuntime struct {
 	// blocking forever. The default (false) preserves the original behavior
 	// (block until unblock), which existing tests rely on.
 	respectCtx bool
+	// entrypoints, if non-empty, is returned by Entrypoints() so prepareTurn's
+	// findEntrypoint can resolve a definition (e.g. with AllowedSenderIDs).
+	entrypoints []entrypoints.Definition
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -87,6 +90,10 @@ func (f *fakeRuntime) RunAgent(ctx context.Context, req frt.TurnRequest) (frt.Tu
 }
 
 func (f *fakeRuntime) maxSeen() int32 { return atomic.LoadInt32(&f.maxConcurrent) }
+
+// Entrypoints lets prepareTurn's findEntrypoint resolve a definition for tests
+// that need entrypoint-level config (e.g. AllowedSenderIDs in #121).
+func (f *fakeRuntime) Entrypoints() []entrypoints.Definition { return f.entrypoints }
 
 // newTestRunner builds a Runner with a fake runtime injected.
 func newTestRunner(t *testing.T, rt frt.Runtime) *Runner {
