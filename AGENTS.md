@@ -150,16 +150,71 @@ fact kind 忘在 switch 里开 `conversation=true` 就被静默 drop。
 - 如果一条行为没有可写的测试，先问"这条行为是否必要"——YAGNI；如果必要，先
   想清楚怎么测，再写。
 
-### 5.2 每个模块的测试覆盖率 ≥ 85%
+### 5.2 测试覆盖率：分级门槛 + 反 tautological 测试
 
 - 用 `go test -coverprofile` + `go tool cover` 按语句精算，不按函数计数（零语句
   空方法在 `go tool cover -func` 下显示 0% 是工具假象，按语句精算不计分母）。
-- **85% 是下限不是目标**——关键契约代码（状态机、sealed 穷尽、Filter 匹配等）
-  应追求 100%。
 - 覆盖率不达标 = 该模块未完成，不得提交。
-- **Enforcement**：目前靠作者自测 + reviewer 核查（`go test -coverprofile` + 按语句精算）。
-  CI 自动卡控（coverage gate）是 TODO——在它落地前，PR 描述必须附覆盖率数字，reviewer 必须独立
-  复跑核实，不能只信描述。
+
+#### 三档分级（不是一律包级 85%）
+
+包级 85% 是下限，但**一律包级 85% 会奖励"刷便宜测试、惩罚补关键测试"**：状态机
+和 slog helper 在同一个 85% 里，刷 helper（便宜）比补状态机边界（贵）更容易过门槛。
+因此按函数性质分三档：
+
+| 函数性质 | 目标 | 典型例子 | 理由 |
+|---|---|---|---|
+| **契约代码**（状态机、sealed 穷尽、Filter 匹配、权限判定、scope 哈希） | **100%**（每个分支/case 必须测到） | `pollPairing`、`shouldHandle`、`AllowsSender`、`scopeSignature`、`inboundContextFromScope` | 错了会丢账号 / 越权 / session 错位，bug 隐蔽且贵 |
+| **核心业务逻辑**（含分支的业务函数） | **85%**（包级平均达标即可） | `handleMessage`、`addAccount`、`CreatePairing`、`RunAgent` 路径 | 错了通常明显（功能坏了），但分支多了仍要覆盖 |
+| **纯 helper**（getter、`filepath.Join` 包装、slog 打字段、nil-return） | **不强制** | `optionalFloat32`、`syncBufPath`、`stringValue`、`firstNonEmpty` | 几乎不可能错，错了也无害 |
+
+**契约代码怎么标记 + 自动卡**：在契约函数的 doc 注释里加 `// coverage: contract (100% required)`。
+CI 脚本（TODO，落地前靠 reviewer 人工核）扫这种注释 + `go tool cover -func` 核对该函数
+是不是 100%。不达标 = PR 不能合，和包级 85% 同等约束力。
+
+**怎么判断一个函数算哪档**——问一句："这个函数错了，会出什么 bug？"
+- 丢账号 / 越权 / 状态错乱 / session 失效 → 契约代码，100%
+- 功能坏了（但能看出来） → 核心逻辑，85%
+- 没人会注意到 → helper，不强制
+
+#### 反 tautological 测试（reviewer 必须打回）
+
+**测试要验证行为，不是为覆盖率而写。** 以下类型不算"有效覆盖"，reviewer 看到必须打回：
+
+- **tautological**：测的就是赋值语句本身（`SetX(nil)` 然后断言 `field == nil`）
+- **显而易见**：单行 getter / `filepath.Join` 包装 / nil-return helper，行为从代码读一眼就懂
+- **凑数纯函数**：`optionalFloat32` / `normalizeChatType` 这种，错误几乎不可能发生
+
+刷这类测试能把包级覆盖率拉到 95% 但抓不到任何 bug——**覆盖率达标不等于测试有效**。
+reviewer 不能因为"覆盖率过了"就放过 tautological 测试。
+
+这条规则的有效性**一半在数字，一半在 reviewer 不放水**。如果 reviewer 对 tautological
+测试视而不见，下次作者还是会刷（刷的成本低于认真补的成本，结果一样）。
+
+#### PR 描述必须列"未覆盖函数 + 解释"，不是"覆盖率 X%"
+
+`X%` 这个数字本身没信息量（95% 可能是 95 行 helper + 0 行状态机）。
+PR 描述必须列出：
+
+1. **包级覆盖率数字**（下限 85%，契约代码 100%）
+2. **未覆盖的契约 / 核心函数 + 为什么不测**（如"pollPairing 的 confirmed-without-token
+   分支未覆盖，原因是测试需要 fake ilink API，工作量暂不划算，标 follow-up issue #XXX"）
+
+这把博弈从"凑数字"转向"解释缺口"。刷 100 个 tautological 测试拉到 95%，但
+pollPairing 没测——作者必须解释，reviewer 判断成不成立。**刷数字不能掩盖真实缺口。**
+
+#### 为什么不直接用更高的包级门槛（如 90% / 95%）
+
+试过会反噬：门槛越高，刷 tautological 测试的激励越强（因为关键代码补完了，剩下的
+都是难测的边角，硬要到 95% 只能刷）。分级 + 反 tautological 比单纯提门槛更精准——
+它把激励从"刷便宜测试"扭转到"补关键测试"。
+
+#### Enforcement
+
+- 作者自测：`go test -coverprofile` + 按语句精算 + 契约函数 100% 核查
+- reviewer 独立复跑覆盖率 + 检查 tautological 测试（不能只信描述）
+- CI 自动卡控（coverage gate + 契约函数 100% 扫描）是 TODO
+- 落地前，PR 描述必须附覆盖率数字 + 未覆盖函数解释
 
 ### 5.3 用真 API key 跑 live 测试，不用 mock
 
