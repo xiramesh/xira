@@ -423,10 +423,12 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 			BotID:        childBase.BotID,
 			ChatID:       childBase.ChatID,
 			ChatType:     childBase.ChatType,
+			ChatName:     childBase.ChatName,
 			TopicID:      childBase.TopicID,
 			SpaceID:      childBase.SpaceID,
 			SpaceType:    childBase.SpaceType,
 			SenderID:     childBase.SenderID,
+			SenderName:   childBase.SenderName,
 			MessageID:    childBase.MessageID,
 		}),
 	}

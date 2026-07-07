@@ -409,10 +409,12 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		AgentSessionID:        agentSessionID,
 		ChatID:                inbound.Context.ChatID,
 		ChatType:              inbound.Context.ChatType,
+		ChatName:              inbound.Context.ChatName,
 		TopicID:               inbound.Context.TopicID,
 		SpaceID:               inbound.Context.SpaceID,
 		SpaceType:             inbound.Context.SpaceType,
 		SenderID:              inbound.Context.SenderID,
+		SenderName:            inbound.Context.SenderName,
 		MessageID:             inbound.Context.MessageID,
 		ReplyToMessageID:      inbound.Context.ReplyToMessageID,
 		ReplyToSenderID:       inbound.Context.ReplyToSenderID,
@@ -1677,11 +1679,13 @@ func (s *Service) composeInstructionText(profile agents.Profile, skillBlocks []s
 // present (e.g. zero-value InboundContext on the InstructionHash path), so the
 // whole section is omitted by the caller.
 //
-// Fields come from InboundContext as-is (IDs only, no display names — name
-// injection is a follow-up). NormalizeInboundContext guarantees ChatID and
-// ChatType have fallback values for real inbound traffic; the empty checks
-// here defend against zero-value contexts on the hash path and direct
-// construction bypassing the normalizer.
+// Fields come from InboundContext: Channel/ChatID/ChatType/SenderID (IDs) and
+// ChatName/SenderName (display names). NormalizeInboundContext guarantees
+// ChatID and ChatType have fallback values for real inbound traffic; the empty
+// checks here defend against zero-value contexts on the hash path and direct
+// construction bypassing the normalizer. Name fields are optional — when no
+// channel runner populates them they stay "" and the corresponding lines are
+// omitted (first-version state; runner填充 is tracked in follow-up issues).
 //
 // Trust boundary: InboundContext fields are UNTRUSTED. HTTP API and websocket
 // clients can carry arbitrary context, so a chat_id/sender_id containing
@@ -1695,7 +1699,9 @@ func formatConversationContext(inbound channel.InboundContext) string {
 	channel := sanitizeInlineField(inbound.Channel)
 	chatID := sanitizeInlineField(inbound.ChatID)
 	chatType := sanitizeInlineField(inbound.ChatType)
+	chatName := sanitizeInlineField(inbound.ChatName)
 	senderID := sanitizeInlineField(inbound.SenderID)
+	senderName := sanitizeInlineField(inbound.SenderName)
 	if channel == "" && chatID == "" && senderID == "" {
 		return ""
 	}
@@ -1710,8 +1716,14 @@ func formatConversationContext(inbound channel.InboundContext) string {
 			lines = append(lines, "Chat: "+chatID)
 		}
 	}
+	if chatName != "" {
+		lines = append(lines, "ChatName: "+chatName)
+	}
 	if senderID != "" {
 		lines = append(lines, "Sender: "+senderID)
+	}
+	if senderName != "" {
+		lines = append(lines, "SenderName: "+senderName)
 	}
 	return strings.Join(lines, "\n")
 }
