@@ -372,3 +372,44 @@ func TestShouldHandleGroupMentionedAuthorized(t *testing.T) {
 		t.Error("unmentioned group + no respond-all should be ignored")
 	}
 }
+
+// TestHandleConnectionUnauthorizedSenderGenericAck (PR #134 review): when an
+// unauthorized sender messages the bot via websocket, the ack must NOT reveal
+// auth-failure — it returns the same generic "unmentioned_group_message"
+// reason as the mention-gate path. The real reason stays in server logs only.
+// This prevents leaking bot/auth existence to unauthorized clients.
+func TestHandleConnectionUnauthorizedSenderGenericAck(t *testing.T) {
+	rt := newFakeRuntime()
+	rt.entrypoints = []entrypoints.Definition{{
+		ID:               "websocket-default",
+		Channel:          "websocket",
+		AllowedSenderIDs: []string{"ou_allowed"},
+	}}
+	srv := newWSLoopbackServer(t, rt)
+	defer srv.close()
+	c := srv.dial(t)
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	// Unauthorized sender sends a message.
+	data := messageData{
+		Message: "hi",
+		Context: channel.InboundContext{ChatID: "c1", SenderID: "ou_blocked", Channel: "websocket"},
+	}
+	raw, _ := json.Marshal(data)
+	writeFrameClient(t, c, inboundFrame{Type: "message", ID: "om_unauth", Data: raw})
+	f := readFrameClient(t, c)
+	d, _ := f.Data.(map[string]any)
+	status, _ := d["status"].(string)
+	reason, _ := d["reason"].(string)
+	if status != "ignored" {
+		t.Fatalf("ack status = %q, want ignored", status)
+	}
+	// CRITICAL: reason must NOT reveal auth failure. It must be the generic
+	// mention-gate reason, indistinguishable from a normal ignore.
+	if reason == "sender_not_authorized" {
+		t.Errorf("ack reason leaked auth failure: %q — must be generic", reason)
+	}
+	if reason != "unmentioned_group_message" {
+		t.Errorf("ack reason = %q, want generic 'unmentioned_group_message'", reason)
+	}
+}

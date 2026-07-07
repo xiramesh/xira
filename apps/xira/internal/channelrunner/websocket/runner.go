@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -557,15 +558,23 @@ func (r *Runner) handleMessage(
 		return
 	}
 	if !prepared.handle {
-		reason := prepared.ignoreReason
-		if reason == "" {
-			reason = "unmentioned_group_message"
+		// Internal reason goes to logs only — never expose auth-failure specifics
+		// to the client. The ack returns a generic reason indistinguishable from
+		// the mention-gate path, so an unauthorized sender cannot tell whether
+		// they were rejected for auth vs just not-mentioned. See PR #134 review.
+		if prepared.ignoreReason != "" {
+			slog.Info("websocket message ignored",
+				"entrypoint_id", prepared.turn.EntrypointID,
+				"chat_id", prepared.eventContext.ChatID,
+				"sender_id", prepared.eventContext.SenderID,
+				"reason", prepared.ignoreReason,
+			)
 		}
 		_ = writeFrame(outboundFrame{
 			Type:      "ack",
 			ID:        "srv_ack_" + requestID,
 			RequestID: requestID,
-			Data:      map[string]any{"status": "ignored", "reason": reason},
+			Data:      map[string]any{"status": "ignored", "reason": "unmentioned_group_message"},
 		})
 		return
 	}
@@ -789,7 +798,9 @@ func (r *Runner) prepareTurn(frame inboundFrame, data messageData, defaultEntryp
 	handle := shouldHandle(ctx, definition, r.ownerResolver)
 	ignoreReason := ""
 	if !handle {
-		// Distinguish mention gate vs sender auth for ack clarity.
+		// Internal-only reason for slog (排障). NEVER reaches the client ack —
+		// handleMessage sends a generic "unmentioned_group_message" reason so
+		// unauthorized senders can't distinguish auth-reject from mention-reject.
 		if !definition.AllowsSender(ctx.SenderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), ctx.SenderID, ctx.Channel)) {
 			ignoreReason = "sender_not_authorized"
 		} else {
