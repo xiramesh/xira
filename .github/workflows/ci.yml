@@ -1,0 +1,71 @@
+# Xira CI — minimal viable (no coverage gate yet, no live test).
+#
+# Coverage gate TODO: wait for #135 (tiered coverage policy) to merge, then
+# add a coverage job that enforces per-package 85% + contract-function 100%.
+# Building the gate against the old "flat 85%" rule now would mean rewriting
+# it once #135 lands — not worth it.
+#
+# Live test (§5.3) is deliberately NOT run in CI:
+#   - Live tests need a real DEEPSEEK_API_KEY, which we won't put in GitHub
+#     secrets (fork-PR leakage risk + the key is in a root file, not env).
+#   - Without XIRA_DEEPSEEK_LIVE=1, live tests t.Skip — which is exactly the
+#     "silent green" §5.3 warns against. We accept this gap in CI and rely on
+#     the local contract: authors run `task live-test` before merge (§5.3),
+#     reviewer confirms no SKIP in local output.
+#   - CI therefore covers non-live tests only. Live coverage is a human gate.
+#
+# Trigger: PR only (not push to main, not nightly) per current decision —
+# saves Actions minutes; every merge goes through a PR anyway.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build + Test (no live)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/xira
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: |
+            apps/xira/go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: gofmt
+        working-directory: .
+        run: |
+          # gofmt -l lists files that need formatting; empty = clean.
+          out=$(gofmt -l apps/xira/cmd apps/xira/internal)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (no race)
+        run: go test ./...
+
+      - name: Test with -race
+        run: go test -race ./...
