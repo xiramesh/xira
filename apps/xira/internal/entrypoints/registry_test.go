@@ -129,6 +129,13 @@ func TestDefinitionAllowsSender(t *testing.T) {
 	}{
 		{"empty allowlist allows any non-empty sender", nil, "ou_anyone", true},
 		{"star matches any non-empty sender", []string{"*"}, "ou_anyone", true},
+		// CRITICAL (PR #134 review): path.Match("*", "a/b") returns false because
+		// "*" doesn't match "/". But sender IDs CAN contain "/" (chatkey_test
+		// pins "sender with slash preserved"). The "*" special-case in AllowsSender
+		// must bypass path.Match so that explicit ["*"] stays equivalent to empty
+		// allowlist. Without the special case this returns false (silent reject).
+		{"star matches sender containing slash", []string{"*"}, "a/b", true},
+		{"empty allowlist matches sender containing slash", nil, "a/b", true},
 		{"exact match passes", []string{"ou_abc"}, "ou_abc", true},
 		{"exact mismatch rejects", []string{"ou_abc"}, "ou_def", false},
 		{"glob prefix matches (future expansion)", []string{"ou_*"}, "ou_abc", true},

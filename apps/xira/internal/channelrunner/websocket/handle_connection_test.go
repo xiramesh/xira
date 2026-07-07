@@ -265,10 +265,11 @@ func TestHandleConnectionBadJSON(t *testing.T) {
 }
 
 // TestPrepareTurnSenderAuthorization (#121): when AllowedSenderIDs is set,
-// prepareTurn must mark the turn as not-handled with reason
-// "sender_not_authorized" for senders outside the list. Authorized senders
-// get handle=true. Unlike feishu/ilink (silent ignore), websocket still acks
-// with status:"ignored" + the reason — pinned by the ignoreReason field.
+// prepareTurn must mark the turn as not-handled for senders outside the list.
+// The internal ignoreReason field is "sender_not_authorized" (for slog only).
+// The client-visible ack does NOT carry this reason — it's generic
+// "unmentioned_group_message" (see TestHandleConnectionUnauthorizedSenderGenericAck).
+// This test pins the internal field; the ack-reason contract is pinned separately.
 func TestPrepareTurnSenderAuthorization(t *testing.T) {
 	rt := newFakeRuntime()
 	rt.entrypoints = []entrypoints.Definition{{

@@ -162,13 +162,20 @@ func (d Definition) AllowsAgent(agentID string) bool {
 }
 
 // AllowsSender reports whether senderID is authorized to use this entrypoint.
-// Matching uses path.Match (glob): "*", "ou_*", or exact IDs all work.
-//   - Empty senderID → rejected (path.Match("*", "") would be true; reject here).
-//   - Empty AllowedSenderIDs → allow all (backward compat, matches AllowedAgentIDs).
-//   - Malformed pattern (ErrBadPattern) → that pattern is skipped, not fail-open.
+// Matching uses path.Match (glob): "ou_*", or exact IDs.
 //
-// First match wins. "*" and missing allowlist are functionally equivalent;
-// "*" is the explicit "this bot is public" marker.
+// Special case: bare "*" is handled BEFORE path.Match. Go's path.Match
+// defines "*" to match only non-"/" characters, so path.Match("*", "a/b")
+// returns false — but sender IDs CAN contain "/" (chatkey_test pins
+// "sender with slash preserved"). Without this special case, an explicit
+// allowed_senders: ["*"] would silently reject senders that an empty
+// allowlist (functionally equivalent per the contract) would accept.
+// The special case makes "*" truly equivalent to "allow any non-empty sender".
+//
+//   - Empty senderID → rejected.
+//   - Empty AllowedSenderIDs → allow all (backward compat, matches AllowedAgentIDs).
+//   - pattern == "*" → allow any non-empty sender (bypasses path.Match).
+//   - Other patterns → path.Match; malformed (ErrBadPattern) skipped, not fail-open.
 func (d Definition) AllowsSender(senderID string) bool {
 	senderID = strings.TrimSpace(senderID)
 	if senderID == "" {
@@ -178,6 +185,9 @@ func (d Definition) AllowsSender(senderID string) bool {
 		return true
 	}
 	for _, pattern := range d.AllowedSenderIDs {
+		if pattern == "*" {
+			return true // bypass path.Match — see comment above
+		}
 		ok, err := path.Match(pattern, senderID)
 		if err != nil {
 			continue // ErrBadPattern: skip, do not fail-open
