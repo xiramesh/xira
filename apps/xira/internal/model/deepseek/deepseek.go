@@ -548,7 +548,13 @@ func genaiToolsToDeepSeek(tools []*genai.Tool) ([]Tool, map[string]string, map[s
 				continue
 			}
 			params := map[string]any{}
-			if fn.Parameters != nil {
+			// ADK functiontool.Declaration() 把 schema 填在 ParametersJsonSchema
+			// （jsonschema），不是 Parameters（*genai.Schema）。优先读 ParametersJsonSchema，
+			// fallback Parameters。只读 Parameters 会丢工具参数定义 → LLM 产空 arguments
+			// → 下游 validation 失败（#143 根因）。
+			if schemaBytes := parametersJSONBytes(fn); schemaBytes != nil {
+				_ = json.Unmarshal(schemaBytes, &params)
+			} else if fn.Parameters != nil {
 				raw, _ := json.Marshal(fn.Parameters)
 				_ = json.Unmarshal(raw, &params)
 			}
@@ -566,6 +572,33 @@ func genaiToolsToDeepSeek(tools []*genai.Tool) ([]Tool, map[string]string, map[s
 		}
 	}
 	return out, wireToOriginal, originalToWire
+}
+
+// parametersJSONBytes 从 genai.FunctionDeclaration.ParametersJsonSchema（类型 any）
+// 提取 JSON bytes。ADK functiontool 填的是 *jsonschema.Schema；也兼容 map / RawMessage。
+// 返回 nil 表示未设置（调用方 fallback 到 fn.Parameters）。
+func parametersJSONBytes(fn *genai.FunctionDeclaration) []byte {
+	schema := fn.ParametersJsonSchema
+	if schema == nil {
+		return nil
+	}
+	switch v := schema.(type) {
+	case nil:
+		return nil
+	case []byte:
+		return v
+	case json.RawMessage:
+		return v
+	case string:
+		return []byte(v)
+	default:
+		// *jsonschema.Schema / map[string]any / *genai.Schema 等 → marshal
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		return raw
+	}
 }
 
 func responseToADK(resp ChatResponse, wireToOriginal map[string]string) *adkmodel.LLMResponse {
