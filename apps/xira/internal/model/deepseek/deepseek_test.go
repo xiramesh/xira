@@ -82,6 +82,82 @@ func TestDeepSeekToolNameSanitizesDots(t *testing.T) {
 	}
 }
 
+// TestGenaiToolsToDeepSeekPreservesParametersJsonSchema 验证 #143 根因修复：
+// ADK functiontool 把 schema 填在 ParametersJsonSchema（jsonschema），不是 Parameters（genai.Schema）。
+// genaiToolsToDeepSeek 必须读 ParametersJsonSchema，否则工具定义发给 DeepSeek 时丢了 parameters，
+// LLM 不知道要传哪些字段（如 human.request 的 question）→ 产空 arguments → validation 失败。
+func TestGenaiToolsToDeepSeekPreservesParametersJsonSchema(t *testing.T) {
+	// 模拟 ADK functiontool.Declaration() 产出的 FunctionDeclaration：
+	// 只填 ParametersJsonSchema（jsonschema dict），Parameters 为 nil。
+	tools := []*genai.Tool{{
+		FunctionDeclarations: []*genai.FunctionDeclaration{{
+			Name:        "human.request",
+			Description: "ask a human",
+			ParametersJsonSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"question": map[string]any{"type": "string"},
+				},
+				"required": []any{"question"},
+			},
+		}},
+	}}
+
+	out, _, _ := genaiToolsToDeepSeek(tools)
+	if len(out) != 1 {
+		t.Fatalf("got %d tools, want 1", len(out))
+	}
+	params := out[0].Function.Parameters
+	if params == nil {
+		t.Fatal("Parameters is nil — genaiToolsToDeepSeek did not read ParametersJsonSchema (the #143 root cause)")
+	}
+	props, ok := params["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties missing or wrong type in Parameters: %#v", params)
+	}
+	if _, ok := props["question"]; !ok {
+		t.Errorf("question property missing from Parameters: %#v", params)
+	}
+	required, _ := params["required"].([]any)
+	foundQuestion := false
+	for _, r := range required {
+		if r == "question" {
+			foundQuestion = true
+		}
+	}
+	if !foundQuestion {
+		t.Errorf("question not in required %v: %#v", required, params)
+	}
+}
+
+// TestGenaiToolsToDeepSeekStillReadsLegacyParameters 验证 fallback：
+// 旧的 Parameters（*genai.Schema）路径仍兼容（不该因加 ParametersJsonSchema 支持而破坏）。
+func TestGenaiToolsToDeepSeekStillReadsLegacyParameters(t *testing.T) {
+	tools := []*genai.Tool{{
+		FunctionDeclarations: []*genai.FunctionDeclaration{{
+			Name:        "legacy.tool",
+			Description: "legacy",
+			Parameters: &genai.Schema{
+				Type: "object",
+				Properties: map[string]*genai.Schema{
+					"x": {Type: "string"},
+				},
+			},
+		}},
+	}}
+	out, _, _ := genaiToolsToDeepSeek(tools)
+	if len(out) != 1 {
+		t.Fatalf("got %d tools, want 1", len(out))
+	}
+	props, ok := out[0].Function.Parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("legacy Parameters not converted: %#v", out[0].Function.Parameters)
+	}
+	if _, ok := props["x"]; !ok {
+		t.Errorf("property x missing from legacy Parameters: %#v", props)
+	}
+}
+
 func TestMergeToolCallDeltasAppendsFunctionNameFragments(t *testing.T) {
 	calls := mergeToolCallDeltas(nil, []ToolCall{{
 		Index: 0,
