@@ -109,13 +109,13 @@ func TestGenerateBindCode(t *testing.T) {
 
 func TestIsBindCommand(t *testing.T) {
 	cases := []struct {
-		msg string
+		msg  string
 		want bool
 	}{
 		{"/bind WDJM-LHKD", true},
 		{"/bind   WDJM-LHKD", true},
 		{"  /bind WDJM-LHKD\n", true},
-		{"/bind", false},      // 无参不算
+		{"/bind", false}, // 无参不算
 		{"hello", false},
 		{"", false},
 		{"/binder X", false},
