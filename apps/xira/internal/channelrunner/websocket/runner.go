@@ -795,7 +795,7 @@ func (r *Runner) prepareTurn(frame inboundFrame, data messageData, defaultEntryp
 	}
 	ctx.MessageID = messageID
 	eventCtx.MessageID = messageID
-	handle := shouldHandle(ctx, definition, r.ownerResolver)
+	handle := shouldHandle(ctx, data.Message, definition, r.ownerResolver)
 	ignoreReason := ""
 	if !handle {
 		// Internal-only reason for slog (排障). NEVER reaches the client ack —
@@ -842,19 +842,29 @@ func (r *Runner) findEntrypoint(entrypointID string) (entrypoints.Definition, bo
 
 // shouldHandle decides whether websocket should process an inbound message.
 // Two gates (AND): mention gate + sender authorization (#121).
-func shouldHandle(ctx channel.InboundContext, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
+//
+// /bind pre-auth (#123): a /bind command bypasses sender auth so an unbound
+// owner can claim a protected entrypoint on first bind. content is message text.
+func shouldHandle(ctx channel.InboundContext, content string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
 	if normalizeChannel(ctx.ChatType) != "group" {
-		return isAuthorizedSender(ctx, definition, owner)
+		return isAuthorizedSender(ctx, content, definition, owner)
 	}
 	if !ctx.Mentioned && !definition.RespondToUnmentionedGroupMessages {
 		return false
 	}
-	return isAuthorizedSender(ctx, definition, owner)
+	return isAuthorizedSender(ctx, content, definition, owner)
 }
 
 // isAuthorizedSender checks the sender allowlist (#121) with optional owner
 // bypass (#122). entrypointID from definition.ID scopes the owner lookup.
-func isAuthorizedSender(ctx channel.InboundContext, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
+//
+// /bind pre-auth (#123): a /bind command bypasses allowlist+owner so an
+// unbound owner can claim a protected entrypoint. Token verification still
+// happens in service layer handleOwnerBind.
+func isAuthorizedSender(ctx channel.InboundContext, content string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
+	if frt.IsBindCommand(content) {
+		return true
+	}
 	if definition.AllowsSender(ctx.SenderID) {
 		return true
 	}

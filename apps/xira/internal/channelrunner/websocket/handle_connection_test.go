@@ -379,19 +379,47 @@ func TestShouldHandleGroupMentionedAuthorized(t *testing.T) {
 		Channel:   "websocket",
 	}
 	def := entrypoints.Definition{AllowedSenderIDs: []string{"ou_ok"}}
-	if !shouldHandle(ctx, def, nil) {
+	if !shouldHandle(ctx, "", def, nil) {
 		t.Error("mentioned + authorized group message should be handled")
 	}
 	// group + not mentioned + respond-to-unmentioned=true → handled (if authed).
 	def2 := entrypoints.Definition{RespondToUnmentionedGroupMessages: true, AllowedSenderIDs: []string{"ou_ok"}}
-	if !shouldHandle(ctx, def2, nil) {
+	if !shouldHandle(ctx, "", def2, nil) {
 		t.Error("respond-all + authorized should be handled")
 	}
 	// group + not mentioned + respond-to-unmentioned=false → not handled.
 	ctxNotMentioned := ctx
 	ctxNotMentioned.Mentioned = false
-	if shouldHandle(ctxNotMentioned, entrypoints.Definition{}, nil) {
+	if shouldHandle(ctxNotMentioned, "", entrypoints.Definition{}, nil) {
 		t.Error("unmentioned group + no respond-all should be ignored")
+	}
+}
+
+// TestShouldHandleBindPreAuth covers #123 /bind pre-auth for websocket:
+// unauthorized sender sending "/bind <code>" passes auth; plain msg rejected.
+func TestShouldHandleBindPreAuth(t *testing.T) {
+	ctx := channel.InboundContext{
+		ChatType:  "group",
+		Mentioned: true,
+		SenderID:  "ou_stranger",
+		Channel:   "websocket",
+	}
+	allowlist := entrypoints.Definition{
+		ID:                                "ws-protected",
+		RespondToUnmentionedGroupMessages: true,
+		AllowedSenderIDs:                  []string{"ou_ok"},
+	}
+	// /bind from unauthorized sender → passes (pre-auth bypass).
+	if !shouldHandle(ctx, "/bind WDJM-LHKD", allowlist, nil) {
+		t.Error("/bind from unauthorized sender should pass pre-auth")
+	}
+	// plain message from unauthorized sender → rejected.
+	if shouldHandle(ctx, "hello", allowlist, nil) {
+		t.Error("plain message from unauthorized sender should be rejected")
+	}
+	// bare /bind (no code) → not a bind command, rejected.
+	if shouldHandle(ctx, "/bind", allowlist, nil) {
+		t.Error("bare /bind (no code) should not bypass auth")
 	}
 }
 

@@ -3024,3 +3024,42 @@ entrypoints: entrypoints.yaml
 		t.Error("nil Service.IsOwner should return false, not panic")
 	}
 }
+
+// TestServiceIsOwner_DynamicOverrideStatic 验证 #123 的契约变更：运行时 /bind 建立的
+// 动态绑定优先于静态配置的 owner。
+func TestServiceIsOwner_DynamicOverrideStatic(t *testing.T) {
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+entrypoints: entrypoints.yaml
+`)
+	// feishu-expense 静态配的 owner 是 ou_finance；/bind 后要被动态绑定覆盖。
+	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
+  - id: feishu-expense
+    channel: feishu
+    default_agent: xira-assistant
+    owner: ou_finance
+`)
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
+
+	// 绑定前：静态 owner 生效（#122 行为不变）。
+	if !rt.IsOwner(context.Background(), "ou_finance", "feishu-expense") {
+		t.Fatal("before bind: ou_finance should be owner (static)")
+	}
+
+	// 动态绑定 ou_runtime 为 owner（通过 handleOwnerBind 建立绑定关系）。
+	rt.bindCodes = map[string]string{"feishu-expense": "TEST-CODE"}
+	msg := rt.handleOwnerBind("feishu-expense", "ou_runtime", "TEST-CODE")
+	if !strings.Contains(msg, "绑定成功") {
+		t.Fatalf("bind failed: %q", msg)
+	}
+
+	// 动态覆盖静态：ou_runtime 是 owner（即使静态配的是 ou_finance）。
+	if !rt.IsOwner(context.Background(), "ou_runtime", "feishu-expense") {
+		t.Error("after bind: ou_runtime (dynamic) should be owner")
+	}
+	// 静态的 ou_finance 不再是 owner（动态绑定 != ou_finance）。
+	if rt.IsOwner(context.Background(), "ou_finance", "feishu-expense") {
+		t.Error("after bind: ou_finance (static) should NOT be owner — dynamic overrides static")
+	}
+}

@@ -600,7 +600,7 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		"content_chars", utf8.RuneCountInString(content),
 		"content_preview", previewText(content, 120),
 	)
-	if !shouldHandleMessage(chatType, senderID, r.definition, r.ownerResolver) {
+	if !shouldHandleMessage(chatType, senderID, content, r.definition, r.ownerResolver) {
 		reason := "unmentioned_group_message"
 		if !r.definition.AllowsSender(senderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), senderID, r.definition.ID)) {
 			reason = "sender_not_authorized"
@@ -948,19 +948,29 @@ func firstNonEmpty(values ...string) string {
 // Two gates (AND): mention gate + sender authorization (#121). ilink protocol
 // has no mention concept, so the mention gate only checks the
 // RespondToUnmentionedGroupMessages config for group messages.
-func shouldHandleMessage(chatType, senderID string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
+//
+// /bind pre-auth (#123): a /bind command bypasses sender auth so an unbound
+// owner can claim a protected entrypoint on first bind. content is message text.
+func shouldHandleMessage(chatType, senderID, content string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
 	if chatType != "group" {
-		return isAuthorizedSender(senderID, definition, owner)
+		return isAuthorizedSender(senderID, content, definition, owner)
 	}
 	if !definition.RespondToUnmentionedGroupMessages {
 		return false
 	}
-	return isAuthorizedSender(senderID, definition, owner)
+	return isAuthorizedSender(senderID, content, definition, owner)
 }
 
 // isAuthorizedSender checks the sender allowlist (#121) with optional owner
 // bypass (#122). owner == nil means allowlist-only auth.
-func isAuthorizedSender(senderID string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
+//
+// /bind pre-auth (#123): a /bind command bypasses allowlist+owner so an
+// unbound owner can claim a protected entrypoint. Token verification still
+// happens in service layer handleOwnerBind.
+func isAuthorizedSender(senderID, content string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
+	if frt.IsBindCommand(content) {
+		return true
+	}
 	if definition.AllowsSender(senderID) {
 		return true
 	}
