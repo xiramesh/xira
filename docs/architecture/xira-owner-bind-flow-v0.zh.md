@@ -186,14 +186,14 @@ func parseBindCommand(msg string) (token string, ok bool)
 ""                   → ("", false)
 ```
 
-#### 为什么在 service 层而不是 channel runner
+#### 两层分工：service 层拦截 + runner pre-auth 放行
 
-- **service 层（本设计）**：集中一处，所有 channel 自动生效；能拿到 `entrypointDecision` 的权威
-  entrypointID；在 session 分配前，不污染历史。
-- channel runner 各拦一遍：飞书/ilink/websocket 三份重复；runner 在 ChatKeySession 外层，要新造
-  「不进 turn 直接发」的路径。
-- agent 工具（让 LLM 调 owner.bind）：code 进 LLM 上下文有泄漏风险；LLM 可能不调；绑定是管理操作
-  不该靠意图理解。
+`/bind` 的处理跨两层，缺一不可（PR #142 review 闭环的 blocker 2 正是证明 service 层 alone 不够）：
+
+- **runner 层（pre-auth 放行）**：三个 runner（feishu/ilink/websocket）的 `isAuthorizedSender` 在检查 `allowed_senders`/owner 之前，先用 `runtime.IsBindCommand(content)` 判定——命中 `/bind <code>` 就跳过 sender 授权（mention gate 仍生效）。**为什么必须**：未绑定前 `IsOwner=false`，配了非空 `allowed_senders` 的入口会把未授权 sender 的 `/bind` 在 runner 层直接丢，到不了 service 层的拦截——「最需要 owner claim 的安全入口」反而绑不上。runner 只判定「是不是 /bind 指令」，不验 token（token 验证在 service 层）。
+- **service 层（拦截 + 执行）**：RunAgent 入口 `parseBindCommand` 命中后走 `handleOwnerBind`，集中一处，所有 channel 自动生效；能拿到 `entrypointDecision` 的权威 entrypointID；在 session 分配前，不污染历史。
+
+（曾考虑的替代方案：让 agent 工具 `owner.bind` 由 LLM 调用——code 进 LLM 上下文有泄漏风险、LLM 可能不调、绑定是管理操作不该靠意图理解，否决。）
 
 ### 3.3 层 2：绑定逻辑
 
@@ -475,8 +475,7 @@ mapRunFinished 虽有 default 分支，复用现值更安全、更简单。）
 - ❌ 不做多 owner（N=1 硬约束，#122）
 - ❌ 不做 CLI approve（纯 IM）
 - ❌ 不做 code 爆破 rate limit（YAGNI，靠 code 高熵 + 平台限频）
-- ❌ 不改 ChatKeySession（复用现有 SendFinal 出口）
-- ❌ 不改 channel runner（`/bind` 在 service 层拦截，runner 无感）
+- ❌ 不改 ChatKeySession（复用现有 SendFinal 出口；runner 的 pre-auth 放行见 §3.2，是配合而非 ChatKeySession 改动）
 - ❌ 绑定消息不进 session 历史（元操作，不是对话）
 - ❌ 不持久化 device code（一次性，启动生成，用完即焚）
 
