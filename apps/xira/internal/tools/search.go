@@ -50,7 +50,7 @@ func (t *SearchFileTool) Execute(ctx context.Context, args map[string]any) (map[
 	if strings.TrimSpace(root) == "" {
 		root = "."
 	}
-	rootPath, err := t.resolveSearchRoot(root)
+	rootPath, err := t.resolveSearchRoot(ctx, root)
 	if err != nil {
 		return nil, err
 	}
@@ -160,10 +160,10 @@ func (t *SearchFileTool) searchOneFile(path, query string) ([]map[string]any, bo
 	return matches, false, nil
 }
 
-func (t *SearchFileTool) resolveSearchRoot(rawRoot string) (string, error) {
-	// resolveReadPath already enforces the path stays within the readable
-	// roots (workspace ∪ allow ∪ readonly), so no extra workspace-only check.
-	return t.resolveReadPath(rawRoot)
+func (t *SearchFileTool) resolveSearchRoot(ctx context.Context, rawRoot string) (string, error) {
+	// resolveReadPathCtx（#126 overlay）已经处理路径在可读 roots 内的约束
+	// （workspace ∪ allow ∪ readonly + 私有层），无需额外的 workspace-only 检查。
+	return t.resolveReadPathCtx(ctx, rawRoot)
 }
 
 func (t *SearchFileTool) searchOutput(rootPath, query string, matches []map[string]any, totalMatches, searchedFiles, skippedFiles, maxResults int) map[string]any {

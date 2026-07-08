@@ -61,8 +61,8 @@ func (t *ReadFileTool) Parameters() map[string]any {
 		"required": []string{"path"},
 	}
 }
-func (t *ReadFileTool) Execute(_ context.Context, args map[string]any) (map[string]any, error) {
-	path, err := t.resolveReadArgPath(args)
+func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) (map[string]any, error) {
+	path, err := t.resolveReadArgPathCtx(ctx, args)
 	if err != nil {
 		return nil, err
 	}
@@ -101,8 +101,8 @@ func (t *WriteFileTool) Parameters() map[string]any {
 		"required": []string{"path", "content"},
 	}
 }
-func (t *WriteFileTool) Execute(_ context.Context, args map[string]any) (map[string]any, error) {
-	path, err := t.resolveWriteArgPath(args)
+func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) (map[string]any, error) {
+	path, err := t.resolveWriteArgPathCtx(ctx, args)
 	if err != nil {
 		return nil, err
 	}
@@ -131,12 +131,12 @@ func (t *ListDirTool) Parameters() map[string]any {
 		},
 	}
 }
-func (t *ListDirTool) Execute(_ context.Context, args map[string]any) (map[string]any, error) {
+func (t *ListDirTool) Execute(ctx context.Context, args map[string]any) (map[string]any, error) {
 	rawPath, _ := args["path"].(string)
 	if strings.TrimSpace(rawPath) == "" {
 		rawPath = "."
 	}
-	path, err := t.resolveReadPath(rawPath)
+	path, err := t.resolveReadPathCtx(ctx, rawPath)
 	if err != nil {
 		return nil, err
 	}
@@ -188,8 +188,8 @@ func (t *EditFileTool) Parameters() map[string]any {
 		"required": []string{"path", "old_text", "new_text"},
 	}
 }
-func (t *EditFileTool) Execute(_ context.Context, args map[string]any) (map[string]any, error) {
-	path, err := t.resolveWriteArgPath(args)
+func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) (map[string]any, error) {
+	path, err := t.resolveWriteArgPathCtx(ctx, args)
 	if err != nil {
 		return nil, err
 	}
@@ -224,51 +224,27 @@ func (t *EditFileTool) Execute(_ context.Context, args map[string]any) (map[stri
 	}, nil
 }
 
-func (t fileTool) resolveReadArgPath(args map[string]any) (string, error) {
-	return t.resolveArgPathWithin(args, t.readRoots)
-}
-
-func (t fileTool) resolveWriteArgPath(args map[string]any) (string, error) {
-	return t.resolveArgPathWithin(args, t.writeRoots)
-}
-
-func (t fileTool) resolveArgPathWithin(args map[string]any, roots []string) (string, error) {
+// resolveReadArgPathCtx 是 #126 overlay 版：从 ctx 取 sender，走 overlay 解析。
+func (t fileTool) resolveReadArgPathCtx(ctx context.Context, args map[string]any) (string, error) {
 	rawPath, ok := args["path"].(string)
 	if !ok || strings.TrimSpace(rawPath) == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	return t.resolveWithin(rawPath, roots)
+	return resolveRead(rawPath, t.workspaceRoot, senderIDFromCtx(ctx), t.readRoots)
 }
 
-func (t fileTool) resolveReadPath(rawPath string) (string, error) {
-	return t.resolveWithin(rawPath, t.readRoots)
+// resolveReadPathCtx 是 #126 overlay 版（直接传 rawPath，供 list_dir 用）。
+func (t fileTool) resolveReadPathCtx(ctx context.Context, rawPath string) (string, error) {
+	return resolveRead(rawPath, t.workspaceRoot, senderIDFromCtx(ctx), t.readRoots)
 }
 
-// resolveWithin turns a raw path into a cleaned absolute path and enforces
-// that it stays within one of the given roots. Relative paths resolve against
-// the workspace root (the first configured root), preserving the original
-// "relative means inside the workspace" contract.
-func (t fileTool) resolveWithin(rawPath string, roots []string) (string, error) {
-	rawPath = strings.TrimSpace(rawPath)
-	if rawPath == "" {
+// resolveWriteArgPathCtx 是 #126 overlay 版：从 ctx 取 sender，走 overlay 解析。
+func (t fileTool) resolveWriteArgPathCtx(ctx context.Context, args map[string]any) (string, error) {
+	rawPath, ok := args["path"].(string)
+	if !ok || strings.TrimSpace(rawPath) == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	workspaceRoot := filepath.Clean(t.workspaceRoot)
-	var path string
-	if filepath.IsAbs(rawPath) {
-		path = filepath.Clean(rawPath)
-	} else {
-		path = filepath.Clean(filepath.Join(workspaceRoot, rawPath))
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	abs = filepath.Clean(abs)
-	if !pathWithinRoots(abs, roots) {
-		return "", fmt.Errorf("path must stay within allowed roots")
-	}
-	return abs, nil
+	return resolveWrite(rawPath, t.workspaceRoot, senderIDFromCtx(ctx), t.writeRoots)
 }
 
 func cleanWorkspace(workspaceRoot string) string {

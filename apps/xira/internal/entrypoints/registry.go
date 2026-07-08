@@ -36,6 +36,14 @@ type Definition struct {
 	IsLark                            bool                  `json:"is_lark,omitempty" yaml:"is_lark,omitempty"`
 	AllowRuntimePairing               bool                  `json:"allow_runtime_pairing,omitempty" yaml:"allow_runtime_pairing,omitempty"`
 	RespondToUnmentionedGroupMessages bool                  `json:"respond_to_unmentioned_group_messages,omitempty" yaml:"respond_to_unmentioned_group_messages,omitempty"`
+	DataIsolation                     DataIsolationPolicy   `json:"data_isolation,omitempty" yaml:"data_isolation,omitempty"`
+}
+
+// DataIsolationPolicy 控制 per-sender 工具数据隔离（#126）。Enabled=true 时，
+// 该 entrypoint 的工具写入落 workspace/users/{sender}/，读走 overlay（私有优先 +
+// fallback 通用层）。不配或 Enabled=false → 维持单层（向后兼容）。
+type DataIsolationPolicy struct {
+	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 }
 
 type ResolveInput struct {

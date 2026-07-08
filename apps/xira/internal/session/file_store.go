@@ -484,7 +484,11 @@ func cloneScope(scope *SessionScope) *SessionScope {
 	return &out
 }
 
-func safePathID(value string) string {
+// SafePathID 把任意字符串清洗成可安全用作路径段的形式：只保留字母/数字/-/_/.，
+// 其余字符替换为 _，连续替换压缩为单个 _，首尾 _ 去除，空值变 "unknown"。
+// 用于 per-sender 目录名（senderID 来自 IM，可能含 / 中文 空格等危险字符）。
+// 导出供 tools 包 per-sender 数据隔离（#126）复用，避免两份清洗逻辑漂移。
+func SafePathID(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return "unknown"
@@ -509,3 +513,6 @@ func safePathID(value string) string {
 	}
 	return out
 }
+
+// safePathID 是 SafePathID 的包内别名，保持现有内部调用不变。
+var safePathID = SafePathID

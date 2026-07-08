@@ -546,7 +546,9 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	// Carry the chatKey through ctx so spawned children (spawn_turn.go) can
 	// register themselves with the per-chat-key cancel registry and be
 	// canceled when this turn is steered (RFC #67).
-	ctx = WithChatKey(ctx, ChatKeyFromInbound(req.Context))
+	chatKey := ChatKeyFromInbound(req.Context)
+	chatKey.DataIsolation = entrypointDecision.Definition.DataIsolation.Enabled // #126
+	ctx = WithChatKey(ctx, chatKey)
 	// #106: inject pending HITL summary into the user message so the agent
 	// knows what human input is currently awaiting an answer for this chatKey.
 	// This is the "agent 理解" entry point — without it the model has no idea a
