@@ -45,6 +45,12 @@ type Service struct {
 	sessions      *fsession.Manager
 	usage         *UsageStore
 	humanRequests *humanrequest.Store
+	// ownerBindings persists /bind-established ownership (dynamic, overrides
+	// static Definition.OwnerID in IsOwner). bindCodes holds the one-time
+	// device codes generated at startup for entrypoints without an owner yet.
+	ownerBindings *ownerBindingStore
+	bindCodes     map[string]string
+	bindCodesMu   sync.Mutex // guards bindCodes (concurrent delete on bind)
 	// outbound delivers resumed-run final responses back to the originating IM
 	// channel (RFC #27 — stateless HITL resume). Injected by main.go as the
 	// channel Manager (an OutboundEmitter). nil = resume finals are not
@@ -108,6 +114,8 @@ func NewService(cfg Config) (*Service, error) {
 		sessions:       sessionManager,
 		usage:          NewUsageStore(resolved.StateDir),
 		humanRequests:  mustHumanRequestStore(resolved.StateDir),
+		ownerBindings:  newOwnerBindingStore(resolved.StateDir),
+		bindCodes:      map[string]string{},
 		adkSessions:    adksession.InMemoryService(),
 		verifier:       NewVerificationRunner(),
 		evolution:      NewEvolutionEngine(),
@@ -120,6 +128,9 @@ func NewService(cfg Config) (*Service, error) {
 		pricing:        resolved.Pricing,
 		activeChildren: map[string]int{},
 	}
+	// #123: 为每个尚未绑定 owner 的 entrypoint 生成一次性 device code，
+	// 打印到 stdout（不进 slog，避免被日志收集系统归档）。
+	svc.generateAndAnnounceBindCodes()
 	// Operational visibility (#72 item 3): log pending HumanRequests at startup
 	// so an operator restarting the process sees unresolved HITL. Best-effort —
 	// a scan failure is warned, never blocks startup. No notify/timeout cleanup
@@ -295,20 +306,33 @@ func (s *Service) Entrypoints() []entrypoints.Definition {
 	return s.entrypoints.Definitions()
 }
 
-// IsOwner reports whether senderID is the declared owner of entrypointID (#122).
-// Owner is per-entrypoint (Definition.OwnerID), declared in entrypoints.yaml,
-// read-only after config load. Empty OwnerID = no owner (A 配置), returns false
-// for any sender. Used by channel runners to let the owner bypass the sender
-// allowlist (#121) even when not explicitly listed.
+// IsOwner reports whether senderID is the owner of entrypointID.
+//
+// 查询顺序（#123 契约变更）：
+//  1. 先查运行时动态绑定（/bind 建立的，ownerBindings）——命中则用动态 owner。
+//  2. 否则 fallback 静态配置（Definition.OwnerID，#122 原行为，向后兼容）。
+//
+// 动态绑定优先于静态：/bind 绑定后，即使 yaml 配了 owner: 也以运行时绑定的为准。
+// 空 OwnerID（A 配置）且无动态绑定 → 对任何 sender 返回 false。
 //
 // coverage: contract (100% required) — owner determination is a security gate.
 func (s *Service) IsOwner(_ context.Context, senderID, entrypointID string) bool {
-	if s == nil || s.entrypoints == nil {
+	if s == nil {
 		return false
 	}
 	senderID = strings.TrimSpace(senderID)
 	entrypointID = strings.TrimSpace(entrypointID)
 	if senderID == "" || entrypointID == "" {
+		return false
+	}
+	// ① 动态绑定优先（#123）。
+	if s.ownerBindings != nil {
+		if b, ok := s.ownerBindings.Get(entrypointID); ok {
+			return b.OwnerSenderID == senderID // strict equality, NOT glob
+		}
+	}
+	// ② fallback 静态配置（#122 原行为）。
+	if s.entrypoints == nil {
 		return false
 	}
 	def, ok := s.entrypoints.Definition(entrypointID)
@@ -371,6 +395,14 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	}
 	req.Context = channel.NormalizeInboundContext(req.Context)
 	inbound.Context = req.Context
+	// #123: owner 绑定拦截。命中 "/bind <code>" 走绑定流程，不进 agent turn。
+	// 此处位于 entrypointDecision 之后（拿到 entrypointID + senderID）、agents.Get 之前
+	// （绕过 skill 激活 / session 分配 / usage / runs 等所有副作用）。返回的 FinalResponse
+	// 由 ChatKeySession.runTurn 的现有 SendFinal 路径发回 IM（不改 ChatKeySession）。
+	if token, ok := parseBindCommand(req.Message); ok {
+		msg := s.handleOwnerBind(entrypointDecision.Definition.ID, req.Context.SenderID, token)
+		return TurnResponse{FinalResponse: msg, Status: "completed"}, nil
+	}
 	profile, ok := s.agents.Get(entrypointDecision.AgentID)
 	if !ok {
 		return TurnResponse{}, fmt.Errorf("agent profile %q not found", entrypointDecision.AgentID)
