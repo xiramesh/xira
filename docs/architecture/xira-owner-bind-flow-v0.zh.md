@@ -224,8 +224,8 @@ owner 绑定（未绑定 owner 的 entrypoint）：
 绑定成功后此码作废。重启会生成新码（已绑定的不再生成）。
 ```
 
-- 用 `fmt.Fprintf(os.Stderr, ...)` 打印到终端，**不进 slog** —— 不被结构化日志收集系统归档。
-  这就是 GitHub device flow 的做法（显示在终端，不是写日志）。
+- 用 `fmt.Println` 打印到 **stdout**，**不进 slog** —— 不被结构化日志收集系统归档。
+  这就是 GitHub device flow 的做法（显示在终端给人看，用完即焚，不是写日志）。
 
 #### `ownerBindingStore`（带 mutex 的持久化存储）
 
@@ -364,7 +364,7 @@ RunAgent 入口（service.go）
     │       ├─ 持锁：Set + persist + revoke code
     │       └─ 返回 "✅ 绑定成功"
     │     ↓
-    │     return TurnResponse{FinalResponse:"✅ 绑定成功", Status:<非 completed>}, nil
+    │     return TurnResponse{FinalResponse:"✅ 绑定成功", Status:"completed"}, nil
     │
     ▼
 ChatKeySession.runTurn 拿到 FinalResponse 非空
@@ -405,16 +405,20 @@ owner 绑定锁死。要换 owner：停 agent → 删 `owner-bindings.json` 里�
 
 ## 5. 踩坑与约束
 
-### 5.1 `Status` 字段别触发 `assistant.final`
+### 5.1 `Status` 复用 `"completed"`（拦截点保证不触发 `assistant.final`）
 
-`/bind` 拦截返回的 `TurnResponse.Status` **不能是 `"completed"`**。否则会触发 service.go 的白名单
-发 `assistant.final` 事件（条件 `final != "" && resp.Status == "completed"`，AGENTS.md §1.2）。
-`/bind` 的「绑定成功」不是 agent 最终回复，是元操作反馈——触发 `assistant.final` 会让下游
-（ChatContext 收尾逻辑）误判「agent turn 结束该收尾」。
+`/bind` 拦截返回的 `TurnResponse` 复用 `Status: "completed"` + 非空 `FinalResponse`。
 
-**实现时核实**：service.go 里 `assistant.final` 发布点相对拦截点的位置；`/bind` 返回的 `Status`
-用非 `"completed"` 的值（如 `"completed"` 但在 assistant.final 发布之前 return，或新增一个 status
-值——实现时定）。
+`assistant.final` 的发布点在 service.go 的 RunAgent **末尾**（副作用区，条件
+`final != "" && resp.Status == "completed"`，AGENTS.md §1.2）。`/bind` 拦截在 RunAgent
+**开头**（entrypointDecision 之后、agents.Get 之前）提前 `return`，**根本到不了**
+`assistant.final` 发布点——所以即使 Status 是 `"completed"` 也不会误触发。
+
+`chatkey_session.runTurn` 的 `SendFinal` 只看 `FinalResponse != ""`，不看 Status（核实
+`chatkey_session.go`）——所以「绑定成功」提示会被正常发回 IM。
+
+（曾考虑用非 `"completed"` 的 Status 值，但那会给未来新增的 Status 消费者埋雷——event_mapping 的
+mapRunFinished 虽有 default 分支，复用现值更安全、更简单。）
 
 ### 5.2 拦截点必须在所有副作用之前 return
 

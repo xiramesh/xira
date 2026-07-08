@@ -245,7 +245,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		"content_chars", utf8.RuneCountInString(content),
 		"content_preview", previewText(content, 120),
 	)
-	if !shouldHandleMessage(chatType, mentioned, senderID, r.definition, r.ownerResolver) {
+	if !shouldHandleMessage(chatType, mentioned, senderID, content, r.definition, r.ownerResolver) {
 		// Distinguish the two gates for log clarity: mention gate vs sender auth.
 		// Both gates use AND; report whichever applies (sender auth takes
 		// precedence — even an @mentioned unauthorized sender is still rejected).
@@ -398,20 +398,31 @@ func (r *Runner) messageDedupeKey(messageID string) string {
 //  2. sender authorization (#121): sender must be in AllowedSenderIDs (glob),
 //     OR pass the owner check when ownerResolver is non-nil. Empty allowlist
 //     = allow all (backward compat).
-func shouldHandleMessage(chatType string, mentioned bool, senderID string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
+//
+// /bind pre-auth (#123): a /bind command bypasses the sender-authorization gate
+// so an unbound owner can claim a protected entrypoint on first bind. The mention
+// gate still applies (group /bind must @bot). content is the message text.
+func shouldHandleMessage(chatType string, mentioned bool, senderID, content string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
 	if chatType != "group" {
 		// p2p/direct: mention gate always passes; still check sender auth.
-		return isAuthorizedSender(senderID, definition, owner)
+		return isAuthorizedSender(senderID, content, definition, owner)
 	}
 	if !mentioned && !definition.RespondToUnmentionedGroupMessages {
 		return false
 	}
-	return isAuthorizedSender(senderID, definition, owner)
+	return isAuthorizedSender(senderID, content, definition, owner)
 }
 
 // isAuthorizedSender checks the sender allowlist (#121) with optional owner
 // bypass (#122). owner == nil OR IsOwner == false means allowlist-only auth.
-func isAuthorizedSender(senderID string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
+//
+// /bind pre-auth (#123): a /bind command bypasses allowlist+owner so an
+// unbound owner can claim a protected entrypoint. Token verification still
+// happens in service layer handleOwnerBind — this only lets the message through.
+func isAuthorizedSender(senderID, content string, definition entrypoints.Definition, owner frt.OwnerResolver) bool {
+	if frt.IsBindCommand(content) {
+		return true
+	}
 	if definition.AllowsSender(senderID) {
 		return true
 	}

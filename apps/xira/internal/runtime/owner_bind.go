@@ -52,6 +52,17 @@ func isASCIISpace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }
 
+// IsBindCommand 报告 msg 是否是一条 /bind 绑定指令（含合法 token）。
+// 供 channel runner 做 pre-auth 放行：配了 allowed_senders 的入口，
+// 未授权 sender 发 /bind <code> 也要能进入绑定流程（否则安全入口永远无法首次绑定）。
+// 仅检查「是不是 /bind 指令」，不关心 token 内容——token 验证在 service 层 handleOwnerBind。
+//
+// 注意："/bind"（无参）不算绑定指令（返回 false），会走正常授权拒绝路径。
+func IsBindCommand(msg string) bool {
+	_, ok := parseBindCommand(msg)
+	return ok
+}
+
 // generateBindCode 生成一个 8 字符的 owner 绑定码，分两组用 "-" 连接，形如 "WDJM-LHKD"。
 //
 // 用 crypto/rand（仓库首次引入），5 字节随机 → base32（去易混字符）→ 8 字符。
@@ -101,10 +112,11 @@ type ownerBindingsFile struct {
 
 // ownerBindingStore 是 owner 绑定关系的内存缓存 + 持久化存储。
 //
-// 职责：Get/IsBound/Set + 持久化。所有会改变状态的操作都由调用方在 handleOwnerBind 里
-// 持同一把锁（check + write + persist 原子），保证并发安全。
+// 并发模型：用 RWMutex。读路径（Get/IsBound，被 IsOwner 授权热路径调用）持 RLock，
+// 可多读并发；写路径（Set + handleOwnerBind 的 check-and-write）持 Lock，独占。
+// handleOwnerBind 的 check + write + persist + revoke-code 整段在写锁内，原子完成。
 type ownerBindingStore struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	dir      string
 	bindings map[string]ownerBinding // entrypointID → binding
 }
@@ -146,25 +158,33 @@ func (s *ownerBindingStore) load() {
 	}
 }
 
-// Get 返回 entrypointID 对应的绑定（内存查询，不持锁——调用方在 handleOwnerBind 持锁）。
+// Get 返回 entrypointID 对应的绑定。线程安全（RLock，可并发读）。
 //
 // coverage: contract (100% required)
 func (s *ownerBindingStore) Get(entrypointID string) (ownerBinding, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	b, ok := s.bindings[entrypointID]
 	return b, ok
 }
 
-// IsBound 报告该 entrypoint 是否已绑定 owner。
+// IsBound 报告该 entrypoint 是否已绑定 owner。线程安全（RLock）。
 //
 // coverage: contract (100% required)
 func (s *ownerBindingStore) IsBound(entrypointID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	_, ok := s.bindings[entrypointID]
 	return ok
 }
 
-// Set 写入一条绑定关系并立即持久化。调用方必须在 handleOwnerBind 里持 s.mu。
+// Set 写入一条绑定关系并立即持久化。线程安全（自己加写锁）。
+// 注意：handleOwnerBind 不调用此方法（它在自己的写锁里直接操作 map + persistLocked，
+// 避免 Lock 重入死锁）。
 // coverage: contract (100% required)
 func (s *ownerBindingStore) Set(b ownerBinding) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.bindings[b.EntrypointID] = b
 	if err := s.persistLocked(); err != nil {
 		// 持久化失败仅记日志——内存绑定已生效（当前进程内 IsOwner 仍正确），
@@ -244,17 +264,21 @@ func (s *Service) handleOwnerBind(entrypointID, senderID, code string) string {
 		return "❌ 绑定码无效，请核对后重试。"
 	}
 
-	// ④ 写入绑定 + 持久化 + 作废 code（整段已在锁内）
-	s.ownerBindings.bindings[entrypointID] = ownerBinding{
+	// ④ 写入绑定 + 持久化。持久化失败 = 绑定未真正建立（重启会丢），所以
+	// 回滚内存写入、不作废 code、返回失败——「成功」语义诚实等于已落盘。
+	binding := ownerBinding{
 		EntrypointID:  entrypointID,
 		OwnerSenderID: senderID,
 		BoundAt:       time.Now().UTC(),
 	}
+	s.ownerBindings.bindings[entrypointID] = binding
 	if err := s.ownerBindings.persistLocked(); err != nil {
-		slog.Error("owner_bind: persist binding failed",
+		delete(s.ownerBindings.bindings, entrypointID) // 回滚内存写入
+		slog.Error("owner_bind: persist binding failed, binding rolled back",
 			"entrypoint_id", entrypointID, "err", err)
+		return "❌ 绑定失败：无法保存绑定关系，请检查系统配置后重试。"
 	}
-	s.revokeBindCode(entrypointID)
+	s.revokeBindCode(entrypointID) // 持久化成功才作废 code
 
 	return "✅ 绑定成功。你现在是 " + entrypointID + " 的主人。"
 }

@@ -292,15 +292,15 @@ func TestIlinkShouldHandleMessageSenderAllowlist(t *testing.T) {
 	}
 	// empty allowlist + respond-all → allow all (backward compat).
 	respondAll := entrypoints.Definition{RespondToUnmentionedGroupMessages: true}
-	if !shouldHandleMessage("group", "wxid_anyone", respondAll, nil) {
+	if !shouldHandleMessage("group", "wxid_anyone", "", respondAll, nil) {
 		t.Error("empty allowlist + respond-all should allow any sender")
 	}
 	// sender in allowlist → pass.
-	if !shouldHandleMessage("group", "wxid_allowed", allowlist, nil) {
+	if !shouldHandleMessage("group", "wxid_allowed", "", allowlist, nil) {
 		t.Error("sender in allowlist should pass")
 	}
 	// sender not in allowlist + no owner → reject.
-	if shouldHandleMessage("group", "wxid_blocked", allowlist, nil) {
+	if shouldHandleMessage("group", "wxid_blocked", "", allowlist, nil) {
 		t.Error("sender not in allowlist + no owner should be rejected")
 	}
 	// sender not in allowlist + owner yes → pass. Pin entrypointID propagation (#139 review).
@@ -310,7 +310,7 @@ func TestIlinkShouldHandleMessageSenderAllowlist(t *testing.T) {
 		AllowedSenderIDs:                  []string{"wxid_allowed"},
 	}
 	owner := &ilinkStubOwner{ownerSenderID: "wxid_owner"}
-	if !shouldHandleMessage("group", "wxid_owner", ownerDef, owner) {
+	if !shouldHandleMessage("group", "wxid_owner", "", ownerDef, owner) {
 		t.Error("owner should bypass allowlist")
 	}
 	if owner.LastEntrypointID != "ilink-owner-test" {
@@ -318,15 +318,37 @@ func TestIlinkShouldHandleMessageSenderAllowlist(t *testing.T) {
 	}
 	// group with respond_to_unmentioned=false → reject regardless of allowlist.
 	strict := entrypoints.Definition{AllowedSenderIDs: []string{"wxid_allowed"}}
-	if shouldHandleMessage("group", "wxid_allowed", strict, nil) {
+	if shouldHandleMessage("group", "wxid_allowed", "", strict, nil) {
 		t.Error("respond_to_unmentioned=false should reject even if sender in allowlist")
 	}
 	// direct (non-group) → mention gate passes, sender auth still applies.
-	if !shouldHandleMessage("direct", "wxid_allowed", allowlist, nil) {
+	if !shouldHandleMessage("direct", "wxid_allowed", "", allowlist, nil) {
 		t.Error("direct message from allowed sender should pass")
 	}
-	if shouldHandleMessage("direct", "wxid_blocked", allowlist, nil) {
+	if shouldHandleMessage("direct", "wxid_blocked", "", allowlist, nil) {
 		t.Error("direct message from blocked sender should be rejected")
+	}
+}
+
+// TestShouldHandleMessageBindPreAuth covers #123 /bind pre-auth for ilink:
+// unauthorized sender sending "/bind <code>" passes auth; plain msg rejected.
+func TestShouldHandleMessageBindPreAuth(t *testing.T) {
+	allowlist := entrypoints.Definition{
+		ID:                                "ilink-protected",
+		RespondToUnmentionedGroupMessages: true,
+		AllowedSenderIDs:                  []string{"wxid_allowed"},
+	}
+	// /bind from unauthorized sender → passes (pre-auth bypass).
+	if !shouldHandleMessage("group", "wxid_stranger", "/bind WDJM-LHKD", allowlist, nil) {
+		t.Error("/bind from unauthorized sender should pass pre-auth")
+	}
+	// plain message from unauthorized sender → rejected.
+	if shouldHandleMessage("group", "wxid_stranger", "hello", allowlist, nil) {
+		t.Error("plain message from unauthorized sender should be rejected")
+	}
+	// bare /bind (no code) → not a bind command, rejected.
+	if shouldHandleMessage("group", "wxid_stranger", "/bind", allowlist, nil) {
+		t.Error("bare /bind (no code) should not bypass auth")
 	}
 }
 

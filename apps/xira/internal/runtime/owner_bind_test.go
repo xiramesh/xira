@@ -105,6 +105,28 @@ func TestGenerateBindCode(t *testing.T) {
 	})
 }
 
+// IsBindCommand 是 runner pre-auth 放行的判定（导出，跨包用）。
+
+func TestIsBindCommand(t *testing.T) {
+	cases := []struct {
+		msg string
+		want bool
+	}{
+		{"/bind WDJM-LHKD", true},
+		{"/bind   WDJM-LHKD", true},
+		{"  /bind WDJM-LHKD\n", true},
+		{"/bind", false},      // 无参不算
+		{"hello", false},
+		{"", false},
+		{"/binder X", false},
+	}
+	for _, tc := range cases {
+		if got := IsBindCommand(tc.msg); got != tc.want {
+			t.Errorf("IsBindCommand(%q) = %v, want %v", tc.msg, got, tc.want)
+		}
+	}
+}
+
 // ownerBindingStore 持久化 owner 绑定关系到 <stateDir>/owner-bindings.json。
 
 func TestNewOwnerBindingStore_LoadsExistingBindings(t *testing.T) {
@@ -493,6 +515,41 @@ func TestRunAgent_PassthroughBindNoArg(t *testing.T) {
 	}
 }
 
+// TestIsOwnerConcurrentWithBind 验证 IsOwner（授权热路径，并发读）和 /bind（写）
+// 不会发生 data race。必须用 -race 跑：go test -race -run TestIsOwnerConcurrentWithBind。
+//
+// 这是 reviewer 复现的 blocker：Get/IsBound 直接读 bindings map 无锁，
+// handleOwnerBind 写同一个 map → concurrent map read and map write。
+func TestIsOwnerConcurrentWithBind(t *testing.T) {
+	svc := newBindTestService(t)
+	svc.bindCodes["ep-race"] = "RACE-CODE"
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	// 一组 goroutine 持续 /bind 写（写入不同 entrypoint 触发 map grow）
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			ep := fmt.Sprintf("ep-%d", i%5)
+			svc.bindCodes[ep] = fmt.Sprintf("CODE-%d", i)
+			svc.handleOwnerBind(ep, fmt.Sprintf("ou_%d", i), fmt.Sprintf("CODE-%d", i))
+		}
+	}()
+	// 一组 goroutine 持续 IsOwner 读（授权热路径）
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				// 不断读各种 entrypoint 的 owner —— 和写并发
+				svc.IsOwner(ctx, "ou_owner", fmt.Sprintf("ep-%d", i%5))
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 // --- 覆盖率补充：错误路径 / 边界分支（§5.2 契约函数 100%）---
 
 func TestOwnerBindingStore_PersistMultipleSortsByID(t *testing.T) {
@@ -597,9 +654,9 @@ entrypoints: entrypoints.yaml
 	}
 }
 
-func TestHandleOwnerBind_PersistFailureStillSucceedsInMemory(t *testing.T) {
-	// handleOwnerBind 在 persistLocked 失败时仍应返回绑定成功（内存已写）。
-	// 构造一个 persist 会失败的 store。
+func TestHandleOwnerBind_PersistFailureRollsBackAndKeepsCode(t *testing.T) {
+	// handleOwnerBind 在 persistLocked 失败时应回滚内存写入、不作废 code、返回失败。
+	// 「成功」语义诚实等于已落盘（reviewer non-block 建议）。
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, ownerBindingsFilename), 0o700) // 让 owner-bindings.json 路径变成目录
 	svc := &Service{
@@ -610,12 +667,20 @@ func TestHandleOwnerBind_PersistFailureStillSucceedsInMemory(t *testing.T) {
 		bindCodes: map[string]string{"ep": "CODE-1234"},
 	}
 	msg := svc.handleOwnerBind("ep", "ou_owner", "CODE-1234")
-	// 绑定逻辑仍成功（内存写入了），只是持久化失败被记日志。
-	if !strings.Contains(msg, "绑定成功") {
-		t.Errorf("msg = %q, want 绑定成功 (in-memory bind should succeed even if persist fails)", msg)
+	// 持久化失败 → 不返回成功。
+	if strings.Contains(msg, "绑定成功") {
+		t.Errorf("msg = %q, should NOT report success on persist failure", msg)
 	}
-	if !svc.ownerBindings.IsBound("ep") {
-		t.Error("in-memory binding should be set even if persist failed")
+	if !strings.Contains(msg, "绑定失败") {
+		t.Errorf("msg = %q, want contains 绑定失败", msg)
+	}
+	// 内存写入被回滚。
+	if svc.ownerBindings.IsBound("ep") {
+		t.Error("binding should be rolled back from memory on persist failure")
+	}
+	// code 不作废（可重试）。
+	if _, stillThere := svc.bindCodes["ep"]; !stillThere {
+		t.Error("bind code should NOT be revoked on persist failure (must allow retry)")
 	}
 }
 
