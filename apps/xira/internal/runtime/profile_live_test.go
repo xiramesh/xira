@@ -89,7 +89,7 @@ entrypoints: entrypoints.yaml
 	t.Logf("live profile run: status=%q final=%q tool_calls=%d", resp.Status, previewText(resp.FinalResponse, 80), len(resp.ToolCalls))
 
 	// 核心断言：user.md 被更新（含"大明"）。
-	userPath := rtools.UserProfilePath(rt.workspace, sender)
+	userPath := rtools.UserProfilePath(rt.stateDir, sender)
 	data, readErr := os.ReadFile(userPath)
 	if readErr != nil {
 		t.Fatalf("user.md not created at %s after update_profile run: %v (status=%q)", userPath, readErr, resp.Status)

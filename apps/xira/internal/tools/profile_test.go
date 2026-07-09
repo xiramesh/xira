@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,21 +16,21 @@ import (
 // 独立于 #126 的 data_isolation 开关——每个 sender 无条件有 user.md。
 
 func TestUserProfilePath(t *testing.T) {
-	ws := "/data/workspace"
+	stateDir := "/data/state"
 	cases := []struct {
 		name     string
 		senderID string
 		want     string
 	}{
-		{"normal", "ou_大明", filepath.Join(ws, "users", "sender_ou_大明", "user.md")},
-		{"ascii", "wxid_abc", filepath.Join(ws, "users", "sender_wxid_abc", "user.md")},
-		{"local user", "local-user", filepath.Join(ws, "users", "sender_local-user", "user.md")},
+		{"normal", "ou_大明", filepath.Join(stateDir, "profiles", "sender_ou_大明", "user.md")},
+		{"ascii", "wxid_abc", filepath.Join(stateDir, "profiles", "sender_wxid_abc", "user.md")},
+		{"local user", "local-user", filepath.Join(stateDir, "profiles", "sender_local-user", "user.md")},
 		{"empty sender -> no path", "", ""},
 		{"whitespace -> no path", "   ", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := UserProfilePath(ws, tc.senderID)
+			got := UserProfilePath(stateDir, tc.senderID)
 			if got != tc.want {
 				t.Errorf("UserProfilePath(%q) = %q, want %q", tc.senderID, got, tc.want)
 			}
@@ -37,14 +38,17 @@ func TestUserProfilePath(t *testing.T) {
 	}
 }
 
-// 路径必须和 #126 的 resolvePrivateRoot 对齐（读写 round-trip）。
-func TestUserProfilePath_AlignsWithPrivateRoot(t *testing.T) {
-	ws := "/data/workspace"
-	sender := "ou_test"
-	privateRoot := resolvePrivateRoot(ws, sender) // #126 的私有层根
-	userPath := UserProfilePath(ws, sender)
-	if userPath != filepath.Join(privateRoot, "user.md") {
-		t.Errorf("UserProfilePath %q != resolvePrivateRoot+user.md (%q)", userPath, filepath.Join(privateRoot, "user.md"))
+// user.md 在 stateDir（非 workspace）——通用工具（fs/command/shell）不可达。
+// 路径不应在 workspace 树内（PR #147 review：move outside tool roots）。
+func TestUserProfilePath_OutsideWorkspace(t *testing.T) {
+	workspace := "/data/workspace"
+	stateDir := "/data/state"
+	userPath := UserProfilePath(stateDir, "ou_test")
+	if strings.HasPrefix(userPath, workspace) {
+		t.Errorf("user.md path %q should NOT be under workspace %q (must be in stateDir)", userPath, workspace)
+	}
+	if !strings.HasPrefix(userPath, stateDir) {
+		t.Errorf("user.md path %q should be under stateDir %q", userPath, stateDir)
 	}
 }
 
@@ -200,7 +204,7 @@ func TestUpdateProfileSection_MkdirFail(t *testing.T) {
 
 func TestUpdateProfileTool_EmptySectionRejected(t *testing.T) {
 	ws := t.TempDir()
-	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{}, ws)
 	ctx := ctxWithSenderProfile("ou_x")
 	if _, err := reg.Execute(ctx, "update_profile", map[string]any{"section": "  ", "content": "x"}); err == nil {
 		t.Error("empty section should be rejected")
@@ -229,7 +233,7 @@ func ctxWithSenderProfile(sender string) context.Context {
 
 func TestUpdateProfileTool_WritesUserMd(t *testing.T) {
 	ws := t.TempDir()
-	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{}, ws)
 	ctx := ctxWithSenderProfile("ou_大明")
 
 	out, err := reg.Execute(ctx, "update_profile", map[string]any{
@@ -255,7 +259,7 @@ func TestUpdateProfileTool_WritesUserMd(t *testing.T) {
 func TestUpdateProfileTool_NoSenderRejected(t *testing.T) {
 	// 没 sender（ctx 无 ChatKey）→ 报错（写哪？）
 	ws := t.TempDir()
-	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{}, ws)
 	_, err := reg.Execute(context.Background(), "update_profile", map[string]any{
 		"section": "偏好", "content": "x",
 	})
@@ -266,7 +270,7 @@ func TestUpdateProfileTool_NoSenderRejected(t *testing.T) {
 
 func TestUpdateProfileTool_MissingArgsRejected(t *testing.T) {
 	ws := t.TempDir()
-	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{}, ws)
 	ctx := ctxWithSenderProfile("ou_x")
 	// 缺 content
 	if _, err := reg.Execute(ctx, "update_profile", map[string]any{"section": "偏好"}); err == nil {
@@ -281,7 +285,7 @@ func TestUpdateProfileTool_MissingArgsRejected(t *testing.T) {
 func TestUpdateProfileTool_IncrementalAcrossSections(t *testing.T) {
 	// 同一 sender 连续更新不同 section → 都保留（增量，非覆盖）
 	ws := t.TempDir()
-	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{}, ws)
 	ctx := ctxWithSenderProfile("ou_a")
 
 	reg.Execute(ctx, "update_profile", map[string]any{"section": "身份", "content": "- name: Alice\n"})
@@ -298,7 +302,7 @@ func TestUpdateProfileTool_IncrementalAcrossSections(t *testing.T) {
 func TestUpdateProfileTool_PerSenderIsolated(t *testing.T) {
 	// Alice 和 Bob 各自的 user.md 互不干扰
 	ws := t.TempDir()
-	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{}, ws)
 
 	reg.Execute(ctxWithSenderProfile("ou_alice"), "update_profile", map[string]any{
 		"section": "身份", "content": "- name: Alice\n",
@@ -360,7 +364,7 @@ func TestUpdateProfileSection_ConcurrentNoLostUpdates(t *testing.T) {
 func TestUpdateProfileTool_ConcurrentSameSender(t *testing.T) {
 	// 通过工具 Execute 并发（更接近真实场景）。
 	ws := t.TempDir()
-	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{}, ws)
 	ctx := chatkey.WithChatKey(context.Background(), chatkey.ChatKey{SenderID: "ou_concurrent"})
 
 	var wg sync.WaitGroup

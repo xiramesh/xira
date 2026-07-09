@@ -160,12 +160,15 @@ func newProfileWithSection(section, content string) string {
 //
 // 独立于 #126 的 data_isolation：用 chatkey.SenderIDFromContext（无门控），
 // 每个 sender 无条件有 user.md。
+//
+// 安全（PR #147 review）：user.md 落在 stateDir（不是 workspace），通用工具
+// （fs/command/shell）只有 workspaceRoot，根本看不到 user.md——无需给每扇门装锁。
 type UpdateProfileTool struct {
-	workspaceRoot string
+	stateDir string
 }
 
-func NewUpdateProfileTool(workspaceRoot string) *UpdateProfileTool {
-	return &UpdateProfileTool{workspaceRoot: cleanWorkspace(workspaceRoot)}
+func NewUpdateProfileTool(stateDir string) *UpdateProfileTool {
+	return &UpdateProfileTool{stateDir: strings.TrimSpace(stateDir)}
 }
 
 func (t *UpdateProfileTool) Name() string { return "update_profile" }
@@ -208,7 +211,7 @@ func (t *UpdateProfileTool) Execute(ctx context.Context, args map[string]any) (m
 	if !ok {
 		return nil, fmt.Errorf("content is required")
 	}
-	path := UserProfilePath(t.workspaceRoot, senderID)
+	path := UserProfilePath(t.stateDir, senderID)
 	if path == "" {
 		return nil, fmt.Errorf("cannot resolve user.md path for sender %q", senderID)
 	}

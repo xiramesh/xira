@@ -97,7 +97,7 @@ func TestSandboxReadWrite(t *testing.T) {
 	}, SandboxRoots{
 		AllowRoots:    []string{allowDir},
 		ReadonlyRoots: []string{readonlyDir},
-	})
+	}, "")
 	readTool, _ := reg.Get("read_file")
 	writeTool, _ := reg.Get("write_file")
 	cmdTool, _ := reg.Get("command.run")
@@ -151,7 +151,7 @@ func TestDefaultSandboxLocked(t *testing.T) {
 	writeFile(t, filepath.Join(workspace, "ws.txt"), "ws")
 	writeFile(t, filepath.Join(external, "ext.txt"), "ext")
 
-	reg := NewBuiltinRegistry(workspace, []string{"read_file", "write_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(workspace, []string{"read_file", "write_file"}, SandboxRoots{}, "")
 	readTool, _ := reg.Get("read_file")
 	writeTool, _ := reg.Get("write_file")
 

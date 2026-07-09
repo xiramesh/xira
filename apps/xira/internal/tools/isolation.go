@@ -58,22 +58,28 @@ func resolvePrivateRoot(workspaceRoot, senderID string) string {
 // userProfileFilename 是 per-sender 用户档案的文件名（#127）。
 const userProfileFilename = "user.md"
 
+// profilesSegment 是 user.md 存放的目录段（在 stateDir 下，不在 workspace）。
+// PR #147 review：user.md 必须在通用工具（fs/command/shell）不可达的位置——
+// stateDir 是 Service 级目录，不是 workspace root，通用工具根本看不到。
+const profilesSegment = "profiles"
+
 // UserProfilePath 算出 sender 的 user.md 路径（#127）。
 //
-// 独立于 #126 的 data_isolation 开关——每个 sender 无条件有 user.md，
-// 不管 entrypoint 配没配 data_isolation（CLI/TUI/feishu 都有）。
-// 内部复用 resolvePrivateRoot 保证和工具写的私有层路径对齐（读写 round-trip）。
+// baseDir 是 stateDir（Service 级状态目录），不是 workspace。user.md 落在
+// baseDir/profiles/sender_{safe}/user.md——在通用工具（fs/command/shell）的
+// 可达范围之外（那些工具只有 workspaceRoot）。
 //
+// 独立于 #126 的 data_isolation 开关——每个 sender 无条件有 user.md。
 // senderID 为空 → 返回 ""（无 sender 无档案）。
 //
-// 导出供 runtime 包（读注入）和 tools 包（update_profile 工具）共用同一真相源，
-// 避免 "users"/"sender_" 路径段在两处硬编码漂移。
-func UserProfilePath(workspaceRoot, senderID string) string {
-	root := resolvePrivateRoot(workspaceRoot, senderID)
-	if root == "" {
+// 导出供 runtime 包（读注入）和 tools 包（update_profile 工具）共用同一真相源。
+func UserProfilePath(baseDir, senderID string) string {
+	senderID = strings.TrimSpace(senderID)
+	if senderID == "" {
 		return ""
 	}
-	return filepath.Join(root, userProfileFilename)
+	safe := session.SafePathID(senderID)
+	return filepath.Join(baseDir, profilesSegment, "sender_"+safe, userProfileFilename)
 }
 
 // resolveWrite 把 rawPath 解析为写入的绝对路径。Overlay 语义：

@@ -61,7 +61,7 @@ type SandboxRoots struct {
 	ReadonlyRoots []string
 }
 
-func NewBuiltinRegistry(workspaceRoot string, allowed []string, roots SandboxRoots) *Registry {
+func NewBuiltinRegistry(workspaceRoot string, allowed []string, roots SandboxRoots, stateDir string) *Registry {
 	ws := cleanWorkspace(workspaceRoot)
 	readRoots := mergeRoots([]string{ws}, roots.AllowRoots, roots.ReadonlyRoots)
 	writeRoots := mergeRoots([]string{ws}, roots.AllowRoots)
@@ -74,7 +74,7 @@ func NewBuiltinRegistry(workspaceRoot string, allowed []string, roots SandboxRoo
 		"write_file":       NewWriteFileTool(ws, readRoots, writeRoots),
 		"list_dir":         NewListDirTool(ws, readRoots, writeRoots),
 		"edit_file":        NewEditFileTool(ws, readRoots, writeRoots),
-		"update_profile":   NewUpdateProfileTool(ws), // #127: per-sender user.md
+		"update_profile":   NewUpdateProfileTool(stateDir), // #127: user.md 在 stateDir（非 workspace），通用工具不可达
 	}
 	tools := make([]Tool, 0, len(allowed))
 	for _, name := range allowed {

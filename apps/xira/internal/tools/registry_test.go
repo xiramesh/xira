@@ -11,7 +11,7 @@ import (
 )
 
 func TestBuiltinRegistryFiltersAllowedTools(t *testing.T) {
-	registry := NewBuiltinRegistry(t.TempDir(), []string{"read_file", "command.run", "shell.run", "tool_output.read", "exec", "missing"}, SandboxRoots{})
+	registry := NewBuiltinRegistry(t.TempDir(), []string{"read_file", "command.run", "shell.run", "tool_output.read", "exec", "missing"}, SandboxRoots{}, "")
 
 	if got := strings.Join(registry.List(), ","); got != "command.run,read_file,shell.run,tool_output.read" {
 		t.Fatalf("List() = %q", got)
@@ -44,7 +44,7 @@ func TestToolOutputReadReadsCurrentRunArtifact(t *testing.T) {
 	if err := os.WriteFile(rawAbs, []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	registry := NewBuiltinRegistry(t.TempDir(), []string{"tool_output.read"}, SandboxRoots{})
+	registry := NewBuiltinRegistry(t.TempDir(), []string{"tool_output.read"}, SandboxRoots{}, "")
 	ctx := WithRunDir(context.Background(), runDir)
 
 	tail, err := registry.Execute(ctx, "tool_output.read", map[string]any{
@@ -86,7 +86,7 @@ func TestToolOutputReadReadsCurrentRunArtifact(t *testing.T) {
 }
 
 func TestToolOutputReadRejectsMissingRunContextAndOutsidePath(t *testing.T) {
-	registry := NewBuiltinRegistry(t.TempDir(), []string{"tool_output.read"}, SandboxRoots{})
+	registry := NewBuiltinRegistry(t.TempDir(), []string{"tool_output.read"}, SandboxRoots{}, "")
 	_, err := registry.Execute(context.Background(), "tool_output.read", map[string]any{
 		"raw_output_path": "artifacts/tool-outputs/call-1.json",
 		"stream":          "stderr",
@@ -106,7 +106,7 @@ func TestToolOutputReadRejectsMissingRunContextAndOutsidePath(t *testing.T) {
 }
 
 func TestBuiltinRegistryRequiresExplicitAllowedTools(t *testing.T) {
-	registry := NewBuiltinRegistry(t.TempDir(), nil, SandboxRoots{})
+	registry := NewBuiltinRegistry(t.TempDir(), nil, SandboxRoots{}, "")
 
 	if got := strings.Join(registry.List(), ","); got != "" {
 		t.Fatalf("List() = %q, want no tools", got)
@@ -115,7 +115,7 @@ func TestBuiltinRegistryRequiresExplicitAllowedTools(t *testing.T) {
 
 func TestFileToolsReadWriteListAndEdit(t *testing.T) {
 	workspace := t.TempDir()
-	registry := NewBuiltinRegistry(workspace, []string{"read_file", "write_file", "list_dir", "edit_file"}, SandboxRoots{})
+	registry := NewBuiltinRegistry(workspace, []string{"read_file", "write_file", "list_dir", "edit_file"}, SandboxRoots{}, "")
 
 	if _, err := registry.Execute(context.Background(), "write_file", map[string]any{
 		"path":    "notes/one.md",
@@ -163,7 +163,7 @@ func TestFileToolsRejectPathsOutsideWorkspace(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	registry := NewBuiltinRegistry(workspace, []string{"read_file", "write_file", "list_dir", "edit_file"}, SandboxRoots{})
+	registry := NewBuiltinRegistry(workspace, []string{"read_file", "write_file", "list_dir", "edit_file"}, SandboxRoots{}, "")
 
 	cases := []struct {
 		name string
@@ -202,7 +202,7 @@ func TestSearchFileFindsTextMatchesInsideWorkspace(t *testing.T) {
 	if err := os.WriteFile(writePath, []byte("第一行\n养生壹号是草本养生酒\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	registry := NewBuiltinRegistry(workspace, []string{"search_file"}, SandboxRoots{})
+	registry := NewBuiltinRegistry(workspace, []string{"search_file"}, SandboxRoots{}, "")
 
 	out, err := registry.Execute(context.Background(), "search_file", map[string]any{
 		"query":       "养生壹号",
@@ -238,7 +238,7 @@ func TestEditFileRejectsAmbiguousReplacement(t *testing.T) {
 	if err := os.WriteFile(path, []byte("x x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	registry := NewBuiltinRegistry(workspace, []string{"edit_file"}, SandboxRoots{})
+	registry := NewBuiltinRegistry(workspace, []string{"edit_file"}, SandboxRoots{}, "")
 
 	_, err := registry.Execute(context.Background(), "edit_file", map[string]any{
 		"path":     "dupe.txt",
@@ -255,7 +255,7 @@ func TestEditFileRejectsAmbiguousReplacement(t *testing.T) {
 
 func TestCommandRunRunsStructuredArgvWithoutShell(t *testing.T) {
 	workspace := t.TempDir()
-	registry := NewBuiltinRegistry(workspace, []string{"command.run"}, SandboxRoots{})
+	registry := NewBuiltinRegistry(workspace, []string{"command.run"}, SandboxRoots{}, "")
 
 	out, err := registry.Execute(context.Background(), "command.run", map[string]any{
 		"program": "printf",
@@ -271,7 +271,7 @@ func TestCommandRunRunsStructuredArgvWithoutShell(t *testing.T) {
 
 func TestShellRunSupportsPipesAndRedirection(t *testing.T) {
 	workspace := t.TempDir()
-	registry := NewBuiltinRegistry(workspace, []string{"shell.run"}, SandboxRoots{})
+	registry := NewBuiltinRegistry(workspace, []string{"shell.run"}, SandboxRoots{}, "")
 
 	out, err := registry.Execute(context.Background(), "shell.run", map[string]any{
 		"command": "printf hello > out.txt && cat out.txt | tr a-z A-Z",
@@ -292,7 +292,7 @@ func TestShellRunTimeoutCleansUpPipelineChildren(t *testing.T) {
 		t.Skip("uses POSIX shell pipeline semantics")
 	}
 	workspace := t.TempDir()
-	registry := NewBuiltinRegistry(workspace, []string{"shell.run"}, SandboxRoots{})
+	registry := NewBuiltinRegistry(workspace, []string{"shell.run"}, SandboxRoots{}, "")
 
 	start := time.Now()
 	out, err := registry.Execute(context.Background(), "shell.run", map[string]any{
