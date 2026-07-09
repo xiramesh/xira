@@ -112,6 +112,15 @@ func (t *SearchFileTool) Execute(ctx context.Context, args map[string]any) (map[
 			if shouldSkipSearchDir(entry.Name()) && path != rootPath {
 				return filepath.SkipDir
 			}
+			// #126 隔离：递归遍历时跳过 workspace/users/ 命名空间（除非遍历目标
+			// 本身就是当前 sender 的 privateRoot）。否则 search_file(root="workspace")
+			// 会借 WalkDir 遍历进其他 sender 的私有目录（review bypass 3）。
+			if senderID := senderIDFromCtx(ctx); senderID != "" {
+				privRoot := resolvePrivateRoot(t.workspaceRoot, senderID)
+				if privRoot != "" && isInPrivateNamespace(path, t.workspaceRoot) && !pathWithinRoots(path, []string{privRoot}) {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		if len(matches) >= maxResults {

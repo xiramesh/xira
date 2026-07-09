@@ -586,3 +586,82 @@ func TestResolveRead_CanReadOwnPrivateViaRelative(t *testing.T) {
 		t.Errorf("own private read = %q, want %q", got, want)
 	}
 }
+
+// --- PR #145 review 2: search_file WalkDir 绕过隔离（递归进 users/） ---
+
+func TestSearchFile_DoesNotLeakOtherSendersPrivate_RelativeRoot(t *testing.T) {
+	// review 坐实：search_file(root=".") 的 WalkDir 从 workspace 根递归，
+	// 会遍历进 users/sender_ou_bob/secret.md，返回 Bob 的私有内容。
+	// 隔离语义要求：递归遍历跳过 workspace/users/ 命名空间（除非是自己 privateRoot）。
+	ws := setupOverlayWorkspace(t)
+	bobRoot := resolvePrivateRoot(ws, "ou_bob")
+	mustWrite(t, filepath.Join(bobRoot, "secret.md"), "needle-bob-secret")
+	// Alice 也有文件（证明她能搜到自己的）
+	aliceRoot := resolvePrivateRoot(ws, "ou_alice")
+	mustWrite(t, filepath.Join(aliceRoot, "mine.md"), "needle-alice-mine")
+
+	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{})
+	alice := ctxWithSender("ou_alice")
+
+	out, err := execute(reg, alice, "search_file", map[string]any{"query": "needle"})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	matches, _ := out["matches"].([]map[string]any)
+	for _, m := range matches {
+		p, _ := m["path"].(string)
+		if strings.Contains(p, "sender_ou_bob") {
+			t.Errorf("BLOCKER: search_file leaked Bob's private file: %s (snippet=%v)", p, m["snippet"])
+		}
+	}
+	// Alice 自己的文件应能搜到
+	foundOwn := false
+	for _, m := range matches {
+		if p, _ := m["path"].(string); strings.Contains(p, "sender_ou_alice") {
+			foundOwn = true
+		}
+	}
+	if !foundOwn {
+		t.Error("search_file should still find Alice's own private files")
+	}
+}
+
+func TestSearchFile_DoesNotLeakOtherSendersPrivate_AbsoluteWorkspaceRoot(t *testing.T) {
+	// 同上但用绝对路径作 root（reviewer 点名的第二个场景）。
+	ws := setupOverlayWorkspace(t)
+	bobRoot := resolvePrivateRoot(ws, "ou_bob")
+	mustWrite(t, filepath.Join(bobRoot, "secret.md"), "needle-bob-secret")
+
+	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{})
+	alice := ctxWithSender("ou_alice")
+
+	out, err := execute(reg, alice, "search_file", map[string]any{"query": "needle", "root": ws})
+	if err != nil {
+		t.Fatalf("search abs root: %v", err)
+	}
+	matches, _ := out["matches"].([]map[string]any)
+	for _, m := range matches {
+		if p, _ := m["path"].(string); strings.Contains(p, "sender_ou_bob") {
+			t.Errorf("BLOCKER: search_file(abs root) leaked Bob's private: %s", p)
+		}
+	}
+}
+
+func TestSearchFile_CanSearchOwnPrivateRoot(t *testing.T) {
+	// 隔离启用时，Alice 显式搜自己的 privateRoot → 允许（不误伤）。
+	ws := setupOverlayWorkspace(t)
+	aliceRoot := resolvePrivateRoot(ws, "ou_alice")
+	mustWrite(t, filepath.Join(aliceRoot, "mine.md"), "needle-alice")
+
+	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{})
+	alice := ctxWithSender("ou_alice")
+
+	out, err := execute(reg, alice, "search_file", map[string]any{"query": "needle", "root": "users/sender_ou_alice"})
+	if err != nil {
+		t.Fatalf("search own root: %v", err)
+	}
+	matches, _ := out["matches"].([]map[string]any)
+	if len(matches) == 0 {
+		t.Error("search should find Alice's own file in her private root")
+	}
+}
