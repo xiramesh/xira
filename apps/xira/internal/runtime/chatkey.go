@@ -2,10 +2,10 @@ package runtime
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/chatkey"
 )
 
 // chatkey.go defines the per-chat-key routing identity (RFC
@@ -21,13 +21,15 @@ import (
 //     same group are different keys → different turns → no cross-steering).
 //   - @me filtering is orthogonal to ChatKey (it's an inbound gate, not a
 //     turn-ownership dimension). See RFC §2.2 routing diagram.
+//
+// ChatKey struct + ctx 传播下沉到 internal/chatkey 包（#126：tools 包要从
+// ctx 取 SenderID 做 per-sender 数据隔离，但不能 import runtime）。本包通过
+// type alias + re-export 保持向后兼容（现有 runtime.ChatKey / WithChatKey /
+// ChatKeyFromContext 调用点不破），ctx key 是同一个（internal/chatkey 拥有）。
 
-// ChatKey uniquely identifies a conversation from one sender's perspective.
-type ChatKey struct {
-	Channel  string
-	ChatID   string
-	SenderID string
-}
+// ChatKey 是 chatkey.ChatKey 的别名——runtime 包内可直接用 ChatKey，
+// 与 internal/chatkey.ChatKey 完全等价（同一类型）。
+type ChatKey = chatkey.ChatKey
 
 // ChatKeyFromInbound extracts a ChatKey from an InboundContext. If
 // Channel/ChatID/SenderID are all empty, returns the zero ChatKey (routing
@@ -39,11 +41,6 @@ func ChatKeyFromInbound(ic channel.InboundContext) ChatKey {
 		ChatID:   ic.ChatID,
 		SenderID: ic.SenderID,
 	}
-}
-
-// String returns a stable, human-readable representation for logging/debugging.
-func (k ChatKey) String() string {
-	return fmt.Sprintf("%s/%s/%s", k.Channel, k.ChatID, k.SenderID)
 }
 
 // ParseChatKey is the inverse of (ChatKey).String(): it splits "channel/chat/sender"
@@ -66,22 +63,14 @@ func ParseChatKey(s string) (ChatKey, bool) {
 	return ChatKey{Channel: parts[0], ChatID: parts[1], SenderID: parts[2]}, true
 }
 
-// --- chatKey context propagation ---
+// --- chatKey context propagation（re-export internal/chatkey，保持调用点不破）---
 
-// chatKeyContextKey carries the ChatKey for the current turn through ctx.
-// Injected at RunAgent entry (service.go) so spawned children (spawn_turn.go)
-// can read it and register themselves with the per-chat-key cancel registry
-// (RFC #67). childToolConstraintCtx re-attaches it (like EventBus) since it
-// starts from context.Background().
-type chatKeyContextKey struct{}
-
-// WithChatKey returns a ctx carrying the chatKey.
+// WithChatKey 返回携带 chatKey 的 ctx。委托给 internal/chatkey（ctx key 的唯一真相源）。
 func WithChatKey(ctx context.Context, key ChatKey) context.Context {
-	return context.WithValue(ctx, chatKeyContextKey{}, key)
+	return chatkey.WithChatKey(ctx, key)
 }
 
-// ChatKeyFromContext returns the chatKey carried in ctx, if any.
+// ChatKeyFromContext 返回 ctx 里的 chatKey。委托给 internal/chatkey。
 func ChatKeyFromContext(ctx context.Context) (ChatKey, bool) {
-	k, ok := ctx.Value(chatKeyContextKey{}).(ChatKey)
-	return k, ok
+	return chatkey.FromContext(ctx)
 }

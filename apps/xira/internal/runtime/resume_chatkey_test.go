@@ -27,9 +27,9 @@ func TestParseChatKey(t *testing.T) {
 		want ChatKey
 		ok   bool
 	}{
-		{"plain", "feishu/chat-9/user-1", ChatKey{"feishu", "chat-9", "user-1"}, true},
-		{"uppercase id (CRITICAL 1)", "ilink/Wxid_Abc/User_X", ChatKey{"ilink", "Wxid_Abc", "User_X"}, true},
-		{"sender with slash preserved", "ws/topic-3/a/b", ChatKey{"ws", "topic-3", "a/b"}, true},
+		{"plain", "feishu/chat-9/user-1", ChatKey{Channel: "feishu", ChatID: "chat-9", SenderID: "user-1"}, true},
+		{"uppercase id (CRITICAL 1)", "ilink/Wxid_Abc/User_X", ChatKey{Channel: "ilink", ChatID: "Wxid_Abc", SenderID: "User_X"}, true},
+		{"sender with slash preserved", "ws/topic-3/a/b", ChatKey{Channel: "ws", ChatID: "topic-3", SenderID: "a/b"}, true},
 		{"empty stays empty", "", ChatKey{}, false},
 		{"two segments invalid", "feishu/chat", ChatKey{}, false},
 	}
