@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/xiramesh/xira/internal/chatkey"
 )
@@ -41,13 +42,39 @@ func loadUserProfile(path string) (userProfile, error) {
 // sectionHeaderRe 匹配 markdown 二级标题（## xxx），用于定位 section。
 var sectionHeaderRe = regexp.MustCompile(`(?m)^##\s+(.+?)\s*$`)
 
-// updateProfileSection 更新 user.md 的指定 section：
+// profileMu 保护 updateProfileSection 的读-改-写原子性（PR #147 review blocker 2）。
+// per-path 锁：同一 sender（同一 user.md 路径）的并发更新串行，不同 sender 不互斥。
+var profileMu = profileMutex{}
+
+type profileMutex struct {
+	mu sync.Mutex // 保护 paths map 本身
+	m  map[string]*sync.Mutex
+}
+
+func (p *profileMutex) lockFor(path string) *sync.Mutex {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.m == nil {
+		p.m = map[string]*sync.Mutex{}
+	}
+	if p.m[path] == nil {
+		p.m[path] = &sync.Mutex{}
+	}
+	return p.m[path]
+}
+
+// updateProfileSection 更新 user.md 的指定 section（原子，PR #147 review blocker 2）：
 //   - section 存在 → 替换其内容（## 标题保留，标题下的行换成 content）
 //   - section 不存在 → 追加新 section
 //   - 文件不存在 → 创建（含父目录，0o600）
 //
+// 读-改-写整段持 per-path 锁，保证同一 sender 的并发更新不丢（silent data loss 防御）。
 // content 是 section 标题下的正文（不含 ## 行）。
 func updateProfileSection(path, section, content string) error {
+	mu := profileMu.lockFor(path)
+	mu.Lock()
+	defer mu.Unlock()
+
 	existing, err := loadUserProfile(path)
 	if err != nil {
 		return err

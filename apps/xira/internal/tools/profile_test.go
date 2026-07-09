@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/xiramesh/xira/internal/chatkey"
@@ -317,5 +319,76 @@ func TestUpdateProfileTool_PerSenderIsolated(t *testing.T) {
 	}
 	if contains(b.Content, "Alice") {
 		t.Error("Bob's profile leaked Alice's data")
+	}
+}
+
+// --- PR #147 review blocker 2: 并发更新不丢 ---
+
+func TestUpdateProfileSection_ConcurrentNoLostUpdates(t *testing.T) {
+	// 同一 sender 并发更新不同 section → 两个 section 都保留（不能丢）。
+	// reviewer 坐实：updateProfileSection 是读-改-写无锁，并发会后写覆盖先写。
+	dir := t.TempDir()
+	path := filepath.Join(dir, "user.md")
+
+	var wg sync.WaitGroup
+	sections := []struct {
+		name    string
+		content string
+	}{
+		{"身份", "- name: 大明\n"},
+		{"偏好", "- reply_style: 简洁\n"},
+		{"背景", "- role: engineer\n"},
+	}
+	wg.Add(len(sections))
+	for _, s := range sections {
+		s := s
+		go func() {
+			defer wg.Done()
+			updateProfileSection(path, s.name, s.content)
+		}()
+	}
+	wg.Wait()
+
+	p, _ := loadUserProfile(path)
+	for _, s := range sections {
+		if !contains(p.Content, s.content[:len(s.content)-1]) { // 去 trailing \n
+			t.Errorf("concurrent update lost section %q:\n%s", s.name, p.Content)
+		}
+	}
+}
+
+func TestUpdateProfileTool_ConcurrentSameSender(t *testing.T) {
+	// 通过工具 Execute 并发（更接近真实场景）。
+	ws := t.TempDir()
+	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{})
+	ctx := chatkey.WithChatKey(context.Background(), chatkey.ChatKey{SenderID: "ou_concurrent"})
+
+	var wg sync.WaitGroup
+	var failCount int64
+	for i := 0; i < 5; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := reg.Execute(ctx, "update_profile", map[string]any{
+				"section": "section_" + string(rune('A'+i)),
+				"content": "- value_" + string(rune('A'+i)) + "\n",
+			})
+			if err != nil {
+				atomic.AddInt64(&failCount, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	if failCount > 0 {
+		t.Errorf("%d concurrent updates failed", failCount)
+	}
+	p, _ := loadUserProfile(UserProfilePath(ws, "ou_concurrent"))
+	// 5 个 section 都该在
+	for i := 0; i < 5; i++ {
+		letter := string(rune('A' + i))
+		if !contains(p.Content, "section_"+letter) || !contains(p.Content, "value_"+letter) {
+			t.Errorf("concurrent tool update lost section_%s:\n%s", letter, p.Content)
+		}
 	}
 }

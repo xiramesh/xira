@@ -775,3 +775,70 @@ func TestSearchFile_CanSearchOwnPrivateRoot(t *testing.T) {
 		t.Error("search should find Alice's own file in her private root")
 	}
 }
+
+// --- PR #147 review: users/ 命名空间保护独立于 data_isolation ---
+
+func TestResolveRead_UsersNamespaceProtectedEvenWithoutIsolation(t *testing.T) {
+	// PR #147 review blocker 1：非隔离 entrypoint（senderID="" 模拟）下，
+	// users/ 命名空间仍要保护——user.md 是 per-sender 私密档案。
+	ws := setupOverlayWorkspace(t)
+	bobRoot := resolvePrivateRoot(ws, "ou_bob")
+	mustWrite(t, filepath.Join(bobRoot, "user.md"), "bob's secret profile")
+
+	readRoots := []string{ws}
+	_, err := resolveRead("users/sender_ou_bob/user.md", ws, "", readRoots)
+	if err == nil {
+		t.Error("BLOCKER: non-isolated resolveRead can read other sender's user.md via users/ namespace")
+	}
+}
+
+func TestReadFile_UsersNamespaceProtectedWithoutIsolation(t *testing.T) {
+	// 集成测：非隔离 ctx（DataIsolation=false），read_file 读他人 user.md → 拒绝。
+	ws := t.TempDir()
+	mustWrite(t, UserProfilePath(ws, "ou_bob"), "bob secret")
+	reg := NewBuiltinRegistry(ws, []string{"read_file"}, SandboxRoots{})
+
+	ctx := ctxWithSenderNoIsolation("ou_alice")
+	_, err := execute(reg, ctx, "read_file", map[string]any{"path": "users/sender_ou_bob/user.md"})
+	if err == nil {
+		t.Error("BLOCKER: read_file without isolation can read other sender's user.md")
+	}
+}
+
+func TestReadFile_CanReadOwnUserMdWithoutIsolation(t *testing.T) {
+	// 非隔离 entrypoint 下，read_file 不该碰 user.md（哪怕自己的）——user.md 归
+	// update_profile 工具管（它用无门控 senderID），不是通用文件工具。
+	// 这里验证：非隔离下 read_file 读 users/ 下任何路径都被拒（保护语义一致）。
+	// update_profile 自己的读写不受此限（它不走 resolveRead/resolveWrite）。
+	ws := t.TempDir()
+	mustWrite(t, UserProfilePath(ws, "ou_alice"), "alice's own profile")
+	reg := NewBuiltinRegistry(ws, []string{"read_file"}, SandboxRoots{})
+
+	ctx := ctxWithSenderNoIsolation("ou_alice")
+	_, err := execute(reg, ctx, "read_file", map[string]any{"path": "users/sender_ou_alice/user.md"})
+	if err == nil {
+		t.Error("read_file should not access users/ namespace even for own user.md (update_profile owns user.md)")
+	}
+}
+
+func TestUpdateProfile_WorksUnderNonIsolatedEntrypoint(t *testing.T) {
+	// update_profile 用无门控 senderID（chatkey.SenderIDFromContext），
+	// 非隔离 entrypoint 也能写自己的 user.md（#127 独立于 data_isolation）。
+	ws := t.TempDir()
+	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{})
+	ctx := ctxWithSenderNoIsolation("ou_alice") // DataIsolation=false
+
+	out, err := execute(reg, ctx, "update_profile", map[string]any{
+		"section": "身份", "content": "- name: Alice\n",
+	})
+	if err != nil {
+		t.Fatalf("update_profile under non-isolated entrypoint: %v", err)
+	}
+	if out["updated"] != true {
+		t.Errorf("updated = %v, want true", out["updated"])
+	}
+	p, _ := loadUserProfile(UserProfilePath(ws, "ou_alice"))
+	if !strings.Contains(p.Content, "Alice") {
+		t.Errorf("user.md not written under non-isolated entrypoint:\n%s", p.Content)
+	}
+}
