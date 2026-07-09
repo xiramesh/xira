@@ -357,13 +357,26 @@ func TestResolveWrite_AbsoluteOutsideRootsRejected(t *testing.T) {
 	}
 }
 
-func TestResolveWrite_AbsoluteInsideRootOK(t *testing.T) {
+func TestResolveWrite_AbsoluteInPrivateRootOK(t *testing.T) {
+	// 隔离启用时：绝对路径在自己的私有层内 → 允许（不 rewrite）。
 	ws := setupOverlayWorkspace(t)
-	// 绝对路径在 writeRoots 内（不 rewrite）
-	abs := filepath.Join(ws, "kb", "index.md")
-	got, err := resolveWrite(abs, ws, "ou_a", []string{ws})
+	abs := filepath.Join(resolvePrivateRoot(ws, "ou_a"), "notes.md")
+	got, err := resolveWrite(abs, ws, "ou_a", []string{ws, resolvePrivateRoot(ws, "ou_a")})
 	if err != nil {
-		t.Fatalf("absolute in roots: %v", err)
+		t.Fatalf("absolute in private root: %v", err)
+	}
+	if got != abs {
+		t.Errorf("absolute in private rewritten: got %q, want %q", got, abs)
+	}
+}
+
+func TestResolveWrite_AbsoluteInsideRootNoIsolationOK(t *testing.T) {
+	// 隔离未启用（senderID 空）：绝对路径在 writeRoots 内即可（现有行为）。
+	ws := setupOverlayWorkspace(t)
+	abs := filepath.Join(ws, "kb", "index.md")
+	got, err := resolveWrite(abs, ws, "", []string{ws})
+	if err != nil {
+		t.Fatalf("absolute in roots (no isolation): %v", err)
 	}
 	if got != abs {
 		t.Errorf("absolute rewritten: got %q, want %q", got, abs)
@@ -468,5 +481,108 @@ func TestResolveRead_FallbackNotFooledBySymlink(t *testing.T) {
 
 	if _, err := resolveRead("kb_link.md", ws, sender, readRoots); err == nil {
 		t.Error("private-layer symlink to common layer should be rejected by #W2 boundary check")
+	}
+}
+
+// --- PR #145 review: 两个 bypass 复现（隔离启用时的 cross-sender 读 / 跨层写）---
+
+func TestResolveRead_CannotReadOtherSendersPrivateViaFallback(t *testing.T) {
+	// Bypass 1（review 坐实）：Alice 的私有层没有 users/sender_ou_bob/...，
+	// fallback 到通用层 workspace/users/sender_ou_bob/...——而 Bob 的私有层物理上
+	// 在 workspace 树内，workspace 又是 readRoot → Alice 能读 Bob 的文件。
+	// 隔离语义要求：fallback 只能读通用层的「非 users/」区域，不能借 fallback
+	// 读到其他 sender 的私有目录。
+	ws := setupOverlayWorkspace(t)
+	alice := "ou_alice"
+	bob := "ou_bob"
+	bobRoot := resolvePrivateRoot(ws, bob)
+	mustWrite(t, filepath.Join(bobRoot, "secret.md"), "bob's secret")
+	readRoots := []string{ws, resolvePrivateRoot(ws, alice)}
+
+	// Alice 试读 Bob 的私有文件（用相对路径指向 users/sender_ou_bob/secret.md）
+	_, err := resolveRead("users/sender_ou_bob/secret.md", ws, alice, readRoots)
+	if err == nil {
+		t.Error("BLOCKER: Alice can read Bob's private file via fallback to workspace/users/...")
+	}
+}
+
+func TestResolveWrite_AbsolutePathCannotWriteCommonLayer(t *testing.T) {
+	// Bypass 2（review 坐实）：隔离启用时，write 的绝对路径不 rewrite，只要在
+	// writeRoots（含 workspace 根）内就允许 → agent 拿 read_file 返回的绝对路径
+	// 喂给 edit_file，能改共享 KB。隔离语义要求：隔离启用时，写只能落私有层，
+	// 绝对路径也必须落在私有 root 内（或拒绝）。
+	ws := setupOverlayWorkspace(t)
+	sender := "ou_a"
+	privateRoot := resolvePrivateRoot(ws, sender)
+	writeRoots := []string{ws, privateRoot} // workspace 根在 writeRoots 里
+
+	// 用绝对路径直指通用层 kb/index.md
+	kbAbs := filepath.Join(ws, "kb", "index.md")
+	_, err := resolveWrite(kbAbs, ws, sender, writeRoots)
+	if err == nil {
+		t.Error("BLOCKER: absolute-path write to common layer allowed under isolation")
+	}
+}
+
+// --- 补充回归：review 要求的 cross-sender 边界 + 绝对路径写他人私有层 ---
+
+func TestResolveWrite_AbsoluteCannotWriteOtherSendersPrivate(t *testing.T) {
+	// 隔离启用时，Alice 不能用绝对路径写 Bob 的私有层。
+	ws := setupOverlayWorkspace(t)
+	bobRoot := resolvePrivateRoot(ws, "ou_bob")
+	writeRoots := []string{ws, resolvePrivateRoot(ws, "ou_alice")}
+
+	_, err := resolveWrite(filepath.Join(bobRoot, "hijack.md"), ws, "ou_alice", writeRoots)
+	if err == nil {
+		t.Error("Alice should not write Bob's private layer via absolute path")
+	}
+}
+
+func TestResolveRead_AbsoluteCannotReadOtherSendersPrivate(t *testing.T) {
+	// 隔离启用时，Alice 不能用绝对路径读 Bob 的私有层。
+	ws := setupOverlayWorkspace(t)
+	bobRoot := resolvePrivateRoot(ws, "ou_bob")
+	mustWrite(t, filepath.Join(bobRoot, "secret.md"), "bob's secret")
+	readRoots := []string{ws, resolvePrivateRoot(ws, "ou_alice")}
+
+	_, err := resolveRead(filepath.Join(bobRoot, "secret.md"), ws, "ou_alice", readRoots)
+	if err == nil {
+		t.Error("Alice should not read Bob's private layer via absolute path")
+	}
+}
+
+func TestResolveRead_AbsoluteCanReadCommonLayer(t *testing.T) {
+	// 隔离启用时，Alice 用绝对路径读通用层 KB（不在 users/ 命名空间）→ 允许。
+	ws := setupOverlayWorkspace(t)
+	kbAbs := filepath.Join(ws, "kb", "index.md")
+	readRoots := []string{ws, resolvePrivateRoot(ws, "ou_alice")}
+
+	got, err := resolveRead(kbAbs, ws, "ou_alice", readRoots)
+	if err != nil {
+		t.Fatalf("absolute read of common KB rejected: %v", err)
+	}
+	if got != kbAbs {
+		t.Errorf("absolute common read rewritten: got %q, want %q", got, kbAbs)
+	}
+}
+
+func TestResolveRead_CanReadOwnPrivateViaRelative(t *testing.T) {
+	// 隔离启用时，Alice 读自己私有层里的 users/sender_ou_alice/... 相对路径 → 允许。
+	// （回归：isInPrivateNamespace 不能误伤自己的私有层）
+	ws := setupOverlayWorkspace(t)
+	alice := "ou_alice"
+	aliceRoot := resolvePrivateRoot(ws, alice)
+	mustWrite(t, filepath.Join(aliceRoot, "mine.md"), "my data")
+	readRoots := []string{ws, aliceRoot}
+
+	// 用指向自己私有目录的相对路径
+	rel := filepath.Join("users", "sender_ou_alice", "mine.md")
+	got, err := resolveRead(rel, ws, alice, readRoots)
+	if err != nil {
+		t.Fatalf("read own private via relative: %v", err)
+	}
+	want := filepath.Join(aliceRoot, "mine.md")
+	if got != want {
+		t.Errorf("own private read = %q, want %q", got, want)
 	}
 }

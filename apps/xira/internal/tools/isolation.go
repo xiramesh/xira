@@ -71,9 +71,16 @@ func resolveWrite(rawPath, workspaceRoot, senderID string, writeRoots []string) 
 	}
 	privateRoot := resolvePrivateRoot(workspaceRoot, senderID)
 
-	// 绝对路径：不 rewrite，只做边界检查。
+	// 绝对路径：不 rewrite。隔离启用时必须落在私有层内（防借绝对路径写通用层 /
+	// 他人私有层——review Bypass 2）；隔离未启用时只要在 writeRoots 内即可。
 	if filepath.IsAbs(rawPath) {
 		abs := filepath.Clean(rawPath)
+		if privateRoot != "" {
+			if !pathWithinRoots(abs, []string{privateRoot}) {
+				return "", errPathOutsideRoots
+			}
+			return abs, nil
+		}
 		if !pathWithinRoots(abs, writeRoots) {
 			return "", errPathOutsideRoots
 		}
@@ -112,10 +119,14 @@ func resolveRead(rawPath, workspaceRoot, senderID string, readRoots []string) (s
 	}
 	privateRoot := resolvePrivateRoot(workspaceRoot, senderID)
 
-	// 绝对路径：不 rewrite。
+	// 绝对路径：不 rewrite，但隔离启用时禁止落在「他人私有层」内
+	// （防借绝对路径读 users/sender_其他/...）。
 	if filepath.IsAbs(rawPath) {
 		abs := filepath.Clean(rawPath)
 		if !pathWithinRoots(abs, readRoots) {
+			return "", errPathOutsideRoots
+		}
+		if privateRoot != "" && isInPrivateNamespace(abs, workspaceRoot) && !pathWithinRoots(abs, []string{privateRoot}) {
 			return "", errPathOutsideRoots
 		}
 		return abs, nil
@@ -132,9 +143,13 @@ func resolveRead(rawPath, workspaceRoot, senderID string, readRoots []string) (s
 			}
 			return privateAbs, nil
 		}
-		// 私有层不存在 → fallback 通用层。
+		// 私有层不存在 → fallback 通用层。但禁止借 fallback 读他人私有层
+		// （workspace/users/ 是所有 sender 私有目录的物理位置，物理上在通用层树内）。
 		commonAbs := filepath.Clean(filepath.Join(workspaceRoot, rawPath))
 		if !pathWithinRoots(commonAbs, readRoots) {
+			return "", errPathOutsideRoots
+		}
+		if isInPrivateNamespace(commonAbs, workspaceRoot) && !pathWithinRoots(commonAbs, []string{privateRoot}) {
 			return "", errPathOutsideRoots
 		}
 		return commonAbs, nil
@@ -155,3 +170,13 @@ var (
 type pathErr string
 
 func (e pathErr) Error() string { return string(e) }
+
+// isInPrivateNamespace 报告 absPath 是否落在 workspace 的「私有命名空间」
+// （workspaceRoot/users/...）下。所有 sender 的私有目录物理上都挂在这个子树里，
+// 所以隔离启用时必须额外检查：路径若在这个命名空间下，只允许是当前 sender 自己的
+// 私有层（由调用方再用 pathWithinRoots(abs, []string{privateRoot}) 收紧）。
+// 这堵住 review Bypass 1：Alice 借 fallback 读 workspace/users/sender_ou_bob/...。
+func isInPrivateNamespace(absPath, workspaceRoot string) bool {
+	privateTree := filepath.Join(workspaceRoot, privateRootSegment) + string(filepath.Separator)
+	return strings.HasPrefix(filepath.Clean(absPath)+string(filepath.Separator), privateTree)
+}
