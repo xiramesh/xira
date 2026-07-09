@@ -1689,7 +1689,34 @@ func (s *Service) instructionTextForRun(profile agents.Profile, inbound channel.
 	for _, skill := range activeSkills {
 		blocks = append(blocks, skill.InstructionBlock())
 	}
+	// #127: 注入当前 sender 的 user.md（如果存在），让 agent "记得"这个用户。
+	// 独立于 #126 data_isolation——每个 sender 无条件有 user.md。
+	if profileBlock := s.loadUserProfileBlock(inbound.SenderID); profileBlock != "" {
+		blocks = append(blocks, profileBlock)
+	}
 	return s.composeInstructionText(profile, blocks, inbound), activeSkillIDs, nil
+}
+
+// loadUserProfileBlock 读当前 sender 的 user.md，返回注入 instruction 的文本块。
+// 文件不存在或 sender 为空 → 返回 ""（跳过注入，不 append 空块）。
+func (s *Service) loadUserProfileBlock(senderID string) string {
+	senderID = strings.TrimSpace(senderID)
+	if senderID == "" {
+		return ""
+	}
+	path := rtools.UserProfilePath(s.workspace, senderID)
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "" // 文件不存在等 → 跳过（首次对话，agent 自然会问"你叫什么"）
+	}
+	body := strings.TrimSpace(string(data))
+	if body == "" {
+		return ""
+	}
+	return "# User Profile\n\nBelow is what you've learned about this user across conversations. Use it to personalize your interaction.\n\n" + body
 }
 
 func (s *Service) composeInstructionText(profile agents.Profile, skillBlocks []string, inbound channel.InboundContext) string {

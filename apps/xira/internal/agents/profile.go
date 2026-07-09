@@ -157,7 +157,7 @@ func BuiltinResearchAssistant() Profile {
 }
 
 func BuiltinToolNames() []string {
-	return []string{"command.run", "shell.run", "tool_output.read", "read_file", "search_file", "write_file", "list_dir", "edit_file"}
+	return []string{"command.run", "shell.run", "tool_output.read", "read_file", "search_file", "write_file", "list_dir", "edit_file", "update_profile"}
 }
 
 func float32Ptr(value float32) *float32 {

@@ -74,6 +74,7 @@ func NewBuiltinRegistry(workspaceRoot string, allowed []string, roots SandboxRoo
 		"write_file":       NewWriteFileTool(ws, readRoots, writeRoots),
 		"list_dir":         NewListDirTool(ws, readRoots, writeRoots),
 		"edit_file":        NewEditFileTool(ws, readRoots, writeRoots),
+		"update_profile":   NewUpdateProfileTool(ws), // #127: per-sender user.md
 	}
 	tools := make([]Tool, 0, len(allowed))
 	for _, name := range allowed {

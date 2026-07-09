@@ -1944,6 +1944,56 @@ func TestInstructionTextForRunInjectsInboundContext(t *testing.T) {
 	}
 }
 
+// TestInstructionTextForRunInjectsUserProfile 验证 #127：有 user.md 时注入 prompt，无时跳过。
+func TestInstructionTextForRunInjectsUserProfile(t *testing.T) {
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+`)
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
+	profile, ok := rt.agents.Get("xira-assistant")
+	if !ok {
+		t.Fatal("default agent not found")
+	}
+	sender := "ou_profile_test"
+
+	// 无 user.md → instruction 不含 User Profile 块
+	ctx := channel.NewInboundContext("feishu", sender, map[string]string{"chat_id": "c1", "chat_type": "p2p"})
+	instBefore, _, err := rt.instructionTextForRun(profile, ctx)
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if strings.Contains(instBefore, "# User Profile") {
+		t.Errorf("instruction should not contain User Profile before user.md exists")
+	}
+
+	// 写 user.md（用 update_profile 工具，带 sender ctx，走真实路径）
+	userPath := rtools.UserProfilePath(rt.workspace, sender)
+	profileTool := rtools.NewUpdateProfileTool(rt.workspace)
+	writeCtx := WithChatKey(context.Background(), ChatKey{SenderID: sender})
+	if _, err := profileTool.Execute(
+		writeCtx,
+		map[string]any{"section": "偏好", "content": "- name: 大明\n- reply_style: 简洁\n"},
+	); err != nil {
+		t.Fatalf("write user.md: %v", err)
+	}
+	if !strings.HasPrefix(userPath, rt.workspace) {
+		t.Fatalf("userPath %q not under workspace %q", userPath, rt.workspace)
+	}
+
+	// 有 user.md → instruction 含其内容
+	instAfter, _, err := rt.instructionTextForRun(profile, ctx)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if !strings.Contains(instAfter, "# User Profile") {
+		t.Errorf("instruction should contain User Profile block after user.md created")
+	}
+	if !strings.Contains(instAfter, "大明") {
+		t.Errorf("instruction should contain user.md content (大明):\n%s", instAfter)
+	}
+}
+
 func TestRunAgentTracesLLMRequestWhenEnabled(t *testing.T) {
 	t.Setenv(llmTraceEnv, "1")
 	runRoot := filepath.Join(t.TempDir(), "runs")
