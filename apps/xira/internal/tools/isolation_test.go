@@ -333,6 +333,116 @@ func TestWriteFile_DataIsolationEnabledGoesPrivate(t *testing.T) {
 
 // --- 覆盖率补充：错误分支（§5.2 契约函数达 100%）---
 
+func TestWriteFile_MissingContentRejected(t *testing.T) {
+	ws := setupOverlayWorkspace(t)
+	reg := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{})
+	if _, err := execute(reg, context.Background(), "write_file", map[string]any{"path": "x.md"}); err == nil {
+		t.Error("missing content should be rejected")
+	}
+	// content 非 string
+	if _, err := execute(reg, context.Background(), "write_file", map[string]any{"path": "x.md", "content": 123}); err == nil {
+		t.Error("non-string content should be rejected")
+	}
+}
+
+func TestListDir_NonexistentPathRejected(t *testing.T) {
+	ws := setupOverlayWorkspace(t)
+	reg := NewBuiltinRegistry(ws, []string{"list_dir"}, SandboxRoots{})
+	_, err := execute(reg, context.Background(), "list_dir", map[string]any{"path": "no_such_dir/"})
+	if err == nil {
+		t.Error("nonexistent dir should error")
+	}
+}
+
+func TestReadFile_NonexistentPathRejected(t *testing.T) {
+	ws := setupOverlayWorkspace(t)
+	reg := NewBuiltinRegistry(ws, []string{"read_file"}, SandboxRoots{})
+	_, err := execute(reg, context.Background(), "read_file", map[string]any{"path": "no_such_file.md"})
+	if err == nil {
+		t.Error("nonexistent file should error")
+	}
+}
+
+func TestEditFile_OldTextNotFoundRejected(t *testing.T) {
+	ws := setupOverlayWorkspace(t)
+	mustWrite(t, filepath.Join(ws, "edit.md"), "hello world")
+	reg := NewBuiltinRegistry(ws, []string{"edit_file"}, SandboxRoots{})
+	_, err := execute(reg, context.Background(), "edit_file", map[string]any{
+		"path": "edit.md", "old_text": "not present", "new_text": "x",
+	})
+	if err == nil {
+		t.Error("old_text not found should error")
+	}
+}
+
+func TestEditFile_MissingArgsRejected(t *testing.T) {
+	ws := setupOverlayWorkspace(t)
+	mustWrite(t, filepath.Join(ws, "e2.md"), "x")
+	reg := NewBuiltinRegistry(ws, []string{"edit_file"}, SandboxRoots{})
+	// 缺 old_text
+	if _, err := execute(reg, context.Background(), "edit_file", map[string]any{"path": "e2.md", "new_text": "y"}); err == nil {
+		t.Error("missing old_text should be rejected")
+	}
+	// 缺 new_text
+	if _, err := execute(reg, context.Background(), "edit_file", map[string]any{"path": "e2.md", "old_text": "x"}); err == nil {
+		t.Error("missing new_text should be rejected")
+	}
+}
+
+func TestEditFile_SuccessReplacesText(t *testing.T) {
+	ws := setupOverlayWorkspace(t)
+	mustWrite(t, filepath.Join(ws, "replace.md"), "foo bar baz")
+	reg := NewBuiltinRegistry(ws, []string{"edit_file"}, SandboxRoots{})
+	out, err := execute(reg, context.Background(), "edit_file", map[string]any{
+		"path": "replace.md", "old_text": "bar", "new_text": "QUX",
+	})
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if out["replacements"] != 1 {
+		t.Errorf("replacements = %v, want 1", out["replacements"])
+	}
+	assertContent(t, filepath.Join(ws, "replace.md"), "foo QUX baz")
+}
+
+func TestListDir_RootItself(t *testing.T) {
+	// list_dir 不传 path → 默认 "."（workspace 根），列出内容。
+	ws := setupOverlayWorkspace(t)
+	reg := NewBuiltinRegistry(ws, []string{"list_dir"}, SandboxRoots{})
+	out, err := execute(reg, context.Background(), "list_dir", map[string]any{})
+	if err != nil {
+		t.Fatalf("list root: %v", err)
+	}
+	entries, _ := out["entries"].([]map[string]any)
+	if len(entries) == 0 {
+		t.Error("list_dir('.') should return workspace entries")
+	}
+}
+
+func TestSearchFile_NoQueryRejected(t *testing.T) {
+	ws := setupOverlayWorkspace(t)
+	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{})
+	if _, err := execute(reg, context.Background(), "search_file", map[string]any{"query": ""}); err == nil {
+		t.Error("empty query should be rejected")
+	}
+}
+
+func TestSearchFile_FileRoot(t *testing.T) {
+	// root 指向文件（非目录）→ 只搜该文件。
+	ws := setupOverlayWorkspace(t)
+	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{})
+	out, err := execute(reg, context.Background(), "search_file", map[string]any{
+		"query": "shared", "root": "kb/index.md",
+	})
+	if err != nil {
+		t.Fatalf("search file root: %v", err)
+	}
+	matches, _ := out["matches"].([]map[string]any)
+	if len(matches) == 0 {
+		t.Error("search on a file root should find matches in it")
+	}
+}
+
 func TestResolveWrite_EmptyPathRejected(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
 	if _, err := resolveWrite("", ws, "ou_a", []string{ws}); err == nil {
