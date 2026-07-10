@@ -220,6 +220,55 @@ func TestIsBotMentioned(t *testing.T) {
 	}
 }
 
+// TestParseBotOpenID 验证 Bot Info API 响应解析（成功/JSON 错误/空 ID/API 错误）。
+func TestParseBotOpenID(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantID  string
+		wantErr bool
+	}{
+		{"success", `{"code":0,"bot":{"open_id":"ou_bot_abc"}}`, "ou_bot_abc", false},
+		{"api error", `{"code":99991,"bot":{"open_id":""}}`, "", true},
+		{"empty open_id", `{"code":0,"bot":{"open_id":""}}`, "", true},
+		{"malformed json", `{not json}`, "", true},
+		{"empty body", ``, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, err := parseBotOpenID([]byte(tc.body))
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("parseBotOpenID(%s) expected error, got nil", tc.name)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("parseBotOpenID(%s) unexpected error: %v", tc.name, err)
+				return
+			}
+			if id != tc.wantID {
+				t.Errorf("parseBotOpenID(%s) = %q, want %q", tc.name, id, tc.wantID)
+			}
+		})
+	}
+}
+
+func TestSafePathSegment(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "default"},
+		{"   ", "default"},
+		{"abc-123_.txt", "abc-123_.txt"},
+		{"中文/path", "___path"},
+		{"ou_open_id", "ou_open_id"},
+	}
+	for _, tc := range cases {
+		if got := safePathSegment(tc.in); got != tc.want {
+			t.Errorf("safePathSegment(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // stubOwnerResolver implements frt.OwnerResolver for tests. It returns true
 // only for the configured owner senderID. The third param (entrypointID) is
 // recorded into LastEntrypointID so integration tests can assert runners pass

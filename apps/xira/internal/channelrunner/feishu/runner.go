@@ -133,10 +133,13 @@ func (r *Runner) Channel() string {
 func (r *Runner) Start(ctx context.Context) error {
 	// 启动时获取 bot open_id，用于精确 @mention 检测（Bug：@ 别人误唤醒 bot）。
 	// 失败不阻塞启动——isBotMentioned 在 open_id 未知时返回 false（保守不唤醒）。
-	if err := r.fetchBotOpenID(ctx); err != nil {
+	// 用 bounded timeout 防止网络卡住阻塞 Start（root ctx 只在 shutdown 时 cancel）。
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, 10*time.Second)
+	if err := r.fetchBotOpenID(fetchCtx); err != nil {
 		slog.Warn("feishu: failed to fetch bot open_id, @mention detection may not work",
 			"entrypoint_id", r.definition.ID, "err", err)
 	}
+	fetchCancel()
 
 	dispatcher := larkdispatcher.NewEventDispatcher(r.verify, r.encryptKey).
 		OnP2MessageReceiveV1(r.handleMessageReceive).
@@ -714,25 +717,35 @@ func (r *Runner) fetchBotOpenID(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("bot info request: %w", err)
 	}
+	openID, err := parseBotOpenID(resp.RawBody)
+	if err != nil {
+		return err
+	}
+	r.botOpenID.Store(openID)
+	slog.Info("feishu: fetched bot open_id for @mention detection",
+		"entrypoint_id", r.definition.ID, "open_id", openID)
+	return nil
+}
+
+// parseBotOpenID 解析飞书 Bot Info API 的响应体，提取 bot open_id。
+// 独立纯函数便于测试（成功/JSON 错误/空 ID/API 错误）。
+func parseBotOpenID(body []byte) (string, error) {
 	var result struct {
 		Code int `json:"code"`
 		Bot  struct {
 			OpenID string `json:"open_id"`
 		} `json:"bot"`
 	}
-	if err := json.Unmarshal(resp.RawBody, &result); err != nil {
-		return fmt.Errorf("bot info parse: %w", err)
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("bot info parse: %w", err)
 	}
 	if result.Code != 0 {
-		return fmt.Errorf("bot info api error (code=%d)", result.Code)
+		return "", fmt.Errorf("bot info api error (code=%d)", result.Code)
 	}
 	if result.Bot.OpenID == "" {
-		return fmt.Errorf("bot info: empty open_id")
+		return "", fmt.Errorf("bot info: empty open_id")
 	}
-	r.botOpenID.Store(result.Bot.OpenID)
-	slog.Info("feishu: fetched bot open_id for @mention detection",
-		"entrypoint_id", r.definition.ID, "open_id", result.Bot.OpenID)
-	return nil
+	return result.Bot.OpenID, nil
 }
 
 func extractSenderID(sender *larkim.EventSender) string {
