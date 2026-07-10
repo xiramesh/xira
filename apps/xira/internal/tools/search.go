@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/xiramesh/xira/internal/chatkey"
 )
 
 const (
@@ -112,14 +114,14 @@ func (t *SearchFileTool) Execute(ctx context.Context, args map[string]any) (map[
 			if shouldSkipSearchDir(entry.Name()) && path != rootPath {
 				return filepath.SkipDir
 			}
-			// #126 隔离：递归遍历时跳过 workspace/users/ 命名空间（除非遍历目标
-			// 本身就是当前 sender 的 privateRoot）。否则 search_file(root="workspace")
-			// 会借 WalkDir 遍历进其他 sender 的私有目录（review bypass 3）。
-			if senderID := senderIDFromCtx(ctx); senderID != "" {
-				privRoot := resolvePrivateRoot(t.workspaceRoot, senderID)
-				if privRoot != "" && isInPrivateNamespace(path, t.workspaceRoot) && !pathWithinRoots(path, []string{privRoot}) {
-					return filepath.SkipDir
-				}
+			// users/ 命名空间保护（#126 + #127）：递归遍历时跳过 workspace/users/，
+			// 除非遍历目标本身就是当前 sender 的 privateRoot。这独立于 data_isolation
+			// 开关——user.md 是 per-sender 便签数据（#127，非强私密），非隔离 entrypoint 也不该被搜到。
+			// 用 chatkey.SenderIDFromContext（无门控），不是 senderIDFromCtx。
+			senderID, _ := chatkey.SenderIDFromContext(ctx)
+			privRoot := resolvePrivateRoot(t.workspaceRoot, senderID)
+			if rejectForeignPrivateNamespace(path, t.workspaceRoot, privRoot) {
+				return filepath.SkipDir
 			}
 			return nil
 		}

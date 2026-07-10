@@ -223,7 +223,7 @@ func ctxWithSenderNoIsolation(sender string) context.Context {
 
 func TestWriteFile_IsolatesPerSender(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"write_file", "read_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"write_file", "read_file"}, SandboxRoots{}, "")
 	alice := ctxWithSender("ou_alice")
 	bob := ctxWithSender("ou_bob")
 
@@ -254,7 +254,7 @@ func TestWriteFile_IsolatesPerSender(t *testing.T) {
 
 func TestReadFile_FallbackToCommonKB(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"read_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"read_file"}, SandboxRoots{}, "")
 	alice := ctxWithSender("ou_alice")
 
 	// kb/index.md 私有层没有 → fallback 通用层
@@ -269,7 +269,7 @@ func TestReadFile_FallbackToCommonKB(t *testing.T) {
 
 func TestWriteFile_NoSenderDegradesToSingleRoot(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{}, "")
 
 	// 无 sender ctx → 写落 workspace 根（现状）
 	ctx := context.Background()
@@ -300,7 +300,7 @@ func TestWriteFile_DataIsolationDisabledGoesSingleRoot(t *testing.T) {
 	// 即使 ctx 有 sender，entrypoint 没开 data_isolation（DataIsolation=false）
 	// → 写落 workspace 根（单层，向后兼容）。
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{}, "")
 	ctx := ctxWithSenderNoIsolation("ou_alice")
 
 	if _, err := execute(reg, ctx, "write_file", map[string]any{"path": "single.py", "content": "x"}); err != nil {
@@ -317,7 +317,7 @@ func TestWriteFile_DataIsolationDisabledGoesSingleRoot(t *testing.T) {
 func TestWriteFile_DataIsolationEnabledGoesPrivate(t *testing.T) {
 	// entrypoint 开了 data_isolation + 有 sender → 写落私有层。
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{}, "")
 	ctx := ctxWithSender("ou_alice") // DataIsolation=true
 
 	if _, err := execute(reg, ctx, "write_file", map[string]any{"path": "iso.md", "content": "private"}); err != nil {
@@ -335,7 +335,7 @@ func TestWriteFile_DataIsolationEnabledGoesPrivate(t *testing.T) {
 
 func TestWriteFile_MissingContentRejected(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{}, "")
 	if _, err := execute(reg, context.Background(), "write_file", map[string]any{"path": "x.md"}); err == nil {
 		t.Error("missing content should be rejected")
 	}
@@ -347,7 +347,7 @@ func TestWriteFile_MissingContentRejected(t *testing.T) {
 
 func TestListDir_NonexistentPathRejected(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"list_dir"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"list_dir"}, SandboxRoots{}, "")
 	_, err := execute(reg, context.Background(), "list_dir", map[string]any{"path": "no_such_dir/"})
 	if err == nil {
 		t.Error("nonexistent dir should error")
@@ -356,7 +356,7 @@ func TestListDir_NonexistentPathRejected(t *testing.T) {
 
 func TestReadFile_NonexistentPathRejected(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"read_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"read_file"}, SandboxRoots{}, "")
 	_, err := execute(reg, context.Background(), "read_file", map[string]any{"path": "no_such_file.md"})
 	if err == nil {
 		t.Error("nonexistent file should error")
@@ -366,7 +366,7 @@ func TestReadFile_NonexistentPathRejected(t *testing.T) {
 func TestEditFile_OldTextNotFoundRejected(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
 	mustWrite(t, filepath.Join(ws, "edit.md"), "hello world")
-	reg := NewBuiltinRegistry(ws, []string{"edit_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"edit_file"}, SandboxRoots{}, "")
 	_, err := execute(reg, context.Background(), "edit_file", map[string]any{
 		"path": "edit.md", "old_text": "not present", "new_text": "x",
 	})
@@ -378,7 +378,7 @@ func TestEditFile_OldTextNotFoundRejected(t *testing.T) {
 func TestEditFile_MissingArgsRejected(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
 	mustWrite(t, filepath.Join(ws, "e2.md"), "x")
-	reg := NewBuiltinRegistry(ws, []string{"edit_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"edit_file"}, SandboxRoots{}, "")
 	// 缺 old_text
 	if _, err := execute(reg, context.Background(), "edit_file", map[string]any{"path": "e2.md", "new_text": "y"}); err == nil {
 		t.Error("missing old_text should be rejected")
@@ -392,7 +392,7 @@ func TestEditFile_MissingArgsRejected(t *testing.T) {
 func TestEditFile_SuccessReplacesText(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
 	mustWrite(t, filepath.Join(ws, "replace.md"), "foo bar baz")
-	reg := NewBuiltinRegistry(ws, []string{"edit_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"edit_file"}, SandboxRoots{}, "")
 	out, err := execute(reg, context.Background(), "edit_file", map[string]any{
 		"path": "replace.md", "old_text": "bar", "new_text": "QUX",
 	})
@@ -408,7 +408,7 @@ func TestEditFile_SuccessReplacesText(t *testing.T) {
 func TestListDir_RootItself(t *testing.T) {
 	// list_dir 不传 path → 默认 "."（workspace 根），列出内容。
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"list_dir"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"list_dir"}, SandboxRoots{}, "")
 	out, err := execute(reg, context.Background(), "list_dir", map[string]any{})
 	if err != nil {
 		t.Fatalf("list root: %v", err)
@@ -421,7 +421,7 @@ func TestListDir_RootItself(t *testing.T) {
 
 func TestSearchFile_NoQueryRejected(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{}, "")
 	if _, err := execute(reg, context.Background(), "search_file", map[string]any{"query": ""}); err == nil {
 		t.Error("empty query should be rejected")
 	}
@@ -430,7 +430,7 @@ func TestSearchFile_NoQueryRejected(t *testing.T) {
 func TestSearchFile_FileRoot(t *testing.T) {
 	// root 指向文件（非目录）→ 只搜该文件。
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{}, "")
 	out, err := execute(reg, context.Background(), "search_file", map[string]any{
 		"query": "shared", "root": "kb/index.md",
 	})
@@ -495,7 +495,7 @@ func TestResolveWrite_AbsoluteInsideRootNoIsolationOK(t *testing.T) {
 
 func TestResolveReadCtx_MissingPathArg(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"read_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"read_file"}, SandboxRoots{}, "")
 	ctx := ctxWithSender("ou_a")
 	// args 没有 path 字段 → 报错
 	if _, err := execute(reg, ctx, "read_file", map[string]any{}); err == nil {
@@ -505,7 +505,7 @@ func TestResolveReadCtx_MissingPathArg(t *testing.T) {
 
 func TestResolveWriteCtx_MissingPathArg(t *testing.T) {
 	ws := setupOverlayWorkspace(t)
-	reg := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{}, "")
 	ctx := ctxWithSender("ou_a")
 	if _, err := execute(reg, ctx, "write_file", map[string]any{"content": "x"}); err == nil {
 		t.Error("missing path arg should be rejected")
@@ -710,7 +710,7 @@ func TestSearchFile_DoesNotLeakOtherSendersPrivate_RelativeRoot(t *testing.T) {
 	aliceRoot := resolvePrivateRoot(ws, "ou_alice")
 	mustWrite(t, filepath.Join(aliceRoot, "mine.md"), "needle-alice-mine")
 
-	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{}, "")
 	alice := ctxWithSender("ou_alice")
 
 	out, err := execute(reg, alice, "search_file", map[string]any{"query": "needle"})
@@ -742,7 +742,7 @@ func TestSearchFile_DoesNotLeakOtherSendersPrivate_AbsoluteWorkspaceRoot(t *test
 	bobRoot := resolvePrivateRoot(ws, "ou_bob")
 	mustWrite(t, filepath.Join(bobRoot, "secret.md"), "needle-bob-secret")
 
-	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{}, "")
 	alice := ctxWithSender("ou_alice")
 
 	out, err := execute(reg, alice, "search_file", map[string]any{"query": "needle", "root": ws})
@@ -763,7 +763,7 @@ func TestSearchFile_CanSearchOwnPrivateRoot(t *testing.T) {
 	aliceRoot := resolvePrivateRoot(ws, "ou_alice")
 	mustWrite(t, filepath.Join(aliceRoot, "mine.md"), "needle-alice")
 
-	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{})
+	reg := NewBuiltinRegistry(ws, []string{"search_file"}, SandboxRoots{}, "")
 	alice := ctxWithSender("ou_alice")
 
 	out, err := execute(reg, alice, "search_file", map[string]any{"query": "needle", "root": "users/sender_ou_alice"})
@@ -773,5 +773,91 @@ func TestSearchFile_CanSearchOwnPrivateRoot(t *testing.T) {
 	matches, _ := out["matches"].([]map[string]any)
 	if len(matches) == 0 {
 		t.Error("search should find Alice's own file in her private root")
+	}
+}
+
+// --- PR #147 review: users/ 命名空间保护独立于 data_isolation ---
+
+func TestResolveRead_UsersNamespaceProtectedEvenWithoutIsolation(t *testing.T) {
+	// PR #147 review blocker 1：非隔离 entrypoint（senderID="" 模拟）下，
+	// users/ 命名空间仍要保护——#126 工具数据隔离的私有层。
+	ws := setupOverlayWorkspace(t)
+	bobRoot := resolvePrivateRoot(ws, "ou_bob")
+	mustWrite(t, filepath.Join(bobRoot, "user.md"), "bob's secret profile")
+
+	readRoots := []string{ws}
+	_, err := resolveRead("users/sender_ou_bob/user.md", ws, "", readRoots)
+	if err == nil {
+		t.Error("BLOCKER: non-isolated resolveRead can read other sender's user.md via users/ namespace")
+	}
+}
+
+func TestReadFile_UsersNamespaceProtectedWithoutIsolation(t *testing.T) {
+	// 集成测：非隔离 ctx（DataIsolation=false），read_file 读他人 user.md → 拒绝。
+	ws := t.TempDir()
+	mustWrite(t, UserProfilePath(ws, "ou_bob"), "bob secret")
+	reg := NewBuiltinRegistry(ws, []string{"read_file"}, SandboxRoots{}, "")
+
+	ctx := ctxWithSenderNoIsolation("ou_alice")
+	_, err := execute(reg, ctx, "read_file", map[string]any{"path": "users/sender_ou_bob/user.md"})
+	if err == nil {
+		t.Error("BLOCKER: read_file without isolation can read other sender's user.md")
+	}
+}
+
+func TestReadFile_CanReadOwnUserMdWithoutIsolation(t *testing.T) {
+	// 非隔离 entrypoint 下，read_file 不该碰 user.md（哪怕自己的）——user.md 归
+	// update_profile 工具管（它用无门控 senderID），不是通用文件工具。
+	// 这里验证：非隔离下 read_file 读 users/ 下任何路径都被拒（保护语义一致）。
+	// update_profile 自己的读写不受此限（它不走 resolveRead/resolveWrite）。
+	ws := t.TempDir()
+	mustWrite(t, UserProfilePath(ws, "ou_alice"), "alice's own profile")
+	reg := NewBuiltinRegistry(ws, []string{"read_file"}, SandboxRoots{}, "")
+
+	ctx := ctxWithSenderNoIsolation("ou_alice")
+	_, err := execute(reg, ctx, "read_file", map[string]any{"path": "users/sender_ou_alice/user.md"})
+	if err == nil {
+		t.Error("read_file should not access users/ namespace even for own user.md (update_profile owns user.md)")
+	}
+}
+
+func TestUpdateProfile_WorksUnderNonIsolatedEntrypoint(t *testing.T) {
+	// update_profile 用无门控 senderID（chatkey.SenderIDFromContext），
+	// 非隔离 entrypoint 也能写自己的 user.md（#127 独立于 data_isolation）。
+	ws := t.TempDir()
+	reg := NewBuiltinRegistry(ws, []string{"update_profile"}, SandboxRoots{}, ws)
+	ctx := ctxWithSenderNoIsolation("ou_alice") // DataIsolation=false
+
+	out, err := execute(reg, ctx, "update_profile", map[string]any{
+		"section": "身份", "content": "- name: Alice\n",
+	})
+	if err != nil {
+		t.Fatalf("update_profile under non-isolated entrypoint: %v", err)
+	}
+	if out["updated"] != true {
+		t.Errorf("updated = %v, want true", out["updated"])
+	}
+	p, _ := loadUserProfile(UserProfilePath(ws, "ou_alice"))
+	if !strings.Contains(p.Content, "Alice") {
+		t.Errorf("user.md not written under non-isolated entrypoint:\n%s", p.Content)
+	}
+}
+
+// --- PR #147 review blocker 4: command.run/shell.run 碰不到 user.md ---
+
+func TestUserProfilePath_OutsideWorkspaceNotAccessibleByShell(t *testing.T) {
+	// user.md 在 stateDir（非 workspace），command/shell 的 cwd 在 workspace，
+	// exec 的进程碰不到 stateDir。验证路径拓扑：user.md 不在 workspace 树内。
+	ws := t.TempDir()
+	stateDir := t.TempDir()
+	userPath := UserProfilePath(stateDir, "ou_target")
+	mustWrite(t, userPath, "secret profile")
+	// user.md 路径不在 workspace 下
+	if strings.HasPrefix(userPath, ws) {
+		t.Fatalf("user.md %q should not be under workspace %q", userPath, ws)
+	}
+	// workspace 下确实没有 users/ 目录（user.md 不在那）
+	if _, err := os.Stat(filepath.Join(ws, "users")); !os.IsNotExist(err) {
+		t.Errorf("workspace/users/ should not exist (user.md moved to stateDir)")
 	}
 }

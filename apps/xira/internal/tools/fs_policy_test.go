@@ -21,7 +21,7 @@ import (
 func TestWriteFilePolicyHighRisk(t *testing.T) {
 	ws := t.TempDir()
 	roots := SandboxRoots{AllowRoots: []string{ws}}
-	registry := NewBuiltinRegistry(ws, []string{"write_file", "edit_file", "read_file"}, roots)
+	registry := NewBuiltinRegistry(ws, []string{"write_file", "edit_file", "read_file"}, roots, "")
 
 	for _, name := range []string{"write_file", "edit_file"} {
 		def, ok := registry.GetDefinition(name)
@@ -40,7 +40,7 @@ func TestWriteFilePolicyHighRisk(t *testing.T) {
 func TestWriteFileSandboxStillRejectsOutOfBoundPath(t *testing.T) {
 	ws := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside.txt") // 不同 TempDir,不在 allow_roots
-	registry := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{AllowRoots: []string{ws}})
+	registry := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{AllowRoots: []string{ws}}, "")
 
 	_, err := registry.Execute(context.Background(), "write_file", map[string]any{
 		"path":    outside,
@@ -63,7 +63,7 @@ func TestWriteFileSandboxStillRejectsOutOfBoundPath(t *testing.T) {
 // 内文件,不该被拦。
 func TestWriteFileInBoundExecutesWithoutGate(t *testing.T) {
 	ws := t.TempDir()
-	registry := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{AllowRoots: []string{ws}})
+	registry := NewBuiltinRegistry(ws, []string{"write_file"}, SandboxRoots{AllowRoots: []string{ws}}, "")
 
 	inBound := filepath.Join(ws, "task-done.md")
 	out, err := registry.Execute(context.Background(), "write_file", map[string]any{
