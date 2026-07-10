@@ -161,8 +161,11 @@ func newProfileWithSection(section, content string) string {
 // 独立于 #126 的 data_isolation：用 chatkey.SenderIDFromContext（无门控），
 // 每个 sender 无条件有 user.md。
 //
-// 安全（PR #147 review）：user.md 落在 stateDir（不是 workspace），通用工具
-// （fs/command/shell）只有 workspaceRoot，根本看不到 user.md——无需给每扇门装锁。
+// 安全模型（PR #147 review，弱便签）：user.md 是非私密的 per-sender 便签，
+// 记录非敏感偏好（昵称/回复风格/语言）。在有 read_file/search_file/command.run/
+// shell.run 的环境下，profile 内容对通用工具可见——**不是 per-sender 私密的**。
+// 强私有（command sandbox / 物理隔离）归 Docker follow-up。不要存敏感数据
+// （密码、联系方式、地址、账号标识）。
 type UpdateProfileTool struct {
 	stateDir string
 }
@@ -174,10 +177,11 @@ func NewUpdateProfileTool(stateDir string) *UpdateProfileTool {
 func (t *UpdateProfileTool) Name() string { return "update_profile" }
 
 func (t *UpdateProfileTool) Description() string {
-	return "Update the current user's profile (user.md) with learned information about them — " +
-		"their name, preferences, background, or anything worth remembering for future conversations. " +
-		"Provide a section name (e.g. \"身份\", \"偏好\", \"背景\") and the content to store under it. " +
-		"Call this when the user shares personal info or preferences you should remember."
+	return "Update the current user's profile (user.md) with NON-SENSITIVE preferences worth remembering " +
+		"across conversations — e.g. nickname, reply style, language preference, background context. " +
+		"Provide a section name (e.g. \"偏好\", \"背景\") and the content to store under it. " +
+		"Call this when the user shares preferences you should remember. " +
+		"DO NOT store sensitive data: no passwords, secrets, contact details, addresses, or account identifiers."
 }
 
 func (t *UpdateProfileTool) Parameters() map[string]any {

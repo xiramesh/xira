@@ -59,8 +59,9 @@ func resolvePrivateRoot(workspaceRoot, senderID string) string {
 const userProfileFilename = "user.md"
 
 // profilesSegment 是 user.md 存放的目录段（在 stateDir 下，不在 workspace）。
-// PR #147 review：user.md 必须在通用工具（fs/command/shell）不可达的位置——
-// stateDir 是 Service 级目录，不是 workspace root，通用工具根本看不到。
+// PR #147 review：user.md 存在 stateDir/profiles/，不主动暴露给通用工具，
+// 但在有 command.run/shell.run 的环境下**非强私密**（进程能读任意路径）。
+// 定位是「弱便签」（非敏感偏好），强私有靠 Docker 物理隔离（follow-up）。
 const profilesSegment = "profiles"
 
 // UserProfilePath 算出 sender 的 user.md 路径（#127）。
