@@ -75,6 +75,8 @@ func NewBuiltinRegistry(workspaceRoot string, allowed []string, roots SandboxRoo
 		"list_dir":         NewListDirTool(ws, readRoots, writeRoots),
 		"edit_file":        NewEditFileTool(ws, readRoots, writeRoots),
 		"update_profile":   NewUpdateProfileTool(stateDir), // #127: user.md 在 stateDir（弱便签，非强私密——见 profile.go 注释）
+		"update_memory":    NewUpdateMemoryTool(stateDir),  // #128: memory.jsonl 交互记忆
+		"forget_memory":    NewForgetMemoryTool(stateDir),  // #128: memory 软删除
 	}
 	tools := make([]Tool, 0, len(allowed))
 	for _, name := range allowed {
