@@ -2083,6 +2083,78 @@ default_agent: xira-assistant
 	}
 }
 
+// TestInstructionTextForRunInjectsMemory 验证 #128：有 active memory 时注入 prompt，无时跳过。
+func TestInstructionTextForRunInjectsMemory(t *testing.T) {
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+`)
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
+	profile, _ := rt.agents.Get("xira-assistant")
+	sender := "ou_mem_test"
+
+	// 无 memory → instruction 不含 Memory 块
+	ctx := channel.NewInboundContext("feishu", sender, map[string]string{"chat_id": "c1", "chat_type": "p2p"})
+	instBefore, _, err := rt.instructionTextForRun(profile, ctx)
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if strings.Contains(instBefore, "# Memory") {
+		t.Error("instruction should not contain Memory block before memory exists")
+	}
+
+	// 写 memory（用 update_memory 工具）
+	memTool := rtools.NewUpdateMemoryTool(rt.stateDir)
+	writeCtx := WithChatKey(context.Background(), ChatKey{SenderID: sender})
+	if _, err := memTool.Execute(writeCtx, map[string]any{
+		"key": "出差", "content": "用户下周三要出差",
+	}); err != nil {
+		t.Fatalf("write memory: %v", err)
+	}
+
+	// 有 memory → instruction 含其内容
+	instAfter, _, err := rt.instructionTextForRun(profile, ctx)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if !strings.Contains(instAfter, "# Memory") {
+		t.Error("instruction should contain Memory block after memory created")
+	}
+	if !strings.Contains(instAfter, "出差") {
+		t.Errorf("instruction should contain memory content (出差):\n%s", instAfter)
+	}
+}
+
+// TestInstructionTextForRunMemorySkipsForgotten 验证 forget 的 memory 不注入。
+func TestInstructionTextForRunMemorySkipsForgotten(t *testing.T) {
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+`)
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
+	profile, _ := rt.agents.Get("xira-assistant")
+	sender := "ou_forget_test"
+
+	writeCtx := WithChatKey(context.Background(), ChatKey{SenderID: sender})
+	// 写两条
+	rtools.NewUpdateMemoryTool(rt.stateDir).Execute(writeCtx, map[string]any{"key": "active", "content": "这条要注入"})
+	rtools.NewUpdateMemoryTool(rt.stateDir).Execute(writeCtx, map[string]any{"key": "forgotten", "content": "这条该跳过"})
+	// 忘记一条
+	rtools.NewForgetMemoryTool(rt.stateDir).Execute(writeCtx, map[string]any{"key": "forgotten"})
+
+	ctx := channel.NewInboundContext("feishu", sender, map[string]string{"chat_id": "c1", "chat_type": "p2p"})
+	inst, _, err := rt.instructionTextForRun(profile, ctx)
+	if err != nil {
+		t.Fatalf("instructionTextForRun: %v", err)
+	}
+	if !strings.Contains(inst, "这条要注入") {
+		t.Error("active memory should be injected")
+	}
+	if strings.Contains(inst, "这条该跳过") {
+		t.Error("forgotten memory should NOT be injected")
+	}
+}
+
 func TestRunAgentTracesLLMRequestWhenEnabled(t *testing.T) {
 	t.Setenv(llmTraceEnv, "1")
 	runRoot := filepath.Join(t.TempDir(), "runs")
