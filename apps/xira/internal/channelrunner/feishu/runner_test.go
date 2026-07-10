@@ -154,6 +154,72 @@ func TestShouldHandleMessageBindPreAuth(t *testing.T) {
 	}
 }
 
+// TestIsBotMentioned 验证精确 mention 匹配（Bug：@ 别人被误判 @ bot）。
+func TestIsBotMentioned(t *testing.T) {
+	botOpenID := "ou_bot_123"
+	strPtr := func(s string) *string { return &s }
+
+	cases := []struct {
+		name      string
+		botOpenID string
+		mentions  []*larkim.MentionEvent
+		want      bool
+	}{
+		{
+			"no mentions",
+			botOpenID,
+			nil,
+			false,
+		},
+		{
+			"@ bot only",
+			botOpenID,
+			[]*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: strPtr(botOpenID)}, Name: strPtr("Xira")}},
+			true,
+		},
+		{
+			"@ other member only (CRITICAL: should be false)",
+			botOpenID,
+			[]*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: strPtr("ou_other_456")}, Name: strPtr("韩懿留")}},
+			false,
+		},
+		{
+			"@ other + @ bot",
+			botOpenID,
+			[]*larkim.MentionEvent{
+				{Id: &larkim.UserId{OpenId: strPtr("ou_other_456")}, Name: strPtr("韩懿留")},
+				{Id: &larkim.UserId{OpenId: strPtr(botOpenID)}, Name: strPtr("Xira")},
+			},
+			true,
+		},
+		{
+			"bot open_id unknown (fallback: false)",
+			"", // botOpenID 未获取到
+			[]*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: strPtr("ou_any")}, Name: strPtr("someone")}},
+			false,
+		},
+		{
+			"mention with nil Id",
+			botOpenID,
+			[]*larkim.MentionEvent{{Name: strPtr("ghost")}},
+			false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Runner{}
+			if tc.botOpenID != "" {
+				r.botOpenID.Store(tc.botOpenID)
+			}
+			msg := &larkim.EventMessage{Mentions: tc.mentions}
+			got := r.isBotMentioned(msg)
+			if got != tc.want {
+				t.Errorf("isBotMentioned(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
 // stubOwnerResolver implements frt.OwnerResolver for tests. It returns true
 // only for the configured owner senderID. The third param (entrypointID) is
 // recorded into LastEntrypointID so integration tests can assert runners pass

@@ -5,15 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
@@ -58,6 +61,8 @@ type Runner struct {
 
 	messages *dedupe.MessageDeduper
 	router   *progress.Router // per-Runner turn router (RFC chatkey-session Step 2)
+
+	botOpenID atomic.Value // stores string; fetched at Start for precise @mention detection
 }
 
 // SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
@@ -126,6 +131,13 @@ func (r *Runner) Channel() string {
 }
 
 func (r *Runner) Start(ctx context.Context) error {
+	// 启动时获取 bot open_id，用于精确 @mention 检测（Bug：@ 别人误唤醒 bot）。
+	// 失败不阻塞启动——isBotMentioned 在 open_id 未知时返回 false（保守不唤醒）。
+	if err := r.fetchBotOpenID(ctx); err != nil {
+		slog.Warn("feishu: failed to fetch bot open_id, @mention detection may not work",
+			"entrypoint_id", r.definition.ID, "err", err)
+	}
+
 	dispatcher := larkdispatcher.NewEventDispatcher(r.verify, r.encryptKey).
 		OnP2MessageReceiveV1(r.handleMessageReceive).
 		OnP2MessageReadV1(r.handleMessageRead)
@@ -224,7 +236,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 	if senderID == "" {
 		senderID = "unknown"
 	}
-	mentioned := len(message.Mentions) > 0
+	mentioned := r.isBotMentioned(message) // 精确匹配 bot open_id，不是「有 mention 就算」
 	messageType := stringValue(message.MessageType)
 	content := extractContent(messageType, stringValue(message.Content))
 	content = stripMentionPlaceholders(content, message.Mentions)
@@ -665,6 +677,62 @@ func stripMentionPlaceholders(content string, mentions []*larkim.MentionEvent) s
 	}
 	content = mentionPlaceholderRegex.ReplaceAllString(content, "")
 	return strings.TrimSpace(content)
+}
+
+// isBotMentioned 检查群消息是否 @ 了 bot 自己（而非 @ 了其他人）。
+//
+// 飞书的 message.Mentions 是消息内全部被 @ 列表（含普通成员 + bot）。
+// 只有存在 mention.Id.OpenId == bot 的 open_id 时才算「@ 了 bot」。
+// 如果 bot open_id 未知（获取失败），返回 false（保守：不误唤醒）。
+func (r *Runner) isBotMentioned(message *larkim.EventMessage) bool {
+	if message == nil || len(message.Mentions) == 0 {
+		return false
+	}
+	knownID, _ := r.botOpenID.Load().(string)
+	if knownID == "" {
+		return false // bot open_id 未知 → 保守不唤醒（避免 @ 别人误触发）
+	}
+	for _, m := range message.Mentions {
+		if m == nil || m.Id == nil || m.Id.OpenId == nil {
+			continue
+		}
+		if *m.Id.OpenId == knownID {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchBotOpenID 调飞书 Bot Info API（GET /open-apis/bot/v3/info）获取 bot 的 open_id。
+// 存入 botOpenID 供 isBotMentioned 使用。失败不 fatal——isBotMentioned 在 unknown 时保守返回 false。
+func (r *Runner) fetchBotOpenID(ctx context.Context) error {
+	resp, err := r.client.Do(ctx, &larkcore.ApiReq{
+		HttpMethod:                http.MethodGet,
+		ApiPath:                   "/open-apis/bot/v3/info",
+		SupportedAccessTokenTypes: []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant},
+	})
+	if err != nil {
+		return fmt.Errorf("bot info request: %w", err)
+	}
+	var result struct {
+		Code int `json:"code"`
+		Bot  struct {
+			OpenID string `json:"open_id"`
+		} `json:"bot"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &result); err != nil {
+		return fmt.Errorf("bot info parse: %w", err)
+	}
+	if result.Code != 0 {
+		return fmt.Errorf("bot info api error (code=%d)", result.Code)
+	}
+	if result.Bot.OpenID == "" {
+		return fmt.Errorf("bot info: empty open_id")
+	}
+	r.botOpenID.Store(result.Bot.OpenID)
+	slog.Info("feishu: fetched bot open_id for @mention detection",
+		"entrypoint_id", r.definition.ID, "open_id", result.Bot.OpenID)
+	return nil
 }
 
 func extractSenderID(sender *larkim.EventSender) string {
