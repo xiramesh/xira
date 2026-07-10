@@ -323,3 +323,151 @@ func TestUpdateMemoryTool_PerSenderIsolated(t *testing.T) {
 		t.Errorf("bob's memory wrong: %+v", bobEntries)
 	}
 }
+
+// --- PR #149 review: 补覆盖率 + non-block 回归 ---
+
+func TestLoadMemories_MalformedLineSkipped(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "memory.jsonl")
+	os.WriteFile(path, []byte(`{"id":"m1","key":"good","content":"ok","created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z","status":"active"}
+{this is not json}
+{"id":"m2","key":"good2","content":"ok2","created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z","status":"active"}
+`), 0o600)
+	entries, err := LoadMemories(path)
+	if err != nil {
+		t.Fatalf("LoadMemories: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("malformed line should be skipped, got %d entries", len(entries))
+	}
+}
+
+func TestSaveMemories_MkdirFail(t *testing.T) {
+	ro := filepath.Join(t.TempDir(), "blocker")
+	os.WriteFile(ro, []byte("x"), 0o600)
+	path := filepath.Join(ro, "sub", "memory.jsonl")
+	err := saveMemories(path, []MemoryEntry{{ID: "m1", Key: "k", Content: "v"}})
+	if err == nil && os.Geteuid() != 0 {
+		t.Error("saveMemories into file-as-dir should fail")
+	}
+}
+
+func TestUpsertMemory_RevivesForgotten(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.jsonl")
+	upsertMemory(path, "k", "old", nil)
+	forgetMemory(path, "k")
+	entries, _ := LoadMemories(path)
+	if entries[0].Status != "forgotten" {
+		t.Fatalf("precondition: should be forgotten, got %s", entries[0].Status)
+	}
+	upsertMemory(path, "k", "new", nil)
+	entries, _ = LoadMemories(path)
+	if len(entries) != 1 || entries[0].Status != "active" || entries[0].Content != "new" {
+		t.Errorf("forgotten should revive: %+v", entries)
+	}
+}
+
+func TestUpdateMemoryTool_InvalidExpiresLogged(t *testing.T) {
+	stateDir := t.TempDir()
+	reg := NewBuiltinRegistry("", []string{"update_memory"}, SandboxRoots{}, stateDir)
+	ctx := memCtxWithSender("ou_a")
+	_, err := reg.Execute(ctx, "update_memory", map[string]any{
+		"key": "test", "content": "x", "expires": "not-a-date",
+	})
+	if err != nil {
+		t.Fatalf("invalid expires should not error: %v", err)
+	}
+	entries, _ := LoadMemories(MemoryPath(stateDir, "ou_a"))
+	if len(entries) != 1 || entries[0].Expires != nil {
+		t.Errorf("invalid expires should result in nil Expires: %+v", entries)
+	}
+}
+
+func TestForgetMemoryTool_MissingKeyRejected(t *testing.T) {
+	stateDir := t.TempDir()
+	reg := NewBuiltinRegistry("", []string{"forget_memory"}, SandboxRoots{}, stateDir)
+	ctx := memCtxWithSender("ou_a")
+	if _, err := reg.Execute(ctx, "forget_memory", map[string]any{}); err == nil {
+		t.Error("missing key should be rejected")
+	}
+	if _, err := reg.Execute(ctx, "forget_memory", map[string]any{"key": "  "}); err == nil {
+		t.Error("whitespace key should be rejected")
+	}
+}
+
+func TestActiveMemories_EmptyExpiresNeverExpires(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.jsonl")
+	upsertMemory(path, "old", "很久以前", nil)
+	active, _ := ActiveMemories(path)
+	if len(active) != 1 {
+		t.Errorf("nil-expires should be active, got %d", len(active))
+	}
+}
+
+func TestActiveMemories_FutureExpiresActive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.jsonl")
+	future := time.Now().Add(24 * time.Hour)
+	upsertMemory(path, "future", "明天的事", &future)
+	active, _ := ActiveMemories(path)
+	if len(active) != 1 {
+		t.Errorf("future-expires should be active, got %d", len(active))
+	}
+}
+
+func TestForgetMemory_DoubleForgetNoOp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.jsonl")
+	upsertMemory(path, "k", "v", nil)
+	forgetMemory(path, "k")
+	if err := forgetMemory(path, "k"); err != nil {
+		t.Fatalf("double forget should be no-op: %v", err)
+	}
+}
+
+// --- 覆盖率补充：getter + helper ---
+
+func TestUpdateMemoryTool_Metadata(t *testing.T) {
+	tool := NewUpdateMemoryTool("/tmp")
+	if tool.Name() != "update_memory" {
+		t.Errorf("name = %q", tool.Name())
+	}
+	if tool.Description() == "" {
+		t.Error("description should not be empty")
+	}
+	params := tool.Parameters()
+	if params["type"] != "object" {
+		t.Errorf("parameters type = %v", params["type"])
+	}
+}
+
+func TestForgetMemoryTool_Metadata(t *testing.T) {
+	tool := NewForgetMemoryTool("/tmp")
+	if tool.Name() != "forget_memory" {
+		t.Errorf("name = %q", tool.Name())
+	}
+	if tool.Description() == "" {
+		t.Error("description should not be empty")
+	}
+	params := tool.Parameters()
+	if params["type"] != "object" {
+		t.Errorf("parameters type = %v", params["type"])
+	}
+}
+
+func TestTruncateForLog(t *testing.T) {
+	if got := truncateForLog("short", 80); got != "short" {
+		t.Errorf("short string should pass through: %q", got)
+	}
+	long := strings.Repeat("x", 100)
+	if got := truncateForLog(long, 80); !strings.HasSuffix(got, "...") || len(got) != 83 {
+		t.Errorf("long string should be truncated: len=%d", len(got))
+	}
+}
+
+func TestUpdateMemoryTool_EmptyContentRejected(t *testing.T) {
+	stateDir := t.TempDir()
+	reg := NewBuiltinRegistry("", []string{"update_memory"}, SandboxRoots{}, stateDir)
+	ctx := memCtxWithSender("ou_a")
+	if _, err := reg.Execute(ctx, "update_memory", map[string]any{"key": "k", "content": "  "}); err == nil {
+		t.Error("whitespace content should be rejected")
+	}
+}

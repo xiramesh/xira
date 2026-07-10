@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,7 +97,9 @@ func LoadMemories(path string) ([]MemoryEntry, error) {
 		}
 		var e MemoryEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			continue // 跳过坏行（不 crash）
+			slog.Warn("memory: skipping malformed jsonl line (will be lost on next rewrite)",
+				"path", path, "line_preview", truncateForLog(line, 80), "err", err)
+			continue
 		}
 		entries = append(entries, e)
 	}
@@ -196,6 +199,14 @@ func ActiveMemories(path string) ([]MemoryEntry, error) {
 	return active, nil
 }
 
+// truncateForLog 截断字符串用于日志预览（避免长行撑爆日志）。
+func truncateForLog(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
 // --- 工具 ---
 
 // UpdateMemoryTool 让 LLM 记录交互记忆（#128）。
@@ -267,6 +278,9 @@ func (t *UpdateMemoryTool) Execute(ctx context.Context, args map[string]any) (ma
 		t, err := time.Parse("2006-01-02", strings.TrimSpace(expStr))
 		if err == nil {
 			expires = &t
+		} else {
+			slog.Warn("update_memory: invalid expires date, memory will not expire",
+				"expires_raw", expStr, "err", err)
 		}
 	}
 	path := MemoryPath(t.stateDir, senderID)
