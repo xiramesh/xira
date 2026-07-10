@@ -245,7 +245,11 @@ func TestUpdateProfileTool_WritesUserMd(t *testing.T) {
 	if out["updated"] != true {
 		t.Errorf("updated = %v, want true", out["updated"])
 	}
-	// 文件落在 users/sender_ou_大明/user.md
+	// PR #147 review：不返回绝对路径（防模型拿路径喂 command.run 读他人档案）
+	if _, hasPath := out["path"]; hasPath {
+		t.Error("update_profile should NOT return path (security: prevents command.run cat <path>)")
+	}
+	// 文件落在 profiles/sender_ou_大明/user.md
 	path := UserProfilePath(ws, "ou_大明")
 	p, _ := loadUserProfile(path)
 	if !p.Exists {

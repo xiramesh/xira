@@ -218,5 +218,7 @@ func (t *UpdateProfileTool) Execute(ctx context.Context, args map[string]any) (m
 	if err := updateProfileSection(path, section, content); err != nil {
 		return nil, err
 	}
-	return map[string]any{"updated": true, "section": section, "path": path}, nil
+	// PR #147 review：不返回绝对路径——防止模型拿路径喂 command.run/shell.run
+	// 读他人 user.md（command/shell 不是 OS 沙箱，能读任意路径）。
+	return map[string]any{"updated": true, "section": section}, nil
 }
