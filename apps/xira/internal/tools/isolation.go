@@ -101,7 +101,7 @@ func resolveWrite(rawPath, workspaceRoot, senderID string, writeRoots []string) 
 
 	// 绝对路径：不 rewrite。隔离启用时必须落在私有层内（防借绝对路径写通用层 /
 	// 他人私有层——review Bypass 2）；隔离未启用时在 writeRoots 内即可，但 users/
-	// 命名空间仍受保护（#127：不能写他人 user.md）。
+	// 命名空间仍受保护（#126 工具数据隔离：不能写他人私有层）。
 	if filepath.IsAbs(rawPath) {
 		abs := filepath.Clean(rawPath)
 		if privateRoot != "" {
@@ -189,7 +189,7 @@ func resolveRead(rawPath, workspaceRoot, senderID string, readRoots []string) (s
 		return commonAbs, nil
 	}
 	// 隔离未启用（senderID 空）：单层行为。但 users/ 命名空间仍要保护——
-	// user.md 是 per-sender 私密档案（#127），即使 entrypoint 没开 data_isolation，
+	// user.md 是 per-sender 便签数据（#127，非强私密），即使 entrypoint 没开 data_isolation，
 	// 也不该让通用文件工具无差别读他人 user.md。
 	abs := filepath.Clean(filepath.Join(workspaceRoot, rawPath))
 	if !pathWithinRoots(abs, readRoots) {
@@ -202,7 +202,7 @@ func resolveRead(rawPath, workspaceRoot, senderID string, readRoots []string) (s
 }
 
 // rejectForeignPrivateNamespace 报告 absPath 是否落在 workspace/users/ 命名空间
-// 但不是当前 sender 自己的 privateRoot。users/ 是 per-sender 私密档案区（user.md），
+// 但不是当前 sender 自己的 privateRoot。users/ 是 #126 工具数据隔离的私有层区，
 // 保护它**独立于 data_isolation 开关**——不管 entrypoint 配没配隔离，通用文件工具
 // 都不能读/写/遍历他人的 users/sender_{其他}/。
 //

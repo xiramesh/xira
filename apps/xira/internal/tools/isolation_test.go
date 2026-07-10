@@ -780,7 +780,7 @@ func TestSearchFile_CanSearchOwnPrivateRoot(t *testing.T) {
 
 func TestResolveRead_UsersNamespaceProtectedEvenWithoutIsolation(t *testing.T) {
 	// PR #147 review blocker 1：非隔离 entrypoint（senderID="" 模拟）下，
-	// users/ 命名空间仍要保护——user.md 是 per-sender 私密档案。
+	// users/ 命名空间仍要保护——#126 工具数据隔离的私有层。
 	ws := setupOverlayWorkspace(t)
 	bobRoot := resolvePrivateRoot(ws, "ou_bob")
 	mustWrite(t, filepath.Join(bobRoot, "user.md"), "bob's secret profile")

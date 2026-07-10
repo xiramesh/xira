@@ -116,7 +116,7 @@ func (t *SearchFileTool) Execute(ctx context.Context, args map[string]any) (map[
 			}
 			// users/ 命名空间保护（#126 + #127）：递归遍历时跳过 workspace/users/，
 			// 除非遍历目标本身就是当前 sender 的 privateRoot。这独立于 data_isolation
-			// 开关——user.md 是 per-sender 私密档案，非隔离 entrypoint 也不该被搜到。
+			// 开关——user.md 是 per-sender 便签数据（#127，非强私密），非隔离 entrypoint 也不该被搜到。
 			// 用 chatkey.SenderIDFromContext（无门控），不是 senderIDFromCtx。
 			senderID, _ := chatkey.SenderIDFromContext(ctx)
 			privRoot := resolvePrivateRoot(t.workspaceRoot, senderID)
