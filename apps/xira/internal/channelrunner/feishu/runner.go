@@ -137,7 +137,7 @@ func (r *Runner) Start(ctx context.Context) error {
 	// 启动时获取 bot open_id，用于精确 @mention 检测（Bug：@ 别人误唤醒 bot）。
 	// 失败不阻塞启动——isBotMentioned 在 open_id 未知时返回 false（保守不唤醒）。
 	// 用 bounded timeout 防止网络卡住阻塞 Start（root ctx 只在 shutdown 时 cancel）。
-	fetchCtx, fetchCancel := context.WithTimeout(ctx, 10*time.Second)
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, 5*time.Second)
 	if err := r.fetchBotOpenID(fetchCtx); err != nil {
 		slog.Warn("feishu: failed to fetch bot open_id, @mention detection may not work",
 			"entrypoint_id", r.definition.ID, "err", err)

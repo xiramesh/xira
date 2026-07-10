@@ -658,6 +658,10 @@ func TestFeishuStartStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
+	// 注入 fake fetcher——避免调真飞书 API（PR #150 review 3）。
+	runner.botInfoFetcher = func(ctx context.Context) (string, error) {
+		return "ou_bot_test", nil
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := runner.Start(ctx); err != nil {
@@ -692,6 +696,72 @@ func TestFeishuStartStop(t *testing.T) {
 	if err := runner2.Stop(ctx); err != nil {
 		t.Errorf("Stop without Start should be no-op, got: %v", err)
 	}
+}
+
+// TestStartFetchFailureDoesNotBlock 验证 PR #150 review 3：
+// fetchBotOpenID 失败时 Start 仍返回 nil + WS runner 仍设置（启动不阻塞）。
+func TestStartFetchFailureDoesNotBlock(t *testing.T) {
+	runner, err := NewRunner(entrypoints.Definition{
+		ID: "feishu-fetch-fail", Channel: "feishu", AppID: "cli_test", AppSecret: "s",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	runner.botInfoFetcher = func(ctx context.Context) (string, error) {
+		return "", fmt.Errorf("simulated API failure")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := runner.Start(ctx); err != nil {
+		t.Fatalf("Start should succeed even when fetchBotOpenID fails: %v", err)
+	}
+	// WS runner 仍设置（启动没被阻塞）
+	runner.mu.Lock()
+	hasClient := runner.wsClient != nil
+	runner.mu.Unlock()
+	if !hasClient {
+		t.Error("Start should set wsClient even when bot info fetch fails")
+	}
+	// botOpenID 未设置 → isBotMentioned 保守 false
+	if runner.isBotMentioned(&larkim.EventMessage{}) {
+		t.Error("isBotMentioned should be false when botOpenID is unknown")
+	}
+	runner.Stop(ctx)
+}
+
+// TestStartFetchTimeoutDoesNotBlock 验证 PR #150 review 3：
+// fetchBotOpenID 超时时 Start 仍及时返回（bounded timeout 生效）。
+func TestStartFetchTimeoutDoesNotBlock(t *testing.T) {
+	runner, err := NewRunner(entrypoints.Definition{
+		ID: "feishu-fetch-timeout", Channel: "feishu", AppID: "cli_test", AppSecret: "s",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	runner.botInfoFetcher = func(ctx context.Context) (string, error) {
+		<-ctx.Done() // 永远不主动返回，只等 ctx 超时
+		return "", ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	start := time.Now()
+	if err := runner.Start(ctx); err != nil {
+		t.Fatalf("Start should succeed even when fetchBotOpenID times out: %v", err)
+	}
+	elapsed := time.Since(start)
+	// Start 里有 10s timeout，但这里测的是「Start 返回了」（不卡死），不是精确耗时。
+	// 如果 timeout 没生效，Start 会永远阻塞（测试超时挂死），所以这里只要到这一行就过了。
+	t.Logf("Start returned after %v with fetch timeout", elapsed)
+
+	runner.mu.Lock()
+	hasClient := runner.wsClient != nil
+	runner.mu.Unlock()
+	if !hasClient {
+		t.Error("Start should set wsClient even when bot info fetch times out")
+	}
+	runner.Stop(ctx)
 }
 
 // TestExtractContent covers all message type branches. Previously 41.7%.
