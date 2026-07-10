@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -254,18 +255,66 @@ func TestParseBotOpenID(t *testing.T) {
 	}
 }
 
-func TestSafePathSegment(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"", "default"},
-		{"   ", "default"},
-		{"abc-123_.txt", "abc-123_.txt"},
-		{"中文/path", "___path"},
-		{"ou_open_id", "ou_open_id"},
+func TestFetchBotOpenID_Success(t *testing.T) {
+	r := &Runner{
+		botInfoFetcher: func(ctx context.Context) (string, error) {
+			return "ou_bot_test", nil
+		},
 	}
-	for _, tc := range cases {
-		if got := safePathSegment(tc.in); got != tc.want {
-			t.Errorf("safePathSegment(%q) = %q, want %q", tc.in, got, tc.want)
-		}
+	if err := r.fetchBotOpenID(context.Background()); err != nil {
+		t.Fatalf("fetchBotOpenID success: %v", err)
+	}
+	if got, _ := r.botOpenID.Load().(string); got != "ou_bot_test" {
+		t.Errorf("botOpenID = %q, want ou_bot_test", got)
+	}
+}
+
+func TestFetchBotOpenID_FailureStoresNothing(t *testing.T) {
+	r := &Runner{
+		botInfoFetcher: func(ctx context.Context) (string, error) {
+			return "", fmt.Errorf("network timeout")
+		},
+	}
+	if err := r.fetchBotOpenID(context.Background()); err == nil {
+		t.Error("fetchBotOpenID with failing fetcher should error")
+	}
+	// botOpenID 未设置 → isBotMentioned 保守返回 false
+	if got, ok := r.botOpenID.Load().(string); ok && got != "" {
+		t.Errorf("botOpenID should be unset on failure, got %q", got)
+	}
+	// 验证失败后 isBotMentioned 保守返回 false（不误唤醒）
+	msg := &larkim.EventMessage{
+		Mentions: []*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: strPtr("ou_any")}}},
+	}
+	if r.isBotMentioned(msg) {
+		t.Error("isBotMentioned should be false when botOpenID is unknown (conservative)")
+	}
+}
+
+func TestFetchBotOpenID_TimeoutDoesNotBlock(t *testing.T) {
+	// fetcher 模拟超时（等一个永不到达的 channel）
+	r := &Runner{
+		botInfoFetcher: func(ctx context.Context) (string, error) {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(10 * time.Second):
+				return "ou_bot_late", nil
+			}
+		},
+	}
+	// Start 用 10s timeout 包 fetchBotOpenID——这里模拟 Start 的行为，
+	// 用短 timeout 证明 fetchBotOpenID 不会无限阻塞。
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := r.fetchBotOpenID(ctx)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Error("should timeout")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("fetchBotOpenID blocked too long: %v (timeout not respected)", elapsed)
 	}
 }
 

@@ -63,6 +63,9 @@ type Runner struct {
 	router   *progress.Router // per-Runner turn router (RFC chatkey-session Step 2)
 
 	botOpenID atomic.Value // stores string; fetched at Start for precise @mention detection
+
+	// botInfoFetcher 获取 bot open_id 的函数（可注入测试）。nil = 用默认飞书 API。
+	botInfoFetcher func(ctx context.Context) (string, error)
 }
 
 // SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
@@ -709,15 +712,11 @@ func (r *Runner) isBotMentioned(message *larkim.EventMessage) bool {
 // fetchBotOpenID 调飞书 Bot Info API（GET /open-apis/bot/v3/info）获取 bot 的 open_id。
 // 存入 botOpenID 供 isBotMentioned 使用。失败不 fatal——isBotMentioned 在 unknown 时保守返回 false。
 func (r *Runner) fetchBotOpenID(ctx context.Context) error {
-	resp, err := r.client.Do(ctx, &larkcore.ApiReq{
-		HttpMethod:                http.MethodGet,
-		ApiPath:                   "/open-apis/bot/v3/info",
-		SupportedAccessTokenTypes: []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant},
-	})
-	if err != nil {
-		return fmt.Errorf("bot info request: %w", err)
+	fetcher := r.botInfoFetcher
+	if fetcher == nil {
+		fetcher = r.defaultBotInfoFetcher
 	}
-	openID, err := parseBotOpenID(resp.RawBody)
+	openID, err := fetcher(ctx)
 	if err != nil {
 		return err
 	}
@@ -725,6 +724,23 @@ func (r *Runner) fetchBotOpenID(ctx context.Context) error {
 	slog.Info("feishu: fetched bot open_id for @mention detection",
 		"entrypoint_id", r.definition.ID, "open_id", openID)
 	return nil
+}
+
+// defaultBotInfoFetcher 调飞书 Bot Info API 获取 bot open_id（生产路径）。
+func (r *Runner) defaultBotInfoFetcher(ctx context.Context) (string, error) {
+	resp, err := r.client.Do(ctx, &larkcore.ApiReq{
+		HttpMethod:                http.MethodGet,
+		ApiPath:                   "/open-apis/bot/v3/info",
+		SupportedAccessTokenTypes: []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant},
+	})
+	if err != nil {
+		return "", fmt.Errorf("bot info request: %w", err)
+	}
+	openID, err := parseBotOpenID(resp.RawBody)
+	if err != nil {
+		return "", err
+	}
+	return openID, nil
 }
 
 // parseBotOpenID 解析飞书 Bot Info API 的响应体，提取 bot open_id。
