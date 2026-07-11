@@ -5,15 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
@@ -58,6 +61,13 @@ type Runner struct {
 
 	messages *dedupe.MessageDeduper
 	router   *progress.Router // per-Runner turn router (RFC chatkey-session Step 2)
+
+	botOpenID atomic.Value // stores string; fetched at Start for precise @mention detection
+
+	// botInfoFetcher 获取 bot open_id 的函数（可注入测试）。nil = 用默认飞书 API。
+	botInfoFetcher func(ctx context.Context) (string, error)
+	// fetchTimeout 是 fetchBotOpenID 的超时（默认 5s，测试可注入短值）。
+	fetchTimeout time.Duration
 }
 
 // SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
@@ -126,6 +136,20 @@ func (r *Runner) Channel() string {
 }
 
 func (r *Runner) Start(ctx context.Context) error {
+	// 启动时获取 bot open_id，用于精确 @mention 检测（Bug：@ 别人误唤醒 bot）。
+	// 失败不阻塞启动——isBotMentioned 在 open_id 未知时返回 false（保守不唤醒）。
+	// 用 bounded timeout 防止网络卡住阻塞 Start（root ctx 只在 shutdown 时 cancel）。
+	timeout := r.fetchTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, timeout)
+	if err := r.fetchBotOpenID(fetchCtx); err != nil {
+		slog.Warn("feishu: failed to fetch bot open_id, @mention detection may not work",
+			"entrypoint_id", r.definition.ID, "err", err)
+	}
+	fetchCancel()
+
 	dispatcher := larkdispatcher.NewEventDispatcher(r.verify, r.encryptKey).
 		OnP2MessageReceiveV1(r.handleMessageReceive).
 		OnP2MessageReadV1(r.handleMessageRead)
@@ -224,7 +248,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 	if senderID == "" {
 		senderID = "unknown"
 	}
-	mentioned := len(message.Mentions) > 0
+	mentioned := r.isBotMentioned(message) // 精确匹配 bot open_id，不是「有 mention 就算」
 	messageType := stringValue(message.MessageType)
 	content := extractContent(messageType, stringValue(message.Content))
 	content = stripMentionPlaceholders(content, message.Mentions)
@@ -665,6 +689,85 @@ func stripMentionPlaceholders(content string, mentions []*larkim.MentionEvent) s
 	}
 	content = mentionPlaceholderRegex.ReplaceAllString(content, "")
 	return strings.TrimSpace(content)
+}
+
+// isBotMentioned 检查群消息是否 @ 了 bot 自己（而非 @ 了其他人）。
+//
+// 飞书的 message.Mentions 是消息内全部被 @ 列表（含普通成员 + bot）。
+// 只有存在 mention.Id.OpenId == bot 的 open_id 时才算「@ 了 bot」。
+// 如果 bot open_id 未知（获取失败），返回 false（保守：不误唤醒）。
+func (r *Runner) isBotMentioned(message *larkim.EventMessage) bool {
+	if message == nil || len(message.Mentions) == 0 {
+		return false
+	}
+	knownID, _ := r.botOpenID.Load().(string)
+	if knownID == "" {
+		return false // bot open_id 未知 → 保守不唤醒（避免 @ 别人误触发）
+	}
+	for _, m := range message.Mentions {
+		if m == nil || m.Id == nil || m.Id.OpenId == nil {
+			continue
+		}
+		if *m.Id.OpenId == knownID {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchBotOpenID 调飞书 Bot Info API（GET /open-apis/bot/v3/info）获取 bot 的 open_id。
+// 存入 botOpenID 供 isBotMentioned 使用。失败不 fatal——isBotMentioned 在 unknown 时保守返回 false。
+func (r *Runner) fetchBotOpenID(ctx context.Context) error {
+	fetcher := r.botInfoFetcher
+	if fetcher == nil {
+		fetcher = r.defaultBotInfoFetcher
+	}
+	openID, err := fetcher(ctx)
+	if err != nil {
+		return err
+	}
+	r.botOpenID.Store(openID)
+	slog.Info("feishu: fetched bot open_id for @mention detection",
+		"entrypoint_id", r.definition.ID, "open_id", openID)
+	return nil
+}
+
+// defaultBotInfoFetcher 调飞书 Bot Info API 获取 bot open_id（生产路径）。
+func (r *Runner) defaultBotInfoFetcher(ctx context.Context) (string, error) {
+	resp, err := r.client.Do(ctx, &larkcore.ApiReq{
+		HttpMethod:                http.MethodGet,
+		ApiPath:                   "/open-apis/bot/v3/info",
+		SupportedAccessTokenTypes: []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant},
+	})
+	if err != nil {
+		return "", fmt.Errorf("bot info request: %w", err)
+	}
+	openID, err := parseBotOpenID(resp.RawBody)
+	if err != nil {
+		return "", err
+	}
+	return openID, nil
+}
+
+// parseBotOpenID 解析飞书 Bot Info API 的响应体，提取 bot open_id。
+// 独立纯函数便于测试（成功/JSON 错误/空 ID/API 错误）。
+func parseBotOpenID(body []byte) (string, error) {
+	var result struct {
+		Code int `json:"code"`
+		Bot  struct {
+			OpenID string `json:"open_id"`
+		} `json:"bot"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("bot info parse: %w", err)
+	}
+	if result.Code != 0 {
+		return "", fmt.Errorf("bot info api error (code=%d)", result.Code)
+	}
+	if result.Bot.OpenID == "" {
+		return "", fmt.Errorf("bot info: empty open_id")
+	}
+	return result.Bot.OpenID, nil
 }
 
 func extractSenderID(sender *larkim.EventSender) string {

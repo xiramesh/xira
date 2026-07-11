@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -151,6 +152,169 @@ func TestShouldHandleMessageBindPreAuth(t *testing.T) {
 	// p2p /bind from unauthorized sender → passes (mention gate n/a, auth bypassed).
 	if !shouldHandleMessage("direct", false, "ou_stranger", "/bind WDJM-LHKD", allowlist, nil) {
 		t.Error("/bind in p2p from unauthorized sender should pass pre-auth")
+	}
+}
+
+// TestIsBotMentioned 验证精确 mention 匹配（Bug：@ 别人被误判 @ bot）。
+func TestIsBotMentioned(t *testing.T) {
+	botOpenID := "ou_bot_123"
+	strPtr := func(s string) *string { return &s }
+
+	cases := []struct {
+		name      string
+		botOpenID string
+		mentions  []*larkim.MentionEvent
+		want      bool
+	}{
+		{
+			"no mentions",
+			botOpenID,
+			nil,
+			false,
+		},
+		{
+			"@ bot only",
+			botOpenID,
+			[]*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: strPtr(botOpenID)}, Name: strPtr("Xira")}},
+			true,
+		},
+		{
+			"@ other member only (CRITICAL: should be false)",
+			botOpenID,
+			[]*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: strPtr("ou_other_456")}, Name: strPtr("韩懿留")}},
+			false,
+		},
+		{
+			"@ other + @ bot",
+			botOpenID,
+			[]*larkim.MentionEvent{
+				{Id: &larkim.UserId{OpenId: strPtr("ou_other_456")}, Name: strPtr("韩懿留")},
+				{Id: &larkim.UserId{OpenId: strPtr(botOpenID)}, Name: strPtr("Xira")},
+			},
+			true,
+		},
+		{
+			"bot open_id unknown (fallback: false)",
+			"", // botOpenID 未获取到
+			[]*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: strPtr("ou_any")}, Name: strPtr("someone")}},
+			false,
+		},
+		{
+			"mention with nil Id",
+			botOpenID,
+			[]*larkim.MentionEvent{{Name: strPtr("ghost")}},
+			false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Runner{}
+			if tc.botOpenID != "" {
+				r.botOpenID.Store(tc.botOpenID)
+			}
+			msg := &larkim.EventMessage{Mentions: tc.mentions}
+			got := r.isBotMentioned(msg)
+			if got != tc.want {
+				t.Errorf("isBotMentioned(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseBotOpenID 验证 Bot Info API 响应解析（成功/JSON 错误/空 ID/API 错误）。
+func TestParseBotOpenID(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantID  string
+		wantErr bool
+	}{
+		{"success", `{"code":0,"bot":{"open_id":"ou_bot_abc"}}`, "ou_bot_abc", false},
+		{"api error", `{"code":99991,"bot":{"open_id":""}}`, "", true},
+		{"empty open_id", `{"code":0,"bot":{"open_id":""}}`, "", true},
+		{"malformed json", `{not json}`, "", true},
+		{"empty body", ``, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, err := parseBotOpenID([]byte(tc.body))
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("parseBotOpenID(%s) expected error, got nil", tc.name)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("parseBotOpenID(%s) unexpected error: %v", tc.name, err)
+				return
+			}
+			if id != tc.wantID {
+				t.Errorf("parseBotOpenID(%s) = %q, want %q", tc.name, id, tc.wantID)
+			}
+		})
+	}
+}
+
+func TestFetchBotOpenID_Success(t *testing.T) {
+	r := &Runner{
+		botInfoFetcher: func(ctx context.Context) (string, error) {
+			return "ou_bot_test", nil
+		},
+	}
+	if err := r.fetchBotOpenID(context.Background()); err != nil {
+		t.Fatalf("fetchBotOpenID success: %v", err)
+	}
+	if got, _ := r.botOpenID.Load().(string); got != "ou_bot_test" {
+		t.Errorf("botOpenID = %q, want ou_bot_test", got)
+	}
+}
+
+func TestFetchBotOpenID_FailureStoresNothing(t *testing.T) {
+	r := &Runner{
+		botInfoFetcher: func(ctx context.Context) (string, error) {
+			return "", fmt.Errorf("network timeout")
+		},
+	}
+	if err := r.fetchBotOpenID(context.Background()); err == nil {
+		t.Error("fetchBotOpenID with failing fetcher should error")
+	}
+	// botOpenID 未设置 → isBotMentioned 保守返回 false
+	if got, ok := r.botOpenID.Load().(string); ok && got != "" {
+		t.Errorf("botOpenID should be unset on failure, got %q", got)
+	}
+	// 验证失败后 isBotMentioned 保守返回 false（不误唤醒）
+	msg := &larkim.EventMessage{
+		Mentions: []*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: strPtr("ou_any")}}},
+	}
+	if r.isBotMentioned(msg) {
+		t.Error("isBotMentioned should be false when botOpenID is unknown (conservative)")
+	}
+}
+
+func TestFetchBotOpenID_TimeoutDoesNotBlock(t *testing.T) {
+	// fetcher 模拟超时（等一个永不到达的 channel）
+	r := &Runner{
+		botInfoFetcher: func(ctx context.Context) (string, error) {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(10 * time.Second):
+				return "ou_bot_late", nil
+			}
+		},
+	}
+	// Start 用 fetchTimeout 包 fetchBotOpenID——这里模拟 Start 的行为，
+	// 用短 timeout 证明 fetchBotOpenID 不会无限阻塞。
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := r.fetchBotOpenID(ctx)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Error("should timeout")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("fetchBotOpenID blocked too long: %v (timeout not respected)", elapsed)
 	}
 }
 
@@ -494,6 +658,10 @@ func TestFeishuStartStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
+	// 注入 fake fetcher——避免调真飞书 API（PR #150 review 3）。
+	runner.botInfoFetcher = func(ctx context.Context) (string, error) {
+		return "ou_bot_test", nil
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := runner.Start(ctx); err != nil {
@@ -528,6 +696,77 @@ func TestFeishuStartStop(t *testing.T) {
 	if err := runner2.Stop(ctx); err != nil {
 		t.Errorf("Stop without Start should be no-op, got: %v", err)
 	}
+}
+
+// TestStartFetchFailureDoesNotBlock 验证 PR #150 review 3：
+// fetchBotOpenID 失败时 Start 仍返回 nil + WS runner 仍设置（启动不阻塞）。
+func TestStartFetchFailureDoesNotBlock(t *testing.T) {
+	runner, err := NewRunner(entrypoints.Definition{
+		ID: "feishu-fetch-fail", Channel: "feishu", AppID: "cli_test", AppSecret: "s",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	runner.botInfoFetcher = func(ctx context.Context) (string, error) {
+		return "", fmt.Errorf("simulated API failure")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := runner.Start(ctx); err != nil {
+		t.Fatalf("Start should succeed even when fetchBotOpenID fails: %v", err)
+	}
+	// WS runner 仍设置（启动没被阻塞）
+	runner.mu.Lock()
+	hasClient := runner.wsClient != nil
+	runner.mu.Unlock()
+	if !hasClient {
+		t.Error("Start should set wsClient even when bot info fetch fails")
+	}
+	// botOpenID 未设置 → isBotMentioned 保守 false
+	if runner.isBotMentioned(&larkim.EventMessage{}) {
+		t.Error("isBotMentioned should be false when botOpenID is unknown")
+	}
+	runner.Stop(ctx)
+}
+
+// TestStartFetchTimeoutDoesNotBlock 验证 PR #150 review 3+4：
+// fetchBotOpenID 超时时 Start 仍及时返回（bounded timeout 生效）。
+// 用注入的短 timeout（100ms），断言 Start 在 2s 内返回——如果 timeout 没生效会挂死。
+func TestStartFetchTimeoutDoesNotBlock(t *testing.T) {
+	runner, err := NewRunner(entrypoints.Definition{
+		ID: "feishu-fetch-timeout", Channel: "feishu", AppID: "cli_test", AppSecret: "s",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	runner.botInfoFetcher = func(ctx context.Context) (string, error) {
+		<-ctx.Done() // 永远不主动返回，只等 ctx 超时
+		return "", ctx.Err()
+	}
+	runner.fetchTimeout = 100 * time.Millisecond // 注入短 timeout（不依赖生产的 5s）
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	start := time.Now()
+	if err := runner.Start(ctx); err != nil {
+		t.Fatalf("Start should succeed even when fetchBotOpenID times out: %v", err)
+	}
+	elapsed := time.Since(start)
+	// 断言上限：100ms timeout + WS setup overhead，2s 绰绰有余。
+	// 如果 timeout 被改大或删除，这里会 fail（不是挂死）。
+	if elapsed > 2*time.Second {
+		t.Errorf("Start took %v with 100ms injected timeout — timeout not respected", elapsed)
+	}
+	t.Logf("Start returned after %v with 100ms injected fetch timeout", elapsed)
+
+	runner.mu.Lock()
+	hasClient := runner.wsClient != nil
+	runner.mu.Unlock()
+	if !hasClient {
+		t.Error("Start should set wsClient even when bot info fetch times out")
+	}
+	runner.Stop(ctx)
 }
 
 // TestExtractContent covers all message type branches. Previously 41.7%.
