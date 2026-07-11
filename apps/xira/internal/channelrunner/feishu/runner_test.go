@@ -303,7 +303,7 @@ func TestFetchBotOpenID_TimeoutDoesNotBlock(t *testing.T) {
 			}
 		},
 	}
-	// Start 用 10s timeout 包 fetchBotOpenID——这里模拟 Start 的行为，
+	// Start 用 fetchTimeout 包 fetchBotOpenID——这里模拟 Start 的行为，
 	// 用短 timeout 证明 fetchBotOpenID 不会无限阻塞。
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -730,8 +730,9 @@ func TestStartFetchFailureDoesNotBlock(t *testing.T) {
 	runner.Stop(ctx)
 }
 
-// TestStartFetchTimeoutDoesNotBlock 验证 PR #150 review 3：
+// TestStartFetchTimeoutDoesNotBlock 验证 PR #150 review 3+4：
 // fetchBotOpenID 超时时 Start 仍及时返回（bounded timeout 生效）。
+// 用注入的短 timeout（100ms），断言 Start 在 2s 内返回——如果 timeout 没生效会挂死。
 func TestStartFetchTimeoutDoesNotBlock(t *testing.T) {
 	runner, err := NewRunner(entrypoints.Definition{
 		ID: "feishu-fetch-timeout", Channel: "feishu", AppID: "cli_test", AppSecret: "s",
@@ -743,6 +744,7 @@ func TestStartFetchTimeoutDoesNotBlock(t *testing.T) {
 		<-ctx.Done() // 永远不主动返回，只等 ctx 超时
 		return "", ctx.Err()
 	}
+	runner.fetchTimeout = 100 * time.Millisecond // 注入短 timeout（不依赖生产的 5s）
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -751,9 +753,12 @@ func TestStartFetchTimeoutDoesNotBlock(t *testing.T) {
 		t.Fatalf("Start should succeed even when fetchBotOpenID times out: %v", err)
 	}
 	elapsed := time.Since(start)
-	// Start 里有 10s timeout，但这里测的是「Start 返回了」（不卡死），不是精确耗时。
-	// 如果 timeout 没生效，Start 会永远阻塞（测试超时挂死），所以这里只要到这一行就过了。
-	t.Logf("Start returned after %v with fetch timeout", elapsed)
+	// 断言上限：100ms timeout + WS setup overhead，2s 绰绰有余。
+	// 如果 timeout 被改大或删除，这里会 fail（不是挂死）。
+	if elapsed > 2*time.Second {
+		t.Errorf("Start took %v with 100ms injected timeout — timeout not respected", elapsed)
+	}
+	t.Logf("Start returned after %v with 100ms injected fetch timeout", elapsed)
 
 	runner.mu.Lock()
 	hasClient := runner.wsClient != nil

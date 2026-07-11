@@ -66,6 +66,8 @@ type Runner struct {
 
 	// botInfoFetcher 获取 bot open_id 的函数（可注入测试）。nil = 用默认飞书 API。
 	botInfoFetcher func(ctx context.Context) (string, error)
+	// fetchTimeout 是 fetchBotOpenID 的超时（默认 5s，测试可注入短值）。
+	fetchTimeout time.Duration
 }
 
 // SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
@@ -137,7 +139,11 @@ func (r *Runner) Start(ctx context.Context) error {
 	// 启动时获取 bot open_id，用于精确 @mention 检测（Bug：@ 别人误唤醒 bot）。
 	// 失败不阻塞启动——isBotMentioned 在 open_id 未知时返回 false（保守不唤醒）。
 	// 用 bounded timeout 防止网络卡住阻塞 Start（root ctx 只在 shutdown 时 cancel）。
-	fetchCtx, fetchCancel := context.WithTimeout(ctx, 5*time.Second)
+	timeout := r.fetchTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, timeout)
 	if err := r.fetchBotOpenID(fetchCtx); err != nil {
 		slog.Warn("feishu: failed to fetch bot open_id, @mention detection may not work",
 			"entrypoint_id", r.definition.ID, "err", err)
