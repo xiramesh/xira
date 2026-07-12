@@ -463,3 +463,30 @@ func newHumanRequestToolTestRuntime(t *testing.T, runID, sessionID string) (*Ser
 	})
 	return rt, ctx
 }
+
+func TestCreateAgentHumanRequestBindsCurrentResponderFromInboundContext(t *testing.T) {
+	rt, baseCtx := newHumanRequestToolTestRuntime(t, "run-responder", "session-responder")
+	exec, ok := runExecutionFromContext(baseCtx)
+	if !ok {
+		t.Fatal("missing run execution context")
+	}
+	exec.Base.EntrypointID = "feishu-default"
+	exec.Request.Context = channel.InboundContext{
+		Channel: "feishu", EntrypointID: "feishu-default", ChatID: "oc_group",
+		SenderID: "ou_sender", SenderIDType: "open_id",
+	}
+	ctx := contextWithRunExecution(baseCtx, exec)
+	req, err := rt.createAgentHumanRequest(ctx, "human-current-responder", map[string]any{
+		"kind": "approval", "question": "Bind current responder?",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := humanrequest.ResponderPolicy{
+		Type: humanrequest.ResponderCurrentSender, EntrypointID: "feishu-default",
+		SenderID: "ou_sender", SenderIDType: "open_id",
+	}
+	if req.Responder != want {
+		t.Fatalf("responder = %+v, want %+v", req.Responder, want)
+	}
+}
