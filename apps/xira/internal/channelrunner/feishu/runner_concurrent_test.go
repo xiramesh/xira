@@ -11,6 +11,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
+	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
@@ -86,6 +87,8 @@ func newFeishuTestRunner(t *testing.T, rt frt.Runtime) *Runner {
 		t.Fatalf("NewRunner: %v", err)
 	}
 	runner.runtime = rt // inject fake (field is frt.Runtime interface)
+	// #151: inject ingest so handleMessageReceive doesn't panic on nil.
+	runner.ingest = ingest.New(nil, nil) // no session manager → observe is no-op
 	// Redirect lark API client to a closed port so SendFinal fails fast.
 	runner.client = lark.NewClient("cli_test_app", "test_secret",
 		lark.WithOpenBaseUrl("http://127.0.0.1:9"), // port 9: discard, refuses connections

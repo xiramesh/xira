@@ -151,6 +151,7 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 		client:     lark.NewClient(appID, appSecret, opts...),
 		messages:   dedupe.New(filepath.Join(stateDir, "dedupe.json"), messageDedupeTTL),
 		router:     progress.NewRouter(),
+		ingest:     ingest.New(nil, nil), // 默认无 session manager 的 ingest（observe no-op）；main.go 会覆盖
 	}, nil
 }
 
@@ -297,31 +298,24 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		"content_preview", previewText(content, 120),
 	)
 	// #151: 通过共享 ingest 层统一处理 gate（授权 + mention）→ observe or dispatch。
-	if r.ingest != nil {
-		input := ingest.MessageInput{
-			Channel: "feishu", EntrypointID: r.definition.ID,
-			ChatID: chatID, ChatType: chatType,
-			SenderID: senderID, Mentioned: mentioned,
-			Content: content, MessageID: messageID,
-		}
-		switch r.ingest.Gate(input, r.definition) {
-		case ingest.DecisionObserve:
-			r.ingest.Observe(input, r.definition, r.messageDedupeKey(messageID), r.messages)
-			return nil
-		case ingest.DecisionReject:
-			slog.Info("feishu message rejected",
-				"entrypoint_id", r.definition.ID, "chat_id", chatID,
-				"sender_id", senderID, "message_id", messageID)
-			return nil
-		}
-		// DecisionDispatch → 继续往下走（dedupe + ChatKeySession + RunAgent）
-	} else if !shouldHandleMessage(chatType, mentioned, senderID, content, r.definition, r.ownerResolver) {
-		// 降级路径（ingest 未注入，旧测试用）
-		if chatType == "group" && r.sessionManager != nil {
-			r.observeGroupMessage(senderID, chatID, chatType, content)
-		}
+	// ingest 必须 非 nil（main.go 在 Start 前注入）。没有不安全 fallback。
+	input := ingest.MessageInput{
+		Channel: "feishu", EntrypointID: r.definition.ID,
+		ChatID: chatID, ChatType: chatType,
+		SenderID: senderID, Mentioned: mentioned,
+		Content: content, MessageID: messageID,
+	}
+	switch r.ingest.Gate(input, r.definition) {
+	case ingest.DecisionObserve:
+		r.ingest.Observe(input, r.definition, r.messageDedupeKey(messageID), r.messages)
+		return nil
+	case ingest.DecisionReject:
+		slog.Info("feishu message rejected",
+			"entrypoint_id", r.definition.ID, "chat_id", chatID,
+			"sender_id", senderID, "message_id", messageID)
 		return nil
 	}
+	// DecisionDispatch → 继续往下走（dedupe + ChatKeySession + RunAgent）
 	dedupeKey := r.messageDedupeKey(messageID)
 	if !r.messages.Begin(dedupeKey, time.Now()) {
 		slog.Info("feishu duplicate message ignored",

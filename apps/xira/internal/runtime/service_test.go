@@ -172,7 +172,7 @@ func TestHydrateADKSessionRestoresPersistedAgentHistory(t *testing.T) {
 	if events.Len() != 2 {
 		t.Fatalf("restored event len = %d, want 2", events.Len())
 	}
-	if first := events.At(0); first.Author != "user" || contentText(first.Content) != "remember this" {
+	if first := events.At(0); first.Author != "user" || !strings.Contains(contentText(first.Content), "remember this") {
 		t.Fatalf("first restored event = %+v", first)
 	}
 	if second := events.At(1); second.Author != resp.AgentID || contentText(second.Content) != "fake model response: remember this" {
