@@ -70,10 +70,16 @@ entrypoints: entrypoints.yaml
 
 	// 用 NewService 而非 newTestService——后者注入 fakeDeepSeekClient。
 	// live 测试要真 client（NewService 在 DeepSeekClient=nil 时用 deepseek.New()）。
-	rt, err := NewService(Config{
+	cfg := Config{
 		ConfigPath: filepath.Join(workspace, "xira.yaml"),
 		StateDir:   stateRoot,
-	})
+	}
+	manager, err := NewSessionManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.SessionManager = manager
+	rt, err := NewService(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -290,10 +290,16 @@ func executeCommandError(args ...string) (string, error) {
 
 func newCLITestRuntime(t *testing.T, instance string) *runtime.Service {
 	t.Helper()
-	rt, err := runtime.NewService(runtime.Config{
+	cfg := runtime.Config{
 		ConfigPath:     filepath.Join(instance, "xira.yaml"),
 		DeepSeekClient: fakeCLIDeepSeekClient(t),
-	})
+	}
+	manager, err := runtime.NewSessionManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.SessionManager = manager
+	rt, err := runtime.NewService(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

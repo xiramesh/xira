@@ -706,6 +706,7 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 			return r.send(ctx, account, msg, text)
 		},
 		DedupeComplete: func() { account.messages.Complete(dedupeKey, time.Now()) },
+		DedupeForget:   func() { account.messages.Forget(dedupeKey) },
 		SpawnResetter: func() {
 			// r.router may be nil in unit tests that construct a Runner
 			// without the full wiring; guard against that.

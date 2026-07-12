@@ -67,15 +67,12 @@ func TestShellTurnAPIIsNotAChannelEntrypoint(t *testing.T) {
 
 func TestAgentsAPIUsesWorkspaceDiscoveredAgents(t *testing.T) {
 	workspace := writeAPIWorkspace(t)
-	rt, err := frt.NewService(frt.Config{
+	rt := newAPITestService(t, frt.Config{
 		WorkspaceRoot:  workspace,
 		DefaultAgentID: "xira-assistant",
 		StateDir:       t.TempDir(),
 		DeepSeekClient: fakeAPIDeepSeekClient(t),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := NewServer(rt, "127.0.0.1:0")
@@ -397,6 +394,13 @@ func newAPITestService(t *testing.T, cfg frt.Config) *frt.Service {
 	t.Helper()
 	if cfg.DeepSeekClient == nil {
 		cfg.DeepSeekClient = fakeAPIDeepSeekClient(t)
+	}
+	if cfg.SessionManager == nil {
+		manager, err := frt.NewSessionManager(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.SessionManager = manager
 	}
 	rt, err := frt.NewService(cfg)
 	if err != nil {

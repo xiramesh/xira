@@ -143,7 +143,13 @@ func writeFile(t *testing.T, path, content string) {
 func newManagerTestRuntime(t *testing.T, configPath string) *runtime.Service {
 	t.Helper()
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
-	rt, err := runtime.NewService(runtime.Config{ConfigPath: configPath})
+	cfg := runtime.Config{ConfigPath: configPath}
+	manager, err := runtime.NewSessionManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.SessionManager = manager
+	rt, err := runtime.NewService(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -605,10 +605,10 @@ tools:
 Use local evidence before summaries.
 `)
 
-	rt, err := NewService(Config{
+	rt, err := NewService(withTestSessionManager(t, Config{
 		ConfigPath:     filepath.Join(instance, "xira.yaml"),
 		DeepSeekClient: fakeDeepSeekClient(t),
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewService() should not validate default skills at startup: %v", err)
 	}
@@ -664,10 +664,10 @@ permissions:
 Use local evidence before summaries.
 `)
 
-	rt, err := NewService(Config{
+	rt, err := NewService(withTestSessionManager(t, Config{
 		ConfigPath:     filepath.Join(instance, "xira.yaml"),
 		DeepSeekClient: fakeDeepSeekClient(t),
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewService() should not validate default skills at startup: %v", err)
 	}
@@ -702,10 +702,10 @@ permissions:
 Use local evidence before summaries.
 `)
 
-	rt, err = NewService(Config{
+	rt, err = NewService(withTestSessionManager(t, Config{
 		ConfigPath:     filepath.Join(instance, "xira.yaml"),
 		DeepSeekClient: fakeDeepSeekClient(t),
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewService() with secret permission should succeed: %v", err)
 	}
@@ -1458,10 +1458,10 @@ func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
 		}, nil
 	})}
 
-	rt, err := NewService(Config{
+	rt, err := NewService(withTestSessionManager(t, Config{
 		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1528,10 +1528,10 @@ func TestRunAgentInjectsConversationContext(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}]}`)),
 		}, nil
 	})}
-	rt, err := NewService(Config{
+	rt, err := NewService(withTestSessionManager(t, Config{
 		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1580,10 +1580,10 @@ func TestRunAgentInjectsConversationContextWithNames(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}]}`)),
 		}, nil
 	})}
-	rt, err := NewService(Config{
+	rt, err := NewService(withTestSessionManager(t, Config{
 		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2548,8 +2548,17 @@ func TestVerificationFailureCreatesEvolutionCandidate(t *testing.T) {
 
 func TestNewServiceRequiresDeepSeekAPIKey(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "")
-	if _, err := NewService(Config{StateDir: t.TempDir()}); err == nil || !strings.Contains(err.Error(), "DEEPSEEK_API_KEY is required") {
+	cfg := Config{StateDir: t.TempDir()}
+	cfg.SessionManager = newTestSessionManager(t, cfg)
+	if _, err := NewService(cfg); err == nil || !strings.Contains(err.Error(), "DEEPSEEK_API_KEY is required") {
 		t.Fatalf("NewService() error = %v, want DEEPSEEK_API_KEY requirement", err)
+	}
+}
+
+func TestNewServiceRequiresInjectedSessionManager(t *testing.T) {
+	_, err := NewService(Config{StateDir: t.TempDir(), DeepSeekClient: fakeDeepSeekClient(t)})
+	if err == nil || !strings.Contains(err.Error(), "SessionManager is required") {
+		t.Fatalf("NewService() error = %v, want SessionManager requirement", err)
 	}
 }
 
@@ -2561,11 +2570,29 @@ func newTestService(t *testing.T, cfg Config) *Service {
 	if cfg.StateDir == "" {
 		cfg.StateDir = t.TempDir()
 	}
+	if cfg.SessionManager == nil {
+		cfg.SessionManager = newTestSessionManager(t, cfg)
+	}
 	rt, err := NewService(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return rt
+}
+
+func newTestSessionManager(t *testing.T, cfg Config) *fsession.Manager {
+	t.Helper()
+	manager, err := NewSessionManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manager
+}
+
+func withTestSessionManager(t *testing.T, cfg Config) Config {
+	t.Helper()
+	cfg.SessionManager = newTestSessionManager(t, cfg)
+	return cfg
 }
 
 func fakeDeepSeekClient(t *testing.T) *deepseek.Client {

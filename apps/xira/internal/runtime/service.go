@@ -94,6 +94,9 @@ func NewService(cfg Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.SessionManager == nil {
+		return nil, errors.New("SessionManager is required; create it at the composition root with NewSessionManager")
+	}
 	manager, profileSource, err := loadAgentManager(resolved)
 	if err != nil {
 		return nil, err
@@ -109,15 +112,7 @@ func NewService(cfg Config) (*Service, error) {
 	if _, ok := manager.Get(resolved.DefaultAgentID); !ok {
 		return nil, fmt.Errorf("default agent %q not found", resolved.DefaultAgentID)
 	}
-	// #151: SessionManager 可以从外部注入（composition root 创建），
-	// 也可以由 NewService 内部创建（兼容旧测试）。
 	sessionManager := cfg.SessionManager
-	if sessionManager == nil {
-		sessionManager, err = NewSessionManager(cfg)
-		if err != nil {
-			return nil, err
-		}
-	}
 	dsClient := cfg.DeepSeekClient
 	if dsClient == nil {
 		if strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")) == "" {

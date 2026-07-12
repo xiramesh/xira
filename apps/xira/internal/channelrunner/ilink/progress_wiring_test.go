@@ -3,6 +3,7 @@ package ilink
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -24,6 +25,7 @@ type recordingClient struct {
 	sent    []string
 	token   string
 	baseURL string
+	sendErr error
 }
 
 func (c *recordingClient) Monitor(context.Context, openilink.MessageHandler, *openilink.MonitorOptions) error {
@@ -32,7 +34,11 @@ func (c *recordingClient) Monitor(context.Context, openilink.MessageHandler, *op
 func (c *recordingClient) SendText(_ context.Context, _, content, _ string) (string, error) {
 	c.mu.Lock()
 	c.sent = append(c.sent, content)
+	err := c.sendErr
 	c.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
 	return "client-id", nil
 }
 func (c *recordingClient) Push(_ context.Context, _, content string) (string, error) {
@@ -73,7 +79,13 @@ func newProgressTestRunner(t *testing.T, respond func(*http.Request) string) (*R
 		}, nil
 	})}
 	ds := deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client))
-	rt, err := frt.NewService(frt.Config{StateDir: filepath.Join(t.TempDir(), "state"), DeepSeekClient: ds})
+	cfg := frt.Config{StateDir: filepath.Join(t.TempDir(), "state"), DeepSeekClient: ds}
+	manager, err := frt.NewSessionManager(cfg)
+	if err != nil {
+		t.Fatalf("NewSessionManager: %v", err)
+	}
+	cfg.SessionManager = manager
+	rt, err := frt.NewService(cfg)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -117,4 +129,35 @@ func TestRunnerForwardsFinalAndDropsRawEvents(t *testing.T) {
 	if len(contents) != 1 || contents[0] != "iLink final answer" {
 		t.Fatalf("expected only the final answer delivered, got %v", contents)
 	}
+}
+
+func TestRunnerReleasesDedupeAfterRuntimeFailure(t *testing.T) {
+	runner, account, _ := newProgressTestRunner(t, func(*http.Request) string {
+		return `not json`
+	})
+	msg := userTextMsg("hello")
+	runner.handleMessage(account, msg)
+	awaitDedupeReleased(t, account, account.messageDedupeKey(messageID(msg)))
+}
+
+func TestRunnerReleasesDedupeAfterFinalSendFailure(t *testing.T) {
+	runner, account, rec := newProgressTestRunner(t, func(*http.Request) string {
+		return dsText("iLink final answer")
+	})
+	rec.sendErr = errors.New("ilink unavailable")
+	msg := userTextMsg("hello")
+	runner.handleMessage(account, msg)
+	awaitDedupeReleased(t, account, account.messageDedupeKey(messageID(msg)))
+}
+
+func awaitDedupeReleased(t *testing.T, account *accountPoller, key string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if account.messages.Begin(key, time.Now()) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("dedupe key %q was not released after failed turn", key)
 }
