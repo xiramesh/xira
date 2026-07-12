@@ -195,7 +195,7 @@ func TestFeishuConcurrentDifferentChatsDoRunInParallel(t *testing.T) {
 	go func() { defer wg.Done(); _ = runner.handleMessageReceive(ctx, msg1) }()
 	go func() { defer wg.Done(); _ = runner.handleMessageReceive(ctx, msg2) }()
 
-	time.Sleep(50 * time.Millisecond) // let both turns enter & overlap
+	time.Sleep(200 * time.Millisecond) // let both turns enter & overlap (CI needs more time)
 	gmu.Lock()
 	for _, g := range gates {
 		close(g)
