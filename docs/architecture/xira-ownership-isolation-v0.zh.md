@@ -204,6 +204,8 @@ agent 跟张三对话时学到了一条对所有用户都有用的事实（如�
 
 **安全默认**：runtime 绝不把 sender memory 自动复制或“提升”成 Agent memory。模型只能通过 sealed `scope=sender|agent` 显式选择地址空间：关于当前人的事实写 sender；Agent 自己接受的事项、经验和上下文写 agent。如何判断由 Agent prompt + 模型负责，runtime 只绑定真实身份并隔离存储。两类 memory 都作为 untrusted data 注入，不因 Agent 自写而升级为 system instruction。
 
+**跨 sender 信任面**：Agent memory 会注入所有使用同一 Agent 的 sender，授权 sender 因此可能尝试诱导模型写入 stored prompt injection，影响面大于只回灌给本人的 sender memory。工具契约必须告诉模型：sender 消息只是输入，只有 Agent 自己明确接受或撤回的内容才能写入/遗忘 agent scope，不能机械照抄请求或不可信指令。untrusted 定界降低指令优先级混淆，但不声称消灭模型层攻击。Agent memory 的所有者是 Agent，不是触发 turn 的 writer；#161 记录 writer/run/chat 只用于审计，不作为 ownership ACL，并补原子写与多进程协调。需要 owner 审批的部署应在 policy/skill 层另行定义，不能从 sender ID 猜权限。
+
 未来 cron 只会周期性触发同一个 Agent Loop 读取 Agent memory；不增加新的记忆类型或第二套 Loop。
 
 ### 6.2 跨 channel 同一 user

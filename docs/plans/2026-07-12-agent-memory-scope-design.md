@@ -57,6 +57,20 @@ Rejected because two subjects do not require two model invocations. One existing
 - Existing `stateDir/memories/sender_*/memory.jsonl` files are read in place and require no migration.
 - Both memory blocks remain untrusted data with dynamic delimiters; Agent-owned does not mean trusted instruction.
 
+## Cross-sender threat model
+
+Agent memory is shared state. An authorized sender can try to prompt the model into storing adversarial text in `scope=agent`; that text would then be injected as untrusted memory in later turns for other senders. This expands the blast radius compared with sender memory, whose stored content is reinjected only for the same sender. The dynamic untrusted-data delimiter preserves instruction priority, but it does not prove that a model can never be confused by stored prompt injection.
+
+This phase accepts that residual risk under three explicit boundaries:
+
+- ingress authorization still controls who can trigger the Agent Loop;
+- the model-facing tool contract says a sender message is input, not authority: the Agent writes or forgets shared memory only when it independently adopts or retracts the item as its own;
+- Agent memory remains untrusted data, must not contain sensitive data, and does not become a system instruction merely because the Agent stored it.
+
+Agent memory is owned by the Agent, not by the sender who happened to trigger the turn. Consequently, writer identity must not become an ownership ACL: doing so would recreate per-sender memory under another name and would break the intended third-party `@owner` / `@agent` flow. Provenance is still valuable for audit and incident analysis, and is deferred together with atomic persistence and multi-process coordination to hardening follow-up #161.
+
+Deployments that do not trust all ingress-authorized participants to influence one shared assistant need a stricter policy layer (for example owner-approved skills or write approval). That is a different product policy, not something this storage primitive can infer from `sender_id`.
+
 ## Test contract
 
 - Scope normalization covers missing, sender, agent, unknown, and non-string input.
@@ -67,3 +81,4 @@ Rejected because two subjects do not require two model invocations. One existing
 - Runtime instruction contains correctly labelled blocks and never substitutes owner memory for an owner-addressed third-party turn.
 - Production ADK tests use real tool execution, not hand-built records.
 - Live DeepSeek tests prove one sender-memory choice and one Agent-memory choice with no live-gated skip.
+- Model-visible update/forget descriptions explicitly pin the cross-sender shared-state boundary and independent Agent judgment.
