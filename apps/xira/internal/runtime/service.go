@@ -163,13 +163,24 @@ func (s *Service) recoverInterruptedHumanRequestResumesAtStartup() {
 		return
 	}
 	count, err := s.humanRequests.RecoverInterruptedResumes(context.Background(), s.WorkspaceKey(), time.Now())
-	if err != nil {
-		slog.Warn("startup human request resume recovery failed (non-fatal)", "error", err)
-		return
-	}
+	logHumanRequestResumeRecovery(count, err)
+}
+
+// logHumanRequestResumeRecovery keeps partial startup outcomes coherent: every
+// successfully persisted recovery is reported before any aggregate failure.
+// coverage: contract (100% required)
+func logHumanRequestResumeRecovery(count int, err error) {
 	if count > 0 {
 		slog.Info("interrupted human request resumes recovered for retry", "count", count)
 	}
+	if err == nil {
+		return
+	}
+	message := "startup human request resume recovery failed (non-fatal)"
+	if count > 0 {
+		message = "startup human request resume recovery partially failed (non-fatal)"
+	}
+	slog.Warn(message, "recovered_count", count, "error", err)
 }
 
 // logPendingHumanRequestsAtStartup scans the HumanRequest store for pending

@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -70,5 +71,36 @@ func TestNewServiceNoPendingLogWhenEmpty(t *testing.T) {
 	logs := logBuf.String()
 	if strings.Contains(logs, "pending at startup") {
 		t.Errorf("clean startup should not log pending scan; logs:\n%s", logs)
+	}
+}
+
+func TestLogHumanRequestResumeRecoveryReportsPartialSuccessBeforeFailure(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(prevLogger)
+
+	logHumanRequestResumeRecovery(2, errors.New("one request could not be persisted"))
+
+	logs := logBuf.String()
+	successAt := strings.Index(logs, "interrupted human request resumes recovered for retry")
+	failureAt := strings.Index(logs, "startup human request resume recovery partially failed")
+	if successAt < 0 || failureAt < 0 || successAt >= failureAt {
+		t.Fatalf("partial recovery logs must report successes before failure; logs:\n%s", logs)
+	}
+	if !strings.Contains(logs, "count=2") || !strings.Contains(logs, "recovered_count=2") {
+		t.Fatalf("partial recovery logs missing recovered count; logs:\n%s", logs)
+	}
+
+	logBuf.Reset()
+	logHumanRequestResumeRecovery(0, nil)
+	if logBuf.Len() != 0 {
+		t.Fatalf("empty successful recovery should not log; logs:\n%s", logBuf.String())
+	}
+
+	logHumanRequestResumeRecovery(0, errors.New("store unavailable"))
+	logs = logBuf.String()
+	if strings.Contains(logs, "recovered for retry") || !strings.Contains(logs, "recovery failed") {
+		t.Fatalf("total recovery failure logs = %q", logs)
 	}
 }
