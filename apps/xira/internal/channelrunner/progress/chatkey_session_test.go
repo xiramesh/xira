@@ -59,6 +59,12 @@ func (f *fakeRuntime) callCount() int {
 	return len(f.calls)
 }
 
+func (f *fakeRuntime) callsSnapshot() []runtime.TurnRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]runtime.TurnRequest(nil), f.calls...)
+}
+
 // captureDeliverer returns a Deliverer that records every text it's asked
 // to send. NOTE: progress.Sender already exists (SendProgress interface) —
 // the channel-delivery func type is named Deliverer to avoid the collision.
@@ -260,16 +266,21 @@ func TestSessionTurnEndReturnsToIdle(t *testing.T) {
 // TestSessionSteeringRetry: RunAgent returns ErrSteered first, then succeeds.
 // The retried turn's final must be sent; the steering-driven resets must fire.
 func TestSessionSteeringRetry(t *testing.T) {
-	steerResetCalled := false
 	spawnResetCalled := false
 	rt := newFakeRuntime(
 		fakeRuntimeStep{err: runtime.ErrSteered},
 		fakeRuntimeStep{resp: runtime.TurnResponse{Status: "completed", FinalResponse: "after steer"}},
 	)
+	// Keep the first RunAgent call parked until the interjection has entered
+	// the queue. Router.active=true alone is not enough: on a fast CI worker
+	// the fake can return ErrSteered before this test gets to Enqueue, leaving
+	// no message to retry.
+	blockFirstRun := make(chan struct{})
+	blocking := &blockingRuntime{inner: rt, block: blockFirstRun}
 	router := NewRouter()
 	finalOut := []string{}
 	cfg := ChatKeySessionConfig{
-		Runtime:      rt,
+		Runtime:      blocking,
 		EntrypointID: "ep1",
 		Inbound:      testInbound(),
 		SendProgress: captureDeliverer(&[]string{}),
@@ -284,7 +295,6 @@ func TestSessionSteeringRetry(t *testing.T) {
 	// Router's SteeringQueue is created on first Handle; we can't pre-seed it,
 	// so instead we rely on the fact that ErrSteered handling drains via
 	// SteeringBusFromContext. We seed the queue AFTER first Handle dispatches.
-	_ = steerResetCalled
 	s := NewChatKeySession(testKey(), router, cfg)
 
 	started := make(chan struct{})
@@ -299,17 +309,19 @@ func TestSessionSteeringRetry(t *testing.T) {
 	// Seed the interjection so the ErrSteered drain picks it up.
 	sq := router.SteeringQueue(testKey())
 	sq.Enqueue("NEW DIRECTION")
+	close(blockFirstRun)
 
 	// Wait for turn to finish.
 	if !waitForActive(router, false) {
 		t.Fatal("turn never finished after steer")
 	}
 
-	if n := rt.callCount(); n != 2 {
-		t.Errorf("RunAgent call count = %d, want 2 (orig + retry)", n)
+	calls := rt.callsSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("RunAgent call count = %d, want 2 (orig + retry)", len(calls))
 	}
 	// Retry message should be the interjection.
-	if got := rt.calls[1].Message; got != "NEW DIRECTION" {
+	if got := calls[1].Message; got != "NEW DIRECTION" {
 		t.Errorf("retry message = %q, want 'NEW DIRECTION'", got)
 	}
 	if len(finalOut) != 1 || finalOut[0] != "after steer" {
