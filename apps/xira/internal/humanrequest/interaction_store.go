@@ -2,6 +2,7 @@ package humanrequest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -243,21 +244,32 @@ func (s *Store) RecoverInterruptedResumes(ctx context.Context, workspaceKey stri
 	if err != nil {
 		return 0, err
 	}
+	return recoverInterruptedRequests(ctx, resolved, recoveredAt, s.writeRequest)
+}
+
+// recoverInterruptedRequests isolates persistence failures per request so one
+// broken record cannot prevent later interrupted resumes from becoming
+// retryable. The returned count includes only successfully persisted records.
+// coverage: contract (100% required)
+func recoverInterruptedRequests(ctx context.Context, requests []HumanRequest, recoveredAt time.Time, persist func(*HumanRequest) error) (int, error) {
 	count := 0
-	for i := range resolved {
+	var failures []error
+	for i := range requests {
 		if err := ctx.Err(); err != nil {
-			return count, err
+			failures = append(failures, err)
+			break
 		}
-		req := &resolved[i]
+		req := &requests[i]
 		if !recoverInterruptedResume(req, recoveredAt) {
 			continue
 		}
-		if err := s.writeRequest(req); err != nil {
-			return count, err
+		if err := persist(req); err != nil {
+			failures = append(failures, fmt.Errorf("persist recovered human request %s: %w", req.ID, err))
+			continue
 		}
 		count++
 	}
-	return count, nil
+	return count, errors.Join(failures...)
 }
 
 // recoverInterruptedResume is the sealed startup recovery transition.

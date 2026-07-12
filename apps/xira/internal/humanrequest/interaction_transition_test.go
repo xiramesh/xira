@@ -210,6 +210,49 @@ func TestStoreRecoversInterruptedAndListsOnlyResumableRequests(t *testing.T) {
 	}
 }
 
+func TestRecoverInterruptedRequestsContinuesAfterSinglePersistFailure(t *testing.T) {
+	persistFailure := errors.New("first request cannot be persisted")
+	recoveredAt := time.Date(2026, 7, 13, 13, 30, 0, 0, time.UTC)
+	requests := []HumanRequest{
+		{ID: "hrq_broken", Resume: ResumeState{Status: ResumeRunning}},
+		{ID: "hrq_healthy", Resume: ResumeState{Status: ResumeRunning}},
+		{ID: "hrq_completed", Resume: ResumeState{Status: ResumeCompleted}},
+	}
+	persisted := []string{}
+
+	count, err := recoverInterruptedRequests(context.Background(), requests, recoveredAt, func(req *HumanRequest) error {
+		if req.ID == "hrq_broken" {
+			return persistFailure
+		}
+		persisted = append(persisted, req.ID)
+		return nil
+	})
+
+	if !errors.Is(err, persistFailure) {
+		t.Fatalf("recovery error = %v, want persisted failure", err)
+	}
+	if count != 1 {
+		t.Fatalf("recovered count = %d, want 1 successful persistence", count)
+	}
+	if len(persisted) != 1 || persisted[0] != "hrq_healthy" {
+		t.Fatalf("persisted requests = %v, want healthy request after failed request", persisted)
+	}
+	if requests[1].Resume.Status != ResumeFailed || requests[1].Resume.LastError == "" {
+		t.Fatalf("healthy request recovery = %+v", requests[1].Resume)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	writeCalled := false
+	count, err = recoverInterruptedRequests(canceled, requests, recoveredAt, func(*HumanRequest) error {
+		writeCalled = true
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) || count != 0 || writeCalled {
+		t.Fatalf("canceled recovery = count %d, error %v, writeCalled %v", count, err, writeCalled)
+	}
+}
+
 func resolvedTrackedRequest(t *testing.T, store *Store, workspaceKey, requestID string) *HumanRequest {
 	t.Helper()
 	req := mustCreateHumanRequest(t, store, CreateRequest{
