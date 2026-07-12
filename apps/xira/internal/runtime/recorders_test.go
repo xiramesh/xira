@@ -64,7 +64,7 @@ func assertUniqueRecorderIDs(t *testing.T, label string, total int, idAt func(in
 			t.Fatalf("%s[%d] missing id", label, i)
 		}
 		if _, ok := seen[id]; ok {
-			t.Fatalf("%s duplicate id %q", label, i)
+			t.Fatalf("%s duplicate id %q", label, id)
 		}
 		seen[id] = struct{}{}
 	}
