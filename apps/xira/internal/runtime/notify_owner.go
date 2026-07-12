@@ -212,21 +212,26 @@ func recordNotifyOwnerOutcome(
 	})
 }
 
-// hasSuccessfulNotifyOwner is the narrow intentional-silence contract: an
-// empty final is valid only after the private side effect actually succeeded.
+// hasSuccessfulNotifyOwner is the narrow intentional-silence contract: at
+// least one notify_owner attempt must have sent the private side effect, while
+// any failure from another tool still blocks silence. Failed/rejected
+// notify_owner attempts do not undo a successful delivery.
 // coverage: contract (100% required)
 func hasSuccessfulNotifyOwner(records []ToolCallRecord) bool {
 	notified := false
 	for _, record := range records {
+		status, _ := record.Output["status"].(string)
+		if record.Name == notifyOwnerToolName {
+			if record.Error == "" && status == "sent" {
+				notified = true
+			}
+			continue
+		}
 		if record.Error != "" {
 			return false
 		}
-		status, _ := record.Output["status"].(string)
 		if status == "failed" || status == "rejected" {
 			return false
-		}
-		if record.Name == notifyOwnerToolName && status == "sent" {
-			notified = true
 		}
 	}
 	return notified

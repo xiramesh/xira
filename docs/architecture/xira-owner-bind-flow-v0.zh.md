@@ -401,7 +401,9 @@ runner 之后，不能用 Manager 的 fleet capability 并集代替。Feishu/iLi
 WebSocket owner binding 是 authorization-only，`notify_owner` fail closed。
 
 通知成功后允许 final 为空，表示群里有意静默；这个例外只对 `notify_owner` 返回 `status=sent` 的 run
-成立。同一 run 最多一次成功通知；投递失败可以重试。通知失败或普通空 final 仍按失败处理。
+成立。同一 run 最多一次成功通知；投递失败可以重试。聚合时只要有一次 `notify_owner` 成功即允许
+intentional silence：同工具之前或之后的失败/拒绝不撤销已经发生的投递；任何其他工具失败仍不允许。
+只有失败、从未成功，或普通空 final 仍按失败处理。
 `notify_owner` 只在生产 ADK 路径注册，未被生产 dispatch 的 legacy native generator 不广告该工具。
 owner 私聊回复与跨 chatKey HITL resume 不在本阶段，见 #155。
 

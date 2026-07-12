@@ -242,14 +242,19 @@ func TestNotifyOwnerFailedDeliveryCanRetryWithinRun(t *testing.T) {
 	base := contextWithRunExecution(context.Background(), runExecutionContext{Base: runtimeEventBase{EntrypointID: "feishu-owner"}})
 	ctx := contextWithNotifyOwnerRunState(base)
 
-	if rec := svc.notifyOwnerToolCall(ctx, "call-1", map[string]any{"message": "first"}); rec.Output["status"] != "failed" {
-		t.Fatalf("first notification = %+v, want failure", rec)
+	first := svc.notifyOwnerToolCall(ctx, "call-1", map[string]any{"message": "first"})
+	if first.Output["status"] != "failed" {
+		t.Fatalf("first notification = %+v, want failure", first)
 	}
 	emitter.mu.Lock()
 	emitter.emitErr = nil
 	emitter.mu.Unlock()
-	if rec := svc.notifyOwnerToolCall(ctx, "call-2", map[string]any{"message": "retry"}); rec.Output["status"] != "sent" {
-		t.Fatalf("retry notification = %+v, want sent", rec)
+	retry := svc.notifyOwnerToolCall(ctx, "call-2", map[string]any{"message": "retry"})
+	if retry.Output["status"] != "sent" {
+		t.Fatalf("retry notification = %+v, want sent", retry)
+	}
+	if !hasSuccessfulNotifyOwner([]ToolCallRecord{first, retry}) {
+		t.Fatal("failed delivery followed by a successful retry must authorize intentional silence")
 	}
 }
 
@@ -394,6 +399,56 @@ func TestADKDeepSeekNotifyOwnerRunsThroughAgentLoop(t *testing.T) {
 	}
 }
 
+func TestADKNotifyOwnerFailedThenSentAllowsIntentionalSilence(t *testing.T) {
+	emitter := &recordingEmitter{emitErr: errors.New("temporary network failure")}
+	modelCalls := 0
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		modelCalls++
+		switch modelCalls {
+		case 1:
+			return deepSeekHTTPResponse(deepSeekToolCallResponseWithArgs("notify-1", notifyOwnerToolName, map[string]any{"message": "first attempt"})), nil
+		case 2:
+			emitter.mu.Lock()
+			emitter.emitErr = nil
+			emitter.mu.Unlock()
+			return deepSeekHTTPResponse(deepSeekToolCallResponseWithArgs("notify-2", notifyOwnerToolName, map[string]any{"message": "retry"})), nil
+		default:
+			return deepSeekHTTPResponse(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":null}}]}`), nil
+		}
+	})}
+	rt := newTestService(t, Config{
+		StateDir:       t.TempDir(),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	rt.entrypoints = entrypoints.NewRegistry(agents.DefaultAgentID, []entrypoints.Definition{{
+		ID: "feishu-owner", Channel: "feishu", DefaultAgentID: agents.DefaultAgentID,
+	}})
+	rt.ownerBindings.Set(ownerBinding{
+		EntrypointID: "feishu-owner", OwnerSenderID: "ou_owner", OwnerSenderIDType: "open_id", BoundAt: time.Now(),
+	})
+	rt.outbound = emitter
+
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		EntrypointID: "feishu-owner",
+		Message:      "retry owner notification and stay silent",
+		Context: channel.InboundContext{
+			Channel: "feishu", EntrypointID: "feishu-owner", ChatID: "oc_group", ChatType: "group", SenderID: "ou_colleague",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if modelCalls != 3 || resp.Status != "completed" || resp.FinalResponse != "" || resp.VerificationResult.Status != "passed" {
+		t.Fatalf("calls=%d response=%+v", modelCalls, resp)
+	}
+	if len(resp.ToolCalls) != 2 || resp.ToolCalls[0].Output["status"] != "failed" || resp.ToolCalls[1].Output["status"] != "sent" {
+		t.Fatalf("tool calls = %+v", resp.ToolCalls)
+	}
+	if len(emitter.emitted()) != 1 {
+		t.Fatalf("owner deliveries = %d, want one successful retry", len(emitter.emitted()))
+	}
+}
+
 func TestADKNotifyOwnerAllowsOnlyOneSuccessfulDeliveryPerRun(t *testing.T) {
 	modelCalls := 0
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -456,6 +511,24 @@ func TestHasSuccessfulNotifyOwner(t *testing.T) {
 	}
 	if !hasSuccessfulNotifyOwner([]ToolCallRecord{{Name: notifyOwnerToolName, Output: map[string]any{"status": "sent"}}}) {
 		t.Fatal("successful notification should authorize intentional silence")
+	}
+	if !hasSuccessfulNotifyOwner([]ToolCallRecord{
+		{Name: notifyOwnerToolName, Error: "network unavailable", Output: map[string]any{"status": "failed"}},
+		{Name: notifyOwnerToolName, Output: map[string]any{"status": "sent"}},
+	}) {
+		t.Fatal("failed notification followed by sent should authorize intentional silence")
+	}
+	if !hasSuccessfulNotifyOwner([]ToolCallRecord{
+		{Name: notifyOwnerToolName, Error: "invalid message", Output: map[string]any{"status": "rejected"}},
+		{Name: notifyOwnerToolName, Output: map[string]any{"status": "sent"}},
+	}) {
+		t.Fatal("rejected notification followed by sent should authorize intentional silence")
+	}
+	if !hasSuccessfulNotifyOwner([]ToolCallRecord{
+		{Name: notifyOwnerToolName, Output: map[string]any{"status": "sent"}},
+		{Name: notifyOwnerToolName, Error: "owner notification already sent", Output: map[string]any{"status": "rejected"}},
+	}) {
+		t.Fatal("a later rejected notification must not undo an earlier successful delivery")
 	}
 	if hasSuccessfulNotifyOwner([]ToolCallRecord{
 		{Name: notifyOwnerToolName, Output: map[string]any{"status": "sent"}},

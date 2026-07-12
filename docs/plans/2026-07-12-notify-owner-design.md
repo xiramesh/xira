@@ -55,7 +55,7 @@ Feishu keeps `chat_id` sends for ordinary finals and adds direct sends for `open
 
 ### Runtime-native tool
 
-`notify_owner` accepts one required `message` string. Runtime obtains the current `runExecutionContext`, resolves the owner target from its entrypoint, builds an `OutboundProactiveMessage`, and calls the injected emitter. The tool returns structured `sent`, `rejected`, or `failed` status. It records a tool call, runtime event, and audit decision without logging full private message content. One Agent run may complete at most one successful owner notification; a failed delivery may be retried.
+`notify_owner` accepts one required `message` string. Runtime obtains the current `runExecutionContext`, resolves the owner target from its entrypoint, builds an `OutboundProactiveMessage`, and calls the injected emitter. The tool returns structured `sent`, `rejected`, or `failed` status. It records a tool call, runtime event, and audit decision without logging full private message content. One Agent run may complete at most one successful owner notification; a failed delivery may be retried. Intentional silence requires at least one `notify_owner` attempt to be `sent`: failed/rejected attempts of the same tool do not undo a successful delivery, while any other tool failure still blocks silence.
 
 The production ADK path calls the shared executor. The legacy `generateNativeDeepSeek` path is not production-dispatched and does not advertise this tool. Flow runtime tool allowlists still apply. The tool description tells the model that successful delivery can be followed by an empty final when no public reply is needed.
 
