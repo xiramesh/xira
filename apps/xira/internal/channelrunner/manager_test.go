@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/runtime"
 )
 
@@ -222,6 +224,57 @@ entrypoints: entrypoints.yaml
 	}
 }
 
+func TestManagerSetIngestForwardsSameInstanceToEveryRunner(t *testing.T) {
+	instance := t.TempDir()
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+entrypoints: entrypoints.yaml
+`)
+	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
+  - id: feishu-default
+    channel: feishu
+    enabled: true
+    app_id: cli_test
+    app_secret: test-secret
+    default_agent: xira-assistant
+  - id: ilink-default
+    channel: ilink
+    enabled: true
+    allow_runtime_pairing: true
+    state_dir: .xira/ilink-default
+    default_agent: xira-assistant
+  - id: ws-default
+    channel: websocket
+    enabled: true
+    default_agent: xira-assistant
+`)
+	writeMinimalAgent(t, filepath.Join(instance, "workspace", "agents", "xira-assistant"))
+	rt := newManagerTestRuntime(t, filepath.Join(instance, "xira.yaml"))
+	manager, err := NewManager(rt)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if manager.Count() != 3 {
+		t.Fatalf("runner count = %d, want feishu + ilink + websocket", manager.Count())
+	}
+	shared := ingest.New(rt.SessionManager(), rt)
+
+	manager.SetIngest(shared)
+
+	want := reflect.ValueOf(shared).Pointer()
+	for _, runner := range manager.runners {
+		field := reflect.ValueOf(runner).Elem().FieldByName("ingest")
+		if !field.IsValid() || field.Kind() != reflect.Pointer {
+			t.Fatalf("runner %s has no ingest dependency", runner.Channel())
+		}
+		if got := field.Pointer(); got != want {
+			t.Errorf("runner %s received ingest %#x, want shared %#x", runner.Channel(), got, want)
+		}
+	}
+	var nilManager *Manager
+	nilManager.SetIngest(shared)
+}
+
 // stubManagerOwnerResolver is a no-op OwnerResolver for Manager forwarding tests.
 type stubManagerOwnerResolver struct{}
 
@@ -387,6 +440,7 @@ func (errRunner) ID() string                    { return "err-runner" }
 func (errRunner) Channel() string               { return "test" }
 func (errRunner) Start(_ context.Context) error { return nil }
 func (errRunner) Stop(_ context.Context) error  { return fmt.Errorf("stop failed") }
+func (errRunner) SetIngest(*ingest.Ingest)      {}
 func (errRunner) Emit(_ context.Context, _ channel.OutboundEnvelope) error {
 	return nil
 }
@@ -485,6 +539,7 @@ func (errStartRunner) ID() string                    { return "err-start" }
 func (errStartRunner) Channel() string               { return "test" }
 func (errStartRunner) Start(_ context.Context) error { return fmt.Errorf("start failed") }
 func (errStartRunner) Stop(_ context.Context) error  { return nil }
+func (errStartRunner) SetIngest(*ingest.Ingest)      {}
 func (errStartRunner) Emit(_ context.Context, _ channel.OutboundEnvelope) error {
 	return nil
 }

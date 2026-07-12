@@ -20,6 +20,7 @@ type Runner interface {
 	Channel() string
 	Start(context.Context) error
 	Stop(context.Context) error
+	SetIngest(*ingest.Ingest)
 }
 
 type Manager struct {
@@ -158,14 +159,7 @@ func (m *Manager) SetIngest(ing *ingest.Ingest) {
 		return
 	}
 	for _, runner := range m.runners {
-		switch r := runner.(type) {
-		case *feishu.Runner:
-			r.SetIngest(ing)
-		case *ilink.Runner:
-			r.SetIngest(ing)
-		case *websocket.Runner:
-			r.SetIngest(ing)
-		}
+		runner.SetIngest(ing)
 	}
 }
 

@@ -34,10 +34,8 @@ type Config struct {
 	DefaultAgentID string
 	StateDir       string
 	DeepSeekClient *deepseek.Client
-	// SessionManager is an optional pre-created session manager (#151: composition
-	// root ownership). nil = NewService creates one internally (backward compat
-	// for tests). When non-nil, NewService uses this instance instead of creating
-	// its own — the same instance can then be injected into channel runners / ingest.
+	// SessionManager is created by the composition root and shared by runtime and
+	// channel ingestion (#151). NewService rejects nil to prevent split stores.
 	SessionManager *fsession.Manager
 }
 
