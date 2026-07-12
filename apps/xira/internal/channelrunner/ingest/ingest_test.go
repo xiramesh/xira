@@ -103,8 +103,8 @@ func TestGateRejectDoesNotObserveUnauthorized(t *testing.T) {
 	mgr, _ := fsession.NewManagerWithStore(t.TempDir())
 	ing := New(mgr, nil)
 	def := entrypoints.Definition{
-		ID:             "ep-test",
-		DefaultAgentID: "agent-1",
+		ID:               "ep-test",
+		DefaultAgentID:   "agent-1",
 		AllowedSenderIDs: []string{"ou_authorized"},
 	}
 

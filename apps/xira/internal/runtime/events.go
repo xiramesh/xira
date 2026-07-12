@@ -89,8 +89,11 @@ func inboundContextFromScope(scope *fsession.SessionScope, raw map[string]string
 	// #151：sender 不再是 dimension（不在 scope.Values 里）。
 	// sender 的 canonical id 存在 scope.Names["sender_id"]（不参与 session ID 计算，
 	// 但 resume delivery 需要它路由）。Strip canonical prefix 同 #71。
-	if scope.Names != nil {
+	// 旧格式 fallback：#151 之前的 run 用 Values["sender"]，需要兼容。
+	if scope.Names != nil && scope.Names["sender_id"] != "" {
 		ctx.SenderID = scopeValueID(scope.Names["sender_id"])
+	} else if scope.Values["sender"] != "" {
+		ctx.SenderID = scopeValueID(scope.Values["sender"])
 	}
 	// Names travel alongside Values (scope.Names) but are not encoded as
 	// "<type>:<id>" — they're plain display strings. Restore as-is.

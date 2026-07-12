@@ -10,6 +10,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/channelrunner/feishu"
 	"github.com/xiramesh/xira/internal/channelrunner/ilink"
+	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/channelrunner/websocket"
 	"github.com/xiramesh/xira/internal/runtime"
 	fsession "github.com/xiramesh/xira/internal/session"
@@ -166,6 +167,23 @@ func (m *Manager) SetSessionManager(sm *fsession.Manager) {
 			r.SetSessionManager(sm)
 		case *websocket.Runner:
 			r.SetSessionManager(sm)
+		}
+	}
+}
+
+// SetIngest injects the shared message processing layer into all runners (#151).
+func (m *Manager) SetIngest(ing *ingest.Ingest) {
+	if m == nil {
+		return
+	}
+	for _, runner := range m.runners {
+		switch r := runner.(type) {
+		case *feishu.Runner:
+			r.SetIngest(ing)
+		case *ilink.Runner:
+			r.SetIngest(ing)
+		case *websocket.Runner:
+			r.SetIngest(ing)
 		}
 	}
 }

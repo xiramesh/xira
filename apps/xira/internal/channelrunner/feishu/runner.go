@@ -23,6 +23,7 @@ import (
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
+	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
@@ -76,6 +77,9 @@ type Runner struct {
 	// still dropped at mention gate, pre-#151 behavior).
 	// #151: session store is a shared layer, not a Runtime internal.
 	sessionManager *fsession.Manager
+	// ingest is the shared message processing layer (#151). nil = use
+	// legacy inline gate/observe logic (backward compat for tests).
+	ingest *ingest.Ingest
 }
 
 // SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
@@ -101,6 +105,13 @@ func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
 func (r *Runner) SetSessionManager(sm *fsession.Manager) {
 	if r != nil {
 		r.sessionManager = sm
+	}
+}
+
+// SetIngest injects the shared message processing layer (#151).
+func (r *Runner) SetIngest(ing *ingest.Ingest) {
+	if r != nil {
+		r.ingest = ing
 	}
 }
 
@@ -285,24 +296,30 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		"content_chars", utf8.RuneCountInString(content),
 		"content_preview", previewText(content, 120),
 	)
-	if !shouldHandleMessage(chatType, mentioned, senderID, content, r.definition, r.ownerResolver) {
-		reason := "unmentioned_group_message"
-		if !r.definition.AllowsSender(senderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), senderID, r.definition.ID)) {
-			reason = "sender_not_authorized"
+	// #151: 通过共享 ingest 层统一处理 gate（授权 + mention）→ observe or dispatch。
+	if r.ingest != nil {
+		input := ingest.MessageInput{
+			Channel: "feishu", EntrypointID: r.definition.ID,
+			ChatID: chatID, ChatType: chatType,
+			SenderID: senderID, Mentioned: mentioned,
+			Content: content, MessageID: messageID,
 		}
-		// #151: 没过 gate 的群消息不丢弃——observe（存进 session 供后续 @ bot 时读）。
-		// 只有群聊才 observe；私聊不过这个分支（私聊 mentioned=true 总过 gate）。
+		switch r.ingest.Gate(input, r.definition) {
+		case ingest.DecisionObserve:
+			r.ingest.Observe(input, r.definition, r.messageDedupeKey(messageID), r.messages)
+			return nil
+		case ingest.DecisionReject:
+			slog.Info("feishu message rejected",
+				"entrypoint_id", r.definition.ID, "chat_id", chatID,
+				"sender_id", senderID, "message_id", messageID)
+			return nil
+		}
+		// DecisionDispatch → 继续往下走（dedupe + ChatKeySession + RunAgent）
+	} else if !shouldHandleMessage(chatType, mentioned, senderID, content, r.definition, r.ownerResolver) {
+		// 降级路径（ingest 未注入，旧测试用）
 		if chatType == "group" && r.sessionManager != nil {
 			r.observeGroupMessage(senderID, chatID, chatType, content)
 		}
-		slog.Info("feishu message observed (not handled)",
-			"entrypoint_id", r.definition.ID,
-			"chat_id", chatID,
-			"chat_type", chatType,
-			"message_id", messageID,
-			"sender_id", senderID,
-			"reason", reason,
-		)
 		return nil
 	}
 	dedupeKey := r.messageDedupeKey(messageID)

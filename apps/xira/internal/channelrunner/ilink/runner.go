@@ -19,6 +19,7 @@ import (
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
+	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
@@ -93,6 +94,8 @@ type Runner struct {
 
 	// sessionManager for group chat observe (#151).
 	sessionManager *fsession.Manager
+	// ingest is the shared message processing layer (#151).
+	ingest *ingest.Ingest
 }
 
 // SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
@@ -113,6 +116,13 @@ func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
 func (r *Runner) SetSessionManager(sm *fsession.Manager) {
 	if r != nil {
 		r.sessionManager = sm
+	}
+}
+
+// SetIngest injects the shared message processing layer (#151).
+func (r *Runner) SetIngest(ing *ingest.Ingest) {
+	if r != nil {
+		r.ingest = ing
 	}
 }
 
