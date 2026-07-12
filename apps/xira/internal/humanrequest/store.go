@@ -69,28 +69,39 @@ func (s *Store) Create(ctx context.Context, input CreateRequest) (*HumanRequest,
 		return nil, err
 	}
 	req := &HumanRequest{
-		ID:           id,
-		WorkspaceID:  strings.TrimSpace(input.WorkspaceID),
-		WorkspaceKey: strings.TrimSpace(input.WorkspaceKey),
-		RunID:        strings.TrimSpace(input.RunID),
-		AgentID:      strings.TrimSpace(input.AgentID),
-		SessionID:    strings.TrimSpace(input.SessionID),
-		ToolCallID:   strings.TrimSpace(input.ToolCallID),
-		Source:       strings.TrimSpace(input.Source),
-		Kind:         input.Kind,
-		Status:       StatusPending,
-		Question:     strings.TrimSpace(input.Question),
-		Options:      append([]HumanOption(nil), input.Options...),
-		DedupeKey:    strings.TrimSpace(input.DedupeKey),
-		ChatKey:      strings.TrimSpace(input.ChatKey),
-		CreatedAt:    now,
-		Metadata:     cloneStringMap(input.Metadata),
+		ID:               id,
+		WorkspaceID:      strings.TrimSpace(input.WorkspaceID),
+		WorkspaceKey:     strings.TrimSpace(input.WorkspaceKey),
+		RunID:            strings.TrimSpace(input.RunID),
+		AgentID:          strings.TrimSpace(input.AgentID),
+		SessionID:        strings.TrimSpace(input.SessionID),
+		ToolCallID:       strings.TrimSpace(input.ToolCallID),
+		Source:           strings.TrimSpace(input.Source),
+		Kind:             input.Kind,
+		Status:           StatusPending,
+		Question:         strings.TrimSpace(input.Question),
+		Options:          append([]HumanOption(nil), input.Options...),
+		DedupeKey:        strings.TrimSpace(input.DedupeKey),
+		Responder:        normalizeResponderPolicy(input.Responder),
+		CorrelationToken: strings.TrimSpace(input.CorrelationToken),
+		ChatKey:          strings.TrimSpace(input.ChatKey),
+		CreatedAt:        now,
+		ExpiresAt:        copyTime(input.ExpiresAt),
+		Metadata:         cloneStringMap(input.Metadata),
 		Audit: []AuditRecord{{
 			Time:     now,
 			Action:   "human_request.created",
 			ToStatus: StatusPending,
 		}},
 	}
+	if req.CorrelationToken == "" {
+		req.CorrelationToken = uuid.NewString()
+	}
+	req.Delivery.Status = DeliveryNone
+	if input.DeliveryRequired {
+		req.Delivery.Status = DeliveryPending
+	}
+	req.Resume.Status = ResumeWaitingResponse
 	if err := s.writeRequest(req); err != nil {
 		return nil, err
 	}
@@ -352,6 +363,9 @@ func validateCreate(input CreateRequest) error {
 	if strings.TrimSpace(input.Question) == "" {
 		return fmt.Errorf("%w: question is required", ErrValidation)
 	}
+	if err := validateResponderPolicy(normalizeResponderPolicy(input.Responder)); err != nil {
+		return err
+	}
 	seenOptions := map[string]struct{}{}
 	for _, opt := range input.Options {
 		id := strings.TrimSpace(opt.ID)
@@ -364,6 +378,52 @@ func validateCreate(input CreateRequest) error {
 		seenOptions[id] = struct{}{}
 	}
 	return nil
+}
+
+// normalizeResponderPolicy keeps persisted responder identity deterministic.
+// A zero-value policy defaults to the human who triggered the conversation.
+// coverage: contract (100% required)
+func normalizeResponderPolicy(policy ResponderPolicy) ResponderPolicy {
+	policy.Type = ResponderType(strings.ToLower(strings.TrimSpace(string(policy.Type))))
+	if policy.Type == "" {
+		policy.Type = ResponderCurrentSender
+	}
+	policy.EntrypointID = strings.TrimSpace(policy.EntrypointID)
+	policy.SenderID = strings.TrimSpace(policy.SenderID)
+	policy.SenderIDType = strings.ToLower(strings.TrimSpace(policy.SenderIDType))
+	return policy
+}
+
+// validateResponderPolicy protects the authorization address persisted with a
+// request. Owner requests must be fully bound before they are stored. Current
+// sender fields may be absent for legacy CLI/Flow contexts.
+// coverage: contract (100% required)
+func validateResponderPolicy(policy ResponderPolicy) error {
+	switch policy.Type {
+	case ResponderCurrentSender:
+		return nil
+	case ResponderOwner:
+		if policy.EntrypointID == "" {
+			return fmt.Errorf("%w: owner responder entrypoint id is required", ErrValidation)
+		}
+		if policy.SenderID == "" {
+			return fmt.Errorf("%w: owner responder sender id is required", ErrValidation)
+		}
+		if policy.SenderIDType == "" {
+			return fmt.Errorf("%w: owner responder sender id type is required", ErrValidation)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: invalid responder type %q", ErrValidation, policy.Type)
+	}
+}
+
+func copyTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copied := value.UTC()
+	return &copied
 }
 
 func validateWorkspaceKey(key string) error {
