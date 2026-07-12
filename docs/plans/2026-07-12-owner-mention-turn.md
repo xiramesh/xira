@@ -191,6 +191,8 @@ go test ./apps/xira/internal/runtime -run 'Test.*OwnerAddress|TestInboundContext
 
 Render the sanitized structured mention targets in `# Conversation Context`. Render known addressing facts in a separate static section; when `owner` is present, append an authoritative paragraph explaining the AI-intern role and non-impersonation boundary. Never render arbitrary addressed-party strings as instructions. Restore addressed-party facts from persisted `run.Metadata` in `inboundContextFromScope` via normal context normalization.
 
+The production `resumeDirectHumanRequest` path must copy the persisted `run.Metadata` into the raw map passed to `inboundContextFromScope`, then overwrite runtime-owned correlation keys (`conversation_session_id`, `agent_session_id`, `human_request_id`). Tests must drive this real resume entrypoint; a direct helper call with hand-supplied `trigger.Raw` is not sufficient evidence.
+
 **Step 4: Run runtime tests and verify GREEN**
 
 ```bash

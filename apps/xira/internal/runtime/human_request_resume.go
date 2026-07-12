@@ -109,17 +109,24 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 		return nil
 	}
 	resumeMessage := childResumeMessage(run.Message, req)
+	// Restore the original trigger facts (including addressed_to=owner) from
+	// the persisted run before rebuilding the InboundContext. Runtime-owned
+	// correlation keys are written last so stale or caller-controlled metadata
+	// cannot override the resume's authoritative IDs.
+	resumeRaw := copyTurnMetadata(run.Metadata)
+	if resumeRaw == nil {
+		resumeRaw = map[string]string{}
+	}
+	resumeRaw["conversation_session_id"] = run.SessionID
+	resumeRaw["agent_session_id"] = run.SessionID
+	resumeRaw["human_request_id"] = req.ID
 	resumeReq := TurnRequest{
 		AgentID:   profile.ID,
 		Message:   resumeMessage,
 		SessionID: adkSessionID(run.SessionID, run.RunID+":resume:"+uuid.NewString()),
 		// Resume inherits the run's original trigger identity from its persisted
 		// session scope, not a forged "resume" channel.
-		Context: inboundContextFromScope(run.SessionScope, map[string]string{
-			"conversation_session_id": run.SessionID,
-			"agent_session_id":        run.SessionID,
-			"human_request_id":        req.ID,
-		}),
+		Context: inboundContextFromScope(run.SessionScope, resumeRaw),
 	}
 	applyExecutionPolicySnapshot(&resumeReq, run.ExecutionPolicy)
 	base := runtimeEventBase{
