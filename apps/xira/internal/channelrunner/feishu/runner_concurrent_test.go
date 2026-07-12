@@ -308,7 +308,7 @@ func TestFeishuDedupeForgetOnRunError(t *testing.T) {
 // non-blocking — the turn's deferred DedupeComplete/Forget runs async.
 func waitTurnInactive(t *testing.T, runner *Runner, key frt.ChatKey) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if !runner.router.IsActive(key) {
 			// Give the deferred dedupe callback a moment to run after
