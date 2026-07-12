@@ -3,6 +3,7 @@ package channelrunner
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -19,6 +20,7 @@ import (
 type mockEmitRunner struct {
 	id      string
 	ch      string
+	caps    channel.CapabilitySet
 	mu      sync.Mutex
 	calls   []channel.OutboundEnvelope
 	emitErr error
@@ -31,7 +33,13 @@ func (m *mockEmitRunner) Stop(context.Context) error  { return nil }
 func (m *mockEmitRunner) SetIngest(*ingest.Ingest)    {}
 
 func (m *mockEmitRunner) Capabilities() channel.CapabilitySet {
-	return channel.CapabilitySet{channel.CapabilityProactiveOutbound}
+	if m.caps != nil {
+		return m.caps
+	}
+	return channel.CapabilitySet{
+		channel.CapabilityProactiveOutbound,
+		channel.CapabilityTypedRecipientOutbound,
+	}
 }
 
 func (m *mockEmitRunner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
@@ -90,6 +98,90 @@ func TestManagerEmitRoutesByChannel(t *testing.T) {
 	}
 }
 
+func TestManagerEmitRoutesByExactEntrypoint(t *testing.T) {
+	first := &mockEmitRunner{id: "feishu-first", ch: "feishu"}
+	owner := &mockEmitRunner{id: "feishu-owner", ch: "feishu"}
+	mgr := &Manager{runners: []Runner{first, owner}}
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "feishu", EntrypointID: "feishu-owner"}
+	env.Recipient = &channel.OutboundRecipient{ID: "ou_owner", IDType: "open_id"}
+	env.Data = map[string]any{"content": "private"}
+
+	if err := mgr.Emit(context.Background(), env); err != nil {
+		t.Fatalf("Emit returned error: %v", err)
+	}
+	if len(first.emitCalls()) != 0 || len(owner.emitCalls()) != 1 {
+		t.Fatalf("exact routing calls: first=%d owner=%d", len(first.emitCalls()), len(owner.emitCalls()))
+	}
+}
+
+func TestManagerEmitChecksTypedRecipientCapabilityOnSelectedRunner(t *testing.T) {
+	feishu := &mockEmitRunner{id: "feishu-owner", ch: "feishu"}
+	websocket := &mockEmitRunner{
+		id:   "websocket-owner",
+		ch:   "websocket",
+		caps: channel.CapabilitySet{channel.CapabilityProactiveOutbound},
+	}
+	mgr := &Manager{runners: []Runner{feishu, websocket}}
+
+	// The manager fleet supports typed recipients through Feishu, but the
+	// selected websocket runner does not. A fleet-wide capability check must
+	// not let the Feishu capability smuggle a private recipient into websocket.
+	if !mgr.Capabilities().Supports(channel.CapabilityTypedRecipientOutbound) {
+		t.Fatal("precondition: fleet should advertise typed recipient outbound")
+	}
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "websocket", EntrypointID: "websocket-owner"}
+	env.Recipient = &channel.OutboundRecipient{ID: "owner", IDType: "open_id"}
+	env.Data = map[string]any{"content": "private"}
+
+	err := mgr.Emit(context.Background(), env)
+	if err == nil || !strings.Contains(err.Error(), "typed recipient") {
+		t.Fatalf("typed recipient error = %v, want route-local capability rejection", err)
+	}
+	if len(websocket.emitCalls()) != 0 {
+		t.Fatal("websocket Emit must not run for a typed recipient")
+	}
+
+	// websocket still supports ordinary proactive delivery for resume finals.
+	env.Recipient = nil
+	if err := mgr.Emit(context.Background(), env); err != nil {
+		t.Fatalf("recipient-free websocket proactive delivery failed: %v", err)
+	}
+	if len(websocket.emitCalls()) != 1 {
+		t.Fatalf("websocket calls = %d, want 1 resume delivery", len(websocket.emitCalls()))
+	}
+}
+
+func TestManagerEmitRejectsAmbiguousChannelFallback(t *testing.T) {
+	mgr := &Manager{runners: []Runner{
+		&mockEmitRunner{id: "feishu-first", ch: "feishu"},
+		&mockEmitRunner{id: "feishu-second", ch: "feishu"},
+	}}
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "feishu"}
+	env.Data = map[string]any{"content": "private"}
+
+	err := mgr.Emit(context.Background(), env)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous fallback error = %v, want explicit ambiguity", err)
+	}
+}
+
+func TestManagerEmitRejectsEntrypointChannelMismatch(t *testing.T) {
+	mgr := &Manager{runners: []Runner{
+		&mockEmitRunner{id: "feishu-owner", ch: "feishu"},
+	}}
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "ilink", EntrypointID: "feishu-owner"}
+	env.Data = map[string]any{"content": "private"}
+
+	err := mgr.Emit(context.Background(), env)
+	if err == nil || !strings.Contains(err.Error(), "channel") {
+		t.Fatalf("entrypoint/channel mismatch error = %v", err)
+	}
+}
+
 // TestManagerEmitUnknownChannelErrors verifies Emit returns a clear error when
 // no runner is registered for the target channel. This Manager has only a
 // feishu runner, so Emit to "websocket" finds no match — even though
@@ -104,6 +196,20 @@ func TestManagerEmitUnknownChannelErrors(t *testing.T) {
 	err := mgr.Emit(context.Background(), env)
 	if err == nil {
 		t.Fatal("Emit to channel with no registered runner should error")
+	}
+}
+
+func TestManagerEmitRejectsMissingTargetAndUnknownEntrypoint(t *testing.T) {
+	mgr := &Manager{runners: []Runner{
+		&mockEmitRunner{id: "feishu-default", ch: "feishu"},
+	}}
+	if err := mgr.Emit(context.Background(), channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)); err == nil || !strings.Contains(err.Error(), "target") {
+		t.Fatalf("missing target error = %v", err)
+	}
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "feishu", EntrypointID: "feishu-missing"}
+	if err := mgr.Emit(context.Background(), env); err == nil || !strings.Contains(err.Error(), "feishu-missing") {
+		t.Fatalf("unknown entrypoint error = %v", err)
 	}
 }
 
@@ -164,5 +270,8 @@ func TestManagerCapabilities(t *testing.T) {
 	caps := mgr.Capabilities()
 	if !caps.Supports(channel.CapabilityProactiveOutbound) {
 		t.Errorf("Manager.Capabilities() missing proactive_outbound; got %v", caps)
+	}
+	if !caps.Supports(channel.CapabilityTypedRecipientOutbound) {
+		t.Errorf("Manager.Capabilities() missing typed_recipient_outbound; got %v", caps)
 	}
 }

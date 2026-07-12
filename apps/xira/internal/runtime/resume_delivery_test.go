@@ -26,7 +26,10 @@ type recordingEmitter struct {
 }
 
 func (r *recordingEmitter) Capabilities() channel.CapabilitySet {
-	return channel.CapabilitySet{channel.CapabilityProactiveOutbound}
+	return channel.CapabilitySet{
+		channel.CapabilityProactiveOutbound,
+		channel.CapabilityTypedRecipientOutbound,
+	}
 }
 
 func (r *recordingEmitter) Emit(_ context.Context, env channel.OutboundEnvelope) error {

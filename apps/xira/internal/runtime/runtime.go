@@ -51,7 +51,14 @@ type OwnerResolver interface {
 	IsOwner(ctx context.Context, senderID, entrypointID string) bool
 }
 
+// OwnerTargetResolver is deliberately separate from OwnerResolver: a boolean
+// authorization answer is not a routable private-delivery address.
+type OwnerTargetResolver interface {
+	ResolveOwnerTarget(ctx context.Context, entrypointID string) (OwnerDeliveryTarget, error)
+}
+
 // Compile-time assertions: *Service implements Runtime + HITLResolver + OwnerResolver.
 var _ Runtime = (*Service)(nil)
 var _ HITLResolver = (*Service)(nil)
 var _ OwnerResolver = (*Service)(nil)
+var _ OwnerTargetResolver = (*Service)(nil)

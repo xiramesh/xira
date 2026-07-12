@@ -26,6 +26,7 @@ type Definition struct {
 	AllowedAgentIDs     []string              `json:"allowed_agents,omitempty" yaml:"allowed_agents,omitempty"`
 	AllowedSenderIDs    []string              `json:"allowed_senders,omitempty" yaml:"allowed_senders,omitempty"`
 	OwnerID             string                `json:"owner,omitempty" yaml:"owner,omitempty"`
+	OwnerIDType         string                `json:"owner_id_type,omitempty" yaml:"owner_id_type,omitempty"`
 	SessionPolicy       routing.SessionPolicy `json:"session,omitempty" yaml:"session,omitempty"`
 	AppSecret           string                `json:"app_secret,omitempty" yaml:"app_secret,omitempty"`
 	AppSecretEnv        string                `json:"app_secret_env,omitempty" yaml:"app_secret_env,omitempty"`
@@ -299,6 +300,7 @@ func normalizeDefinition(definition Definition, defaultAgentID string) Definitio
 	}
 	definition.AllowedSenderIDs = allowedSenders
 	definition.OwnerID = strings.TrimSpace(definition.OwnerID)
+	definition.OwnerIDType = strings.ToLower(strings.TrimSpace(definition.OwnerIDType))
 	definition.SessionPolicy = routing.NormalizeSessionPolicy(definition.SessionPolicy)
 	return definition
 }

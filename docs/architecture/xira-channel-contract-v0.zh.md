@@ -105,7 +105,26 @@ entrypoint routing、session scope、runtime event scope 和 audit 解释性。
 `target` 用于出站投递，尤其是 proactive `outbound_message`。请求内响应通常可
 从原始 `source` 派生 target。
 
-### 2.3 Correlation
+`target` 表示**由哪个 route/entrypoint/bot 投递**，不是私信收件人。Manager 在
+`entrypoint_id` 存在时必须精确匹配 runner；只有一个 channel 候选时才允许
+channel-only fallback，多候选必须返回 ambiguity error。
+
+### 2.3 Recipient
+
+发送给平台用户而不是既有 chat 时，envelope 额外携带 typed recipient：
+
+```json
+{
+  "id": "ou_xxx",
+  "id_type": "open_id"
+}
+```
+
+`recipient` 只描述平台收件身份；channel adapter 决定支持哪些 sealed ID type。
+它不能由模型自由指定。owner 私有投递由 runtime 根据 owner binding 生成。
+没有 `recipient` 时维持现有 `target.chat_id` 投递语义。
+
+### 2.4 Correlation
 
 ```json
 {
@@ -122,7 +141,7 @@ entrypoint routing、session scope、runtime event scope 和 audit 解释性。
 - child run / delegation event 必须带足够 correlation，避免 UI 或 channel
   event filter 丢失子 run 进度。
 - `request_id` 关联用户请求；`run_id` 关联 runtime run；二者不能互相替代。
-- proactive `outbound_message` 可以没有 `request_id`，但必须有 target。
+- proactive `outbound_message` 可以没有 `request_id`，但必须有 target；私信用户时还必须有 typed recipient。
 
 ## 3. Channel Inbound
 
@@ -510,6 +529,7 @@ outbound 可以交错，客户端必须按 `request_id` 归属。
 | `runtime_event_stream` | 支持展示或传输 runtime events。 |
 | `interactive_human_response` | 支持在 channel 内回答 HITL。 |
 | `proactive_outbound` | 支持 Xira 请求外主动投递消息。 |
+| `typed_recipient_outbound` | 支持按 envelope 的 typed `recipient` 投递给平台用户，而不是退回 `target` 会话。 |
 | `offline_queue` | 目标离线时可以排队。 |
 
 Channel adapter 应声明自己支持哪些能力。没有能力时的默认降级：
@@ -518,6 +538,11 @@ Channel adapter 应声明自己支持哪些能力。没有能力时的默认降�
 - 不支持 `runtime_event_stream`：只保留 run log / inspector，不发给用户 channel。
 - 不支持 `interactive_human_response`：通过 HTTP/API/UI 处理 human response。
 - 不支持 `proactive_outbound`：记录 delivery_failed 或交给外部 relay。
+- 不支持 `typed_recipient_outbound`：带 `recipient` 的 envelope 必须 fail closed；不得忽略 recipient 后发给 `target`。
+
+Manager 的 capability 是所有 runner 的能力并集，只能用于 fleet discovery，不能证明某个
+entrypoint 支持 typed recipient。`Manager.Emit` 必须在按 `entrypoint_id` 选出最终 runner 后做
+route-local capability 校验。
 
 ## 8. Existing Channel Mapping
 
@@ -534,8 +559,9 @@ WebSocket 是 Channel Contract 的第一个实时 transport binding。当前实�
 - `interrupt` -> `interrupt` frame
 - `error` -> `error` frame
 
-`assistant_delta`、`outbound_message` 和 resume-over-WS `human_response` 是保留能力，
-未在当前 WebSocket `ready.capabilities` 中广告。
+WebSocket 支持把无 `recipient` 的 proactive/resume final 投递到当前 ChatKey live connection，
+但没有平台用户 DM/typed-recipient 语义。任何带 `recipient` 的 envelope 必须拒绝，不能发送给
+触发 turn 的连接。`assistant_delta` 和 resume-over-WS `human_response` 仍是保留能力。
 
 WebSocket 语义细节见 `docs/architecture/xira-websocket-channel-v0.zh.md`。
 
@@ -550,14 +576,16 @@ WebSocket 语义细节见 `docs/architecture/xira-websocket-channel-v0.zh.md`。
 
 ### 8.3 Feishu / iLink
 
-Feishu/iLink 的 channel runner 当前保持 final-only：
+Feishu/iLink 的 channel runner 当前保持 final-only 渲染，但支持受约束的 proactive outbound：
 
 - `assistant_delta` -> buffer，不逐条发送
 - `assistant_final` -> 平台文本/卡片消息
 - `runtime_event` -> run log / inspector，不默认发到群
 - `interrupt` -> 目标为平台消息或外部 approval UI 链接，当前未实现
-- `outbound_message` -> 平台 send API 具备基础能力，但 generic proactive dispatcher
-  当前未实现
+- `outbound_message` -> `Manager.Emit` 按 entrypoint 精确路由。Feishu 支持
+  `open_id` / `user_id` / `union_id` typed recipient；iLink 支持 typed user recipient。
+- owner 单向通知由生产 ADK 路径的 runtime-native `notify_owner` 使用上述路径；每个 run 最多一次
+  成功通知，owner 回复/HITL 仍未实现。
 
 若未来要把 delta 发到聊天平台，必须先定义节流、合并和撤回/编辑策略，避免刷屏。
 

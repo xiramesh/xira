@@ -76,6 +76,22 @@ func (s *Service) runtimeADKTools(
 	}
 	out = append(out, humanRequestTool)
 
+	notifyOwnerTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
+		Name:         notifyOwnerToolName,
+		Description:  "Privately notify this agent's configured owner through the authoritative bound channel. You provide only the message, never a recipient. After a successful notification, return an empty final response when no public reply is needed.",
+		InputSchema:  notifyOwnerInputSchema(),
+		OutputSchema: objectSchema(),
+	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
+		rec := s.notifyOwnerToolCall(ctx, strings.TrimSpace(toolCtx.FunctionCallID()), args)
+		recordNotifyOwnerOutcome(rec, recordEvent, recordAudit)
+		recordTool(rec)
+		return rec.Output, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, notifyOwnerTool)
+
 	// #107: human.interpret — agent 理解用户回复后,声明它答的是哪个 pending HR。
 	// 镜像 answer_child 的异步 resolve,但加四项校验(source/chatKey/存在/无歧义)。
 	// 不 suspend run(非破坏性),resolve 在后台 goroutine 跑。ChatKey 由 runtime

@@ -43,6 +43,7 @@ const (
 	CapabilityRuntimeEventStream       Capability = "runtime_event_stream"
 	CapabilityInteractiveHumanResponse Capability = "interactive_human_response"
 	CapabilityProactiveOutbound        Capability = "proactive_outbound"
+	CapabilityTypedRecipientOutbound   Capability = "typed_recipient_outbound"
 	CapabilityOfflineQueue             Capability = "offline_queue"
 )
 
@@ -83,6 +84,21 @@ type OutboundCorrelation struct {
 	ParentMessageID string `json:"parent_message_id,omitempty" yaml:"parent_message_id,omitempty"`
 }
 
+type OutboundRecipient struct {
+	ID     string `json:"id" yaml:"id"`
+	IDType string `json:"id_type" yaml:"id_type"`
+}
+
+// Normalize keeps the recipient contract deterministic. Channel adapters own
+// the sealed set of ID types they accept; the shared contract only requires a
+// non-empty typed identity.
+// coverage: contract (100% required)
+func (recipient OutboundRecipient) Normalize() OutboundRecipient {
+	recipient.ID = strings.TrimSpace(recipient.ID)
+	recipient.IDType = strings.ToLower(strings.TrimSpace(recipient.IDType))
+	return recipient
+}
+
 func (correlation OutboundCorrelation) Normalize() OutboundCorrelation {
 	correlation.TraceID = strings.TrimSpace(correlation.TraceID)
 	correlation.ParentRunID = strings.TrimSpace(correlation.ParentRunID)
@@ -102,6 +118,7 @@ type OutboundEnvelope struct {
 	Time          time.Time           `json:"time" yaml:"time"`
 	Source        *InboundContext     `json:"source,omitempty" yaml:"source,omitempty"`
 	Target        *InboundContext     `json:"target,omitempty" yaml:"target,omitempty"`
+	Recipient     *OutboundRecipient  `json:"recipient,omitempty" yaml:"recipient,omitempty"`
 	Correlation   OutboundCorrelation `json:"correlation,omitempty" yaml:"correlation,omitempty"`
 	Data          map[string]any      `json:"data,omitempty" yaml:"data,omitempty"`
 }
@@ -134,6 +151,14 @@ func (msg OutboundEnvelope) Normalize() OutboundEnvelope {
 	}
 	msg.Source = normalizeOptionalInboundContext(msg.Source)
 	msg.Target = normalizeOptionalInboundContext(msg.Target)
+	if msg.Recipient != nil {
+		recipient := msg.Recipient.Normalize()
+		if recipient.ID == "" && recipient.IDType == "" {
+			msg.Recipient = nil
+		} else {
+			msg.Recipient = &recipient
+		}
+	}
 	msg.Correlation = msg.Correlation.Normalize()
 	msg.Data = copyAnyMap(msg.Data)
 	return msg

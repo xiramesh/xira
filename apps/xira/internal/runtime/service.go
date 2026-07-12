@@ -414,7 +414,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	// （绕过 skill 激活 / session 分配 / usage / runs 等所有副作用）。返回的 FinalResponse
 	// 由 ChatKeySession.runTurn 的现有 SendFinal 路径发回 IM（不改 ChatKeySession）。
 	if token, ok := parseBindCommand(req.Message); ok {
-		msg := s.handleOwnerBind(entrypointDecision.Definition.ID, req.Context.SenderID, token)
+		msg := s.handleOwnerBindWithIdentity(entrypointDecision.Definition.ID, req.Context.SenderID, req.Context.SenderIDType, token)
 		return TurnResponse{FinalResponse: msg, Status: "completed"}, nil
 	}
 	profile, ok := s.agents.Get(entrypointDecision.AgentID)
@@ -607,6 +607,8 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 			"blocked_by":     interrupt.Reason,
 			"summary":        waitingHumanSummary(interrupt),
 		})
+	} else if strings.TrimSpace(final) == "" && hasSuccessfulNotifyOwner(toolCalls) {
+		resp.VerificationResult = VerificationResult{Status: "passed", Checks: []string{"notify_owner_sent"}}
 	} else {
 		resp.VerificationResult = s.verifier.Verify(final, profile.Verification.DefaultChecks)
 	}

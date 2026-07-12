@@ -201,7 +201,9 @@ func (r *Runner) Start(ctx context.Context) error { return nil }
 func (r *Runner) Stop(ctx context.Context) error { return nil }
 
 // Capabilities advertises what this channel can do. websocket supports
-// proactive outbound (resume delivery to a live connection). Interactive
+// proactive outbound (resume delivery to a live connection), but not typed
+// recipient outbound because a connection is keyed by the inbound ChatKey,
+// not by a server-verified platform user identity. Interactive
 // human response (in-IM approve/deny via human_response frames) is a future
 // concern — the inbound human_response frame is still rejected (see
 // HandleConnection) — so we do NOT advertise CapabilityInteractiveHumanResponse
@@ -239,6 +241,9 @@ var _ channel.OutboundEmitter = (*Runner)(nil)
 func (r *Runner) Emit(_ context.Context, env channel.OutboundEnvelope) error {
 	if env.Target == nil {
 		return fmt.Errorf("websocket Emit: envelope has no target")
+	}
+	if env.Recipient != nil {
+		return fmt.Errorf("websocket Emit: typed recipient outbound is not supported")
 	}
 	chatID := strings.TrimSpace(env.Target.ChatID)
 	if chatID == "" {
@@ -795,6 +800,21 @@ func (r *Runner) prepareTurn(frame inboundFrame, data messageData, defaultEntryp
 		runEntrypointID = effectiveEntrypointID
 	}
 	ctx := data.Context
+	// websocket identity facts are supplied by the client, not asserted by an
+	// upstream identity provider. Keep SenderID for authorization/session
+	// routing, but never let a client-provided identity type become a durable
+	// owner delivery credential.
+	ctx.SenderIDType = ""
+	if ctx.Raw != nil {
+		raw := make(map[string]string, len(ctx.Raw))
+		for key, value := range ctx.Raw {
+			if strings.EqualFold(strings.TrimSpace(key), "sender_id_type") {
+				continue
+			}
+			raw[key] = value
+		}
+		ctx.Raw = raw
+	}
 	ctx.Channel = "websocket"
 	ctx.EntrypointID = runEntrypointID
 	ctx = channel.NormalizeInboundContext(ctx)
@@ -816,7 +836,7 @@ func (r *Runner) prepareTurn(frame inboundFrame, data messageData, defaultEntryp
 	input := ingest.MessageInput{
 		Channel: "websocket", EntrypointID: runEntrypointID,
 		ChatID: ctx.ChatID, ChatType: normalizeChannel(ctx.ChatType),
-		SenderID: ctx.SenderID, Mentioned: ctx.Mentioned,
+		SenderID: ctx.SenderID, SenderIDType: ctx.SenderIDType, Mentioned: ctx.Mentioned,
 		Content: data.Message, MessageID: messageID,
 	}
 	switch r.ingest.Gate(input, definition) {
