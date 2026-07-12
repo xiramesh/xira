@@ -136,6 +136,22 @@ func TestInboundContextFromScopeRestoresNames(t *testing.T) {
 	}
 }
 
+func TestInboundContextFromScopeRestoresOwnerAddressingFromPersistedMetadata(t *testing.T) {
+	trigger := channel.NormalizeInboundContext(channel.InboundContext{
+		Channel:     "feishu",
+		ChatID:      "chat-7",
+		ChatType:    "group",
+		SenderID:    "user-9",
+		AddressedTo: []channel.AddressTarget{channel.AddressTargetOwner},
+	})
+	scope := fsession.BuildScope(trigger, routing.SessionPolicy{Dimensions: []string{"chat"}})
+	got := inboundContextFromScope(&scope, trigger.Raw)
+
+	if len(got.AddressedTo) != 1 || got.AddressedTo[0] != channel.AddressTargetOwner {
+		t.Fatalf("AddressedTo = %v, want owner restored from persisted run metadata", got.AddressedTo)
+	}
+}
+
 // TestInboundContextFromScopeNilNames verifies the resume path doesn't crash
 // and produces empty names when scope.Names is nil (older persisted sessions
 // that predate the Names field, or scopes from runs where no names were

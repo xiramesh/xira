@@ -2,6 +2,21 @@ package channel
 
 import "strings"
 
+const addressedToMetadataKey = "addressed_to"
+
+type AddressTarget string
+
+const (
+	AddressTargetAgent AddressTarget = "agent"
+	AddressTargetOwner AddressTarget = "owner"
+)
+
+type MentionTarget struct {
+	ID     string `json:"id" yaml:"id"`
+	IDType string `json:"id_type,omitempty" yaml:"id_type,omitempty"`
+	Name   string `json:"name,omitempty" yaml:"name,omitempty"`
+}
+
 type InboundContext struct {
 	Channel          string            `json:"channel" yaml:"channel"`
 	EntrypointID     string            `json:"entrypoint_id,omitempty" yaml:"entrypoint_id,omitempty"`
@@ -18,6 +33,8 @@ type InboundContext struct {
 	SenderName       string            `json:"sender_name,omitempty" yaml:"sender_name,omitempty"`
 	MessageID        string            `json:"message_id,omitempty" yaml:"message_id,omitempty"`
 	Mentioned        bool              `json:"mentioned,omitempty" yaml:"mentioned,omitempty"`
+	MentionTargets   []MentionTarget   `json:"mention_targets,omitempty" yaml:"mention_targets,omitempty"`
+	AddressedTo      []AddressTarget   `json:"addressed_to,omitempty" yaml:"addressed_to,omitempty"`
 	ReplyToMessageID string            `json:"reply_to_message_id,omitempty" yaml:"reply_to_message_id,omitempty"`
 	ReplyToSenderID  string            `json:"reply_to_sender_id,omitempty" yaml:"reply_to_sender_id,omitempty"`
 	Raw              map[string]string `json:"raw,omitempty" yaml:"raw,omitempty"`
@@ -82,6 +99,7 @@ func NewInboundContextWithEntrypoint(channelName, entrypointID, userID string, m
 }
 
 func NormalizeInboundContext(ctx InboundContext) InboundContext {
+	ctx.Raw = copyMetadata(ctx.Raw)
 	ctx.Channel = normalizedOrDefault(ctx.Channel, "local")
 	ctx.EntrypointID = strings.TrimSpace(ctx.EntrypointID)
 	ctx.Account = strings.TrimSpace(ctx.Account)
@@ -98,6 +116,23 @@ func NormalizeInboundContext(ctx InboundContext) InboundContext {
 	ctx.MessageID = strings.TrimSpace(ctx.MessageID)
 	ctx.ReplyToMessageID = strings.TrimSpace(ctx.ReplyToMessageID)
 	ctx.ReplyToSenderID = strings.TrimSpace(ctx.ReplyToSenderID)
+	ctx.MentionTargets = normalizeMentionTargets(ctx.MentionTargets)
+	if len(ctx.AddressedTo) == 0 {
+		ctx.AddressedTo = parseAddressTargets(firstMetadata(ctx.Raw, addressedToMetadataKey))
+	}
+	ctx.AddressedTo = normalizeAddressTargets(ctx.AddressedTo)
+	if len(ctx.AddressedTo) > 0 {
+		if ctx.Raw == nil {
+			ctx.Raw = map[string]string{}
+		}
+		values := make([]string, 0, len(ctx.AddressedTo))
+		for _, target := range ctx.AddressedTo {
+			values = append(values, string(target))
+		}
+		ctx.Raw[addressedToMetadataKey] = strings.Join(values, ",")
+	} else {
+		delete(ctx.Raw, addressedToMetadataKey)
+	}
 	if ctx.SenderID == "" {
 		ctx.SenderID = "local-user"
 	}
@@ -108,6 +143,66 @@ func NormalizeInboundContext(ctx InboundContext) InboundContext {
 		ctx.Raw = nil
 	}
 	return ctx
+}
+
+// normalizeAddressTargets filters external values to the sealed addressing contract.
+// coverage: contract (100% required)
+func normalizeAddressTargets(targets []AddressTarget) []AddressTarget {
+	present := map[AddressTarget]bool{}
+	for _, target := range targets {
+		switch AddressTarget(strings.ToLower(strings.TrimSpace(string(target)))) {
+		case AddressTargetAgent:
+			present[AddressTargetAgent] = true
+		case AddressTargetOwner:
+			present[AddressTargetOwner] = true
+		}
+	}
+	result := make([]AddressTarget, 0, len(present))
+	for _, target := range []AddressTarget{AddressTargetAgent, AddressTargetOwner} {
+		if present[target] {
+			result = append(result, target)
+		}
+	}
+	return result
+}
+
+// parseAddressTargets restores the sealed addressing contract from run metadata.
+// coverage: contract (100% required)
+func parseAddressTargets(value string) []AddressTarget {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	targets := make([]AddressTarget, 0, len(parts))
+	for _, part := range parts {
+		targets = append(targets, AddressTarget(part))
+	}
+	return targets
+}
+
+// normalizeMentionTargets makes platform mention identities safe and deterministic.
+// coverage: contract (100% required)
+func normalizeMentionTargets(targets []MentionTarget) []MentionTarget {
+	if len(targets) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	result := make([]MentionTarget, 0, len(targets))
+	for _, target := range targets {
+		target.ID = strings.TrimSpace(target.ID)
+		target.IDType = strings.ToLower(strings.TrimSpace(target.IDType))
+		target.Name = strings.TrimSpace(target.Name)
+		if target.ID == "" {
+			continue
+		}
+		key := target.IDType + "\x00" + target.ID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, target)
+	}
+	return result
 }
 
 func NewOutboundMessage(in InboundEnvelope, content string) OutboundMessage {

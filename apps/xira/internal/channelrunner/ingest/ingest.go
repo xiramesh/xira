@@ -41,34 +41,38 @@ const (
 // MessageInput 是 runner 解析完原始消息后构造的统一输入。
 // Runner 只管填这个——后续的授权/dedupe/observe/dispatch 全由 Ingest 处理。
 type MessageInput struct {
-	Channel      string
-	EntrypointID string
-	Account      string
-	ChatID       string
-	ChatType     string // "group" / "direct" / "p2p"
-	SenderID     string
-	SenderName   string
-	ChatName     string
-	Mentioned    bool // feishu/ws 算好；ilink 无概念不填
-	Content      string
-	MessageID    string
-	Metadata     map[string]string
+	Channel        string
+	EntrypointID   string
+	Account        string
+	ChatID         string
+	ChatType       string // "group" / "direct" / "p2p"
+	SenderID       string
+	SenderName     string
+	ChatName       string
+	Mentioned      bool // feishu/ws 算好；ilink 无概念不填
+	MentionTargets []channel.MentionTarget
+	AddressedTo    []channel.AddressTarget
+	Content        string
+	MessageID      string
+	Metadata       map[string]string
 }
 
 // InboundContext 从 MessageInput 构造标准 InboundContext。
 func (m MessageInput) InboundContext() channel.InboundContext {
-	return channel.InboundContext{
-		Channel:      m.Channel,
-		EntrypointID: m.EntrypointID,
-		Account:      m.Account,
-		ChatID:       m.ChatID,
-		ChatType:     m.ChatType,
-		SenderID:     m.SenderID,
-		SenderName:   m.SenderName,
-		ChatName:     m.ChatName,
-		Mentioned:    m.Mentioned,
-		Raw:          m.Metadata,
-	}
+	return channel.NormalizeInboundContext(channel.InboundContext{
+		Channel:        m.Channel,
+		EntrypointID:   m.EntrypointID,
+		Account:        m.Account,
+		ChatID:         m.ChatID,
+		ChatType:       m.ChatType,
+		SenderID:       m.SenderID,
+		SenderName:     m.SenderName,
+		ChatName:       m.ChatName,
+		Mentioned:      m.Mentioned,
+		MentionTargets: m.MentionTargets,
+		AddressedTo:    m.AddressedTo,
+		Raw:            m.Metadata,
+	})
 }
 
 // Ingest 是统一的消息处理层。被注入到每个 channel runner。
@@ -122,14 +126,14 @@ func AuthorizeSender(senderID, content string, def entrypoints.Definition, owner
 //
 // 逻辑：
 //   - 私聊（非 group）：授权 → dispatch；未授权 → reject
-//   - 群聊 @ bot：授权 → dispatch；未授权 → reject
-//   - 群聊没 @ bot：授权 → observe；未授权 → reject（不 observe 未授权内容，安全）
+//   - 群聊 @ agent / @ owner：授权 → dispatch；未授权 → reject
+//   - 群聊没 address agent/owner：授权 → observe；未授权 → reject（不 observe 未授权内容，安全）
 //
 // 安全（reviewer #4）：/bind pre-auth 只在 dispatch 路径（@ bot）才放行——
 // 群聊没 @ bot 的 /bind 不该 observe（陌生人可注入共享 session）。
 func (ing *Ingest) Gate(input MessageInput, def entrypoints.Definition) Decision {
 	// 群聊没 @ bot：先检查授权（不含 /bind pre-auth，防注入），授权了才 observe。
-	if input.ChatType == "group" && !input.Mentioned {
+	if input.ChatType == "group" && !input.Mentioned && !hasKnownAddressTarget(input.AddressedTo) {
 		if !isAuthorizedForObserve(input.SenderID, def, ing.ownerResolver) {
 			return DecisionReject
 		}
@@ -140,6 +144,18 @@ func (ing *Ingest) Gate(input MessageInput, def entrypoints.Definition) Decision
 		return DecisionReject
 	}
 	return DecisionDispatch
+}
+
+// hasKnownAddressTarget is the activation boundary for group messages.
+// coverage: contract (100% required)
+func hasKnownAddressTarget(targets []channel.AddressTarget) bool {
+	for _, target := range targets {
+		switch target {
+		case channel.AddressTargetAgent, channel.AddressTargetOwner:
+			return true
+		}
+	}
+	return false
 }
 
 // isAuthorizedForObserve 检查 sender 是否被授权 observe（不包含 /bind pre-auth）。

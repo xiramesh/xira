@@ -31,6 +31,74 @@ func TestNewInboundContextNormalizesChannelFacts(t *testing.T) {
 	}
 }
 
+func TestNormalizeInboundContextPreservesAddressingFacts(t *testing.T) {
+	addressed := []AddressTarget{AddressTargetOwner, AddressTargetAgent, AddressTargetOwner, AddressTarget("unknown")}
+	mentions := []MentionTarget{
+		{ID: " u_owner ", IDType: " user_id ", Name: " Owner "},
+		{ID: "u_owner", IDType: "user_id", Name: "duplicate"},
+		{ID: " ", IDType: "open_id", Name: "empty"},
+	}
+	ctx := NormalizeInboundContext(InboundContext{
+		Channel:        "feishu",
+		ChatID:         "oc_group",
+		SenderID:       "u_sender",
+		AddressedTo:    addressed,
+		MentionTargets: mentions,
+	})
+
+	if len(ctx.AddressedTo) != 2 || ctx.AddressedTo[0] != AddressTargetAgent || ctx.AddressedTo[1] != AddressTargetOwner {
+		t.Fatalf("AddressedTo = %v, want [agent owner]", ctx.AddressedTo)
+	}
+	if len(ctx.MentionTargets) != 1 {
+		t.Fatalf("MentionTargets = %+v, want one normalized target", ctx.MentionTargets)
+	}
+	wantMention := (MentionTarget{ID: "u_owner", IDType: "user_id", Name: "Owner"})
+	if ctx.MentionTargets[0] != wantMention {
+		t.Fatalf("MentionTargets[0] = %+v, want %+v", ctx.MentionTargets[0], wantMention)
+	}
+	if ctx.Raw["addressed_to"] != "agent,owner" {
+		t.Fatalf("raw addressed_to = %q, want agent,owner", ctx.Raw["addressed_to"])
+	}
+
+	addressed[0] = AddressTargetAgent
+	mentions[0].ID = "mutated"
+	if ctx.AddressedTo[1] != AddressTargetOwner || ctx.MentionTargets[0].ID != "u_owner" {
+		t.Fatalf("NormalizeInboundContext aliased caller slices: addressed=%v mentions=%+v", ctx.AddressedTo, ctx.MentionTargets)
+	}
+}
+
+func TestNormalizeInboundContextRestoresAddressingFactsFromRaw(t *testing.T) {
+	ctx := NormalizeInboundContext(InboundContext{
+		Channel:  "feishu",
+		ChatID:   "oc_group",
+		SenderID: "u_sender",
+		Raw: map[string]string{
+			"addressed_to": " owner, unknown, agent, owner ",
+		},
+	})
+
+	if len(ctx.AddressedTo) != 2 || ctx.AddressedTo[0] != AddressTargetAgent || ctx.AddressedTo[1] != AddressTargetOwner {
+		t.Fatalf("AddressedTo = %v, want [agent owner]", ctx.AddressedTo)
+	}
+	if ctx.Raw["addressed_to"] != "agent,owner" {
+		t.Fatalf("raw addressed_to = %q, want normalized agent,owner", ctx.Raw["addressed_to"])
+	}
+}
+
+func TestNormalizeInboundContextDropsUnknownAddressingFacts(t *testing.T) {
+	ctx := NormalizeInboundContext(InboundContext{
+		AddressedTo: []AddressTarget{"unknown", " "},
+		Raw:         map[string]string{"addressed_to": "unknown"},
+	})
+
+	if len(ctx.AddressedTo) != 0 {
+		t.Fatalf("AddressedTo = %v, want empty", ctx.AddressedTo)
+	}
+	if _, ok := ctx.Raw["addressed_to"]; ok {
+		t.Fatalf("unknown addressed_to must not remain authoritative: %+v", ctx.Raw)
+	}
+}
+
 func TestOutboundEnvelopeNormalizesContractFields(t *testing.T) {
 	msg := NewOutboundEnvelope(OutboundAssistantFinal)
 	msg.ID = " out-1 "

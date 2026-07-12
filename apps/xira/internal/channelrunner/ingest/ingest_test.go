@@ -81,6 +81,81 @@ func TestGateObserve(t *testing.T) {
 	}
 }
 
+func TestGateUsesAddressedPartyWithoutBypassingAuthorization(t *testing.T) {
+	ing := New(nil, nil)
+	def := entrypoints.Definition{AllowedSenderIDs: []string{"ou_ok"}}
+
+	cases := []struct {
+		name  string
+		input MessageInput
+		want  Decision
+	}{
+		{
+			name:  "no address observes",
+			input: MessageInput{ChatType: "group", SenderID: "ou_ok"},
+			want:  DecisionObserve,
+		},
+		{
+			name: "ordinary member mention observes",
+			input: MessageInput{ChatType: "group", SenderID: "ou_ok", MentionTargets: []channel.MentionTarget{
+				{ID: "ou_colleague", IDType: "open_id", Name: "Colleague"},
+			}},
+			want: DecisionObserve,
+		},
+		{
+			name:  "agent address dispatches",
+			input: MessageInput{ChatType: "group", SenderID: "ou_ok", AddressedTo: []channel.AddressTarget{channel.AddressTargetAgent}},
+			want:  DecisionDispatch,
+		},
+		{
+			name:  "owner address dispatches",
+			input: MessageInput{ChatType: "group", SenderID: "ou_ok", AddressedTo: []channel.AddressTarget{channel.AddressTargetOwner}},
+			want:  DecisionDispatch,
+		},
+		{
+			name:  "dual address dispatches once",
+			input: MessageInput{ChatType: "group", SenderID: "ou_ok", AddressedTo: []channel.AddressTarget{channel.AddressTargetAgent, channel.AddressTargetOwner}},
+			want:  DecisionDispatch,
+		},
+		{
+			name:  "owner address does not bypass sender authorization",
+			input: MessageInput{ChatType: "group", SenderID: "ou_stranger", AddressedTo: []channel.AddressTarget{channel.AddressTargetOwner}},
+			want:  DecisionReject,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ing.Gate(tc.input, def); got != tc.want {
+				t.Fatalf("Gate() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMessageInputInboundContextPreservesAddressingFacts(t *testing.T) {
+	input := MessageInput{
+		Channel:      "feishu",
+		EntrypointID: "ep-owner",
+		ChatID:       "oc_group",
+		ChatType:     "group",
+		SenderID:     "ou_sender",
+		Mentioned:    false,
+		MentionTargets: []channel.MentionTarget{
+			{ID: "ou_owner", IDType: "open_id", Name: "Owner"},
+		},
+		AddressedTo: []channel.AddressTarget{channel.AddressTargetOwner},
+	}
+
+	ctx := input.InboundContext()
+	if len(ctx.AddressedTo) != 1 || ctx.AddressedTo[0] != channel.AddressTargetOwner {
+		t.Fatalf("AddressedTo = %v, want [owner]", ctx.AddressedTo)
+	}
+	if len(ctx.MentionTargets) != 1 || ctx.MentionTargets[0].ID != "ou_owner" {
+		t.Fatalf("MentionTargets = %+v, want owner target", ctx.MentionTargets)
+	}
+}
+
 func TestGateObserveAllowsEntrypointOwner(t *testing.T) {
 	owner := &stubOwnerResolver{ownerSenderID: "ou_owner"}
 	ing := New(nil, nil)
@@ -99,6 +174,7 @@ func TestGateRejectUnauthorized(t *testing.T) {
 	// 未授权 → reject（不管 mention/chatType）
 	cases := []MessageInput{
 		{ChatType: "group", Mentioned: true, SenderID: "ou_stranger", Content: "hi"},
+		{ChatType: "group", AddressedTo: []channel.AddressTarget{channel.AddressTargetOwner}, SenderID: "ou_stranger", Content: "hi"},
 		{ChatType: "group", Mentioned: false, SenderID: "ou_stranger", Content: "hi"},
 		{ChatType: "direct", SenderID: "ou_stranger", Content: "hi"},
 	}
