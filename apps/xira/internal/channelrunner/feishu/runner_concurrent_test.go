@@ -119,6 +119,95 @@ func makeP2Message(chatID, senderID, messageID, text string) *larkim.P2MessageRe
 	}
 }
 
+func makeP2GroupMessageWithMentions(chatID, senderID, messageID, text string, mentions ...*larkim.MentionEvent) *larkim.P2MessageReceiveV1 {
+	msg := makeP2Message(chatID, senderID, messageID, text)
+	msg.Event.Message.ChatType = strPtr("group")
+	msg.Event.Message.Mentions = mentions
+	return msg
+}
+
+func TestFeishuOwnerMentionStartsExistingTurnWithAddressingFacts(t *testing.T) {
+	captured := make(chan frt.TurnRequest, 1)
+	rt := &fakeRuntime{respond: func(req frt.TurnRequest) frt.TurnResponse {
+		captured <- req
+		return frt.TurnResponse{Status: "completed", FinalResponse: " "}
+	}}
+	runner := newFeishuTestRunner(t, rt)
+	runner.SetOwnerResolver(&stubOwnerResolver{ownerSenderID: "u_owner"})
+
+	msg := makeP2GroupMessageWithMentions(
+		"oc_group", "u_sender", "om_owner", "owner please review",
+		&larkim.MentionEvent{Id: &larkim.UserId{UserId: strPtr("u_owner"), OpenId: strPtr("ou_owner")}, Name: strPtr("Owner")},
+	)
+	if err := runner.handleMessageReceive(context.Background(), msg); err != nil {
+		t.Fatalf("handleMessageReceive: %v", err)
+	}
+	waitTurnInactive(t, runner, chatKeyFor("oc_group", "u_sender"))
+
+	select {
+	case req := <-captured:
+		if len(req.Context.AddressedTo) != 1 || req.Context.AddressedTo[0] != channel.AddressTargetOwner {
+			t.Fatalf("AddressedTo = %v, want [owner]", req.Context.AddressedTo)
+		}
+		if len(req.Context.MentionTargets) != 1 || req.Context.MentionTargets[0].ID != "u_owner" {
+			t.Fatalf("MentionTargets = %+v, want canonical owner", req.Context.MentionTargets)
+		}
+		if req.Context.ChatID != "oc_group" || req.Context.SenderID != "u_sender" {
+			t.Fatalf("runtime context lost group identity: %+v", req.Context)
+		}
+	default:
+		t.Fatal("@owner did not start the existing Agent Turn")
+	}
+}
+
+func TestFeishuOwnerAndAgentMentionStartsOneTurnWithBothFacts(t *testing.T) {
+	captured := make(chan frt.TurnRequest, 2)
+	rt := &fakeRuntime{respond: func(req frt.TurnRequest) frt.TurnResponse {
+		captured <- req
+		return frt.TurnResponse{Status: "completed", FinalResponse: " "}
+	}}
+	runner := newFeishuTestRunner(t, rt)
+	runner.SetOwnerResolver(&stubOwnerResolver{ownerSenderID: "u_owner"})
+	runner.botOpenID.Store("ou_bot")
+
+	msg := makeP2GroupMessageWithMentions(
+		"oc_group", "u_sender", "om_both", "both please review",
+		&larkim.MentionEvent{Id: &larkim.UserId{UserId: strPtr("u_owner"), OpenId: strPtr("ou_owner")}, Name: strPtr("Owner")},
+		&larkim.MentionEvent{Id: &larkim.UserId{OpenId: strPtr("ou_bot")}, Name: strPtr("Xira")},
+	)
+	if err := runner.handleMessageReceive(context.Background(), msg); err != nil {
+		t.Fatalf("handleMessageReceive: %v", err)
+	}
+	waitTurnInactive(t, runner, chatKeyFor("oc_group", "u_sender"))
+
+	if len(captured) != 1 {
+		t.Fatalf("RunAgent calls = %d, want exactly 1", len(captured))
+	}
+	req := <-captured
+	if len(req.Context.AddressedTo) != 2 || req.Context.AddressedTo[0] != channel.AddressTargetAgent || req.Context.AddressedTo[1] != channel.AddressTargetOwner {
+		t.Fatalf("AddressedTo = %v, want [agent owner]", req.Context.AddressedTo)
+	}
+}
+
+func TestFeishuOrdinaryMemberMentionRemainsObserveOnly(t *testing.T) {
+	rt := &fakeRuntime{respond: func(frt.TurnRequest) frt.TurnResponse {
+		return frt.TurnResponse{Status: "completed", FinalResponse: " "}
+	}}
+	runner := newFeishuTestRunner(t, rt)
+	runner.SetOwnerResolver(&stubOwnerResolver{ownerSenderID: "u_owner"})
+
+	msg := makeP2GroupMessageWithMentions(
+		"oc_group", "u_sender", "om_colleague", "colleague please review",
+		&larkim.MentionEvent{Id: &larkim.UserId{UserId: strPtr("u_colleague")}, Name: strPtr("Colleague")},
+	)
+	if err := runner.handleMessageReceive(context.Background(), msg); err != nil {
+		t.Fatalf("handleMessageReceive: %v", err)
+	}
+	if got := rt.maxSeen(); got != 0 {
+		t.Fatalf("RunAgent calls for ordinary member mention = %d, want observe-only", got)
+	}
+}
+
 // chatKeyFor reproduces the ChatKey handleMessageReceive derives. extractSenderID
 // returns SenderId.UserId, so SenderID in the key equals the raw senderID.
 func chatKeyFor(chatID, senderID string) frt.ChatKey {

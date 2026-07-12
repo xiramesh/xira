@@ -392,6 +392,11 @@ func TestResumeDirectHumanRequestPropagatesContextToBase(t *testing.T) {
 		Message:      "need input",
 		SessionID:    "session-resume-1",
 		SessionScope: scope,
+		// Production owner-addressed runs persist this fact in run.Metadata.
+		// The resume path must merge it back into InboundContext.Raw; passing
+		// trigger.Raw directly to inboundContextFromScope would not exercise
+		// the real resumeDirectHumanRequest data flow.
+		Metadata: map[string]string{"addressed_to": "owner"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -434,6 +439,10 @@ func TestResumeDirectHumanRequestPropagatesContextToBase(t *testing.T) {
 		"ChatName: 工作群",
 		"Sender: user-42",
 		"SenderName: 张三",
+		"# Addressing Context",
+		"Addressed to: owner",
+		"owner's AI intern",
+		"Never impersonate the owner",
 	} {
 		if !strings.Contains(systemInstruction, want) {
 			t.Errorf("resumed run system instruction missing %q\n--- instruction ---\n%s", want, systemInstruction)

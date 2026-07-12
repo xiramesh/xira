@@ -264,6 +264,15 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		senderID = "unknown"
 	}
 	mentioned := r.isBotMentioned(message) // 精确匹配 bot open_id，不是「有 mention 就算」
+	mentionTargets := extractMentionTargets(message.Mentions)
+	ownerMentioned := r.isOwnerMentioned(ctx, mentionTargets)
+	addressedTo := make([]channel.AddressTarget, 0, 2)
+	if mentioned {
+		addressedTo = append(addressedTo, channel.AddressTargetAgent)
+	}
+	if ownerMentioned {
+		addressedTo = append(addressedTo, channel.AddressTargetOwner)
+	}
 	messageType := stringValue(message.MessageType)
 	content := extractContent(messageType, stringValue(message.Content))
 	content = stripMentionPlaceholders(content, message.Mentions)
@@ -280,17 +289,20 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		"message_type", messageType,
 		"sender_id", senderID,
 		"mentioned", mentioned,
+		"owner_mentioned", ownerMentioned,
 		"mentions", len(message.Mentions),
 		"content_chars", utf8.RuneCountInString(content),
 		"content_preview", previewText(content, 120),
 	)
 	// #151: 通过共享 ingest 层统一处理 gate（授权 + mention）→ observe or dispatch。
 	// ingest 必须 非 nil（main.go 在 Start 前注入）。没有不安全 fallback。
+	metadata := r.buildMetadata(message, event.Event.Sender, chatType, messageType)
 	input := ingest.MessageInput{
 		Channel: "feishu", EntrypointID: r.definition.ID,
 		ChatID: chatID, ChatType: chatType,
 		SenderID: senderID, Mentioned: mentioned,
-		Content: content, MessageID: messageID,
+		MentionTargets: mentionTargets, AddressedTo: addressedTo,
+		Content: content, MessageID: messageID, Metadata: metadata,
 	}
 	switch r.ingest.Gate(input, r.definition) {
 	case ingest.DecisionObserve:
@@ -327,7 +339,6 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 	// single-active-turn contract violation. The Router now serializes them:
 	// the 2nd message steers (enqueued) instead of racing. Different chats
 	// still run in parallel (per-chatKey isolation preserved).
-	metadata := r.buildMetadata(message, event.Event.Sender, chatType, messageType)
 	slog.Info("feishu dispatching message to runtime",
 		"entrypoint_id", r.definition.ID,
 		"chat_id", chatID,
@@ -335,7 +346,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		"message_id", messageID,
 		"sender_id", senderID,
 	)
-	inbound := channel.NewInboundContextWithEntrypoint("feishu", r.definition.ID, senderID, metadata)
+	inbound := input.InboundContext()
 	chatKey := frt.ChatKeyFromInbound(inbound)
 	// HITL direct-answer (#92): shared preflight check. If this chatKey has a
 	// pending HITL (agent_request only — tool gates need precise approve/deny),
@@ -792,16 +803,8 @@ func extractSenderID(sender *larkim.EventSender) string {
 	if sender == nil || sender.SenderId == nil {
 		return ""
 	}
-	if sender.SenderId.UserId != nil && *sender.SenderId.UserId != "" {
-		return *sender.SenderId.UserId
-	}
-	if sender.SenderId.OpenId != nil && *sender.SenderId.OpenId != "" {
-		return *sender.SenderId.OpenId
-	}
-	if sender.SenderId.UnionId != nil && *sender.SenderId.UnionId != "" {
-		return *sender.SenderId.UnionId
-	}
-	return ""
+	id, _ := canonicalUserIdentity(sender.SenderId)
+	return id
 }
 
 func normalizeChatType(value string) string {

@@ -219,6 +219,70 @@ func TestIsBotMentioned(t *testing.T) {
 	}
 }
 
+func TestExtractMentionTargetsUsesSenderIdentityPriority(t *testing.T) {
+	targets := extractMentionTargets([]*larkim.MentionEvent{
+		{
+			Id: &larkim.UserId{
+				UserId:  strPtr("u_owner"),
+				OpenId:  strPtr("ou_owner"),
+				UnionId: strPtr("on_owner"),
+			},
+			Name: strPtr(" Owner "),
+		},
+		{Id: &larkim.UserId{OpenId: strPtr("ou_colleague")}, Name: strPtr("Colleague")},
+		{Id: &larkim.UserId{UnionId: strPtr("on_guest")}, Name: strPtr("Guest")},
+		nil,
+		{Name: strPtr("No ID")},
+		{Id: &larkim.UserId{}, Name: strPtr("Empty ID")},
+	})
+
+	want := []channel.MentionTarget{
+		{ID: "u_owner", IDType: "user_id", Name: "Owner"},
+		{ID: "ou_colleague", IDType: "open_id", Name: "Colleague"},
+		{ID: "on_guest", IDType: "union_id", Name: "Guest"},
+	}
+	if len(targets) != len(want) {
+		t.Fatalf("targets = %+v, want %+v", targets, want)
+	}
+	for i := range want {
+		if targets[i] != want[i] {
+			t.Fatalf("targets[%d] = %+v, want %+v", i, targets[i], want[i])
+		}
+	}
+}
+
+func TestIsOwnerMentionedUsesExactEntrypointScopedIdentity(t *testing.T) {
+	owner := &stubOwnerResolver{ownerSenderID: "u_owner"}
+	r := &Runner{
+		definition:    entrypoints.Definition{ID: "feishu-owner-entrypoint"},
+		ownerResolver: owner,
+	}
+	targets := []channel.MentionTarget{
+		{ID: "u_colleague", IDType: "user_id"},
+		{ID: "u_owner", IDType: "user_id"},
+	}
+
+	if !r.isOwnerMentioned(context.Background(), targets) {
+		t.Fatal("owner mention should be detected")
+	}
+	if owner.LastEntrypointID != "feishu-owner-entrypoint" {
+		t.Fatalf("entrypointID = %q, want feishu-owner-entrypoint", owner.LastEntrypointID)
+	}
+	if (&Runner{}).isOwnerMentioned(context.Background(), targets) {
+		t.Fatal("nil owner resolver must not classify an owner mention")
+	}
+	var nilRunner *Runner
+	if nilRunner.isOwnerMentioned(context.Background(), targets) {
+		t.Fatal("nil runner must not classify an owner mention")
+	}
+	if r.isOwnerMentioned(context.Background(), []channel.MentionTarget{{ID: "u_other", IDType: "user_id"}}) {
+		t.Fatal("ordinary member must not classify as owner")
+	}
+	if r.isOwnerMentioned(context.Background(), []channel.MentionTarget{{ID: "", IDType: "user_id"}}) {
+		t.Fatal("empty mention identity must not classify as owner")
+	}
+}
+
 // TestParseBotOpenID 验证 Bot Info API 响应解析（成功/JSON 错误/空 ID/API 错误）。
 func TestParseBotOpenID(t *testing.T) {
 	cases := []struct {

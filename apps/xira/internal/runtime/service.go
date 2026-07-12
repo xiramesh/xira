@@ -1821,6 +1821,7 @@ func (s *Service) composeInstructionText(profile agents.Profile, skillBlocks []s
 		time.Now().Format("2006-01-02"),
 	)
 	conversation := formatConversationContext(inbound)
+	addressing := formatAddressingContext(inbound)
 	var capability string
 	if len(tools) == 0 {
 		capability = "Available tools: none.\nOnly claim capabilities you can perform without tools."
@@ -1834,6 +1835,9 @@ func (s *Service) composeInstructionText(profile agents.Profile, skillBlocks []s
 	sections = append(sections, "# Runtime Identity\n\n"+identity)
 	if conversation != "" {
 		sections = append(sections, "# Conversation Context\n\n"+conversation)
+	}
+	if addressing != "" {
+		sections = append(sections, "# Addressing Context\n\n"+addressing)
 	}
 	sections = append(sections, "# Runtime Capabilities\n\n"+capability)
 	body := strings.Join(sections, "\n\n")
@@ -1893,6 +1897,23 @@ func formatConversationContext(inbound channel.InboundContext) string {
 	}
 	if senderName != "" {
 		lines = append(lines, "SenderName: "+senderName)
+	}
+	for _, target := range inbound.MentionTargets {
+		id := sanitizeInlineField(target.ID)
+		if id == "" {
+			continue
+		}
+		idType := sanitizeInlineField(target.IDType)
+		identity := id
+		if idType != "" {
+			identity = idType + ":" + id
+		}
+		name := sanitizeInlineField(target.Name)
+		if name != "" {
+			lines = append(lines, fmt.Sprintf("MentionTarget: %s (%s)", name, identity))
+		} else {
+			lines = append(lines, "MentionTarget: "+identity)
+		}
 	}
 	return strings.Join(lines, "\n")
 }
