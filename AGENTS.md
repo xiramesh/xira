@@ -75,6 +75,19 @@ fact kind 忘在 switch 里开 `conversation=true` 就被静默 drop。
 **警惕仍适用**:新加的信号 kind 如果该进 IM,要在 `runtimeEventToEvent` 加映射 + `renderEventText`
 加渲染 case,否则它走 non-signal 的 slog 路径(不进 IM)。这是 §2"缺口要补不要绕"在新架构下的延续。
 
+### 1.5 `finish_silent` —— 显式静默，不是“空 final 即成功”
+
+- `finish_silent` 是 runtime-owned ADK tool，输入 schema 是 sealed 空对象；模型只能声明静默，不能提供
+  recipient、reason、status 或任意身份。
+- 空 final 只有两种白名单成功原因：成功的 `finish_silent`，或已有的 `notify_owner sent`。普通空 final、
+  截断和缺失输出继续失败。
+- `finish_silent` 不能掩盖工具失败：同一 turn 任意 tool record 有 error / `failed` / `rejected`，显式静默
+  不成立。`notify_owner` 的“失败后重试成功”继续保留其独立语义。
+- parent RunAgent、spawned child 和 HITL resume 必须统一走 `verifyRunOutcome`，不能只修主路径；否则会出现
+  “工具可见且调用成功，但 wrapper verification 又判失败”的路径漂移。
+- 静默成功不发布 `assistant.final`（没有 final）；仍发布 `run.finished(completed)`。`agent.silence_declared` 与
+  `adk.intentional_silence` 是 observability/audit kind，不映射进 IM。
+
 ## 2. 设计评审方法论（本次复盘总结）
 
 - **先核实，再判断。** 评审设计文档时，文档声称存在的代码契约（事件、接口、字段）必须先
