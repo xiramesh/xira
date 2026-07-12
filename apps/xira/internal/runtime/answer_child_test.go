@@ -264,9 +264,12 @@ func TestAnswerChildResumeKeepsChildWorking(t *testing.T) {
 			if run.Status != "completed" {
 				t.Fatalf("child resume ended in %q with error metadata %+v — resume did not let the child finish its job (断裂 B: tools must be kept on the answer-resume path)", run.Status, run.Metadata)
 			}
-			return // pass: child completed after the parent answered
+			request, err := rt.GetHumanRequest(ctx, hr.ID)
+			if err == nil && request.Resume.Status == humanrequest.ResumeCompleted {
+				return // pass: child and its durable resume bookkeeping both completed
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("child run did not reach a terminal status within timeout — resume did not fire")
+	t.Fatalf("child run and durable resume bookkeeping did not complete within timeout")
 }
