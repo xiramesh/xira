@@ -230,3 +230,65 @@ func resolvedTrackedRequest(t *testing.T, store *Store, workspaceKey, requestID 
 	}
 	return resolved
 }
+
+func TestInteractionTransitionTablesFailClosed(t *testing.T) {
+	now := time.Date(2026, 7, 13, 14, 0, 0, 0, time.UTC)
+	if err := applyDeliveryAttempt(nil, DeliveryAttempt{MessageID: "om_x"}, now); !errors.Is(err, ErrValidation) {
+		t.Fatalf("nil delivery request error = %v", err)
+	}
+	if err := applyDeliveryAttempt(&HumanRequest{Delivery: DeliveryState{Status: DeliverySent}}, DeliveryAttempt{MessageID: "om_x"}, now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("terminal delivery error = %v", err)
+	}
+
+	if _, err := applyResumeClaim(nil, now); !errors.Is(err, ErrValidation) {
+		t.Fatalf("nil resume claim error = %v", err)
+	}
+	if _, err := applyResumeClaim(&HumanRequest{ID: "pending", Status: StatusPending}, now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unresolved resume claim error = %v", err)
+	}
+	legacyResolved := &HumanRequest{ID: "legacy", Status: StatusResolved, Response: &HumanResponse{ID: "hrs_legacy"}}
+	if _, err := applyResumeClaim(legacyResolved, now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("legacy resume claim error = %v", err)
+	}
+	for _, status := range []ResumeStatus{ResumeRunning, ResumeCompleted} {
+		req := &HumanRequest{ID: "noop", Status: StatusResolved, Response: &HumanResponse{ID: "hrs_noop"}, Resume: ResumeState{Status: status}}
+		if claimed, err := applyResumeClaim(req, now); err != nil || claimed {
+			t.Fatalf("claim %s = (%v, %v), want no-op", status, claimed, err)
+		}
+	}
+
+	if _, err := applyResumeFinish(nil, "", now); !errors.Is(err, ErrValidation) {
+		t.Fatalf("nil resume finish error = %v", err)
+	}
+	completed := &HumanRequest{ID: "completed", Resume: ResumeState{Status: ResumeCompleted}}
+	if changed, err := applyResumeFinish(completed, "", now); err != nil || changed {
+		t.Fatalf("complete completed = (%v, %v), want idempotent no-op", changed, err)
+	}
+	if _, err := applyResumeFinish(&HumanRequest{ID: "pending", Resume: ResumeState{Status: ResumePending}}, "", now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("finish pending error = %v", err)
+	}
+
+	wants := map[ResumeStatus]bool{
+		ResumeWaitingResponse: false,
+		ResumePending:         true,
+		ResumeRunning:         false,
+		ResumeCompleted:       false,
+		ResumeFailed:          true,
+		"":                    false,
+	}
+	for status, want := range wants {
+		if got := resumeNeedsRetry(status); got != want {
+			t.Fatalf("resumeNeedsRetry(%q) = %v, want %v", status, got, want)
+		}
+	}
+	if recoverInterruptedResume(nil, now) {
+		t.Fatal("nil interrupted resume recovered")
+	}
+	if recoverInterruptedResume(&HumanRequest{Resume: ResumeState{Status: ResumePending}}, now) {
+		t.Fatal("pending resume recovered as interrupted")
+	}
+	running := &HumanRequest{Resume: ResumeState{Status: ResumeRunning}}
+	if !recoverInterruptedResume(running, now) || running.Resume.Status != ResumeFailed {
+		t.Fatalf("running resume recovery = %+v", running.Resume)
+	}
+}

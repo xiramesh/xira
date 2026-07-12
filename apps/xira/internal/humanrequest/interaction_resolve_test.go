@@ -179,3 +179,47 @@ func TestStoreResolveExactIsIdempotentOnlyForSameKeyAndPayload(t *testing.T) {
 		t.Fatalf("different key error = %v, want ErrConflict", err)
 	}
 }
+
+func TestStoreLegacyResolveUsesIdempotencyKeyWithoutExactEnvelope(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_legacy_idempotent", WorkspaceID: "workspace", WorkspaceKey: "ws_legacy_idempotent",
+		RunID: "run-legacy-idempotent", AgentID: "agent", SessionID: "session",
+		Kind: RequestFreeform, Question: "Legacy retry?",
+	})
+	input := ResolveRequest{
+		WorkspaceKey: req.WorkspaceKey, RequestID: req.ID, Kind: ResponseAnswer,
+		Actor: "user", Message: "same answer", IdempotencyKey: "legacy-message-1",
+	}
+	first, err := store.Resolve(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Resolve(context.Background(), input)
+	if err != nil {
+		t.Fatalf("legacy identical retry error = %v", err)
+	}
+	if second.Response == nil || first.Response == nil || second.Response.ID != first.Response.ID {
+		t.Fatalf("legacy retry responses = first=%+v second=%+v", first.Response, second.Response)
+	}
+	input.Message = "different answer"
+	if _, err := store.Resolve(context.Background(), input); !errors.Is(err, ErrConflict) {
+		t.Fatalf("legacy conflicting retry error = %v", err)
+	}
+}
+
+func TestExactResponseContractNilAndRetryAuthority(t *testing.T) {
+	if err := validateExactResponse(nil, HumanResponseEnvelope{}, time.Now()); !errors.Is(err, ErrValidation) {
+		t.Fatalf("nil exact request error = %v", err)
+	}
+	existing := &HumanResponse{
+		Kind: ResponseApprove, Actor: "ou_owner", ActorIDType: "open_id",
+		EntrypointID: "feishu-owner", DeliveryMessageID: "om_1",
+		Message: "approved", IdempotencyKey: "action-1",
+	}
+	legacy := ResolveRequest{Kind: ResponseApprove, Actor: "ou_owner", Message: "approved", IdempotencyKey: "action-1"}
+	exact := &HumanResponseEnvelope{SenderIDType: "open_id", EntrypointID: "feishu-owner", DeliveryMessageID: "om_2"}
+	if sameResponseRetry(existing, legacy, exact) {
+		t.Fatal("retry with wrong delivery authority matched")
+	}
+}
