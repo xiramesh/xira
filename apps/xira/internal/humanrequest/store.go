@@ -3,6 +3,7 @@ package humanrequest
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ var (
 	ErrValidation = errors.New("validation")
 	ErrNotFound   = errors.New("not found")
 	ErrConflict   = errors.New("conflict")
+	ErrExpired    = errors.New("expired")
 )
 
 type Store struct {
@@ -109,6 +111,25 @@ func (s *Store) Create(ctx context.Context, input CreateRequest) (*HumanRequest,
 }
 
 func (s *Store) Resolve(ctx context.Context, input ResolveRequest) (*HumanRequest, error) {
+	return s.resolve(ctx, input, nil)
+}
+
+// ResolveExact resolves one request only when the channel-supplied correlation
+// and typed responder identity match the authority persisted at creation.
+// coverage: contract (100% required)
+func (s *Store) ResolveExact(ctx context.Context, input HumanResponseEnvelope) (*HumanRequest, error) {
+	return s.resolve(ctx, ResolveRequest{
+		WorkspaceKey:   input.WorkspaceKey,
+		RequestID:      input.RequestID,
+		Kind:           input.Kind,
+		Actor:          input.SenderID,
+		Message:        input.Message,
+		IdempotencyKey: input.IdempotencyKey,
+		ResolvedAt:     input.ResolvedAt,
+	}, &input)
+}
+
+func (s *Store) resolve(ctx context.Context, input ResolveRequest, exact *HumanResponseEnvelope) (*HumanRequest, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -131,12 +152,20 @@ func (s *Store) Resolve(ctx context.Context, input ResolveRequest) (*HumanReques
 	if input.Kind == ResponseAnswer && strings.TrimSpace(input.Message) == "" {
 		return nil, fmt.Errorf("%w: answer message is required", ErrValidation)
 	}
-	if req.Status != StatusPending {
-		return nil, fmt.Errorf("%w: human request %s is already %s", ErrConflict, req.ID, req.Status)
-	}
 	now := input.ResolvedAt
 	if now.IsZero() {
 		now = time.Now()
+	}
+	if exact != nil {
+		if err := validateExactResponse(req, *exact, now); err != nil {
+			return nil, err
+		}
+	}
+	if req.Status != StatusPending {
+		if sameResponseRetry(req.Response, input, exact) {
+			return req, nil
+		}
+		return nil, fmt.Errorf("%w: human request %s is already %s", ErrConflict, req.ID, req.Status)
 	}
 	response := &HumanResponse{
 		ID:             "hrs_" + uuid.NewString(),
@@ -147,9 +176,18 @@ func (s *Store) Resolve(ctx context.Context, input ResolveRequest) (*HumanReques
 		IdempotencyKey: strings.TrimSpace(input.IdempotencyKey),
 		CreatedAt:      now,
 	}
+	if exact != nil {
+		response.ActorIDType = strings.ToLower(strings.TrimSpace(exact.SenderIDType))
+		response.EntrypointID = strings.TrimSpace(exact.EntrypointID)
+		response.DeliveryMessageID = strings.TrimSpace(exact.DeliveryMessageID)
+	}
 	req.Status = StatusResolved
 	req.ResolvedAt = &now
 	req.Response = response
+	if req.Resume.Status == ResumeWaitingResponse {
+		req.Resume.Status = ResumePending
+		req.Resume.LastError = ""
+	}
 	req.Audit = append(req.Audit, AuditRecord{
 		Time:       now,
 		Actor:      response.Actor,
@@ -166,6 +204,58 @@ func (s *Store) Resolve(ctx context.Context, input ResolveRequest) (*HumanReques
 		return nil, err
 	}
 	return req, nil
+}
+
+// validateExactResponse checks every authority dimension before the request is
+// mutated. Empty persisted optional dimensions are legacy-compatible; a
+// non-empty persisted value must match exactly.
+// coverage: contract (100% required)
+func validateExactResponse(req *HumanRequest, input HumanResponseEnvelope, now time.Time) error {
+	if req == nil {
+		return fmt.Errorf("%w: human request is required", ErrValidation)
+	}
+	correlation := strings.TrimSpace(input.CorrelationToken)
+	if correlation == "" || subtle.ConstantTimeCompare([]byte(correlation), []byte(req.CorrelationToken)) != 1 {
+		return fmt.Errorf("%w: human response correlation does not match request", ErrConflict)
+	}
+	entrypointID := strings.TrimSpace(input.EntrypointID)
+	senderID := strings.TrimSpace(input.SenderID)
+	senderIDType := strings.ToLower(strings.TrimSpace(input.SenderIDType))
+	if req.Responder.EntrypointID != "" && entrypointID != req.Responder.EntrypointID {
+		return fmt.Errorf("%w: human response entrypoint does not match request", ErrConflict)
+	}
+	if req.Responder.SenderID != "" && senderID != req.Responder.SenderID {
+		return fmt.Errorf("%w: human response sender does not match request", ErrConflict)
+	}
+	if req.Responder.SenderIDType != "" && senderIDType != req.Responder.SenderIDType {
+		return fmt.Errorf("%w: human response sender id type does not match request", ErrConflict)
+	}
+	deliveryMessageID := strings.TrimSpace(input.DeliveryMessageID)
+	if req.Delivery.MessageID != "" && deliveryMessageID != req.Delivery.MessageID {
+		return fmt.Errorf("%w: human response delivery message does not match request", ErrConflict)
+	}
+	if req.ExpiresAt != nil && now.After(*req.ExpiresAt) {
+		return fmt.Errorf("%w: human request %s expired at %s", ErrExpired, req.ID, req.ExpiresAt.Format(time.RFC3339))
+	}
+	return nil
+}
+
+// sameResponseRetry recognizes an exact retry only when a non-empty stable
+// idempotency key and every persisted response field match.
+// coverage: contract (100% required)
+func sameResponseRetry(existing *HumanResponse, input ResolveRequest, exact *HumanResponseEnvelope) bool {
+	if existing == nil || strings.TrimSpace(input.IdempotencyKey) == "" || existing.IdempotencyKey != strings.TrimSpace(input.IdempotencyKey) {
+		return false
+	}
+	if existing.Kind != input.Kind || existing.Actor != strings.TrimSpace(input.Actor) || existing.Message != strings.TrimSpace(input.Message) {
+		return false
+	}
+	if exact == nil {
+		return true
+	}
+	return existing.ActorIDType == strings.ToLower(strings.TrimSpace(exact.SenderIDType)) &&
+		existing.EntrypointID == strings.TrimSpace(exact.EntrypointID) &&
+		existing.DeliveryMessageID == strings.TrimSpace(exact.DeliveryMessageID)
 }
 
 func (s *Store) Get(ctx context.Context, workspaceKey, requestID string) (*HumanRequest, error) {

@@ -117,13 +117,33 @@ type HumanRequest struct {
 }
 
 type HumanResponse struct {
-	ID             string       `json:"id" yaml:"id"`
-	RequestID      string       `json:"request_id" yaml:"request_id"`
-	Kind           ResponseKind `json:"kind" yaml:"kind"`
-	Actor          string       `json:"actor,omitempty" yaml:"actor,omitempty"`
-	Message        string       `json:"message,omitempty" yaml:"message,omitempty"`
-	IdempotencyKey string       `json:"idempotency_key,omitempty" yaml:"idempotency_key,omitempty"`
-	CreatedAt      time.Time    `json:"created_at" yaml:"created_at"`
+	ID                string       `json:"id" yaml:"id"`
+	RequestID         string       `json:"request_id" yaml:"request_id"`
+	Kind              ResponseKind `json:"kind" yaml:"kind"`
+	Actor             string       `json:"actor,omitempty" yaml:"actor,omitempty"`
+	ActorIDType       string       `json:"actor_id_type,omitempty" yaml:"actor_id_type,omitempty"`
+	EntrypointID      string       `json:"entrypoint_id,omitempty" yaml:"entrypoint_id,omitempty"`
+	DeliveryMessageID string       `json:"delivery_message_id,omitempty" yaml:"delivery_message_id,omitempty"`
+	Message           string       `json:"message,omitempty" yaml:"message,omitempty"`
+	IdempotencyKey    string       `json:"idempotency_key,omitempty" yaml:"idempotency_key,omitempty"`
+	CreatedAt         time.Time    `json:"created_at" yaml:"created_at"`
+}
+
+// HumanResponseEnvelope is the channel-neutral exact response contract. A
+// runner authenticates the native event and supplies typed identity; runtime
+// and Store revalidate it against the persisted request authority.
+type HumanResponseEnvelope struct {
+	WorkspaceKey      string
+	RequestID         string
+	CorrelationToken  string
+	EntrypointID      string
+	SenderID          string
+	SenderIDType      string
+	DeliveryMessageID string
+	Kind              ResponseKind
+	Message           string
+	IdempotencyKey    string
+	ResolvedAt        time.Time
 }
 
 type AuditRecord struct {
