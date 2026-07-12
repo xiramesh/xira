@@ -50,6 +50,12 @@ type DeliveryState struct {
 	DeliveredAt *time.Time     `json:"delivered_at,omitempty" yaml:"delivered_at,omitempty"`
 }
 
+type DeliveryAttempt struct {
+	MessageID   string
+	Error       string
+	AttemptedAt time.Time
+}
+
 type ResumeStatus string
 
 const (
