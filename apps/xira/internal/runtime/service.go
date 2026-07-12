@@ -34,6 +34,11 @@ type Config struct {
 	DefaultAgentID string
 	StateDir       string
 	DeepSeekClient *deepseek.Client
+	// SessionManager is an optional pre-created session manager (#151: composition
+	// root ownership). nil = NewService creates one internally (backward compat
+	// for tests). When non-nil, NewService uses this instance instead of creating
+	// its own — the same instance can then be injected into channel runners / ingest.
+	SessionManager *fsession.Manager
 }
 
 type Service struct {
@@ -93,9 +98,15 @@ func NewService(cfg Config) (*Service, error) {
 	if _, ok := manager.Get(resolved.DefaultAgentID); !ok {
 		return nil, fmt.Errorf("default agent %q not found", resolved.DefaultAgentID)
 	}
-	sessionManager, err := fsession.NewManagerWithStore(resolved.SessionRoot)
-	if err != nil {
-		return nil, err
+	// #151: SessionManager 可以从外部注入（composition root 创建），
+	// 也可以由 NewService 内部创建（兼容旧测试）。
+	sessionManager := cfg.SessionManager
+	if sessionManager == nil {
+		var err error
+		sessionManager, err = fsession.NewManagerWithStore(resolved.SessionRoot)
+		if err != nil {
+			return nil, err
+		}
 	}
 	dsClient := cfg.DeepSeekClient
 	if dsClient == nil {

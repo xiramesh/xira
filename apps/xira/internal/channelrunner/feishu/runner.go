@@ -96,6 +96,9 @@ func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
 func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
 	if r != nil {
 		r.ownerResolver = resolver
+		if r.ingest != nil {
+			r.ingest.SetOwnerResolver(resolver)
+		}
 	}
 }
 

@@ -77,6 +77,20 @@ type Ingest struct {
 	ownerResolver  runtime.OwnerResolver
 }
 
+// SetOwnerResolver 更新 owner resolver（runner 的 SetOwnerResolver 同步调这个）。
+func (ing *Ingest) SetOwnerResolver(owner runtime.OwnerResolver) {
+	if ing != nil {
+		ing.ownerResolver = owner
+	}
+}
+
+// SetSessionManager 更新 session manager（runner 的 SetSessionManager 同步调这个）。
+func (ing *Ingest) SetSessionManager(sm *fsession.Manager) {
+	if ing != nil {
+		ing.sessionManager = sm
+	}
+}
+
 // New 创建一个 Ingest。sessionManager 用于 observe（存消息）。
 // ownerResolver 用于授权检查（owner bypass allowlist）。
 func New(sessionManager *fsession.Manager, owner runtime.OwnerResolver) *Ingest {

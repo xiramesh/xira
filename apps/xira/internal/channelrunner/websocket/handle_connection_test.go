@@ -318,7 +318,7 @@ func TestPrepareTurnSenderAuthorization(t *testing.T) {
 	// Pin entrypointID propagation (#139 review): resolver must receive
 	// definition.ID, not channel "websocket".
 	owner := &wsStubOwner{}
-	runner.ownerResolver = owner
+	runner.SetOwnerResolver(owner) // 走 setter 同步更新 ingest
 	frame, data = mkFrame("ou_owner")
 	prepared, errFrame = runner.prepareTurn(frame, data, "ws-allowlist")
 	if errFrame != nil {

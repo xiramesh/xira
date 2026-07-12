@@ -109,6 +109,9 @@ func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
 func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
 	if r != nil {
 		r.ownerResolver = resolver
+		if r.ingest != nil {
+			r.ingest.SetOwnerResolver(resolver)
+		}
 	}
 }
 
@@ -620,20 +623,28 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		"content_chars", utf8.RuneCountInString(content),
 		"content_preview", previewText(content, 120),
 	)
-	if !shouldHandleMessage(chatType, senderID, content, r.definition, r.ownerResolver) {
-		reason := "unmentioned_group_message"
-		if !r.definition.AllowsSender(senderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), senderID, r.definition.ID)) {
-			reason = "sender_not_authorized"
+	// #151: 通过共享 ingest 层统一处理 gate（授权 + mention）→ observe or dispatch。
+	// ilink 无 mention 概念——群消息也走 AuthorizeSender（Gate 里 ilink 的
+	// Mentioned=false + ChatType=group → observe，但 ilink 不该 observe）。
+	// 所以 ilink 走 ChatType 非 group 语义（直接 dispatch or reject）。
+	input := ingest.MessageInput{
+		Channel: "ilink", EntrypointID: r.definition.ID,
+		ChatID: chatID, ChatType: chatType,
+		SenderID: senderID, Mentioned: true, // ilink 无 mention——总是"Mentioned"走 dispatch 路径
+		Content: content, MessageID: messageID,
+	}
+	if r.ingest != nil {
+		decision := r.ingest.Gate(input, r.definition)
+		if decision == ingest.DecisionReject {
+			slog.Info("ilink message rejected",
+				"entrypoint_id", r.definition.ID,
+				"account_id", account.record.AccountID,
+				"chat_id", chatID,
+				"sender_id", senderID,
+				"message_id", messageID)
+			return
 		}
-		slog.Info("ilink group message ignored",
-			"entrypoint_id", r.definition.ID,
-			"account_id", account.record.AccountID,
-			"chat_id", chatID,
-			"message_id", messageID,
-			"sender_id", senderID,
-			"reason", reason,
-		)
-		return
+		// ilink 的 Gate 总返回 dispatch 或 reject（Mentioned=true 不触发 observe）
 	}
 	dedupeKey := account.messageDedupeKey(messageID)
 	if !account.messages.Begin(dedupeKey, time.Now()) {

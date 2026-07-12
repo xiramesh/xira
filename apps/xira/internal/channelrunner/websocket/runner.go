@@ -164,6 +164,7 @@ func NewRunner(def entrypoints.Definition, rt *frt.Service, stateRoot string) (*
 		router:     progress.NewRouter(),
 		dedupe:     dedupe.New("", dedupeTTL),
 		conns:      map[frt.ChatKey]*wsConn{},
+		ingest:     ingest.New(nil, nil), // 默认无 session manager（observe no-op）；main.go 会覆盖
 	}, nil
 }
 
@@ -181,6 +182,9 @@ func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
 func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
 	if r != nil {
 		r.ownerResolver = resolver
+		if r.ingest != nil {
+			r.ingest.SetOwnerResolver(resolver)
+		}
 	}
 }
 
@@ -816,13 +820,22 @@ func (r *Runner) prepareTurn(frame inboundFrame, data messageData, defaultEntryp
 	}
 	ctx.MessageID = messageID
 	eventCtx.MessageID = messageID
-	handle := shouldHandle(ctx, data.Message, definition, r.ownerResolver)
+	// #151: 通过共享 ingest 层统一处理 gate（授权 + mention）→ observe or dispatch。
+	handle := true
 	ignoreReason := ""
-	if !handle {
-		// Internal-only reason for slog (排障). NEVER reaches the client ack —
-		// handleMessage sends a generic "unmentioned_group_message" reason so
-		// unauthorized senders can't distinguish auth-reject from mention-reject.
-		if !definition.AllowsSender(ctx.SenderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), ctx.SenderID, definition.ID)) {
+	input := ingest.MessageInput{
+		Channel: "websocket", EntrypointID: runEntrypointID,
+		ChatID: ctx.ChatID, ChatType: normalizeChannel(ctx.ChatType),
+		SenderID: ctx.SenderID, Mentioned: ctx.Mentioned,
+		Content: data.Message, MessageID: messageID,
+	}
+	switch r.ingest.Gate(input, definition) {
+	case ingest.DecisionObserve:
+		r.ingest.Observe(input, definition, dedupeKey(runEntrypointID, messageID), r.dedupe)
+		fallthrough
+	case ingest.DecisionReject:
+		handle = false
+		if !ingest.AuthorizeSender(ctx.SenderID, data.Message, definition, r.ownerResolver) {
 			ignoreReason = "sender_not_authorized"
 		} else {
 			ignoreReason = "unmentioned_group_message"
