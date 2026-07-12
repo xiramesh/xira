@@ -100,9 +100,10 @@ const ownerBindingsFilename = "owner-bindings.json"
 
 // ownerBinding 描述一条已建立的 ownership 关系：某 entrypoint 绑定了一个 owner sender。
 type ownerBinding struct {
-	EntrypointID  string    `json:"entrypoint_id"`
-	OwnerSenderID string    `json:"owner_sender_id"`
-	BoundAt       time.Time `json:"bound_at"`
+	EntrypointID      string    `json:"entrypoint_id"`
+	OwnerSenderID     string    `json:"owner_sender_id"`
+	OwnerSenderIDType string    `json:"owner_sender_id_type,omitempty"`
+	BoundAt           time.Time `json:"bound_at"`
 }
 
 // ownerBindingsFile 是 owner-bindings.json 的磁盘格式。
@@ -242,12 +243,31 @@ func sortOwnerBindings(bs []ownerBinding) {
 //
 // coverage: contract (100% required)
 func (s *Service) handleOwnerBind(entrypointID, senderID, code string) string {
+	return s.handleOwnerBindWithIdentity(entrypointID, senderID, "", code)
+}
+
+// handleOwnerBindWithIdentity is the production bind path. senderIDType comes
+// from the channel's structured sender identity, never from model/user text.
+// coverage: contract (100% required)
+func (s *Service) handleOwnerBindWithIdentity(entrypointID, senderID, senderIDType, code string) string {
 	s.ownerBindings.mu.Lock()
 	defer s.ownerBindings.mu.Unlock()
+	senderIDType = strings.ToLower(strings.TrimSpace(senderIDType))
 
 	// ① 已绑定？
 	if existing, bound := s.ownerBindings.bindings[entrypointID]; bound {
 		if existing.OwnerSenderID == senderID {
+			if existing.OwnerSenderIDType == "" && senderIDType != "" {
+				previous := existing
+				existing.OwnerSenderIDType = senderIDType
+				s.ownerBindings.bindings[entrypointID] = existing
+				if err := s.ownerBindings.persistLocked(); err != nil {
+					s.ownerBindings.bindings[entrypointID] = previous
+					slog.Error("owner_bind: persist identity type failed, enrichment rolled back",
+						"entrypoint_id", entrypointID, "err", err)
+					return "❌ 你已经是该入口的主人，但系统无法保存私有投递身份，请检查系统配置后重试。"
+				}
+			}
 			return "✅ 你已经是 " + entrypointID + " 的主人了，无需重复绑定。"
 		}
 		return "❌ 该入口（" + entrypointID + "）已有主人，无法重新绑定。"
@@ -267,9 +287,10 @@ func (s *Service) handleOwnerBind(entrypointID, senderID, code string) string {
 	// ④ 写入绑定 + 持久化。持久化失败 = 绑定未真正建立（重启会丢），所以
 	// 回滚内存写入、不作废 code、返回失败——「成功」语义诚实等于已落盘。
 	binding := ownerBinding{
-		EntrypointID:  entrypointID,
-		OwnerSenderID: senderID,
-		BoundAt:       time.Now().UTC(),
+		EntrypointID:      entrypointID,
+		OwnerSenderID:     senderID,
+		OwnerSenderIDType: senderIDType,
+		BoundAt:           time.Now().UTC(),
 	}
 	s.ownerBindings.bindings[entrypointID] = binding
 	if err := s.ownerBindings.persistLocked(); err != nil {

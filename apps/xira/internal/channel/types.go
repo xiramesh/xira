@@ -2,7 +2,10 @@ package channel
 
 import "strings"
 
-const addressedToMetadataKey = "addressed_to"
+const (
+	addressedToMetadataKey  = "addressed_to"
+	senderIDTypeMetadataKey = "sender_id_type"
+)
 
 type AddressTarget string
 
@@ -30,6 +33,7 @@ type InboundContext struct {
 	SpaceID          string            `json:"space_id,omitempty" yaml:"space_id,omitempty"`
 	SpaceType        string            `json:"space_type,omitempty" yaml:"space_type,omitempty"`
 	SenderID         string            `json:"sender_id" yaml:"sender_id"`
+	SenderIDType     string            `json:"sender_id_type,omitempty" yaml:"sender_id_type,omitempty"`
 	SenderName       string            `json:"sender_name,omitempty" yaml:"sender_name,omitempty"`
 	MessageID        string            `json:"message_id,omitempty" yaml:"message_id,omitempty"`
 	Mentioned        bool              `json:"mentioned,omitempty" yaml:"mentioned,omitempty"`
@@ -112,6 +116,18 @@ func NormalizeInboundContext(ctx InboundContext) InboundContext {
 	ctx.SpaceID = strings.TrimSpace(ctx.SpaceID)
 	ctx.SpaceType = strings.TrimSpace(ctx.SpaceType)
 	ctx.SenderID = strings.TrimSpace(ctx.SenderID)
+	if strings.TrimSpace(ctx.SenderIDType) == "" {
+		ctx.SenderIDType = firstMetadata(ctx.Raw, senderIDTypeMetadataKey)
+	}
+	ctx.SenderIDType = strings.ToLower(strings.TrimSpace(ctx.SenderIDType))
+	if ctx.SenderIDType != "" {
+		if ctx.Raw == nil {
+			ctx.Raw = map[string]string{}
+		}
+		ctx.Raw[senderIDTypeMetadataKey] = ctx.SenderIDType
+	} else {
+		delete(ctx.Raw, senderIDTypeMetadataKey)
+	}
 	ctx.SenderName = strings.TrimSpace(ctx.SenderName)
 	ctx.MessageID = strings.TrimSpace(ctx.MessageID)
 	ctx.ReplyToMessageID = strings.TrimSpace(ctx.ReplyToMessageID)

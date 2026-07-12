@@ -231,15 +231,16 @@ owner 绑定（未绑定 owner 的 entrypoint）：
 
 ```go
 type ownerBindingStore struct {
-    mu       sync.Mutex
+    mu       sync.RWMutex
     dir      string  // = s.stateDir（Service 级，跨 channel 共享）
     bindings map[string]ownerBinding  // entrypointID → binding（启动时从 owner-bindings.json 加载）
 }
 
 type ownerBinding struct {
-    EntrypointID  string    `json:"entrypoint_id"`
-    OwnerSenderID string    `json:"owner_sender_id"`
-    BoundAt       time.Time `json:"bound_at"`
+    EntrypointID      string    `json:"entrypoint_id"`
+    OwnerSenderID     string    `json:"owner_sender_id"`
+    OwnerSenderIDType string    `json:"owner_sender_id_type,omitempty"`
+    BoundAt           time.Time `json:"bound_at"`
 }
 ```
 
@@ -251,6 +252,7 @@ type ownerBinding struct {
     {
       "entrypoint_id": "feishu-default",
       "owner_sender_id": "ou_xxxxxx",
+      "owner_sender_id_type": "open_id",
       "bound_at": "2026-07-08T10:30:00Z"
     }
   ]
@@ -263,7 +265,7 @@ type ownerBinding struct {
 #### `handleOwnerBind`（核心，必须原子）
 
 ```go
-func (s *Service) handleOwnerBind(entrypointID, senderID, code string) (resultMsg string) {
+func (s *Service) handleOwnerBindWithIdentity(entrypointID, senderID, senderIDType, code string) (resultMsg string) {
     // ★ 整个 check + write 持同一把锁，原子完成
     s.ownerBindings.mu.Lock()
     defer s.ownerBindings.mu.Unlock()
@@ -282,15 +284,25 @@ func (s *Service) handleOwnerBind(entrypointID, senderID, code string) (resultMs
         return "❌ 该入口已有主人，无法重新绑定。"  // 防冒领
     }
     s.ownerBindings.bindings[entrypointID] = ownerBinding{
-        EntrypointID:  entrypointID,
-        OwnerSenderID: senderID,
-        BoundAt:       time.Now().UTC(),
+        EntrypointID:      entrypointID,
+        OwnerSenderID:     senderID,
+        OwnerSenderIDType: senderIDType,
+        BoundAt:           time.Now().UTC(),
     }
     s.ownerBindings.persistLocked()    // 持锁持久化（写文件）
     delete(s.bindCodes, entrypointID)  // 作废 code
     return "✅ 绑定成功。你现在是 " + entrypointID + " 的主人。"
 }
 ```
+
+`senderIDType` 必须来自 channel 的结构化 sender identity（飞书沿用
+`user_id > open_id > union_id` 的 canonical 选择），不能由显示名、普通文本或模型参数提供。
+旧版 `owner-bindings.json` 没有 `owner_sender_id_type` 时仍可用于 `IsOwner` 授权，但不能用于私有投递；
+同一已绑定 owner 再发送一次 `/bind ...` 时，runtime 可用当前可信事件中的 ID type 原子补齐并持久化。
+补齐失败必须回滚，不能把内存态当成已迁移。
+
+静态 owner 可通过 entrypoint 的 `owner_id_type` 声明可投递类型；只配置 `owner` 而没有 type 时同样保持
+authorization-only，`notify_owner` fail closed。
 
 #### 并发双绑防御（silent data corruption 重灾区）
 
@@ -370,6 +382,22 @@ RunAgent 入口（service.go）
 ChatKeySession.runTurn 拿到 FinalResponse 非空
     → s.cfg.SendFinal(ctx, "✅ 绑定成功")   ← 现有发送路径，零改动，发回飞书
 ```
+
+### 3.6 owner 私有投递（#154）
+
+owner 授权判断与私有投递解析是两份契约：
+
+- `OwnerResolver.IsOwner` 只回答某 sender 是否为该 entrypoint 的 owner；
+- `OwnerTargetResolver.ResolveOwnerTarget` 返回 entrypoint/channel/account/app/bot 路由信息，以及 typed recipient。
+
+`notify_owner` 是 runtime-native tool。模型只能提供 `message`，不能提供 recipient。runtime 从当前
+`runExecutionContext` 的权威 entrypoint 解析 owner，构造 `OutboundProactiveMessage`，并通过
+`Manager.Emit` 按 `EntrypointID` 精确选择 runner。相同 channel 存在多个 entrypoint 时，禁止退化成
+“取第一个 runner”；缺少 entrypoint 的 channel-only fallback 只有在候选唯一时才合法。
+
+通知成功后允许 final 为空，表示群里有意静默；这个例外只对 `notify_owner` 返回 `status=sent` 的 run
+成立。通知失败或普通空 final 仍按失败处理。owner 私聊回复与跨 chatKey HITL resume 不在本阶段，见
+#155。
 
 ---
 

@@ -140,6 +140,7 @@ func TestMessageInputInboundContextPreservesAddressingFacts(t *testing.T) {
 		ChatID:       "oc_group",
 		ChatType:     "group",
 		SenderID:     "ou_sender",
+		SenderIDType: "open_id",
 		Mentioned:    false,
 		MentionTargets: []channel.MentionTarget{
 			{ID: "ou_owner", IDType: "open_id", Name: "Owner"},
@@ -153,6 +154,9 @@ func TestMessageInputInboundContextPreservesAddressingFacts(t *testing.T) {
 	}
 	if len(ctx.MentionTargets) != 1 || ctx.MentionTargets[0].ID != "ou_owner" {
 		t.Fatalf("MentionTargets = %+v, want owner target", ctx.MentionTargets)
+	}
+	if ctx.SenderIDType != "open_id" || ctx.Raw["sender_id_type"] != "open_id" {
+		t.Fatalf("sender identity type not preserved: %+v", ctx)
 	}
 }
 

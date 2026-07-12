@@ -816,7 +816,7 @@ func (r *Runner) prepareTurn(frame inboundFrame, data messageData, defaultEntryp
 	input := ingest.MessageInput{
 		Channel: "websocket", EntrypointID: runEntrypointID,
 		ChatID: ctx.ChatID, ChatType: normalizeChannel(ctx.ChatType),
-		SenderID: ctx.SenderID, Mentioned: ctx.Mentioned,
+		SenderID: ctx.SenderID, SenderIDType: ctx.SenderIDType, Mentioned: ctx.Mentioned,
 		Content: data.Message, MessageID: messageID,
 	}
 	switch r.ingest.Gate(input, definition) {

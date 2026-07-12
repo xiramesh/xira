@@ -207,14 +207,23 @@ func (s *Service) generateADK(
 			return final, toolRecords.snapshot(), ctx.Err()
 		}
 	}
+	recordedTools := toolRecords.snapshot()
+	if strings.TrimSpace(final) == "" && hasSuccessfulNotifyOwner(recordedTools) {
+		recordEvent("adk.intentional_silence", "adk.runner", "owner notified; no public final requested", map[string]any{
+			"agent_id": profile.ID,
+			"reason":   "notify_owner_sent",
+		})
+		recordAudit("adk.runner", profile.ID, true, "ADK runner completed with owner notification and intentional silence", nil)
+		return final, recordedTools, nil
+	}
 	if strings.TrimSpace(final) == "" {
 		recordEvent("adk.empty_final", "adk.runner", "final ADK event contained no response text", map[string]any{
 			"agent_id": profile.ID,
 		})
-		return final, toolRecords.snapshot(), fmt.Errorf("ADK runner produced empty final response")
+		return final, recordedTools, fmt.Errorf("ADK runner produced empty final response")
 	}
 	recordAudit("adk.runner", profile.ID, true, "ADK runner completed", nil)
-	return final, toolRecords.snapshot(), nil
+	return final, recordedTools, nil
 }
 
 func generateContentConfig(profile agents.Profile) *genai.GenerateContentConfig {

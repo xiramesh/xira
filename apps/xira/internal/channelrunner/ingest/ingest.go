@@ -47,6 +47,7 @@ type MessageInput struct {
 	ChatID         string
 	ChatType       string // "group" / "direct" / "p2p"
 	SenderID       string
+	SenderIDType   string
 	SenderName     string
 	ChatName       string
 	Mentioned      bool // feishu/ws 算好；ilink 无概念不填
@@ -66,6 +67,7 @@ func (m MessageInput) InboundContext() channel.InboundContext {
 		ChatID:         m.ChatID,
 		ChatType:       m.ChatType,
 		SenderID:       m.SenderID,
+		SenderIDType:   m.SenderIDType,
 		SenderName:     m.SenderName,
 		ChatName:       m.ChatName,
 		Mentioned:      m.Mentioned,

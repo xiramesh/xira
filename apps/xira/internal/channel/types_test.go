@@ -67,6 +67,31 @@ func TestNormalizeInboundContextPreservesAddressingFacts(t *testing.T) {
 	}
 }
 
+func TestNormalizeInboundContextPreservesSenderIDTypeRoundTrip(t *testing.T) {
+	ctx := NormalizeInboundContext(InboundContext{
+		Channel:      "feishu",
+		ChatID:       "oc_group",
+		SenderID:     "ou_sender",
+		SenderIDType: " Open_ID ",
+	})
+	if ctx.SenderIDType != "open_id" {
+		t.Fatalf("SenderIDType = %q, want open_id", ctx.SenderIDType)
+	}
+	if ctx.Raw["sender_id_type"] != "open_id" {
+		t.Fatalf("raw sender_id_type = %q, want open_id", ctx.Raw["sender_id_type"])
+	}
+
+	restored := NormalizeInboundContext(InboundContext{
+		Channel:  "feishu",
+		ChatID:   "oc_group",
+		SenderID: "ou_sender",
+		Raw:      ctx.Raw,
+	})
+	if restored.SenderIDType != "open_id" {
+		t.Fatalf("restored SenderIDType = %q, want open_id", restored.SenderIDType)
+	}
+}
+
 func TestNormalizeInboundContextRestoresAddressingFactsFromRaw(t *testing.T) {
 	ctx := NormalizeInboundContext(InboundContext{
 		Channel:  "feishu",
@@ -106,6 +131,7 @@ func TestOutboundEnvelopeNormalizesContractFields(t *testing.T) {
 	msg.RunID = " run-1 "
 	msg.Source = &InboundContext{Channel: "WebSocket", ChatID: " chat-1 ", SenderID: " user-1 "}
 	msg.Target = &InboundContext{Channel: "Feishu", ChatID: " oc-1 ", SenderID: " xira "}
+	msg.Recipient = &OutboundRecipient{ID: " ou_owner ", IDType: " OPEN_ID "}
 	msg.Correlation = OutboundCorrelation{
 		TraceID:         " trace-1 ",
 		ParentRunID:     " parent-run ",
@@ -129,6 +155,9 @@ func TestOutboundEnvelopeNormalizesContractFields(t *testing.T) {
 	if normalized.Time.IsZero() {
 		t.Fatal("time should be populated")
 	}
+	if normalized.Recipient == nil || normalized.Recipient.ID != "ou_owner" || normalized.Recipient.IDType != "open_id" {
+		t.Fatalf("recipient not normalized: %+v", normalized.Recipient)
+	}
 	if normalized.Source == nil || normalized.Source.Channel != "websocket" || normalized.Source.ChatID != "chat-1" || normalized.Source.SenderID != "user-1" {
 		t.Fatalf("source not normalized: %+v", normalized.Source)
 	}
@@ -148,6 +177,14 @@ func TestOutboundEnvelopeNormalizesContractFields(t *testing.T) {
 	}
 	if _, ok := msg.Data["content"]; ok {
 		t.Fatalf("Normalize mutated original data map: %+v", msg.Data)
+	}
+}
+
+func TestOutboundEnvelopeDropsEmptyRecipient(t *testing.T) {
+	env := NewOutboundEnvelope(OutboundProactiveMessage)
+	env.Recipient = &OutboundRecipient{ID: " ", IDType: " "}
+	if got := env.Normalize().Recipient; got != nil {
+		t.Fatalf("empty recipient = %+v, want nil", got)
 	}
 }
 

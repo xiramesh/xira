@@ -259,9 +259,10 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		return nil
 	}
 	chatType := normalizeChatType(stringValue(message.ChatType))
-	senderID := extractSenderID(event.Event.Sender)
+	senderID, senderIDType := extractSenderIdentity(event.Event.Sender)
 	if senderID == "" {
 		senderID = "unknown"
+		senderIDType = ""
 	}
 	mentioned := r.isBotMentioned(message) // 精确匹配 bot open_id，不是「有 mention 就算」
 	mentionTargets := extractMentionTargets(message.Mentions)
@@ -299,8 +300,9 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 	metadata := r.buildMetadata(message, event.Event.Sender, chatType, messageType)
 	input := ingest.MessageInput{
 		Channel: "feishu", EntrypointID: r.definition.ID,
-		ChatID: chatID, ChatType: chatType,
-		SenderID: senderID, Mentioned: mentioned,
+		Account: r.definition.Account,
+		ChatID:  chatID, ChatType: chatType,
+		SenderID: senderID, SenderIDType: senderIDType, Mentioned: mentioned,
 		MentionTargets: mentionTargets, AddressedTo: addressedTo,
 		Content: content, MessageID: messageID, Metadata: metadata,
 	}
@@ -529,16 +531,25 @@ func (r *Runner) Capabilities() channel.CapabilitySet {
 // resume): when a run resumed via HTTP/CLI produces a final, the runtime calls
 // Manager.Emit, which routes here by Target.Channel == "feishu".
 //
-// Supported types: assistant_final / proactive_message → send content to
-// Target.ChatID. Unknown types return an error (do not silently drop — caller
-// logs it).
+// Supported types: assistant_final / proactive_message. Without Recipient,
+// content goes to Target.ChatID; with Recipient it goes to the explicit typed
+// user identity. Unknown types return an error (do not silently drop).
 func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
 	if env.Target == nil {
 		return fmt.Errorf("feishu Emit: envelope has no target")
 	}
-	chatID := strings.TrimSpace(env.Target.ChatID)
-	if chatID == "" {
-		return fmt.Errorf("feishu Emit: target has no chat_id")
+	receiveIDType := larkim.ReceiveIdTypeChatId
+	receiveID := strings.TrimSpace(env.Target.ChatID)
+	if env.Recipient != nil {
+		var err error
+		receiveIDType, err = feishuReceiveIDType(env.Recipient.IDType)
+		if err != nil {
+			return fmt.Errorf("feishu Emit: recipient: %w", err)
+		}
+		receiveID = strings.TrimSpace(env.Recipient.ID)
+	}
+	if receiveID == "" {
+		return fmt.Errorf("feishu Emit: target has no receive_id")
 	}
 	content := ""
 	if env.Data != nil {
@@ -551,7 +562,7 @@ func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
 	}
 	switch env.Type {
 	case channel.OutboundAssistantFinal, channel.OutboundProactiveMessage:
-		return r.send(ctx, chatID, content)
+		return r.sendTo(ctx, receiveIDType, receiveID, content)
 	default:
 		return fmt.Errorf("feishu Emit: unsupported outbound type %q", env.Type)
 	}
@@ -561,29 +572,33 @@ func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
 var _ channel.OutboundEmitter = (*Runner)(nil)
 
 func (r *Runner) send(ctx context.Context, chatID, content string) error {
+	return r.sendTo(ctx, larkim.ReceiveIdTypeChatId, chatID, content)
+}
+
+func (r *Runner) sendTo(ctx context.Context, receiveIDType, receiveID, content string) error {
 	cardContent, err := buildMarkdownCard(content)
 	if err == nil {
-		if err := r.sendCard(ctx, chatID, cardContent); err == nil {
-			slog.Info("feishu card response sent", "entrypoint_id", r.definition.ID, "chat_id", chatID, "content_chars", utf8.RuneCountInString(content))
+		if err := r.sendCardTo(ctx, receiveIDType, receiveID, cardContent); err == nil {
+			slog.Info("feishu card response sent", "entrypoint_id", r.definition.ID, "receive_id_type", receiveIDType, "receive_id", receiveID, "content_chars", utf8.RuneCountInString(content))
 			return nil
 		} else {
-			slog.Warn("feishu card response failed; falling back to text", "entrypoint_id", r.definition.ID, "chat_id", chatID, "error", err)
+			slog.Warn("feishu card response failed; falling back to text", "entrypoint_id", r.definition.ID, "receive_id_type", receiveIDType, "receive_id", receiveID, "error", err)
 		}
 	} else {
-		slog.Warn("feishu card response build failed; falling back to text", "entrypoint_id", r.definition.ID, "chat_id", chatID, "error", err)
+		slog.Warn("feishu card response build failed; falling back to text", "entrypoint_id", r.definition.ID, "receive_id_type", receiveIDType, "receive_id", receiveID, "error", err)
 	}
-	if err := r.sendText(ctx, chatID, content); err != nil {
+	if err := r.sendTextTo(ctx, receiveIDType, receiveID, content); err != nil {
 		return err
 	}
-	slog.Info("feishu text response sent", "entrypoint_id", r.definition.ID, "chat_id", chatID, "content_chars", utf8.RuneCountInString(content))
+	slog.Info("feishu text response sent", "entrypoint_id", r.definition.ID, "receive_id_type", receiveIDType, "receive_id", receiveID, "content_chars", utf8.RuneCountInString(content))
 	return nil
 }
 
-func (r *Runner) sendCard(ctx context.Context, chatID, cardContent string) error {
+func (r *Runner) sendCardTo(ctx context.Context, receiveIDType, receiveID, cardContent string) error {
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		ReceiveIdType(receiveIDType).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(chatID).
+			ReceiveId(receiveID).
 			MsgType(larkim.MsgTypeInteractive).
 			Content(cardContent).
 			Build()).
@@ -598,12 +613,12 @@ func (r *Runner) sendCard(ctx context.Context, chatID, cardContent string) error
 	return nil
 }
 
-func (r *Runner) sendText(ctx context.Context, chatID, text string) error {
+func (r *Runner) sendTextTo(ctx context.Context, receiveIDType, receiveID, text string) error {
 	content, _ := json.Marshal(map[string]string{"text": text})
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		ReceiveIdType(receiveIDType).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(chatID).
+			ReceiveId(receiveID).
 			MsgType(larkim.MsgTypeText).
 			Content(string(content)).
 			Build()).
@@ -616,6 +631,21 @@ func (r *Runner) sendText(ctx context.Context, chatID, text string) error {
 		return fmt.Errorf("feishu api error code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+// feishuReceiveIDType is the sealed adapter boundary for direct recipients.
+// coverage: contract (100% required)
+func feishuReceiveIDType(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "open_id":
+		return larkim.ReceiveIdTypeOpenId, nil
+	case "user_id":
+		return larkim.ReceiveIdTypeUserId, nil
+	case "union_id":
+		return larkim.ReceiveIdTypeUnionId, nil
+	default:
+		return "", fmt.Errorf("unsupported id_type %q", value)
+	}
 }
 
 func buildMarkdownCard(content string) (string, error) {
@@ -800,11 +830,15 @@ func parseBotOpenID(body []byte) (string, error) {
 }
 
 func extractSenderID(sender *larkim.EventSender) string {
-	if sender == nil || sender.SenderId == nil {
-		return ""
-	}
-	id, _ := canonicalUserIdentity(sender.SenderId)
+	id, _ := extractSenderIdentity(sender)
 	return id
+}
+
+func extractSenderIdentity(sender *larkim.EventSender) (string, string) {
+	if sender == nil || sender.SenderId == nil {
+		return "", ""
+	}
+	return canonicalUserIdentity(sender.SenderId)
 }
 
 func normalizeChatType(value string) string {

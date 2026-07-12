@@ -619,8 +619,9 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 	// 所以 ilink 走 ChatType 非 group 语义（直接 dispatch or reject）。
 	input := ingest.MessageInput{
 		Channel: "ilink", EntrypointID: r.definition.ID,
-		ChatID: chatID, ChatType: chatType,
-		SenderID: senderID, Mentioned: true, // ilink 无 mention——总是"Mentioned"走 dispatch 路径
+		Account: account.record.AccountID,
+		ChatID:  chatID, ChatType: chatType,
+		SenderID: senderID, SenderIDType: "ilink_user_id", Mentioned: true, // ilink 无 mention——总是"Mentioned"走 dispatch 路径
 		Content: content, MessageID: messageID,
 	}
 	if r.ingest != nil {
@@ -786,6 +787,7 @@ func (r *Runner) Capabilities() channel.CapabilitySet {
 // via SendText; otherwise Push). These survive HITL pause because they live in
 // InboundContext.Raw → run metadata → SessionScope (persisted), and are
 // reconstructed by inboundContextFromScope on resume.
+// coverage: contract (100% required)
 func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
 	if env.Target == nil {
 		return fmt.Errorf("ilink Emit: envelope has no target")
@@ -801,6 +803,13 @@ func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
 		return fmt.Errorf("ilink Emit: no account %q registered (runner may have been reconfigured)", accountID)
 	}
 	recipient := strings.TrimSpace(env.Target.SenderID)
+	if env.Recipient != nil {
+		idType := strings.ToLower(strings.TrimSpace(env.Recipient.IDType))
+		if idType != "ilink_user_id" && idType != "user_id" {
+			return fmt.Errorf("ilink Emit: unsupported recipient id_type %q", env.Recipient.IDType)
+		}
+		recipient = strings.TrimSpace(env.Recipient.ID)
+	}
 	if recipient == "" {
 		return fmt.Errorf("ilink Emit: target has no sender_id (recipient)")
 	}

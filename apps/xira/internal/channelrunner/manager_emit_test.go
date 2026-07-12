@@ -3,6 +3,7 @@ package channelrunner
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -90,6 +91,52 @@ func TestManagerEmitRoutesByChannel(t *testing.T) {
 	}
 }
 
+func TestManagerEmitRoutesByExactEntrypoint(t *testing.T) {
+	first := &mockEmitRunner{id: "feishu-first", ch: "feishu"}
+	owner := &mockEmitRunner{id: "feishu-owner", ch: "feishu"}
+	mgr := &Manager{runners: []Runner{first, owner}}
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "feishu", EntrypointID: "feishu-owner"}
+	env.Recipient = &channel.OutboundRecipient{ID: "ou_owner", IDType: "open_id"}
+	env.Data = map[string]any{"content": "private"}
+
+	if err := mgr.Emit(context.Background(), env); err != nil {
+		t.Fatalf("Emit returned error: %v", err)
+	}
+	if len(first.emitCalls()) != 0 || len(owner.emitCalls()) != 1 {
+		t.Fatalf("exact routing calls: first=%d owner=%d", len(first.emitCalls()), len(owner.emitCalls()))
+	}
+}
+
+func TestManagerEmitRejectsAmbiguousChannelFallback(t *testing.T) {
+	mgr := &Manager{runners: []Runner{
+		&mockEmitRunner{id: "feishu-first", ch: "feishu"},
+		&mockEmitRunner{id: "feishu-second", ch: "feishu"},
+	}}
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "feishu"}
+	env.Data = map[string]any{"content": "private"}
+
+	err := mgr.Emit(context.Background(), env)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous fallback error = %v, want explicit ambiguity", err)
+	}
+}
+
+func TestManagerEmitRejectsEntrypointChannelMismatch(t *testing.T) {
+	mgr := &Manager{runners: []Runner{
+		&mockEmitRunner{id: "feishu-owner", ch: "feishu"},
+	}}
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "ilink", EntrypointID: "feishu-owner"}
+	env.Data = map[string]any{"content": "private"}
+
+	err := mgr.Emit(context.Background(), env)
+	if err == nil || !strings.Contains(err.Error(), "channel") {
+		t.Fatalf("entrypoint/channel mismatch error = %v", err)
+	}
+}
+
 // TestManagerEmitUnknownChannelErrors verifies Emit returns a clear error when
 // no runner is registered for the target channel. This Manager has only a
 // feishu runner, so Emit to "websocket" finds no match — even though
@@ -104,6 +151,20 @@ func TestManagerEmitUnknownChannelErrors(t *testing.T) {
 	err := mgr.Emit(context.Background(), env)
 	if err == nil {
 		t.Fatal("Emit to channel with no registered runner should error")
+	}
+}
+
+func TestManagerEmitRejectsMissingTargetAndUnknownEntrypoint(t *testing.T) {
+	mgr := &Manager{runners: []Runner{
+		&mockEmitRunner{id: "feishu-default", ch: "feishu"},
+	}}
+	if err := mgr.Emit(context.Background(), channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)); err == nil || !strings.Contains(err.Error(), "target") {
+		t.Fatalf("missing target error = %v", err)
+	}
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "feishu", EntrypointID: "feishu-missing"}
+	if err := mgr.Emit(context.Background(), env); err == nil || !strings.Contains(err.Error(), "feishu-missing") {
+		t.Fatalf("unknown entrypoint error = %v", err)
 	}
 }
 

@@ -36,7 +36,7 @@ apps/xira/internal/channel
 | 类型 | 用途 |
 |---|---|
 | `OutboundType` | `ack` / `runtime_event` / `assistant_delta` / `assistant_final` / `interrupt` / `outbound_message` / `error`。 |
-| `OutboundEnvelope` | transport-neutral outbound 信封，包含 `source`、`target`、`request_id`、`run_id`、`correlation` 和 `data`。 |
+| `OutboundEnvelope` | transport-neutral outbound 信封，包含 `source`、route `target`、可选 typed `recipient`、`request_id`、`run_id`、`correlation` 和 `data`。 |
 | `Capability` / `CapabilitySet` | channel adapter 能力声明，例如 `streaming_delta`、`proactive_outbound`。 |
 | `OutboundEmitter` | 小型接口：声明 capabilities，并发送一个 `OutboundEnvelope`。 |
 
@@ -53,8 +53,8 @@ apps/xira/internal/channel
 | CLI | `xira agent run` | final-only | `assistant_final` 映射为 stdout final response；`--json` 输出完整 `TurnResponse`。 | `assistant_delta` streaming、inline `interrupt` prompt、proactive `outbound_message`。 |
 | TUI | 无内置 TUI command | not implemented | 无。 | 若未来新增 TUI，按 CLI + HTTP/WebSocket contract 实现。 |
 | WebSocket | `GET /api/v1/channels/websocket/messages` | final-only + runtime-event-stream | `ack`、`event`(binding of `runtime_event`)、`response`(binding of `assistant_final`)、`interrupt`、`error`。 | `assistant_delta`、`human_response` resume-over-WS、`outbound_message` 当前 reserve。 |
-| Feishu | `channelrunner/feishu` | final-only | `assistant_final` 发送为卡片或文本消息。 | delta 默认 buffer/drop；`runtime_event` 只进 run log；`interrupt` 尚未平台内展示；无 generic proactive dispatcher。 |
-| iLink | `channelrunner/ilink` | final-only | `assistant_final` 通过 `SendText` 或 `Push` 发送。 | delta 默认 buffer/drop；`runtime_event` 只进 run log；`interrupt` 尚未平台内展示；无 generic proactive dispatcher。 |
+| Feishu | `channelrunner/feishu` | final-only + proactive-outbound | `assistant_final` 发到 `target.chat_id`；`outbound_message` 可发到 typed `open_id` / `user_id` / `union_id` recipient。 | delta 默认 buffer/drop；`runtime_event` 只进 run log；owner 双向 HITL 尚未实现。 |
+| iLink | `channelrunner/ilink` | final-only + proactive-outbound | `assistant_final` 通过 `SendText` 或 `Push`；`outbound_message` 可使用 typed user recipient。 | delta 默认 buffer/drop；`runtime_event` 只进 run log；owner 双向 HITL 尚未实现。 |
 
 ## 4. Surface Mapping
 
@@ -175,3 +175,5 @@ Feishu/iLink 这类聊天平台默认不实时发送 `assistant_delta`。后续�
   delivery_failed，不能假装已投递。
 - Vendor-specific connection management 留在对应 runner；common layer 只处理 contract
   envelope、capability 和 target 语义。
+- `target.entrypoint_id` 存在时必须精确选择 runner；同 channel 多 runner 时不得取第一个。
+- 平台用户私信使用 typed `recipient`；不得把 sender ID 当 `chat_id`，也不得按显示名猜 ID type。

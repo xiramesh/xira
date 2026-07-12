@@ -576,6 +576,23 @@ func TestExtractSenderID(t *testing.T) {
 	}
 }
 
+func TestExtractSenderIdentityPreservesCanonicalType(t *testing.T) {
+	sender := &larkim.EventSender{SenderId: &larkim.UserId{
+		UserId: strPtr("u1"),
+		OpenId: strPtr("ou1"),
+	}}
+	id, idType := extractSenderIdentity(sender)
+	if id != "u1" || idType != "user_id" {
+		t.Fatalf("extractSenderIdentity = (%q, %q), want (u1, user_id)", id, idType)
+	}
+
+	sender.SenderId.UserId = nil
+	id, idType = extractSenderIdentity(sender)
+	if id != "ou1" || idType != "open_id" {
+		t.Fatalf("extractSenderIdentity fallback = (%q, %q), want (ou1, open_id)", id, idType)
+	}
+}
+
 // TestFirstJSONStringField covers JSON content field extraction.
 // Previously 0%.
 func TestFirstJSONStringField(t *testing.T) {
@@ -924,5 +941,76 @@ func TestFeishuSendUsesInteractiveCardWhenAPIAcceptsIt(t *testing.T) {
 	}
 	if !strings.Contains(requestBody, `"msg_type":"interactive"`) {
 		t.Fatalf("send body = %s, want interactive card", requestBody)
+	}
+}
+
+func TestFeishuEmitDirectRecipientUsesTypedIdentity(t *testing.T) {
+	var requestURI, requestBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(r.URL.Path, "/messages") {
+			requestURI = r.URL.RequestURI()
+			requestBody = string(body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{"message_id":"om_owner"}}`))
+	}))
+	defer server.Close()
+
+	runner, err := NewRunner(entrypoints.Definition{
+		ID: "feishu-owner", Channel: "feishu", AppID: "cli_test", AppSecret: "s",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	runner.client = lark.NewClient("cli_test", "s", lark.WithOpenBaseUrl(server.URL))
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "feishu", EntrypointID: "feishu-owner"}
+	env.Recipient = &channel.OutboundRecipient{ID: "ou_owner", IDType: "open_id"}
+	env.Data = map[string]any{"content": "private hello"}
+
+	if err := runner.Emit(context.Background(), env); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if !strings.Contains(requestURI, "receive_id_type=open_id") {
+		t.Fatalf("request URI = %q, want receive_id_type=open_id", requestURI)
+	}
+	if !strings.Contains(requestBody, `"receive_id":"ou_owner"`) {
+		t.Fatalf("request body = %s, want typed owner receive_id", requestBody)
+	}
+}
+
+func TestFeishuEmitRejectsUnsupportedRecipientType(t *testing.T) {
+	runner, err := NewRunner(entrypoints.Definition{
+		ID: "feishu-owner", Channel: "feishu", AppID: "cli_test", AppSecret: "s",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "feishu", EntrypointID: "feishu-owner"}
+	env.Recipient = &channel.OutboundRecipient{ID: "owner", IDType: "display_name"}
+	env.Data = map[string]any{"content": "private hello"}
+	if err := runner.Emit(context.Background(), env); err == nil || !strings.Contains(err.Error(), "recipient") {
+		t.Fatalf("unsupported recipient error = %v", err)
+	}
+}
+
+func TestFeishuReceiveIDTypeContract(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{" OPEN_ID ", larkim.ReceiveIdTypeOpenId},
+		{"user_id", larkim.ReceiveIdTypeUserId},
+		{"union_id", larkim.ReceiveIdTypeUnionId},
+	} {
+		got, err := feishuReceiveIDType(tc.input)
+		if err != nil || got != tc.want {
+			t.Fatalf("feishuReceiveIDType(%q) = (%q, %v), want %q", tc.input, got, err, tc.want)
+		}
+	}
+	if _, err := feishuReceiveIDType("display_name"); err == nil {
+		t.Fatal("unknown recipient type must fail closed")
 	}
 }

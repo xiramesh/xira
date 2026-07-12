@@ -53,6 +53,41 @@ func TestRunnerEmitDeliversFinal(t *testing.T) {
 	}
 }
 
+func TestRunnerEmitUsesTypedRecipientWhenPresent(t *testing.T) {
+	r, rc := newEmitTestRunner(t, "acct-1")
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "ilink", Account: "acct-1"}
+	env.Recipient = &channel.OutboundRecipient{ID: "wxid_owner", IDType: "ilink_user_id"}
+	env.Data = map[string]any{"content": "private owner notice"}
+
+	if err := r.Emit(context.Background(), env); err != nil {
+		t.Fatalf("Emit error: %v", err)
+	}
+	if got := rc.contents(); len(got) != 1 || got[0] != "private owner notice" {
+		t.Fatalf("sent = %v", got)
+	}
+}
+
+func TestRunnerEmitRejectsUnsupportedTypedRecipient(t *testing.T) {
+	r, _ := newEmitTestRunner(t, "acct-1")
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "ilink", Account: "acct-1"}
+	env.Recipient = &channel.OutboundRecipient{ID: "owner", IDType: "display_name"}
+	env.Data = map[string]any{"content": "private owner notice"}
+	if err := r.Emit(context.Background(), env); err == nil || !strings.Contains(err.Error(), "id_type") {
+		t.Fatalf("unsupported recipient error = %v", err)
+	}
+}
+
+func TestRunnerEmitRejectsMissingContent(t *testing.T) {
+	r, _ := newEmitTestRunner(t, "acct-1")
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "ilink", Account: "acct-1", SenderID: "user-9"}
+	if err := r.Emit(context.Background(), env); err == nil || !strings.Contains(err.Error(), "content") {
+		t.Fatalf("missing content error = %v", err)
+	}
+}
+
 func TestRunnerEmitMissingAccount(t *testing.T) {
 	r, _ := newEmitTestRunner(t, "acct-1")
 	env := channel.NewOutboundEnvelope(channel.OutboundAssistantFinal)

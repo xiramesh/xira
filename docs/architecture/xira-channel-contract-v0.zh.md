@@ -105,7 +105,26 @@ entrypoint routing、session scope、runtime event scope 和 audit 解释性。
 `target` 用于出站投递，尤其是 proactive `outbound_message`。请求内响应通常可
 从原始 `source` 派生 target。
 
-### 2.3 Correlation
+`target` 表示**由哪个 route/entrypoint/bot 投递**，不是私信收件人。Manager 在
+`entrypoint_id` 存在时必须精确匹配 runner；只有一个 channel 候选时才允许
+channel-only fallback，多候选必须返回 ambiguity error。
+
+### 2.3 Recipient
+
+发送给平台用户而不是既有 chat 时，envelope 额外携带 typed recipient：
+
+```json
+{
+  "id": "ou_xxx",
+  "id_type": "open_id"
+}
+```
+
+`recipient` 只描述平台收件身份；channel adapter 决定支持哪些 sealed ID type。
+它不能由模型自由指定。owner 私有投递由 runtime 根据 owner binding 生成。
+没有 `recipient` 时维持现有 `target.chat_id` 投递语义。
+
+### 2.4 Correlation
 
 ```json
 {
@@ -122,7 +141,7 @@ entrypoint routing、session scope、runtime event scope 和 audit 解释性。
 - child run / delegation event 必须带足够 correlation，避免 UI 或 channel
   event filter 丢失子 run 进度。
 - `request_id` 关联用户请求；`run_id` 关联 runtime run；二者不能互相替代。
-- proactive `outbound_message` 可以没有 `request_id`，但必须有 target。
+- proactive `outbound_message` 可以没有 `request_id`，但必须有 target；私信用户时还必须有 typed recipient。
 
 ## 3. Channel Inbound
 
@@ -550,14 +569,15 @@ WebSocket 语义细节见 `docs/architecture/xira-websocket-channel-v0.zh.md`。
 
 ### 8.3 Feishu / iLink
 
-Feishu/iLink 的 channel runner 当前保持 final-only：
+Feishu/iLink 的 channel runner 当前保持 final-only 渲染，但支持受约束的 proactive outbound：
 
 - `assistant_delta` -> buffer，不逐条发送
 - `assistant_final` -> 平台文本/卡片消息
 - `runtime_event` -> run log / inspector，不默认发到群
 - `interrupt` -> 目标为平台消息或外部 approval UI 链接，当前未实现
-- `outbound_message` -> 平台 send API 具备基础能力，但 generic proactive dispatcher
-  当前未实现
+- `outbound_message` -> `Manager.Emit` 按 entrypoint 精确路由。Feishu 支持
+  `open_id` / `user_id` / `union_id` typed recipient；iLink 支持 typed user recipient。
+- owner 单向通知由 runtime-native `notify_owner` 使用上述路径；owner 回复/HITL 仍未实现。
 
 若未来要把 delta 发到聊天平台，必须先定义节流、合并和撤回/编辑策略，避免刷屏。
 

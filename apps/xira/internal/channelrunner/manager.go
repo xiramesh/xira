@@ -222,32 +222,58 @@ func (m *Manager) pairingController(entrypointID string) (channelcontrol.Pairing
 // back to the originating IM channel without knowing about individual runners
 // (RFC #27 — stateless HITL resume).
 //
-// Manager.Emit is the unified outbound surface: callers (resume, future
-// proactive messaging) construct an envelope with Target.Channel/ChatID, and
-// Manager finds the right channel runner to actually send. Runners must
-// implement channel.OutboundEmitter for their channel to be reachable.
+// Manager.Emit is the unified outbound surface: callers construct an envelope
+// with a route Target and optional typed Recipient. EntrypointID selects the
+// exact runner; channel-only fallback is allowed only when unambiguous.
+// Runners must implement channel.OutboundEmitter to be reachable.
+// coverage: contract (100% required)
 func (m *Manager) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
 	if m == nil {
 		return fmt.Errorf("channel manager is not configured (no runners)")
 	}
 	target := ""
+	entrypointID := ""
 	if env.Target != nil {
 		target = strings.TrimSpace(env.Target.Channel)
+		entrypointID = strings.TrimSpace(env.Target.EntrypointID)
 	}
-	if target == "" {
+	if target == "" && entrypointID == "" {
 		return fmt.Errorf("outbound envelope has no target channel")
 	}
+	if entrypointID != "" {
+		for _, runner := range m.runners {
+			if runner.ID() != entrypointID {
+				continue
+			}
+			if target != "" && !strings.EqualFold(runner.Channel(), target) {
+				return fmt.Errorf("outbound entrypoint %q uses channel %q, target requested %q", entrypointID, runner.Channel(), target)
+			}
+			return emitWithRunner(ctx, runner, env)
+		}
+		return fmt.Errorf("no runner registered for entrypoint %q", entrypointID)
+	}
+	var matched Runner
 	for _, runner := range m.runners {
 		if !strings.EqualFold(runner.Channel(), target) {
 			continue
 		}
-		emitter, ok := runner.(channel.OutboundEmitter)
-		if !ok {
-			return fmt.Errorf("runner %q (channel %q) does not implement OutboundEmitter", runner.ID(), runner.Channel())
+		if matched != nil {
+			return fmt.Errorf("ambiguous outbound channel %q: target must include entrypoint_id", target)
 		}
-		return emitter.Emit(ctx, env)
+		matched = runner
+	}
+	if matched != nil {
+		return emitWithRunner(ctx, matched, env)
 	}
 	return fmt.Errorf("no runner registered for channel %q", target)
+}
+
+func emitWithRunner(ctx context.Context, runner Runner, env channel.OutboundEnvelope) error {
+	emitter, ok := runner.(channel.OutboundEmitter)
+	if !ok {
+		return fmt.Errorf("runner %q (channel %q) does not implement OutboundEmitter", runner.ID(), runner.Channel())
+	}
+	return emitter.Emit(ctx, env)
 }
 
 // Capabilities returns the union of all runners' capabilities. Manager

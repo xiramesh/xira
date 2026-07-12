@@ -134,9 +134,10 @@ func TestNewOwnerBindingStore_LoadsExistingBindings(t *testing.T) {
 	// 先用一个 store 写入一条绑定
 	s1 := newOwnerBindingStore(dir)
 	s1.setLockedForTest(ownerBinding{
-		EntrypointID:  "feishu-default",
-		OwnerSenderID: "ou_owner",
-		BoundAt:       time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC),
+		EntrypointID:      "feishu-default",
+		OwnerSenderID:     "ou_owner",
+		OwnerSenderIDType: "open_id",
+		BoundAt:           time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC),
 	})
 	if err := s1.persistLocked(); err != nil {
 		t.Fatalf("persist: %v", err)
@@ -150,6 +151,9 @@ func TestNewOwnerBindingStore_LoadsExistingBindings(t *testing.T) {
 	}
 	if got.OwnerSenderID != "ou_owner" {
 		t.Errorf("OwnerSenderID = %q, want ou_owner", got.OwnerSenderID)
+	}
+	if got.OwnerSenderIDType != "open_id" {
+		t.Errorf("OwnerSenderIDType = %q, want open_id", got.OwnerSenderIDType)
 	}
 	if got.EntrypointID != "feishu-default" {
 		t.Errorf("EntrypointID = %q, want feishu-default", got.EntrypointID)
@@ -305,6 +309,30 @@ func TestHandleOwnerBind_IdempotentSameSender(t *testing.T) {
 	second := svc.handleOwnerBind("feishu-default", "ou_owner", "anything")
 	if !strings.Contains(second, "已经是") {
 		t.Errorf("idempotent msg = %q, want contains 已经是", second)
+	}
+}
+
+func TestHandleOwnerBindWithIdentityEnrichesLegacyBinding(t *testing.T) {
+	svc := newBindTestService(t)
+	svc.ownerBindings.Set(ownerBinding{
+		EntrypointID:  "feishu-default",
+		OwnerSenderID: "ou_owner",
+		BoundAt:       time.Now().UTC(),
+	})
+
+	msg := svc.handleOwnerBindWithIdentity("feishu-default", "ou_owner", "open_id", "unused")
+	if !strings.Contains(msg, "已经是") {
+		t.Fatalf("msg = %q, want idempotent already-owner response", msg)
+	}
+	got, ok := svc.ownerBindings.Get("feishu-default")
+	if !ok || got.OwnerSenderIDType != "open_id" {
+		t.Fatalf("legacy binding not enriched: %+v, ok=%v", got, ok)
+	}
+
+	reloaded := newOwnerBindingStore(svc.ownerBindings.dir)
+	persisted, ok := reloaded.Get("feishu-default")
+	if !ok || persisted.OwnerSenderIDType != "open_id" {
+		t.Fatalf("enriched type not persisted: %+v, ok=%v", persisted, ok)
 	}
 }
 
@@ -681,6 +709,28 @@ func TestHandleOwnerBind_PersistFailureRollsBackAndKeepsCode(t *testing.T) {
 	// code 不作废（可重试）。
 	if _, stillThere := svc.bindCodes["ep"]; !stillThere {
 		t.Error("bind code should NOT be revoked on persist failure (must allow retry)")
+	}
+}
+
+func TestHandleOwnerBindWithIdentity_EnrichmentPersistFailureRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ownerBindingsFilename), 0o700)
+	legacy := ownerBinding{EntrypointID: "ep", OwnerSenderID: "ou_owner", BoundAt: time.Now().UTC()}
+	svc := &Service{
+		ownerBindings: &ownerBindingStore{
+			dir:      dir,
+			bindings: map[string]ownerBinding{"ep": legacy},
+		},
+		bindCodes: map[string]string{},
+	}
+
+	msg := svc.handleOwnerBindWithIdentity("ep", "ou_owner", "open_id", "unused")
+	if !strings.Contains(msg, "无法保存") {
+		t.Fatalf("msg = %q, want persistence failure", msg)
+	}
+	got, ok := svc.ownerBindings.Get("ep")
+	if !ok || got.OwnerSenderIDType != "" {
+		t.Fatalf("failed enrichment must roll back: %+v, ok=%v", got, ok)
 	}
 }
 
