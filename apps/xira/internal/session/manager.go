@@ -291,19 +291,22 @@ func (m *Manager) AppendAgentMessages(input AgentTurnInput, messages []Message) 
 		return nil
 	}
 
+	// Publish to memory only after persistence succeeds. Otherwise Observe
+	// retries would append a duplicate to the live model context even though the
+	// first attempt was never durably recorded.
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.store != nil {
+		if err := m.store.AppendAgentMessages(input, messages); err != nil {
+			return err
+		}
+	}
 	m.histories[input.SessionID] = append(m.histories[input.SessionID], messages...)
 	if m.agentHistories[input.SessionID] == nil {
 		m.agentHistories[input.SessionID] = map[string][]Message{}
 	}
 	m.agentHistories[input.SessionID][input.AgentID] = append(m.agentHistories[input.SessionID][input.AgentID], messages...)
-	store := m.store
-	m.mu.Unlock()
-
-	if store == nil {
-		return nil
-	}
-	return store.AppendAgentMessages(input, messages)
+	return nil
 }
 
 func (m *Manager) History(sessionID string) []Message {

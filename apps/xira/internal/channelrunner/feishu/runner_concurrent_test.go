@@ -11,9 +11,12 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/routing"
 	frt "github.com/xiramesh/xira/internal/runtime"
+	fsession "github.com/xiramesh/xira/internal/session"
 )
 
 // runner_concurrent_test.go: TDD tests for feishu's ChatKeySession
@@ -368,5 +371,92 @@ func TestFeishuRejectsUnauthorizedSenderSilently(t *testing.T) {
 	waitTurnInactive(t, runner, chatKeyFor("c1", "ou_allowed"))
 	if rt.maxSeen() != 1 {
 		t.Fatalf("RunAgent should be called once for authorized sender, got %d", rt.maxSeen())
+	}
+}
+
+func TestFeishuObservePersistsAuthorizedUnmentionedGroupMessage(t *testing.T) {
+	def := entrypoints.Definition{
+		ID:               "feishu-observe",
+		Channel:          "feishu",
+		AppID:            "cli_test_app",
+		AppSecret:        "test_secret",
+		DefaultAgentID:   "agent-1",
+		AllowedSenderIDs: []string{"ou_allowed"},
+		SessionPolicy:    routing.SessionPolicy{Dimensions: []string{"chat"}},
+	}
+	runner, err := NewRunner(def, nil, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := newFakeRuntime()
+	runner.runtime = rt
+	mgr, err := fsession.NewManagerWithStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.SetIngest(ingest.New(mgr, nil))
+	event := makeP2Message("group-1", "ou_allowed", "om-observe", "remember this")
+	*event.Event.Message.ChatType = "group"
+
+	if err := runner.handleMessageReceive(context.Background(), event); err != nil {
+		t.Fatalf("handleMessageReceive: %v", err)
+	}
+	if got := rt.maxSeen(); got != 0 {
+		t.Fatalf("RunAgent calls = %d, want observe-only path", got)
+	}
+	scope := mgr.Allocate(fsession.AllocationInput{Context: fsessionTestInbound("feishu-observe", "group-1", "ou_allowed"), SessionPolicy: def.SessionPolicy})
+	history := mgr.AgentHistory(scope.SessionID, def.DefaultAgentID)
+	if len(history) != 1 || history[0].Content != "remember this" || history[0].SenderID != "ou_allowed" {
+		t.Fatalf("observed history = %+v", history)
+	}
+	if err := runner.handleMessageReceive(context.Background(), event); err != nil {
+		t.Fatalf("duplicate handleMessageReceive: %v", err)
+	}
+	if got := mgr.AgentHistory(scope.SessionID, def.DefaultAgentID); len(got) != 1 {
+		t.Fatalf("duplicate observe history = %+v, want exactly one message", got)
+	}
+}
+
+func TestFeishuObserveAllowsUnmentionedEntrypointOwner(t *testing.T) {
+	def := entrypoints.Definition{
+		ID:               "feishu-owner-observe",
+		Channel:          "feishu",
+		AppID:            "cli_test_app",
+		AppSecret:        "test_secret",
+		DefaultAgentID:   "agent-1",
+		AllowedSenderIDs: []string{"ou_allowed"},
+		SessionPolicy:    routing.SessionPolicy{Dimensions: []string{"chat"}},
+	}
+	runner, err := NewRunner(def, nil, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := newFakeRuntime()
+	runner.runtime = rt
+	mgr, err := fsession.NewManagerWithStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.SetIngest(ingest.New(mgr, nil))
+	runner.SetOwnerResolver(&stubOwnerResolver{ownerSenderID: "ou_owner"})
+	event := makeP2Message("group-owner", "ou_owner", "om-owner-observe", "owner context")
+	*event.Event.Message.ChatType = "group"
+
+	if err := runner.handleMessageReceive(context.Background(), event); err != nil {
+		t.Fatalf("handleMessageReceive: %v", err)
+	}
+	if got := rt.maxSeen(); got != 0 {
+		t.Fatalf("RunAgent calls = %d, want observe-only path", got)
+	}
+	scope := mgr.Allocate(fsession.AllocationInput{Context: fsessionTestInbound(def.ID, "group-owner", "ou_owner"), SessionPolicy: def.SessionPolicy})
+	history := mgr.AgentHistory(scope.SessionID, def.DefaultAgentID)
+	if len(history) != 1 || history[0].Content != "owner context" || history[0].SenderID != "ou_owner" {
+		t.Fatalf("owner observed history = %+v", history)
+	}
+}
+
+func fsessionTestInbound(entrypointID, chatID, senderID string) channel.InboundContext {
+	return channel.InboundContext{
+		Channel: "feishu", EntrypointID: entrypointID, ChatID: chatID, ChatType: "group", SenderID: senderID,
 	}
 }

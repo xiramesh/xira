@@ -33,7 +33,6 @@ import (
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
-	fsession "github.com/xiramesh/xira/internal/session"
 )
 
 const (
@@ -124,8 +123,6 @@ type Runner struct {
 	conns     map[frt.ChatKey]*wsConn
 	connIDSeq uint64 // monotonic connection identity, for same-conn detection
 
-	// sessionManager for group chat observe (#151).
-	sessionManager *fsession.Manager
 	// ingest is the shared message processing layer (#151).
 	ingest *ingest.Ingest
 }
@@ -185,13 +182,6 @@ func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
 		if r.ingest != nil {
 			r.ingest.SetOwnerResolver(resolver)
 		}
-	}
-}
-
-// SetSessionManager injects the session store for group chat observe (#151).
-func (r *Runner) SetSessionManager(sm *fsession.Manager) {
-	if r != nil {
-		r.sessionManager = sm
 	}
 }
 

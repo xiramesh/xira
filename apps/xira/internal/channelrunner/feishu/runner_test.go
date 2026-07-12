@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -832,5 +835,30 @@ func TestFeishuSendError(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("Emit proactive to closed port should return error")
+	}
+}
+
+func TestFeishuSendUsesInteractiveCardWhenAPIAcceptsIt(t *testing.T) {
+	var requestBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requestBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{"message_id":"om_1"}}`))
+	}))
+	defer server.Close()
+
+	runner, err := NewRunner(entrypoints.Definition{
+		ID: "feishu-send-success", Channel: "feishu", AppID: "cli_test", AppSecret: "s",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	runner.client = lark.NewClient("cli_test", "s", lark.WithOpenBaseUrl(server.URL))
+	if err := runner.send(context.Background(), "oc_chat", "hello"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !strings.Contains(requestBody, `"msg_type":"interactive"`) {
+		t.Fatalf("send body = %s, want interactive card", requestBody)
 	}
 }

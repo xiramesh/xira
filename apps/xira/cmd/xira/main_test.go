@@ -34,6 +34,29 @@ func TestAgentListUsesWorkspaceAgents(t *testing.T) {
 	}
 }
 
+func TestRootCommandInjectsSessionManagerBeforeConstructingService(t *testing.T) {
+	instance := writeCLIFixture(t, "xira-assistant")
+	injected := false
+	cmd := newRootCommandWithFactory(func(cfg runtime.Config) (*runtime.Service, error) {
+		if cfg.SessionManager == nil {
+			t.Fatal("composition root must create SessionManager before constructing Service")
+		}
+		injected = true
+		cfg.DeepSeekClient = fakeCLIDeepSeekClient(t)
+		return runtime.NewService(cfg)
+	})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stdout)
+	cmd.SetArgs([]string{"--config", filepath.Join(instance, "xira.yaml"), "agent", "list"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v\n%s", err, stdout.String())
+	}
+	if !injected {
+		t.Fatal("service factory was not called")
+	}
+}
+
 func TestVersionCommandPrintsBuildMetadata(t *testing.T) {
 	out := executeCommand(t, "version")
 	if out != "xira 0.4.0 commit=unknown date=unknown\n" {

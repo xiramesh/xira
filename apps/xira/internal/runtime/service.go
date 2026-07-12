@@ -78,6 +78,17 @@ type Service struct {
 	mu             sync.RWMutex
 }
 
+// NewSessionManager creates the shared session store from the same Config used
+// by NewService. The composition root calls this before constructing Service,
+// then injects the returned instance into both runtime and channel ingestion.
+func NewSessionManager(cfg Config) (*fsession.Manager, error) {
+	resolved, err := resolveRuntimeConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return fsession.NewManagerWithStore(resolved.SessionRoot)
+}
+
 func NewService(cfg Config) (*Service, error) {
 	resolved, err := resolveRuntimeConfig(cfg)
 	if err != nil {
@@ -102,8 +113,7 @@ func NewService(cfg Config) (*Service, error) {
 	// 也可以由 NewService 内部创建（兼容旧测试）。
 	sessionManager := cfg.SessionManager
 	if sessionManager == nil {
-		var err error
-		sessionManager, err = fsession.NewManagerWithStore(resolved.SessionRoot)
+		sessionManager, err = NewSessionManager(cfg)
 		if err != nil {
 			return nil, err
 		}

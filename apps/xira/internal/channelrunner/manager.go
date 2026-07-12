@@ -13,7 +13,6 @@ import (
 	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/channelrunner/websocket"
 	"github.com/xiramesh/xira/internal/runtime"
-	fsession "github.com/xiramesh/xira/internal/session"
 )
 
 type Runner interface {
@@ -149,24 +148,6 @@ func (m *Manager) SetOwnerResolver(resolver runtime.OwnerResolver) {
 			r.SetOwnerResolver(resolver)
 		case *websocket.Runner:
 			r.SetOwnerResolver(resolver)
-		}
-	}
-}
-
-// SetSessionManager injects the session store into all channel runners (#151).
-// Runners use it to observe group messages (store without triggering agent).
-func (m *Manager) SetSessionManager(sm *fsession.Manager) {
-	if m == nil {
-		return
-	}
-	for _, runner := range m.runners {
-		switch r := runner.(type) {
-		case *feishu.Runner:
-			r.SetSessionManager(sm)
-		case *ilink.Runner:
-			r.SetSessionManager(sm)
-		case *websocket.Runner:
-			r.SetSessionManager(sm)
 		}
 	}
 }

@@ -43,9 +43,17 @@ func newRootCommandWithFactory(serviceFactory func(runtime.Config) (*runtime.Ser
 	cmd.SetVersionTemplate(version.String() + "\n")
 	cmd.PersistentFlags().StringVar(&configPath, "config", "xira.yaml", "Runtime instance config path")
 	newRuntime := func() (*runtime.Service, error) {
-		return serviceFactory(runtime.Config{
+		cfg := runtime.Config{
 			ConfigPath: configPath,
-		})
+		}
+		// Session storage is shared by Runtime and channel ingestion, so the
+		// composition root owns construction and injects one instance into both.
+		sessionManager, err := runtime.NewSessionManager(cfg)
+		if err != nil {
+			return nil, err
+		}
+		cfg.SessionManager = sessionManager
+		return serviceFactory(cfg)
 	}
 	cmd.AddCommand(versionCommand())
 	cmd.AddCommand(serveCommand(newRuntime))
@@ -112,7 +120,6 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 			rt.SetOutboundEmitter(channelRunners)
 			channelRunners.SetHITLResolver(rt)
 			channelRunners.SetOwnerResolver(rt)
-			channelRunners.SetSessionManager(rt.SessionManager())
 			// #151: 创建共享 ingest 层，注入所有 runner。
 			// ingest 统一处理 gate（授权+mention）/ dedupe / observe。
 			ing := ingest.New(rt.SessionManager(), rt)

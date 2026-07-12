@@ -44,6 +44,44 @@ func TestManagerAllocatesStableScopedSession(t *testing.T) {
 	}
 }
 
+func TestManagerDoesNotPublishMessagesWhenPersistenceFails(t *testing.T) {
+	root := t.TempDir()
+	manager, err := NewManagerWithStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Block the channel directory only after the store has opened. This makes
+	// persistence fail during AppendAgentMessages, rather than at construction.
+	if err := os.WriteFile(filepath.Join(root, "feishu"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input := AgentTurnInput{
+		SessionID: "conversation:write-failure",
+		AgentID:   "agent-1",
+		Context: channel.InboundContext{
+			Channel: "feishu", EntrypointID: "ep-1", ChatID: "chat-1", ChatType: "group", SenderID: "user-1",
+		},
+		Scope: &SessionScope{Dimensions: []string{"chat"}, Values: map[string]string{"chat": "group:chat-1"}},
+	}
+	message := Message{Role: "user", Kind: MessageKindMessage, Content: "retry me"}
+	if err := manager.AppendAgentMessages(input, []Message{message}); err == nil {
+		t.Fatal("AppendAgentMessages() error = nil, want persistence failure")
+	}
+	if got := manager.AgentHistory(input.SessionID, input.AgentID); len(got) != 0 {
+		t.Fatalf("failed append leaked into in-memory history: %+v", got)
+	}
+
+	if err := os.Remove(filepath.Join(root, "feishu")); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.AppendAgentMessages(input, []Message{message}); err != nil {
+		t.Fatalf("retry append: %v", err)
+	}
+	if got := manager.AgentHistory(input.SessionID, input.AgentID); len(got) != 1 || got[0].Content != "retry me" {
+		t.Fatalf("retry history = %+v, want exactly one persisted message", got)
+	}
+}
+
 func TestManagerConversationSessionIncludesEntrypoint(t *testing.T) {
 	manager := NewManager()
 	base := map[string]string{

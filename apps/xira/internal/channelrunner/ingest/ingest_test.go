@@ -2,6 +2,8 @@ package ingest
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -79,6 +81,17 @@ func TestGateObserve(t *testing.T) {
 	}
 }
 
+func TestGateObserveAllowsEntrypointOwner(t *testing.T) {
+	owner := &stubOwnerResolver{ownerSenderID: "ou_owner"}
+	ing := New(nil, nil)
+	ing.SetOwnerResolver(owner)
+	def := entrypoints.Definition{ID: "ep-owner", AllowedSenderIDs: []string{"ou_allowed"}}
+
+	if got := ing.Gate(MessageInput{ChatType: "group", SenderID: "ou_owner"}, def); got != DecisionObserve {
+		t.Fatalf("owner's unmentioned group message = %v, want observe", got)
+	}
+}
+
 func TestGateRejectUnauthorized(t *testing.T) {
 	ing := New(nil, nil)
 	def := entrypoints.Definition{AllowedSenderIDs: []string{"ou_ok"}}
@@ -148,7 +161,8 @@ func TestGateRejectDoesNotObserveUnauthorized(t *testing.T) {
 
 func TestObserveStoresWithSender(t *testing.T) {
 	mgr, _ := fsession.NewManagerWithStore(t.TempDir())
-	ing := New(mgr, nil)
+	ing := New(nil, nil)
+	ing.SetSessionManager(mgr)
 	def := entrypoints.Definition{ID: "ep-test", DefaultAgentID: "agent-1"}
 
 	ing.Observe(MessageInput{
@@ -166,6 +180,35 @@ func TestObserveStoresWithSender(t *testing.T) {
 	}
 	if entries[0].SenderName != "Alice" {
 		t.Errorf("SenderName = %q, want Alice", entries[0].SenderName)
+	}
+}
+
+func TestObserveRetriesAfterPersistenceFailureWithoutDuplicateContext(t *testing.T) {
+	root := t.TempDir()
+	mgr, err := fsession.NewManagerWithStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ing := New(mgr, nil)
+	def := entrypoints.Definition{ID: "ep-test", DefaultAgentID: "agent-1"}
+	deduper := dedupe.New("", time.Hour)
+	input := MessageInput{
+		ChatType: "group", SenderID: "ou_a", Content: "retry me",
+		ChatID: "chat-1", Channel: "test", MessageID: "msg-retry",
+	}
+	if err := os.WriteFile(filepath.Join(root, "test"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ing.Observe(input, def, "ep-test:msg-retry", deduper)
+	if got := readHistory(t, mgr, "test", "chat-1", "group", "ou_a"); len(got) != 0 {
+		t.Fatalf("failed observe leaked into history: %+v", got)
+	}
+	if err := os.Remove(filepath.Join(root, "test")); err != nil {
+		t.Fatal(err)
+	}
+	ing.Observe(input, def, "ep-test:msg-retry", deduper)
+	if got := readHistory(t, mgr, "test", "chat-1", "group", "ou_a"); len(got) != 1 || got[0].Content != "retry me" {
+		t.Fatalf("retry history = %+v, want one message", got)
 	}
 }
 
