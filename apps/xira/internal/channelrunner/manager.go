@@ -268,17 +268,26 @@ func (m *Manager) Emit(ctx context.Context, env channel.OutboundEnvelope) error 
 	return fmt.Errorf("no runner registered for channel %q", target)
 }
 
+// emitWithRunner enforces recipient capability on the selected route. The
+// Manager fleet union is discovery-only and must never authorize a different
+// runner to receive a typed private message.
+// coverage: contract (100% required)
 func emitWithRunner(ctx context.Context, runner Runner, env channel.OutboundEnvelope) error {
 	emitter, ok := runner.(channel.OutboundEmitter)
 	if !ok {
 		return fmt.Errorf("runner %q (channel %q) does not implement OutboundEmitter", runner.ID(), runner.Channel())
+	}
+	if env.Recipient != nil && !emitter.Capabilities().Supports(channel.CapabilityTypedRecipientOutbound) {
+		return fmt.Errorf("runner %q (channel %q) does not support typed recipient outbound", runner.ID(), runner.Channel())
 	}
 	return emitter.Emit(ctx, env)
 }
 
 // Capabilities returns the union of all runners' capabilities. Manager
 // satisfies channel.OutboundEmitter; Capabilities advertises what the fleet
-// can do (e.g. proactive_outbound for resume delivery).
+// can do (e.g. proactive_outbound for resume delivery). It is not proof that
+// the runner selected for one entrypoint supports a capability; Emit performs
+// route-local enforcement for typed recipients.
 func (m *Manager) Capabilities() channel.CapabilitySet {
 	if m == nil {
 		return nil

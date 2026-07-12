@@ -522,6 +522,7 @@ func (r *Runner) buildMetadata(message *larkim.EventMessage, sender *larkim.Even
 func (r *Runner) Capabilities() channel.CapabilitySet {
 	return channel.CapabilitySet{
 		channel.CapabilityProactiveOutbound,
+		channel.CapabilityTypedRecipientOutbound,
 		channel.CapabilityInteractiveHumanResponse,
 	}
 }

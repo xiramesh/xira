@@ -395,9 +395,15 @@ owner 授权判断与私有投递解析是两份契约：
 `Manager.Emit` 按 `EntrypointID` 精确选择 runner。相同 channel 存在多个 entrypoint 时，禁止退化成
 “取第一个 runner”；缺少 entrypoint 的 channel-only fallback 只有在候选唯一时才合法。
 
+typed recipient 私信还要求最终 runner 声明 `typed_recipient_outbound`。这个检查发生在精确选出
+runner 之后，不能用 Manager 的 fleet capability 并集代替。Feishu/iLink 支持；WebSocket 只保留
+无 recipient 的 proactive resume final，客户端自报 `sender_id_type` 不进入 owner binding，因此
+WebSocket owner binding 是 authorization-only，`notify_owner` fail closed。
+
 通知成功后允许 final 为空，表示群里有意静默；这个例外只对 `notify_owner` 返回 `status=sent` 的 run
-成立。通知失败或普通空 final 仍按失败处理。owner 私聊回复与跨 chatKey HITL resume 不在本阶段，见
-#155。
+成立。同一 run 最多一次成功通知；投递失败可以重试。通知失败或普通空 final 仍按失败处理。
+`notify_owner` 只在生产 ADK 路径注册，未被生产 dispatch 的 legacy native generator 不广告该工具。
+owner 私聊回复与跨 chatKey HITL resume 不在本阶段，见 #155。
 
 ---
 

@@ -33,6 +33,7 @@ func (s *Service) generateADK(
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	ctx = contextWithRuntimeInterruptCancel(ctx, cancel)
+	ctx = contextWithNotifyOwnerRunState(ctx)
 
 	adkModel, err := deepseek.NewADKModelWithThinking(profile.ModelPolicy.Model, s.deepseek, deepseek.Thinking{Type: thinkingType(profile.ModelPolicy)})
 	if err != nil {

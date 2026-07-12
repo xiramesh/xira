@@ -142,4 +142,7 @@ func TestRunnerCapabilities(t *testing.T) {
 	if !caps.Supports(channel.CapabilityProactiveOutbound) {
 		t.Errorf("ilink Capabilities missing proactive_outbound; got %v", caps)
 	}
+	if !caps.Supports(channel.CapabilityTypedRecipientOutbound) {
+		t.Errorf("ilink Capabilities missing typed_recipient_outbound; got %v", caps)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -168,11 +169,13 @@ func TestNotifyOwnerToolCallReportsDeliveryFailure(t *testing.T) {
 	}
 }
 
-type nonProactiveEmitter struct{}
+type nonTypedRecipientEmitter struct{}
 
-func (nonProactiveEmitter) Capabilities() channel.CapabilitySet { return nil }
-func (nonProactiveEmitter) Emit(context.Context, channel.OutboundEnvelope) error {
-	return errors.New("Emit must not run without proactive capability")
+func (nonTypedRecipientEmitter) Capabilities() channel.CapabilitySet {
+	return channel.CapabilitySet{channel.CapabilityProactiveOutbound}
+}
+func (nonTypedRecipientEmitter) Emit(context.Context, channel.OutboundEnvelope) error {
+	return errors.New("Emit must not run without typed recipient capability")
 }
 
 func TestNotifyOwnerToolCallCoversValidationAndDeliveryGuards(t *testing.T) {
@@ -189,8 +192,8 @@ func TestNotifyOwnerToolCallCoversValidationAndDeliveryGuards(t *testing.T) {
 		t.Fatalf("no-emitter record = %+v", rec)
 	}
 
-	withoutCapability := notifyOwnerTestService(t, baseDef, binding, nonProactiveEmitter{})
-	if rec := withoutCapability.notifyOwnerToolCall(ctx, "call", map[string]any{"message": "hello"}); rec.Output["status"] != "failed" || !strings.Contains(rec.Error, "proactive") {
+	withoutCapability := notifyOwnerTestService(t, baseDef, binding, nonTypedRecipientEmitter{})
+	if rec := withoutCapability.notifyOwnerToolCall(ctx, "call", map[string]any{"message": "hello"}); rec.Output["status"] != "failed" || !strings.Contains(rec.Error, "typed recipient") {
 		t.Fatalf("no-capability record = %+v", rec)
 	}
 
@@ -201,6 +204,90 @@ func TestNotifyOwnerToolCallCoversValidationAndDeliveryGuards(t *testing.T) {
 
 	if rec := withNoEmitter.notifyOwnerToolCall(ctx, "call", map[string]any{"message": strings.Repeat("界", notifyOwnerMaxMessageRunes+1)}); rec.Output["status"] != "rejected" || !strings.Contains(rec.Error, "exceeds") {
 		t.Fatalf("oversized record = %+v", rec)
+	}
+}
+
+func TestNotifyOwnerAllowsOnlyOneSuccessfulDeliveryPerRun(t *testing.T) {
+	emitter := &recordingEmitter{}
+	svc := notifyOwnerTestService(t, entrypoints.Definition{ID: "feishu-owner", Channel: "feishu"}, ownerBinding{
+		EntrypointID: "feishu-owner", OwnerSenderID: "ou_owner", OwnerSenderIDType: "open_id", BoundAt: time.Now(),
+	}, emitter)
+	base := contextWithRunExecution(context.Background(), runExecutionContext{Base: runtimeEventBase{EntrypointID: "feishu-owner"}})
+	ctx := contextWithNotifyOwnerRunState(base)
+
+	first := svc.notifyOwnerToolCall(ctx, "call-1", map[string]any{"message": "first"})
+	second := svc.notifyOwnerToolCall(ctx, "call-2", map[string]any{"message": "second"})
+	if first.Output["status"] != "sent" {
+		t.Fatalf("first notification = %+v", first)
+	}
+	if second.Output["status"] != "rejected" || !strings.Contains(second.Error, "already sent") {
+		t.Fatalf("second notification = %+v, want per-run rejection", second)
+	}
+	if got := len(emitter.emitted()); got != 1 {
+		t.Fatalf("owner deliveries = %d, want 1", got)
+	}
+
+	// A new run receives a fresh limiter.
+	third := svc.notifyOwnerToolCall(contextWithNotifyOwnerRunState(base), "call-3", map[string]any{"message": "next run"})
+	if third.Output["status"] != "sent" || len(emitter.emitted()) != 2 {
+		t.Fatalf("new-run notification = %+v deliveries=%d", third, len(emitter.emitted()))
+	}
+}
+
+func TestNotifyOwnerFailedDeliveryCanRetryWithinRun(t *testing.T) {
+	emitter := &recordingEmitter{emitErr: errors.New("temporary failure")}
+	svc := notifyOwnerTestService(t, entrypoints.Definition{ID: "feishu-owner", Channel: "feishu"}, ownerBinding{
+		EntrypointID: "feishu-owner", OwnerSenderID: "ou_owner", OwnerSenderIDType: "open_id", BoundAt: time.Now(),
+	}, emitter)
+	base := contextWithRunExecution(context.Background(), runExecutionContext{Base: runtimeEventBase{EntrypointID: "feishu-owner"}})
+	ctx := contextWithNotifyOwnerRunState(base)
+
+	if rec := svc.notifyOwnerToolCall(ctx, "call-1", map[string]any{"message": "first"}); rec.Output["status"] != "failed" {
+		t.Fatalf("first notification = %+v, want failure", rec)
+	}
+	emitter.mu.Lock()
+	emitter.emitErr = nil
+	emitter.mu.Unlock()
+	if rec := svc.notifyOwnerToolCall(ctx, "call-2", map[string]any{"message": "retry"}); rec.Output["status"] != "sent" {
+		t.Fatalf("retry notification = %+v, want sent", rec)
+	}
+}
+
+func TestNotifyOwnerRunLimitIsConcurrentSafe(t *testing.T) {
+	emitter := &recordingEmitter{}
+	svc := notifyOwnerTestService(t, entrypoints.Definition{ID: "feishu-owner", Channel: "feishu"}, ownerBinding{
+		EntrypointID: "feishu-owner", OwnerSenderID: "ou_owner", OwnerSenderIDType: "open_id", BoundAt: time.Now(),
+	}, emitter)
+	base := contextWithRunExecution(context.Background(), runExecutionContext{Base: runtimeEventBase{EntrypointID: "feishu-owner"}})
+	ctx := contextWithNotifyOwnerRunState(base)
+
+	const calls = 16
+	start := make(chan struct{})
+	results := make(chan ToolCallRecord, calls)
+	var wg sync.WaitGroup
+	for i := 0; i < calls; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- svc.notifyOwnerToolCall(ctx, "", map[string]any{"message": "notify"})
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	sent, rejected := 0, 0
+	for rec := range results {
+		switch rec.Output["status"] {
+		case "sent":
+			sent++
+		case "rejected":
+			rejected++
+		}
+	}
+	if sent != 1 || rejected != calls-1 || len(emitter.emitted()) != 1 {
+		t.Fatalf("sent=%d rejected=%d deliveries=%d", sent, rejected, len(emitter.emitted()))
 	}
 }
 
@@ -239,15 +326,11 @@ func TestRecordNotifyOwnerOutcomeIncludesFailureWithoutMessage(t *testing.T) {
 	}
 }
 
-func TestNotifyOwnerRegisteredForNativeAndADK(t *testing.T) {
-	foundNative := false
+func TestNotifyOwnerRegisteredForProductionADKPathOnly(t *testing.T) {
 	for _, def := range runtimeNativeToolDefinitions(agents.BuiltinXiraAssistant()) {
 		if def.Function.Name == notifyOwnerToolName {
-			foundNative = true
+			t.Fatal("dead native definitions must not advertise notify_owner")
 		}
-	}
-	if !foundNative {
-		t.Fatal("native definitions missing notify_owner")
 	}
 
 	svc := &Service{}
@@ -266,7 +349,7 @@ func TestNotifyOwnerRegisteredForNativeAndADK(t *testing.T) {
 	}
 }
 
-func TestNativeDeepSeekNotifyOwnerRunsThroughAgentLoop(t *testing.T) {
+func TestADKDeepSeekNotifyOwnerRunsThroughAgentLoop(t *testing.T) {
 	modelCalls := 0
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		modelCalls++
@@ -311,41 +394,56 @@ func TestNativeDeepSeekNotifyOwnerRunsThroughAgentLoop(t *testing.T) {
 	}
 }
 
-func TestGenerateNativeDeepSeekExecutesNotifyOwner(t *testing.T) {
+func TestADKNotifyOwnerAllowsOnlyOneSuccessfulDeliveryPerRun(t *testing.T) {
 	modelCalls := 0
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		modelCalls++
-		if modelCalls == 1 {
-			return deepSeekHTTPResponse(deepSeekToolCallResponseWithArgs("native-notify-1", notifyOwnerToolName, map[string]any{
-				"message": "Native path owner notice.",
-			})), nil
+		switch modelCalls {
+		case 1:
+			return deepSeekHTTPResponse(deepSeekToolCallResponseWithArgs("notify-1", notifyOwnerToolName, map[string]any{"message": "first"})), nil
+		case 2:
+			return deepSeekHTTPResponse(deepSeekToolCallResponseWithArgs("notify-2", notifyOwnerToolName, map[string]any{"message": "second"})), nil
+		default:
+			return deepSeekHTTPResponse(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"Owner notification handled."}}]}`), nil
 		}
-		return deepSeekHTTPResponse(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":null}}]}`), nil
 	})}
-	emitter := &recordingEmitter{}
-	svc := notifyOwnerTestService(t, entrypoints.Definition{
-		ID: "feishu-owner", Channel: "feishu", DefaultAgentID: agents.DefaultAgentID,
-	}, ownerBinding{
-		EntrypointID: "feishu-owner", OwnerSenderID: "ou_owner", OwnerSenderIDType: "open_id", BoundAt: time.Now(),
-	}, emitter)
-	svc.deepseek = deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client))
-	profile := agents.BuiltinXiraAssistant()
-	request := TurnRequest{Message: "notify owner", Context: channel.InboundContext{Channel: "feishu", EntrypointID: "feishu-owner"}}
-	ctx := contextWithRunExecution(context.Background(), runExecutionContext{
-		Base:    runtimeEventBase{RunID: "native-run", EntrypointID: "feishu-owner", TraceID: "native-run"},
-		Profile: profile,
-		Request: request,
+	rt := newTestService(t, Config{
+		StateDir:       t.TempDir(),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
+	rt.entrypoints = entrypoints.NewRegistry(agents.DefaultAgentID, []entrypoints.Definition{{
+		ID: "feishu-owner", Channel: "feishu", DefaultAgentID: agents.DefaultAgentID,
+	}})
+	rt.ownerBindings.Set(ownerBinding{
+		EntrypointID: "feishu-owner", OwnerSenderID: "ou_owner", OwnerSenderIDType: "open_id", BoundAt: time.Now(),
+	})
+	emitter := &recordingEmitter{}
+	rt.outbound = emitter
 
-	final, records, err := svc.generateNativeDeepSeek(ctx, profile, "instruction", request, func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		EntrypointID: "feishu-owner",
+		Message:      "notify twice",
+		Context: channel.InboundContext{
+			Channel: "feishu", EntrypointID: "feishu-owner", ChatID: "oc_group", ChatType: "group", SenderID: "ou_colleague",
+		},
+	})
 	if err != nil {
-		t.Fatalf("generateNativeDeepSeek: %v", err)
+		t.Fatalf("RunAgent: %v", err)
 	}
-	if final != "" || modelCalls != 2 || len(records) != 1 || records[0].Output["status"] != "sent" {
-		t.Fatalf("final=%q calls=%d records=%+v", final, modelCalls, records)
+	if modelCalls != 3 || resp.Status != "completed" || resp.FinalResponse != "Owner notification handled." {
+		t.Fatalf("response = %+v", resp)
 	}
-	if len(emitter.emitted()) != 1 {
-		t.Fatalf("owner notifications = %d, want 1", len(emitter.emitted()))
+	sent, rejected := 0, 0
+	for _, rec := range resp.ToolCalls {
+		switch rec.Output["status"] {
+		case "sent":
+			sent++
+		case "rejected":
+			rejected++
+		}
+	}
+	if sent != 1 || rejected != 1 || len(emitter.emitted()) != 1 {
+		t.Fatalf("sent=%d rejected=%d deliveries=%d records=%+v", sent, rejected, len(emitter.emitted()), resp.ToolCalls)
 	}
 }
 

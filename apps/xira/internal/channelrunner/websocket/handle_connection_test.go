@@ -239,6 +239,36 @@ func TestPrepareTurnValidation(t *testing.T) {
 	}
 }
 
+func TestPrepareTurnDropsClientSuppliedSenderIDType(t *testing.T) {
+	runner := newTestRunner(t, newFakeRuntime())
+	data := messageData{
+		Message: "hi",
+		Context: channel.InboundContext{
+			ChatID:       "chat-1",
+			ChatType:     "p2p",
+			SenderID:     "client-owner",
+			SenderIDType: "open_id",
+			Raw:          map[string]string{"sender_id_type": "union_id", "keep": "value"},
+		},
+	}
+	raw, _ := json.Marshal(data)
+	frame := inboundFrame{Type: "message", ID: "om_identity", Data: raw}
+
+	prepared, errFrame := runner.prepareTurn(frame, data, "websocket-default")
+	if errFrame != nil {
+		t.Fatalf("prepareTurn error = %+v", errFrame)
+	}
+	if prepared.turn.Context.SenderIDType != "" {
+		t.Fatalf("SenderIDType = %q, want untrusted websocket type dropped", prepared.turn.Context.SenderIDType)
+	}
+	if _, ok := prepared.turn.Context.Raw["sender_id_type"]; ok {
+		t.Fatalf("sender_id_type survived in Raw: %+v", prepared.turn.Context.Raw)
+	}
+	if prepared.turn.Context.Raw["keep"] != "value" {
+		t.Fatalf("unrelated metadata lost: %+v", prepared.turn.Context.Raw)
+	}
+}
+
 // TestHandleConnectionBadJSON covers readInboundFrame's bad_json branch +
 // badJSONError.Error (loopback: client sends invalid JSON, server replies with
 // a bad_json error frame and continues).

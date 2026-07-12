@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -22,6 +23,25 @@ const (
 type OwnerDeliveryTarget struct {
 	Route     channel.InboundContext
 	Recipient channel.OutboundRecipient
+}
+
+type notifyOwnerRunState struct {
+	mu   sync.Mutex
+	sent bool
+}
+
+type notifyOwnerRunStateKey struct{}
+
+func contextWithNotifyOwnerRunState(ctx context.Context) context.Context {
+	return context.WithValue(ctx, notifyOwnerRunStateKey{}, &notifyOwnerRunState{})
+}
+
+func notifyOwnerRunStateFromContext(ctx context.Context) *notifyOwnerRunState {
+	if ctx == nil {
+		return nil
+	}
+	state, _ := ctx.Value(notifyOwnerRunStateKey{}).(*notifyOwnerRunState)
+	return state
 }
 
 // ResolveOwnerTarget resolves a private delivery target without changing the
@@ -101,6 +121,14 @@ func (s *Service) notifyOwnerToolCall(ctx context.Context, callID string, args m
 	if !ok {
 		return reject(errors.New("notify_owner requires runtime execution context"))
 	}
+	state := notifyOwnerRunStateFromContext(ctx)
+	if state != nil {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		if state.sent {
+			return reject(errors.New("owner notification already sent for this run"))
+		}
+	}
 	entrypointID := strings.TrimSpace(exec.Base.EntrypointID)
 	if entrypointID == "" {
 		entrypointID = strings.TrimSpace(exec.Request.Context.EntrypointID)
@@ -115,8 +143,8 @@ func (s *Service) notifyOwnerToolCall(ctx context.Context, callID string, args m
 		rec.EndedAt = time.Now()
 		return rec
 	}
-	if !s.outbound.Capabilities().Supports(channel.CapabilityProactiveOutbound) {
-		rec.Error = "outbound emitter does not support proactive outbound"
+	if !s.outbound.Capabilities().Supports(channel.CapabilityTypedRecipientOutbound) {
+		rec.Error = "outbound emitter does not support typed recipient outbound"
 		rec.Output = map[string]any{"status": "failed", "error": rec.Error}
 		rec.EndedAt = time.Now()
 		return rec
@@ -141,18 +169,10 @@ func (s *Service) notifyOwnerToolCall(ctx context.Context, callID string, args m
 	}
 	rec.Output = map[string]any{"status": "sent", "entrypoint_id": entrypointID}
 	rec.EndedAt = time.Now()
-	return rec
-}
-
-func notifyOwnerToolParameters() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"message": map[string]any{"type": "string", "maxLength": notifyOwnerMaxMessageRunes},
-		},
-		"required":             []string{"message"},
-		"additionalProperties": false,
+	if state != nil {
+		state.sent = true
 	}
+	return rec
 }
 
 func notifyOwnerInputSchema() *jsonschema.Schema {
@@ -167,10 +187,6 @@ func notifyOwnerInputSchema() *jsonschema.Schema {
 }
 
 func intPtr(value int) *int { return &value }
-
-func isNotifyOwnerToolWireName(name string) bool {
-	return strings.TrimSpace(name) == notifyOwnerToolName
-}
 
 func recordNotifyOwnerOutcome(
 	rec ToolCallRecord,

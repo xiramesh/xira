@@ -51,13 +51,13 @@ Static owner configuration may declare an optional `owner_id_type`. A static own
 2. Otherwise, allow channel-only fallback only when exactly one matching runner exists.
 3. Multiple channel matches without an entrypoint are an explicit ambiguity error.
 
-Feishu keeps `chat_id` sends for ordinary finals and adds direct sends for `open_id`, `user_id`, or `union_id`. iLink may use the recipient ID as its user target; unsupported recipient types fail explicitly. WebSocket remains connection/chat-bound and may reject owner proactive delivery.
+Feishu keeps `chat_id` sends for ordinary finals and adds direct sends for `open_id`, `user_id`, or `union_id`. iLink may use the recipient ID as its user target; unsupported recipient types fail explicitly. Typed-recipient delivery is a separate capability from ordinary proactive delivery and is checked on the runner selected by `EntrypointID`, not against the Manager fleet union. WebSocket remains connection/chat-bound: it retains ordinary proactive delivery for resume finals but rejects every envelope carrying `Recipient`.
 
 ### Runtime-native tool
 
-`notify_owner` accepts one required `message` string. Runtime obtains the current `runExecutionContext`, resolves the owner target from its entrypoint, builds an `OutboundProactiveMessage`, and calls the injected emitter. The tool returns structured `sent`, `rejected`, or `failed` status. It records a tool call, runtime event, and audit decision without logging full private message content.
+`notify_owner` accepts one required `message` string. Runtime obtains the current `runExecutionContext`, resolves the owner target from its entrypoint, builds an `OutboundProactiveMessage`, and calls the injected emitter. The tool returns structured `sent`, `rejected`, or `failed` status. It records a tool call, runtime event, and audit decision without logging full private message content. One Agent run may complete at most one successful owner notification; a failed delivery may be retried.
 
-Both native DeepSeek and ADK paths call the same core executor. Flow runtime tool allowlists still apply. The tool description tells the model that successful delivery can be followed by an empty final when no public reply is needed.
+The production ADK path calls the shared executor. The legacy `generateNativeDeepSeek` path is not production-dispatched and does not advertise this tool. Flow runtime tool allowlists still apply. The tool description tells the model that successful delivery can be followed by an empty final when no public reply is needed.
 
 ## Failure Modes
 
@@ -75,7 +75,7 @@ Both native DeepSeek and ADK paths call the same core executor. Flow runtime too
 - Production-path `/bind` tests use typed inbound context and restart the store.
 - Manager tests use two same-channel runners to prove exact entrypoint selection and ambiguity failure.
 - Feishu adapter tests assert the actual `receive_id_type` and `receive_id` request.
-- Runtime tests exercise both native DeepSeek and ADK wrappers through the shared executor.
+- Runtime tests exercise the production ADK wrapper through the shared executor, including repeated calls in one run.
 - Live DeepSeek test asks the real model to call `notify_owner` against a recording emitter and verifies no live gate was skipped. Real Feishu delivery remains an operator smoke test because CI has no Feishu tenant credentials.
 
 ## Explicit Non-goals

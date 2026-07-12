@@ -94,6 +94,26 @@ func TestEmitDeliversToRegisteredConnection(t *testing.T) {
 	}
 }
 
+func TestEmitRejectsTypedRecipientWithoutLeakingToTriggerConnection(t *testing.T) {
+	runner := newTestRunner(t, newFakeRuntime())
+	frames := &capturedFrames{}
+	_, cancel := context.WithCancel(context.Background())
+	registerOneKey(runner, "group-1", "non-owner", frames.write, cancel)
+
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "websocket", ChatID: "group-1", SenderID: "non-owner"}
+	env.Recipient = &channel.OutboundRecipient{ID: "owner", IDType: "open_id"}
+	env.Data = map[string]any{"content": "owner secret"}
+
+	err := runner.Emit(context.Background(), env)
+	if err == nil || !strings.Contains(err.Error(), "typed recipient") {
+		t.Fatalf("Emit typed recipient error = %v, want fail-closed rejection", err)
+	}
+	if got := frames.snapshot(); len(got) != 0 {
+		t.Fatalf("trigger connection received %d private frames, want 0", len(got))
+	}
+}
+
 // TestEmitNoLiveConnectionReturnsError verifies Emit does NOT silently drop
 // when no connection is registered. Resume delivery is best-effort, but a
 // silent nil would hide the gap; an error lets the resume path log it
@@ -207,6 +227,9 @@ func TestCapabilitiesAdvertisesProactiveOutbound(t *testing.T) {
 	}
 	if !has[channel.CapabilityProactiveOutbound] {
 		t.Error("missing CapabilityProactiveOutbound")
+	}
+	if has[channel.CapabilityTypedRecipientOutbound] {
+		t.Error("websocket must not advertise typed recipient outbound")
 	}
 	if has[channel.CapabilityInteractiveHumanResponse] {
 		t.Error("should NOT advertise CapabilityInteractiveHumanResponse (human_response frame not yet wired)")

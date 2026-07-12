@@ -774,6 +774,7 @@ func (r *Runner) buildMetadata(account *accountPoller, msg openilink.WeixinMessa
 func (r *Runner) Capabilities() channel.CapabilitySet {
 	return channel.CapabilitySet{
 		channel.CapabilityProactiveOutbound,
+		channel.CapabilityTypedRecipientOutbound,
 	}
 }
 

@@ -37,7 +37,7 @@ apps/xira/internal/channel
 |---|---|
 | `OutboundType` | `ack` / `runtime_event` / `assistant_delta` / `assistant_final` / `interrupt` / `outbound_message` / `error`。 |
 | `OutboundEnvelope` | transport-neutral outbound 信封，包含 `source`、route `target`、可选 typed `recipient`、`request_id`、`run_id`、`correlation` 和 `data`。 |
-| `Capability` / `CapabilitySet` | channel adapter 能力声明，例如 `streaming_delta`、`proactive_outbound`。 |
+| `Capability` / `CapabilitySet` | channel adapter 能力声明，例如 `streaming_delta`、`proactive_outbound`、`typed_recipient_outbound`。 |
 | `OutboundEmitter` | 小型接口：声明 capabilities，并发送一个 `OutboundEnvelope`。 |
 
 约束：
@@ -52,7 +52,7 @@ apps/xira/internal/channel
 |---|---|---|---|---|
 | CLI | `xira agent run` | final-only | `assistant_final` 映射为 stdout final response；`--json` 输出完整 `TurnResponse`。 | `assistant_delta` streaming、inline `interrupt` prompt、proactive `outbound_message`。 |
 | TUI | 无内置 TUI command | not implemented | 无。 | 若未来新增 TUI，按 CLI + HTTP/WebSocket contract 实现。 |
-| WebSocket | `GET /api/v1/channels/websocket/messages` | final-only + runtime-event-stream | `ack`、`event`(binding of `runtime_event`)、`response`(binding of `assistant_final`)、`interrupt`、`error`。 | `assistant_delta`、`human_response` resume-over-WS、`outbound_message` 当前 reserve。 |
+| WebSocket | `GET /api/v1/channels/websocket/messages` | final-only + runtime-event-stream | `ack`、`event`(binding of `runtime_event`)、`response`(binding of `assistant_final`/无 recipient 的 proactive resume)、`interrupt`、`error`。 | `assistant_delta`、`human_response` resume-over-WS、typed-recipient 私信。 |
 | Feishu | `channelrunner/feishu` | final-only + proactive-outbound | `assistant_final` 发到 `target.chat_id`；`outbound_message` 可发到 typed `open_id` / `user_id` / `union_id` recipient。 | delta 默认 buffer/drop；`runtime_event` 只进 run log；owner 双向 HITL 尚未实现。 |
 | iLink | `channelrunner/ilink` | final-only + proactive-outbound | `assistant_final` 通过 `SendText` 或 `Push`；`outbound_message` 可使用 typed user recipient。 | delta 默认 buffer/drop；`runtime_event` 只进 run log；owner 双向 HITL 尚未实现。 |
 
@@ -148,7 +148,7 @@ Channel-specific 约束：
 
 | Channel | 最小 target | 投递说明 |
 |---|---|---|
-| WebSocket | `channel=websocket` + `entrypoint_id` + `chat_id` | 只能投递给当前已连接且匹配 target 的 client；离线队列不属于 v0。 |
+| WebSocket | `channel=websocket` + `entrypoint_id` + `chat_id` | 只能投递给当前已连接且匹配 target 的 client；保留普通 `proactive_outbound` 供 resume 使用，但不声明 `typed_recipient_outbound`，带 recipient 时 fail closed；离线队列不属于 v0。 |
 | Feishu | `channel=feishu` + `entrypoint_id` + `chat_id` | 使用 entrypoint 凭证发送 chat message。 |
 | iLink | `channel=ilink` + `entrypoint_id` + account/bot + recipient | 有 `context_token` 时可 reply；request-independent 场景通常用 `Push`。 |
 | CLI/TUI | `channel=cli` + local session | v0 不支持；未来可映射成本地 notification。 |
@@ -173,6 +173,8 @@ Feishu/iLink 这类聊天平台默认不实时发送 `assistant_delta`。后续�
 - 不支持 `interactive_human_response` 时，human response 走 HTTP/API/UI。
 - 不支持 `proactive_outbound` 时，`outbound_message` 必须记录为 unsupported /
   delivery_failed，不能假装已投递。
+- 不支持 `typed_recipient_outbound` 时，带 typed recipient 的消息必须拒绝，不能忽略 recipient
+  后退化成 target chat 投递；能力必须在 Manager 选出的最终 runner 上检查，不能只看 fleet 并集。
 - Vendor-specific connection management 留在对应 runner；common layer 只处理 contract
   envelope、capability 和 target 语义。
 - `target.entrypoint_id` 存在时必须精确选择 runner；同 channel 多 runner 时不得取第一个。

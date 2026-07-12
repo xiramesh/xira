@@ -20,6 +20,7 @@ import (
 type mockEmitRunner struct {
 	id      string
 	ch      string
+	caps    channel.CapabilitySet
 	mu      sync.Mutex
 	calls   []channel.OutboundEnvelope
 	emitErr error
@@ -32,7 +33,13 @@ func (m *mockEmitRunner) Stop(context.Context) error  { return nil }
 func (m *mockEmitRunner) SetIngest(*ingest.Ingest)    {}
 
 func (m *mockEmitRunner) Capabilities() channel.CapabilitySet {
-	return channel.CapabilitySet{channel.CapabilityProactiveOutbound}
+	if m.caps != nil {
+		return m.caps
+	}
+	return channel.CapabilitySet{
+		channel.CapabilityProactiveOutbound,
+		channel.CapabilityTypedRecipientOutbound,
+	}
 }
 
 func (m *mockEmitRunner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
@@ -105,6 +112,44 @@ func TestManagerEmitRoutesByExactEntrypoint(t *testing.T) {
 	}
 	if len(first.emitCalls()) != 0 || len(owner.emitCalls()) != 1 {
 		t.Fatalf("exact routing calls: first=%d owner=%d", len(first.emitCalls()), len(owner.emitCalls()))
+	}
+}
+
+func TestManagerEmitChecksTypedRecipientCapabilityOnSelectedRunner(t *testing.T) {
+	feishu := &mockEmitRunner{id: "feishu-owner", ch: "feishu"}
+	websocket := &mockEmitRunner{
+		id:   "websocket-owner",
+		ch:   "websocket",
+		caps: channel.CapabilitySet{channel.CapabilityProactiveOutbound},
+	}
+	mgr := &Manager{runners: []Runner{feishu, websocket}}
+
+	// The manager fleet supports typed recipients through Feishu, but the
+	// selected websocket runner does not. A fleet-wide capability check must
+	// not let the Feishu capability smuggle a private recipient into websocket.
+	if !mgr.Capabilities().Supports(channel.CapabilityTypedRecipientOutbound) {
+		t.Fatal("precondition: fleet should advertise typed recipient outbound")
+	}
+	env := channel.NewOutboundEnvelope(channel.OutboundProactiveMessage)
+	env.Target = &channel.InboundContext{Channel: "websocket", EntrypointID: "websocket-owner"}
+	env.Recipient = &channel.OutboundRecipient{ID: "owner", IDType: "open_id"}
+	env.Data = map[string]any{"content": "private"}
+
+	err := mgr.Emit(context.Background(), env)
+	if err == nil || !strings.Contains(err.Error(), "typed recipient") {
+		t.Fatalf("typed recipient error = %v, want route-local capability rejection", err)
+	}
+	if len(websocket.emitCalls()) != 0 {
+		t.Fatal("websocket Emit must not run for a typed recipient")
+	}
+
+	// websocket still supports ordinary proactive delivery for resume finals.
+	env.Recipient = nil
+	if err := mgr.Emit(context.Background(), env); err != nil {
+		t.Fatalf("recipient-free websocket proactive delivery failed: %v", err)
+	}
+	if len(websocket.emitCalls()) != 1 {
+		t.Fatalf("websocket calls = %d, want 1 resume delivery", len(websocket.emitCalls()))
 	}
 }
 
@@ -225,5 +270,8 @@ func TestManagerCapabilities(t *testing.T) {
 	caps := mgr.Capabilities()
 	if !caps.Supports(channel.CapabilityProactiveOutbound) {
 		t.Errorf("Manager.Capabilities() missing proactive_outbound; got %v", caps)
+	}
+	if !caps.Supports(channel.CapabilityTypedRecipientOutbound) {
+		t.Errorf("Manager.Capabilities() missing typed_recipient_outbound; got %v", caps)
 	}
 }

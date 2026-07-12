@@ -43,6 +43,7 @@ const (
 	CapabilityRuntimeEventStream       Capability = "runtime_event_stream"
 	CapabilityInteractiveHumanResponse Capability = "interactive_human_response"
 	CapabilityProactiveOutbound        Capability = "proactive_outbound"
+	CapabilityTypedRecipientOutbound   Capability = "typed_recipient_outbound"
 	CapabilityOfflineQueue             Capability = "offline_queue"
 )
 

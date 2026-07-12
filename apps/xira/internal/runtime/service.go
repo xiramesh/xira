@@ -1032,21 +1032,6 @@ func (s *Service) generateNativeDeepSeek(
 	var toolRecords []ToolCallRecord
 	messages = append(messages, msg)
 	for _, call := range msg.ToolCalls {
-		if isNotifyOwnerToolWireName(call.Function.Name) && !runtimeNativeToolsDisabledFromContext(ctx) && runtimeToolAllowedFromContext(ctx, notifyOwnerToolName) {
-			args := map[string]any{}
-			_ = json.Unmarshal([]byte(call.Function.Arguments), &args)
-			rec := s.notifyOwnerToolCall(ctx, call.ID, args)
-			recordNotifyOwnerOutcome(rec, recordEvent, recordAudit)
-			toolRecords = append(toolRecords, rec)
-			contentBytes, _ := json.Marshal(toolOutputForModel(rec))
-			messages = append(messages, deepseek.Message{
-				Role:       "tool",
-				ToolCallID: call.ID,
-				Name:       call.Function.Name,
-				Content:    string(contentBytes),
-			})
-			continue
-		}
 		if isHumanRequestToolWireName(call.Function.Name) && !runtimeNativeToolsDisabledFromContext(ctx) && runtimeToolAllowedFromContext(ctx, "human.request") {
 			args := map[string]any{}
 			_ = json.Unmarshal([]byte(call.Function.Arguments), &args)
@@ -1662,47 +1647,37 @@ func (s *Service) toolDefinitions(ctx context.Context, profile agents.Profile) [
 }
 
 func runtimeNativeToolDefinitions(agents.Profile) []deepseek.Tool {
-	return []deepseek.Tool{
-		{
-			Type: "function",
-			Function: deepseek.ToolFunction{
-				Name:        deepseek.DeepSeekToolName("human.request"),
-				Description: "Pause the current agent run and ask a human for freeform input or approval.",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"kind": map[string]any{
-							"type": "string",
-							"enum": []string{string(humanrequest.RequestFreeform), string(humanrequest.RequestApproval)},
-						},
-						"question": map[string]any{"type": "string"},
-						"options": map[string]any{
-							"type": "array",
-							"items": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"id":    map[string]any{"type": "string"},
-									"label": map[string]any{"type": "string"},
-								},
-								"required":             []string{"id", "label"},
-								"additionalProperties": false,
+	return []deepseek.Tool{{
+		Type: "function",
+		Function: deepseek.ToolFunction{
+			Name:        deepseek.DeepSeekToolName("human.request"),
+			Description: "Pause the current agent run and ask a human for freeform input or approval.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"kind": map[string]any{
+						"type": "string",
+						"enum": []string{string(humanrequest.RequestFreeform), string(humanrequest.RequestApproval)},
+					},
+					"question": map[string]any{"type": "string"},
+					"options": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"id":    map[string]any{"type": "string"},
+								"label": map[string]any{"type": "string"},
 							},
+							"required":             []string{"id", "label"},
+							"additionalProperties": false,
 						},
 					},
-					"required":             []string{"question"},
-					"additionalProperties": false,
 				},
+				"required":             []string{"question"},
+				"additionalProperties": false,
 			},
 		},
-		{
-			Type: "function",
-			Function: deepseek.ToolFunction{
-				Name:        notifyOwnerToolName,
-				Description: "Privately notify this agent's configured owner through the authoritative bound channel. You provide only the message, never a recipient. Use this when the owner should know or decide something. After a successful notification, return an empty final response when no public reply is needed.",
-				Parameters:  notifyOwnerToolParameters(),
-			},
-		},
-	}
+	}}
 }
 
 func (s *Service) toolRegistry(profile agents.Profile) *rtools.Registry {

@@ -4,7 +4,7 @@
 
 **Goal:** Add a safe one-way `notify_owner` runtime tool that resolves a typed owner recipient and delivers through the exact bound entrypoint.
 
-**Architecture:** Preserve the existing outbound route context and add a typed recipient. Persist sender identity type in owner bindings, resolve route and recipient inside runtime, route by entrypoint before channel, and share one tool executor between native DeepSeek and ADK.
+**Architecture:** Preserve the existing outbound route context and add a typed recipient. Persist sender identity type in owner bindings, resolve route and recipient inside runtime, route by entrypoint before channel, and expose the runtime-native tool through the production ADK path. Typed-recipient capability is enforced on the selected runner; connection-bound websocket remains authorization-only for owner binding.
 
 **Tech Stack:** Go, Google ADK function tools, DeepSeek tool calling, Lark/Feishu OpenAPI SDK, file-backed runtime state.
 
@@ -68,11 +68,11 @@
 **Steps:**
 
 1. Write failing contract tests for dynamic/static target resolution, missing type/no owner/no emitter, successful envelope shape, adapter failure, and message validation.
-2. Write failing native DeepSeek and ADK wrapper tests proving both paths record the tool result and call the same delivery core.
+2. Write failing ADK wrapper tests proving the production path records the tool result, calls the delivery core, and limits one run to one successful notification.
 3. Run `go test ./apps/xira/internal/runtime -run 'NotifyOwner|OwnerTarget' -count=1` and confirm RED.
 4. Implement `OwnerTargetResolver` separately from authorization-only `OwnerResolver`.
 5. Implement `notifyOwnerCore(ctx, args)` with authoritative target resolution, proactive envelope emission, structured result, event/audit hooks, and no recipient argument.
-6. Register the runtime-native definition and wire it into both model backends while preserving flow tool allowlists.
+6. Register the runtime-native definition in the production ADK backend while preserving flow tool allowlists; do not advertise it from the undispatched legacy native generator.
 7. Run targeted tests and confirm GREEN.
 
 ### Task 4: Documentation, coverage, and full verification

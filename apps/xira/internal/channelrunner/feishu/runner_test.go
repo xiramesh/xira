@@ -683,6 +683,9 @@ func TestFeishuCapabilities(t *testing.T) {
 	if !hasCap(channel.CapabilityProactiveOutbound) {
 		t.Error("missing CapabilityProactiveOutbound")
 	}
+	if !hasCap(channel.CapabilityTypedRecipientOutbound) {
+		t.Error("missing CapabilityTypedRecipientOutbound")
+	}
 	if !hasCap(channel.CapabilityInteractiveHumanResponse) {
 		t.Error("missing CapabilityInteractiveHumanResponse")
 	}
