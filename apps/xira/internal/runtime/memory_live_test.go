@@ -64,10 +64,16 @@ entrypoints: entrypoints.yaml
 `)
 
 	// 用 NewService（真 DeepSeek client，不走 fake）。
-	rt, err := NewService(Config{
+	cfg := Config{
 		ConfigPath: filepath.Join(workspace, "xira.yaml"),
 		StateDir:   stateRoot,
-	})
+	}
+	manager, err := NewSessionManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.SessionManager = manager
+	rt, err := NewService(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

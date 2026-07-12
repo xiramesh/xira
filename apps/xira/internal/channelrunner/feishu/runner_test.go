@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,9 +62,9 @@ func TestShouldHandleMessageRespectsGroupMentionPolicy(t *testing.T) {
 		t.Fatal("unmentioned group messages should be ignored by default")
 	}
 
-	respondAllGroups := entrypoints.Definition{RespondToUnmentionedGroupMessages: true}
-	if !shouldHandleMessage("group", false, "ou_1", "", respondAllGroups, nil) {
-		t.Fatal("unmentioned group messages should be handled when configured")
+	// #151: 群消息不 @ bot → 不处理（observe 存 session）。
+	if shouldHandleMessage("group", false, "ou_1", "", entrypoints.Definition{}, nil) {
+		t.Fatal("unmentioned group message should not be handled (observe only)")
 	}
 }
 
@@ -74,8 +77,7 @@ func TestShouldHandleMessageRespectsGroupMentionPolicy(t *testing.T) {
 //   - mention gate fails + sender in allowlist → still reject (AND)
 func TestShouldHandleMessageSenderAllowlist(t *testing.T) {
 	allowlist := entrypoints.Definition{
-		RespondToUnmentionedGroupMessages: true, // ensure mention gate passes, isolate allowlist
-		AllowedSenderIDs:                  []string{"ou_allowed"},
+		AllowedSenderIDs: []string{"ou_allowed"},
 	}
 	// empty allowlist → allow all.
 	if !shouldHandleMessage("group", true, "ou_anyone", "", entrypoints.Definition{}, nil) {
@@ -93,9 +95,8 @@ func TestShouldHandleMessageSenderAllowlist(t *testing.T) {
 	// owner resolver receives definition.ID (entrypoint ID), not a channel
 	// name — owner bypass is a privilege boundary (#139 review).
 	ownerDef := entrypoints.Definition{
-		ID:                                "feishu-owner-test",
-		RespondToUnmentionedGroupMessages: true,
-		AllowedSenderIDs:                  []string{"ou_allowed"},
+		ID:               "feishu-owner-test",
+		AllowedSenderIDs: []string{"ou_allowed"},
 	}
 	owner := &stubOwnerResolver{ownerSenderID: "ou_owner"}
 	if !shouldHandleMessage("group", true, "ou_owner", "", ownerDef, owner) {
@@ -106,8 +107,7 @@ func TestShouldHandleMessageSenderAllowlist(t *testing.T) {
 	}
 	// mention gate fails + sender in allowlist → still reject (AND).
 	strictGroup := entrypoints.Definition{
-		RespondToUnmentionedGroupMessages: false,
-		AllowedSenderIDs:                  []string{"ou_allowed"},
+		AllowedSenderIDs: []string{"ou_allowed"},
 	}
 	if shouldHandleMessage("group", false, "ou_allowed", "", strictGroup, nil) {
 		t.Error("mention gate fail should reject even if sender is in allowlist (AND)")
@@ -121,9 +121,8 @@ func TestShouldHandleMessageSenderAllowlist(t *testing.T) {
 // /bind must @bot).
 func TestShouldHandleMessageBindPreAuth(t *testing.T) {
 	allowlist := entrypoints.Definition{
-		ID:                                "feishu-protected",
-		RespondToUnmentionedGroupMessages: true, // mention gate passes, isolate auth
-		AllowedSenderIDs:                  []string{"ou_allowed"},
+		ID:               "feishu-protected",
+		AllowedSenderIDs: []string{"ou_allowed"},
 	}
 	// /bind command from unauthorized sender → passes auth (pre-auth bypass).
 	if !shouldHandleMessage("group", true, "ou_stranger", "/bind WDJM-LHKD", allowlist, nil) {
@@ -143,8 +142,7 @@ func TestShouldHandleMessageBindPreAuth(t *testing.T) {
 	}
 	// mention gate still applies to /bind in groups.
 	strictGroup := entrypoints.Definition{
-		RespondToUnmentionedGroupMessages: false,
-		AllowedSenderIDs:                  []string{"ou_allowed"},
+		AllowedSenderIDs: []string{"ou_allowed"},
 	}
 	if shouldHandleMessage("group", false, "ou_stranger", "/bind WDJM-LHKD", strictGroup, nil) {
 		t.Error("/bind without @bot in strict group should be rejected by mention gate")
@@ -837,5 +835,30 @@ func TestFeishuSendError(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("Emit proactive to closed port should return error")
+	}
+}
+
+func TestFeishuSendUsesInteractiveCardWhenAPIAcceptsIt(t *testing.T) {
+	var requestBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requestBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"msg":"success","data":{"message_id":"om_1"}}`))
+	}))
+	defer server.Close()
+
+	runner, err := NewRunner(entrypoints.Definition{
+		ID: "feishu-send-success", Channel: "feishu", AppID: "cli_test", AppSecret: "s",
+	}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	runner.client = lark.NewClient("cli_test", "s", lark.WithOpenBaseUrl(server.URL))
+	if err := runner.send(context.Background(), "oc_chat", "hello"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !strings.Contains(requestBody, `"msg_type":"interactive"`) {
+		t.Fatalf("send body = %s, want interactive card", requestBody)
 	}
 }

@@ -110,9 +110,7 @@ func TestRunAgentPersistsSessionInTriggerChannel(t *testing.T) {
 	if got := resp.SessionScope.Values["chat"]; got != "group:oc_smoke" {
 		t.Fatalf("session scope chat = %q, want group:oc_smoke", got)
 	}
-	if got := resp.SessionScope.Values["sender"]; !strings.Contains(got, "u_smoke") {
-		t.Fatalf("session scope sender = %q, want it to contain u_smoke", got)
-	}
+	// #151：dimensions=[chat]，sender 不在 scope 里。
 
 	// And the messages.jsonl must physically land under sessions/feishu/...
 	scope := resp.SessionScope

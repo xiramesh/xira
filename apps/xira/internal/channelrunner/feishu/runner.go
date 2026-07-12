@@ -23,6 +23,7 @@ import (
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
+	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
@@ -68,6 +69,10 @@ type Runner struct {
 	botInfoFetcher func(ctx context.Context) (string, error)
 	// fetchTimeout 是 fetchBotOpenID 的超时（默认 5s，测试可注入短值）。
 	fetchTimeout time.Duration
+
+	// ingest is the shared message processing layer (#151). It owns the
+	// SessionManager dependency, so runners only normalize platform facts.
+	ingest *ingest.Ingest
 }
 
 // SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
@@ -84,6 +89,16 @@ func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
 func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
 	if r != nil {
 		r.ownerResolver = resolver
+		if r.ingest != nil {
+			r.ingest.SetOwnerResolver(resolver)
+		}
+	}
+}
+
+// SetIngest injects the shared message processing layer (#151).
+func (r *Runner) SetIngest(ing *ingest.Ingest) {
+	if r != nil {
+		r.ingest = ing
 	}
 }
 
@@ -112,7 +127,6 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 		"is_lark", definition.IsLark,
 		"verification_token_configured", resolveValue(definition.VerifyToken, definition.VerifyTokenEnv) != "",
 		"encrypt_key_configured", resolveValue(definition.EncryptKey, definition.EncryptKeyEnv) != "",
-		"respond_to_unmentioned_group_messages", definition.RespondToUnmentionedGroupMessages,
 	)
 	return &Runner{
 		definition: definition,
@@ -124,6 +138,7 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 		client:     lark.NewClient(appID, appSecret, opts...),
 		messages:   dedupe.New(filepath.Join(stateDir, "dedupe.json"), messageDedupeTTL),
 		router:     progress.NewRouter(),
+		ingest:     ingest.New(nil, nil), // 默认无 session manager 的 ingest（observe no-op）；main.go 会覆盖
 	}, nil
 }
 
@@ -269,25 +284,25 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		"content_chars", utf8.RuneCountInString(content),
 		"content_preview", previewText(content, 120),
 	)
-	if !shouldHandleMessage(chatType, mentioned, senderID, content, r.definition, r.ownerResolver) {
-		// Distinguish the two gates for log clarity: mention gate vs sender auth.
-		// Both gates use AND; report whichever applies (sender auth takes
-		// precedence — even an @mentioned unauthorized sender is still rejected).
-		reason := "unmentioned_group_message"
-		if !r.definition.AllowsSender(senderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), senderID, r.definition.ID)) {
-			reason = "sender_not_authorized"
-		}
-		slog.Info("feishu message ignored",
-			"entrypoint_id", r.definition.ID,
-			"chat_id", chatID,
-			"chat_type", chatType,
-			"message_id", messageID,
-			"sender_id", senderID,
-			"reason", reason,
-			"respond_to_unmentioned_group_messages", r.definition.RespondToUnmentionedGroupMessages,
-		)
+	// #151: 通过共享 ingest 层统一处理 gate（授权 + mention）→ observe or dispatch。
+	// ingest 必须 非 nil（main.go 在 Start 前注入）。没有不安全 fallback。
+	input := ingest.MessageInput{
+		Channel: "feishu", EntrypointID: r.definition.ID,
+		ChatID: chatID, ChatType: chatType,
+		SenderID: senderID, Mentioned: mentioned,
+		Content: content, MessageID: messageID,
+	}
+	switch r.ingest.Gate(input, r.definition) {
+	case ingest.DecisionObserve:
+		r.ingest.Observe(input, r.definition, r.messageDedupeKey(messageID), r.messages)
+		return nil
+	case ingest.DecisionReject:
+		slog.Info("feishu message rejected",
+			"entrypoint_id", r.definition.ID, "chat_id", chatID,
+			"sender_id", senderID, "message_id", messageID)
 		return nil
 	}
+	// DecisionDispatch → 继续往下走（dedupe + ChatKeySession + RunAgent）
 	dedupeKey := r.messageDedupeKey(messageID)
 	if !r.messages.Begin(dedupeKey, time.Now()) {
 		slog.Info("feishu duplicate message ignored",
@@ -418,10 +433,13 @@ func (r *Runner) messageDedupeKey(messageID string) string {
 
 // shouldHandleMessage decides whether feishu should process an inbound message.
 // Two orthogonal gates, both must pass (AND):
-//  1. mention gate: group messages need @bot unless RespondToUnmentionedGroupMessages.
+//  1. mention gate: group messages need @bot (#151: unmentioned → observe, not handle).
 //  2. sender authorization (#121): sender must be in AllowedSenderIDs (glob),
 //     OR pass the owner check when ownerResolver is non-nil. Empty allowlist
 //     = allow all (backward compat).
+//
+// #151: respond_to_unmentioned_group_messages removed — unmentioned group
+// messages are always observed (stored in session), never handled.
 //
 // /bind pre-auth (#123): a /bind command bypasses the sender-authorization gate
 // so an unbound owner can claim a protected entrypoint on first bind. The mention
@@ -431,7 +449,7 @@ func shouldHandleMessage(chatType string, mentioned bool, senderID, content stri
 		// p2p/direct: mention gate always passes; still check sender auth.
 		return isAuthorizedSender(senderID, content, definition, owner)
 	}
-	if !mentioned && !definition.RespondToUnmentionedGroupMessages {
+	if !mentioned {
 		return false
 	}
 	return isAuthorizedSender(senderID, content, definition, owner)

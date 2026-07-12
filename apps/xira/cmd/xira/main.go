@@ -16,6 +16,7 @@ import (
 	"github.com/xiramesh/xira/internal/api"
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelrunner"
+	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/runtime"
 	"github.com/xiramesh/xira/internal/version"
@@ -42,9 +43,17 @@ func newRootCommandWithFactory(serviceFactory func(runtime.Config) (*runtime.Ser
 	cmd.SetVersionTemplate(version.String() + "\n")
 	cmd.PersistentFlags().StringVar(&configPath, "config", "xira.yaml", "Runtime instance config path")
 	newRuntime := func() (*runtime.Service, error) {
-		return serviceFactory(runtime.Config{
+		cfg := runtime.Config{
 			ConfigPath: configPath,
-		})
+		}
+		// Session storage is shared by Runtime and channel ingestion, so the
+		// composition root owns construction and injects one instance into both.
+		sessionManager, err := runtime.NewSessionManager(cfg)
+		if err != nil {
+			return nil, err
+		}
+		cfg.SessionManager = sessionManager
+		return serviceFactory(cfg)
 	}
 	cmd.AddCommand(versionCommand())
 	cmd.AddCommand(serveCommand(newRuntime))
@@ -107,21 +116,18 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// #151: Inject all shared capabilities BEFORE Start (消除启动窗口）。
+			rt.SetOutboundEmitter(channelRunners)
+			channelRunners.SetHITLResolver(rt)
+			channelRunners.SetOwnerResolver(rt)
+			// #151: 创建共享 ingest 层，注入所有 runner。
+			// ingest 统一处理 gate（授权+mention）/ dedupe / observe。
+			ing := ingest.New(rt.SessionManager(), rt)
+			channelRunners.SetIngest(ing)
 			if err := channelRunners.Start(ctx); err != nil {
 				return err
 			}
 			slog.Info("channel runners started", "count", channelRunners.Count())
-			// Inject the channel manager as the outbound emitter so resumed runs
-			// (HITL resume via HTTP/CLI) can deliver their final response back to
-			// the originating IM channel (RFC #27 — stateless HITL resume).
-			rt.SetOutboundEmitter(channelRunners)
-			// Inject HITL resolve capability so IM channels (feishu/ilink) can
-			// resolve pending HITL from text replies (#92 — HITL IM direct answer).
-			channelRunners.SetHITLResolver(rt)
-			// Inject owner-query capability (#122): *Service now implements
-			// IsOwner (entrypoint-level owner declared in entrypoints.yaml).
-			// Runners use it to let the owner bypass the sender allowlist (#121).
-			channelRunners.SetOwnerResolver(rt)
 			defer func() {
 				stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel()

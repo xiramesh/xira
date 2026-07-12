@@ -29,6 +29,7 @@ import (
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
+	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
@@ -121,6 +122,9 @@ type Runner struct {
 	connMu    sync.Mutex
 	conns     map[frt.ChatKey]*wsConn
 	connIDSeq uint64 // monotonic connection identity, for same-conn detection
+
+	// ingest is the shared message processing layer (#151).
+	ingest *ingest.Ingest
 }
 
 // wsConn holds a live websocket connection's send capability. id is a stable
@@ -157,6 +161,7 @@ func NewRunner(def entrypoints.Definition, rt *frt.Service, stateRoot string) (*
 		router:     progress.NewRouter(),
 		dedupe:     dedupe.New("", dedupeTTL),
 		conns:      map[frt.ChatKey]*wsConn{},
+		ingest:     ingest.New(nil, nil), // 默认无 session manager（observe no-op）；main.go 会覆盖
 	}, nil
 }
 
@@ -174,6 +179,16 @@ func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
 func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
 	if r != nil {
 		r.ownerResolver = resolver
+		if r.ingest != nil {
+			r.ingest.SetOwnerResolver(resolver)
+		}
+	}
+}
+
+// SetIngest injects the shared message processing layer (#151).
+func (r *Runner) SetIngest(ing *ingest.Ingest) {
+	if r != nil {
+		r.ingest = ing
 	}
 }
 
@@ -795,13 +810,22 @@ func (r *Runner) prepareTurn(frame inboundFrame, data messageData, defaultEntryp
 	}
 	ctx.MessageID = messageID
 	eventCtx.MessageID = messageID
-	handle := shouldHandle(ctx, data.Message, definition, r.ownerResolver)
+	// #151: 通过共享 ingest 层统一处理 gate（授权 + mention）→ observe or dispatch。
+	handle := true
 	ignoreReason := ""
-	if !handle {
-		// Internal-only reason for slog (排障). NEVER reaches the client ack —
-		// handleMessage sends a generic "unmentioned_group_message" reason so
-		// unauthorized senders can't distinguish auth-reject from mention-reject.
-		if !definition.AllowsSender(ctx.SenderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), ctx.SenderID, definition.ID)) {
+	input := ingest.MessageInput{
+		Channel: "websocket", EntrypointID: runEntrypointID,
+		ChatID: ctx.ChatID, ChatType: normalizeChannel(ctx.ChatType),
+		SenderID: ctx.SenderID, Mentioned: ctx.Mentioned,
+		Content: data.Message, MessageID: messageID,
+	}
+	switch r.ingest.Gate(input, definition) {
+	case ingest.DecisionObserve:
+		r.ingest.Observe(input, definition, dedupeKey(runEntrypointID, messageID), r.dedupe)
+		fallthrough
+	case ingest.DecisionReject:
+		handle = false
+		if !ingest.AuthorizeSender(ctx.SenderID, data.Message, definition, r.ownerResolver) {
 			ignoreReason = "sender_not_authorized"
 		} else {
 			ignoreReason = "unmentioned_group_message"
@@ -849,7 +873,8 @@ func shouldHandle(ctx channel.InboundContext, content string, definition entrypo
 	if normalizeChannel(ctx.ChatType) != "group" {
 		return isAuthorizedSender(ctx, content, definition, owner)
 	}
-	if !ctx.Mentioned && !definition.RespondToUnmentionedGroupMessages {
+	// #151: respond_to_unmentioned removed — unmentioned group messages → observe.
+	if !ctx.Mentioned {
 		return false
 	}
 	return isAuthorizedSender(ctx, content, definition, owner)

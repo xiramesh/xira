@@ -10,6 +10,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/channelrunner/feishu"
 	"github.com/xiramesh/xira/internal/channelrunner/ilink"
+	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/channelrunner/websocket"
 	"github.com/xiramesh/xira/internal/runtime"
 )
@@ -19,6 +20,7 @@ type Runner interface {
 	Channel() string
 	Start(context.Context) error
 	Stop(context.Context) error
+	SetIngest(*ingest.Ingest)
 }
 
 type Manager struct {
@@ -148,6 +150,16 @@ func (m *Manager) SetOwnerResolver(resolver runtime.OwnerResolver) {
 		case *websocket.Runner:
 			r.SetOwnerResolver(resolver)
 		}
+	}
+}
+
+// SetIngest injects the shared message processing layer into all runners (#151).
+func (m *Manager) SetIngest(ing *ingest.Ingest) {
+	if m == nil {
+		return
+	}
+	for _, runner := range m.runners {
+		runner.SetIngest(ing)
 	}
 }
 

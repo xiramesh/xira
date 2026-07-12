@@ -318,7 +318,7 @@ func TestPrepareTurnSenderAuthorization(t *testing.T) {
 	// Pin entrypointID propagation (#139 review): resolver must receive
 	// definition.ID, not channel "websocket".
 	owner := &wsStubOwner{}
-	runner.ownerResolver = owner
+	runner.SetOwnerResolver(owner) // 走 setter 同步更新 ingest
 	frame, data = mkFrame("ou_owner")
 	prepared, errFrame = runner.prepareTurn(frame, data, "ws-allowlist")
 	if errFrame != nil {
@@ -382,12 +382,7 @@ func TestShouldHandleGroupMentionedAuthorized(t *testing.T) {
 	if !shouldHandle(ctx, "", def, nil) {
 		t.Error("mentioned + authorized group message should be handled")
 	}
-	// group + not mentioned + respond-to-unmentioned=true → handled (if authed).
-	def2 := entrypoints.Definition{RespondToUnmentionedGroupMessages: true, AllowedSenderIDs: []string{"ou_ok"}}
-	if !shouldHandle(ctx, "", def2, nil) {
-		t.Error("respond-all + authorized should be handled")
-	}
-	// group + not mentioned + respond-to-unmentioned=false → not handled.
+	// group + not mentioned → not handled (#151: observe, not handle).
 	ctxNotMentioned := ctx
 	ctxNotMentioned.Mentioned = false
 	if shouldHandle(ctxNotMentioned, "", entrypoints.Definition{}, nil) {
@@ -405,9 +400,8 @@ func TestShouldHandleBindPreAuth(t *testing.T) {
 		Channel:   "websocket",
 	}
 	allowlist := entrypoints.Definition{
-		ID:                                "ws-protected",
-		RespondToUnmentionedGroupMessages: true,
-		AllowedSenderIDs:                  []string{"ou_ok"},
+		ID:               "ws-protected",
+		AllowedSenderIDs: []string{"ou_ok"},
 	}
 	// /bind from unauthorized sender → passes (pre-auth bypass).
 	if !shouldHandle(ctx, "/bind WDJM-LHKD", allowlist, nil) {

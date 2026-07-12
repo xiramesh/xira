@@ -44,6 +44,44 @@ func TestManagerAllocatesStableScopedSession(t *testing.T) {
 	}
 }
 
+func TestManagerDoesNotPublishMessagesWhenPersistenceFails(t *testing.T) {
+	root := t.TempDir()
+	manager, err := NewManagerWithStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Block the channel directory only after the store has opened. This makes
+	// persistence fail during AppendAgentMessages, rather than at construction.
+	if err := os.WriteFile(filepath.Join(root, "feishu"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input := AgentTurnInput{
+		SessionID: "conversation:write-failure",
+		AgentID:   "agent-1",
+		Context: channel.InboundContext{
+			Channel: "feishu", EntrypointID: "ep-1", ChatID: "chat-1", ChatType: "group", SenderID: "user-1",
+		},
+		Scope: &SessionScope{Dimensions: []string{"chat"}, Values: map[string]string{"chat": "group:chat-1"}},
+	}
+	message := Message{Role: "user", Kind: MessageKindMessage, Content: "retry me"}
+	if err := manager.AppendAgentMessages(input, []Message{message}); err == nil {
+		t.Fatal("AppendAgentMessages() error = nil, want persistence failure")
+	}
+	if got := manager.AgentHistory(input.SessionID, input.AgentID); len(got) != 0 {
+		t.Fatalf("failed append leaked into in-memory history: %+v", got)
+	}
+
+	if err := os.Remove(filepath.Join(root, "feishu")); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.AppendAgentMessages(input, []Message{message}); err != nil {
+		t.Fatalf("retry append: %v", err)
+	}
+	if got := manager.AgentHistory(input.SessionID, input.AgentID); len(got) != 1 || got[0].Content != "retry me" {
+		t.Fatalf("retry history = %+v, want exactly one persisted message", got)
+	}
+}
+
 func TestManagerConversationSessionIncludesEntrypoint(t *testing.T) {
 	manager := NewManager()
 	base := map[string]string{
@@ -325,15 +363,25 @@ func TestBuildScopeIncludesNames(t *testing.T) {
 // TestBuildScopeOmitsEmptyNames verifies that when no name fields are present,
 // scope.Names is not populated (keeps the zero-value scope clean for backward
 // compatibility with older persisted scopes that predate the Names field).
-func TestBuildScopeOmitsEmptyNames(t *testing.T) {
+func TestBuildScopeOmitsEmptyDisplayNames(t *testing.T) {
+	// #151：sender_id 总会进 Names（供 resume），但 display names（chat_name/sender_name）
+	// 只在实际有值时才存在。
 	ctx := channel.NewInboundContext("feishu", "user-1", map[string]string{
 		"chat_id":   "chat-1",
 		"chat_type": "group",
 	})
-	policy := routing.SessionPolicy{Dimensions: []string{"chat", "sender"}}
+	policy := routing.SessionPolicy{Dimensions: []string{"chat"}}
 	scope := BuildScope(ctx, policy)
-	if scope.Names != nil {
-		t.Errorf("scope.Names = %+v, want nil when no names present", scope.Names)
+	// sender_id 应该在（resume 需要）
+	if scope.Names == nil || scope.Names["sender_id"] == "" {
+		t.Errorf("scope.Names should contain sender_id: %+v", scope.Names)
+	}
+	// 但 chat_name / sender_name 不在（没有 display name）
+	if scope.Names["chat_name"] != "" {
+		t.Errorf("chat_name should be empty: %+v", scope.Names)
+	}
+	if scope.Names["sender_name"] != "" {
+		t.Errorf("sender_name should be empty: %+v", scope.Names)
 	}
 }
 

@@ -266,23 +266,14 @@ func TestRunChildAgentPersistsSessionScope(t *testing.T) {
 	if want := "direct:" + parentChat; chatVal != want {
 		t.Errorf("scope chat = %q, want %q", chatVal, want)
 	}
-	// sender is stored in canonical form "<channel>:<sender>" (canonicalSenderID).
-	// This is the REAL transformation product — not a hand-cleaned value (§5.4).
-	senderVal := run.SessionScope.Values["sender"]
-	if want := parentChannel + ":" + parentSender; senderVal != want {
-		t.Errorf("scope sender = %q, want canonical %q", senderVal, want)
-	}
-
-	// Round-trip: inboundContextFromScope must recover the raw IDs (strip prefixes).
+	// #151：dimensions=[chat]，sender 不在 scope 里（per-sender 数据已独立到 stateDir）。
+	// Round-trip: inboundContextFromScope 仍能恢复 Channel + ChatID。
 	reconstructed := inboundContextFromScope(run.SessionScope, nil)
 	if reconstructed.Channel != parentChannel {
 		t.Errorf("reconstructed Channel = %q, want %q", reconstructed.Channel, parentChannel)
 	}
 	if reconstructed.ChatID != parentChat {
 		t.Errorf("reconstructed ChatID = %q, want %q (prefix must strip)", reconstructed.ChatID, parentChat)
-	}
-	if reconstructed.SenderID != parentSender {
-		t.Errorf("reconstructed SenderID = %q, want %q (canonical prefix must strip)", reconstructed.SenderID, parentSender)
 	}
 }
 
@@ -378,19 +369,19 @@ func TestResumeDirectHumanRequestPropagatesContextToBase(t *testing.T) {
 		StateDir:       filepath.Join(t.TempDir(), "state"),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
 	})
-	// Seed a waiting_human run whose SessionScope carries chat_id/sender_id
-	// (encoded as "<type>:<id>") AND Names (display names).
+	// Seed a waiting_human run whose SessionScope carries chat_id
+	// AND Names (sender_id + display names). #151: sender 在 Names，不在 Values。
 	scope := &fsession.SessionScope{
 		Version:      1,
 		EntrypointID: "ep-resume",
 		Channel:      "feishu",
 		Values: map[string]string{
-			"chat":   "group:chat-9",
-			"sender": "feishu:user-42",
+			"chat": "group:chat-9",
 		},
 		Names: map[string]string{
 			"chat_name":   "工作群",
 			"sender_name": "张三",
+			"sender_id":   "feishu:user-42",
 		},
 	}
 	if err := rt.runs.SaveRun(TurnResponse{

@@ -122,8 +122,12 @@ func TestRunAgentPersistsSessionFilesAndReloadsHistory(t *testing.T) {
 	if len(entries) != 1 || !entries[0].IsDir() {
 		t.Fatalf("session entries = %+v, want one conversation dir", entries)
 	}
-	if !strings.Contains(entries[0].Name(), "chat_group_chat-1") || !strings.Contains(entries[0].Name(), "sender_sender-1") {
-		t.Fatalf("conversation dir = %q, want readable chat and sender labels", entries[0].Name())
+	if !strings.Contains(entries[0].Name(), "chat_group_chat-1") {
+		t.Fatalf("conversation dir = %q, want readable chat label", entries[0].Name())
+	}
+	// #151：dimensions=[chat]，目录名不含 sender 段。
+	if strings.Contains(entries[0].Name(), "sender_") {
+		t.Fatalf("conversation dir should not contain sender segment: %q", entries[0].Name())
 	}
 	messagesPath := filepath.Join(entrypointDir, entries[0].Name(), "agents", resp.AgentID, "messages.jsonl")
 	if _, err := os.Stat(messagesPath); err != nil {
@@ -168,7 +172,7 @@ func TestHydrateADKSessionRestoresPersistedAgentHistory(t *testing.T) {
 	if events.Len() != 2 {
 		t.Fatalf("restored event len = %d, want 2", events.Len())
 	}
-	if first := events.At(0); first.Author != "user" || contentText(first.Content) != "remember this" {
+	if first := events.At(0); first.Author != "user" || !strings.Contains(contentText(first.Content), "remember this") {
 		t.Fatalf("first restored event = %+v", first)
 	}
 	if second := events.At(1); second.Author != resp.AgentID || contentText(second.Content) != "fake model response: remember this" {
@@ -601,10 +605,10 @@ tools:
 Use local evidence before summaries.
 `)
 
-	rt, err := NewService(Config{
+	rt, err := NewService(withTestSessionManager(t, Config{
 		ConfigPath:     filepath.Join(instance, "xira.yaml"),
 		DeepSeekClient: fakeDeepSeekClient(t),
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewService() should not validate default skills at startup: %v", err)
 	}
@@ -660,10 +664,10 @@ permissions:
 Use local evidence before summaries.
 `)
 
-	rt, err := NewService(Config{
+	rt, err := NewService(withTestSessionManager(t, Config{
 		ConfigPath:     filepath.Join(instance, "xira.yaml"),
 		DeepSeekClient: fakeDeepSeekClient(t),
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewService() should not validate default skills at startup: %v", err)
 	}
@@ -698,10 +702,10 @@ permissions:
 Use local evidence before summaries.
 `)
 
-	rt, err = NewService(Config{
+	rt, err = NewService(withTestSessionManager(t, Config{
 		ConfigPath:     filepath.Join(instance, "xira.yaml"),
 		DeepSeekClient: fakeDeepSeekClient(t),
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewService() with secret permission should succeed: %v", err)
 	}
@@ -1454,10 +1458,10 @@ func TestRunAgentADKResponseRecordsContentStats(t *testing.T) {
 		}, nil
 	})}
 
-	rt, err := NewService(Config{
+	rt, err := NewService(withTestSessionManager(t, Config{
 		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1524,10 +1528,10 @@ func TestRunAgentInjectsConversationContext(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}]}`)),
 		}, nil
 	})}
-	rt, err := NewService(Config{
+	rt, err := NewService(withTestSessionManager(t, Config{
 		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1576,10 +1580,10 @@ func TestRunAgentInjectsConversationContextWithNames(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}]}`)),
 		}, nil
 	})}
-	rt, err := NewService(Config{
+	rt, err := NewService(withTestSessionManager(t, Config{
 		StateDir:       t.TempDir(),
 		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2517,14 +2521,17 @@ func TestAgentProfileSessionDimensionsOverrideDefaultScope(t *testing.T) {
 	if resp.SessionScope == nil {
 		t.Fatal("session scope is nil")
 	}
-	if got := resp.SessionScope.Values["channel"]; got != "channel:websocket" {
-		t.Fatalf("channel scope = %q", got)
+	// #151：dimensions 硬编码 [chat]，配置里的 dimensions 被忽略。
+	// scope 只有 chat，没有 channel（配置写了 channel 但被忽略）。
+	if got := resp.SessionScope.Values["channel"]; got != "" {
+		t.Fatalf("channel scope should be empty (dimensions ignored): %q", got)
 	}
+	if got := resp.SessionScope.Values["chat"]; got == "" {
+		t.Fatalf("chat scope should be present: %+v", resp.SessionScope.Values)
+	}
+	// #151：dimensions=[chat]，sender 不在 scope Values 里。
 	if _, ok := resp.SessionScope.Values["sender"]; ok {
-		t.Fatalf("sender scope should not be present: %+v", resp.SessionScope.Values)
-	}
-	if _, ok := resp.SessionScope.Values["chat"]; ok {
-		t.Fatalf("chat scope should not be present: %+v", resp.SessionScope.Values)
+		t.Fatalf("sender should not be in scope Values: %+v", resp.SessionScope.Values)
 	}
 }
 
@@ -2541,8 +2548,17 @@ func TestVerificationFailureCreatesEvolutionCandidate(t *testing.T) {
 
 func TestNewServiceRequiresDeepSeekAPIKey(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "")
-	if _, err := NewService(Config{StateDir: t.TempDir()}); err == nil || !strings.Contains(err.Error(), "DEEPSEEK_API_KEY is required") {
+	cfg := Config{StateDir: t.TempDir()}
+	cfg.SessionManager = newTestSessionManager(t, cfg)
+	if _, err := NewService(cfg); err == nil || !strings.Contains(err.Error(), "DEEPSEEK_API_KEY is required") {
 		t.Fatalf("NewService() error = %v, want DEEPSEEK_API_KEY requirement", err)
+	}
+}
+
+func TestNewServiceRequiresInjectedSessionManager(t *testing.T) {
+	_, err := NewService(Config{StateDir: t.TempDir(), DeepSeekClient: fakeDeepSeekClient(t)})
+	if err == nil || !strings.Contains(err.Error(), "SessionManager is required") {
+		t.Fatalf("NewService() error = %v, want SessionManager requirement", err)
 	}
 }
 
@@ -2554,11 +2570,29 @@ func newTestService(t *testing.T, cfg Config) *Service {
 	if cfg.StateDir == "" {
 		cfg.StateDir = t.TempDir()
 	}
+	if cfg.SessionManager == nil {
+		cfg.SessionManager = newTestSessionManager(t, cfg)
+	}
 	rt, err := NewService(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return rt
+}
+
+func newTestSessionManager(t *testing.T, cfg Config) *fsession.Manager {
+	t.Helper()
+	manager, err := NewSessionManager(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manager
+}
+
+func withTestSessionManager(t *testing.T, cfg Config) Config {
+	t.Helper()
+	cfg.SessionManager = newTestSessionManager(t, cfg)
+	return cfg
 }
 
 func fakeDeepSeekClient(t *testing.T) *deepseek.Client {

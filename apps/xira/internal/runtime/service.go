@@ -34,6 +34,9 @@ type Config struct {
 	DefaultAgentID string
 	StateDir       string
 	DeepSeekClient *deepseek.Client
+	// SessionManager is created by the composition root and shared by runtime and
+	// channel ingestion (#151). NewService rejects nil to prevent split stores.
+	SessionManager *fsession.Manager
 }
 
 type Service struct {
@@ -73,10 +76,24 @@ type Service struct {
 	mu             sync.RWMutex
 }
 
+// NewSessionManager creates the shared session store from the same Config used
+// by NewService. The composition root calls this before constructing Service,
+// then injects the returned instance into both runtime and channel ingestion.
+func NewSessionManager(cfg Config) (*fsession.Manager, error) {
+	resolved, err := resolveRuntimeConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return fsession.NewManagerWithStore(resolved.SessionRoot)
+}
+
 func NewService(cfg Config) (*Service, error) {
 	resolved, err := resolveRuntimeConfig(cfg)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.SessionManager == nil {
+		return nil, errors.New("SessionManager is required; create it at the composition root with NewSessionManager")
 	}
 	manager, profileSource, err := loadAgentManager(resolved)
 	if err != nil {
@@ -93,10 +110,7 @@ func NewService(cfg Config) (*Service, error) {
 	if _, ok := manager.Get(resolved.DefaultAgentID); !ok {
 		return nil, fmt.Errorf("default agent %q not found", resolved.DefaultAgentID)
 	}
-	sessionManager, err := fsession.NewManagerWithStore(resolved.SessionRoot)
-	if err != nil {
-		return nil, err
-	}
+	sessionManager := cfg.SessionManager
 	dsClient := cfg.DeepSeekClient
 	if dsClient == nil {
 		if strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")) == "" {
@@ -654,7 +668,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		UserMessage:    req.Message,
 		AssistantReply: final,
 	}
-	if err := s.sessions.AppendAgentMessages(sessionTurn, sessionMessagesForRun(req.Message, final, profile.ID, runID, toolCalls, resp.HumanRequests, resp.Status)); err != nil {
+	if err := s.sessions.AppendAgentMessages(sessionTurn, sessionMessagesForRun(req.Message, final, profile.ID, runID, toolCalls, resp.HumanRequests, resp.Status, req.Context.SenderID, req.Context.SenderName)); err != nil {
 		slog.Warn("session history persistence failed",
 			"run_id", runID,
 			"agent_id", profile.ID,
@@ -1346,14 +1360,16 @@ func mapString(input map[string]any, key string) string {
 // options), and the assistant reply. The reply may be empty when the run pauses
 // for human input — that is intentional, the human-request messages are the
 // audit record of why it paused.
-func sessionMessagesForRun(userMessage, finalResponse, agentID, runID string, toolCalls []ToolCallRecord, humanRequests []humanrequest.HumanRequest, runStatus string) []fsession.Message {
+func sessionMessagesForRun(userMessage, finalResponse, agentID, runID string, toolCalls []ToolCallRecord, humanRequests []humanrequest.HumanRequest, runStatus, senderID, senderName string) []fsession.Message {
 	messages := []fsession.Message{
 		{
-			Role:    "user",
-			Kind:    fsession.MessageKindMessage,
-			Content: strings.TrimSpace(userMessage),
-			AgentID: agentID,
-			RunID:   runID,
+			Role:       "user",
+			Kind:       fsession.MessageKindMessage,
+			Content:    strings.TrimSpace(userMessage),
+			AgentID:    agentID,
+			RunID:      runID,
+			SenderID:   senderID,
+			SenderName: senderName,
 		},
 	}
 	for _, rec := range toolCalls {

@@ -52,6 +52,11 @@ type Message struct {
 	CreatedAt  time.Time      `json:"created_at,omitempty" yaml:"created_at,omitempty"`
 	AgentID    string         `json:"agent_id,omitempty" yaml:"agent_id,omitempty"`
 	RunID      string         `json:"run_id,omitempty" yaml:"run_id,omitempty"`
+	// SenderID/SenderName 标记群聊 observed 消息的说话人（#151）。
+	// 空值 = agent 回复或非群聊消息（正常 user 消息也可能是空的——
+	// hydrate 时只有非空才加说话人前缀）。
+	SenderID   string `json:"sender_id,omitempty" yaml:"sender_id,omitempty"`
+	SenderName string `json:"sender_name,omitempty" yaml:"sender_name,omitempty"`
 }
 
 const (
@@ -183,12 +188,20 @@ func BuildScope(ctx channel.InboundContext, policy routing.SessionPolicy) Sessio
 	// Names travel with the scope for resume hydration but do NOT participate
 	// in session isolation (not in Dimensions, not in scopeSignature). Keep
 	// this independence — see TestScopeSignatureExcludesNames.
+	//
+	// #151：sender_id 也存在这里（不作为 dimension，但 resume 需要恢复它）。
+	// 之前 sender 是 dimension（scope.Values["sender"]），现在 dimensions=[chat]，
+	// 但 resume delivery 仍需 sender 路由——所以 sender 的 canonical id 存在 Names 里，
+	// inboundContextFromScope 从这取。
 	names := map[string]string{}
 	if chatName := strings.TrimSpace(ctx.ChatName); chatName != "" {
 		names["chat_name"] = chatName
 	}
 	if senderName := strings.TrimSpace(ctx.SenderName); senderName != "" {
 		names["sender_name"] = senderName
+	}
+	if senderID := strings.TrimSpace(ctx.SenderID); senderID != "" {
+		names["sender_id"] = canonicalSenderID(ctx.Channel, senderID, policy.IdentityLinks)
 	}
 	if len(names) > 0 {
 		scope.Names = names
@@ -278,19 +291,22 @@ func (m *Manager) AppendAgentMessages(input AgentTurnInput, messages []Message) 
 		return nil
 	}
 
+	// Publish to memory only after persistence succeeds. Otherwise Observe
+	// retries would append a duplicate to the live model context even though the
+	// first attempt was never durably recorded.
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.store != nil {
+		if err := m.store.AppendAgentMessages(input, messages); err != nil {
+			return err
+		}
+	}
 	m.histories[input.SessionID] = append(m.histories[input.SessionID], messages...)
 	if m.agentHistories[input.SessionID] == nil {
 		m.agentHistories[input.SessionID] = map[string][]Message{}
 	}
 	m.agentHistories[input.SessionID][input.AgentID] = append(m.agentHistories[input.SessionID][input.AgentID], messages...)
-	store := m.store
-	m.mu.Unlock()
-
-	if store == nil {
-		return nil
-	}
-	return store.AppendAgentMessages(input, messages)
+	return nil
 }
 
 func (m *Manager) History(sessionID string) []Message {

@@ -10,33 +10,32 @@ import (
 )
 
 type Definition struct {
-	ID                                string                `json:"id" yaml:"id"`
-	Enabled                           bool                  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	Channel                           string                `json:"channel" yaml:"channel"`
-	Account                           string                `json:"account,omitempty" yaml:"account,omitempty"`
-	AppID                             string                `json:"app_id,omitempty" yaml:"app_id,omitempty"`
-	AppIDEnv                          string                `json:"app_id_env,omitempty" yaml:"app_id_env,omitempty"`
-	BotID                             string                `json:"bot_id,omitempty" yaml:"bot_id,omitempty"`
-	Token                             string                `json:"token,omitempty" yaml:"token,omitempty"`
-	TokenEnv                          string                `json:"token_env,omitempty" yaml:"token_env,omitempty"`
-	BaseURL                           string                `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	BaseURLEnv                        string                `json:"base_url_env,omitempty" yaml:"base_url_env,omitempty"`
-	StateDir                          string                `json:"state_dir,omitempty" yaml:"state_dir,omitempty"`
-	DefaultAgentID                    string                `json:"default_agent" yaml:"default_agent"`
-	AllowedAgentIDs                   []string              `json:"allowed_agents,omitempty" yaml:"allowed_agents,omitempty"`
-	AllowedSenderIDs                  []string              `json:"allowed_senders,omitempty" yaml:"allowed_senders,omitempty"`
-	OwnerID                           string                `json:"owner,omitempty" yaml:"owner,omitempty"`
-	SessionPolicy                     routing.SessionPolicy `json:"session,omitempty" yaml:"session,omitempty"`
-	AppSecret                         string                `json:"app_secret,omitempty" yaml:"app_secret,omitempty"`
-	AppSecretEnv                      string                `json:"app_secret_env,omitempty" yaml:"app_secret_env,omitempty"`
-	EncryptKey                        string                `json:"encrypt_key,omitempty" yaml:"encrypt_key,omitempty"`
-	EncryptKeyEnv                     string                `json:"encrypt_key_env,omitempty" yaml:"encrypt_key_env,omitempty"`
-	VerifyToken                       string                `json:"verification_token,omitempty" yaml:"verification_token,omitempty"`
-	VerifyTokenEnv                    string                `json:"verification_token_env,omitempty" yaml:"verification_token_env,omitempty"`
-	IsLark                            bool                  `json:"is_lark,omitempty" yaml:"is_lark,omitempty"`
-	AllowRuntimePairing               bool                  `json:"allow_runtime_pairing,omitempty" yaml:"allow_runtime_pairing,omitempty"`
-	RespondToUnmentionedGroupMessages bool                  `json:"respond_to_unmentioned_group_messages,omitempty" yaml:"respond_to_unmentioned_group_messages,omitempty"`
-	DataIsolation                     DataIsolationPolicy   `json:"data_isolation,omitempty" yaml:"data_isolation,omitempty"`
+	ID                  string                `json:"id" yaml:"id"`
+	Enabled             bool                  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Channel             string                `json:"channel" yaml:"channel"`
+	Account             string                `json:"account,omitempty" yaml:"account,omitempty"`
+	AppID               string                `json:"app_id,omitempty" yaml:"app_id,omitempty"`
+	AppIDEnv            string                `json:"app_id_env,omitempty" yaml:"app_id_env,omitempty"`
+	BotID               string                `json:"bot_id,omitempty" yaml:"bot_id,omitempty"`
+	Token               string                `json:"token,omitempty" yaml:"token,omitempty"`
+	TokenEnv            string                `json:"token_env,omitempty" yaml:"token_env,omitempty"`
+	BaseURL             string                `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	BaseURLEnv          string                `json:"base_url_env,omitempty" yaml:"base_url_env,omitempty"`
+	StateDir            string                `json:"state_dir,omitempty" yaml:"state_dir,omitempty"`
+	DefaultAgentID      string                `json:"default_agent" yaml:"default_agent"`
+	AllowedAgentIDs     []string              `json:"allowed_agents,omitempty" yaml:"allowed_agents,omitempty"`
+	AllowedSenderIDs    []string              `json:"allowed_senders,omitempty" yaml:"allowed_senders,omitempty"`
+	OwnerID             string                `json:"owner,omitempty" yaml:"owner,omitempty"`
+	SessionPolicy       routing.SessionPolicy `json:"session,omitempty" yaml:"session,omitempty"`
+	AppSecret           string                `json:"app_secret,omitempty" yaml:"app_secret,omitempty"`
+	AppSecretEnv        string                `json:"app_secret_env,omitempty" yaml:"app_secret_env,omitempty"`
+	EncryptKey          string                `json:"encrypt_key,omitempty" yaml:"encrypt_key,omitempty"`
+	EncryptKeyEnv       string                `json:"encrypt_key_env,omitempty" yaml:"encrypt_key_env,omitempty"`
+	VerifyToken         string                `json:"verification_token,omitempty" yaml:"verification_token,omitempty"`
+	VerifyTokenEnv      string                `json:"verification_token_env,omitempty" yaml:"verification_token_env,omitempty"`
+	IsLark              bool                  `json:"is_lark,omitempty" yaml:"is_lark,omitempty"`
+	AllowRuntimePairing bool                  `json:"allow_runtime_pairing,omitempty" yaml:"allow_runtime_pairing,omitempty"`
+	DataIsolation       DataIsolationPolicy   `json:"data_isolation,omitempty" yaml:"data_isolation,omitempty"`
 }
 
 // DataIsolationPolicy 控制 per-sender 工具数据隔离（#126）。Enabled=true 时，

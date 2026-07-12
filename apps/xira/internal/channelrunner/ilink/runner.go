@@ -19,6 +19,7 @@ import (
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/channelrunner/dedupe"
+	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
@@ -89,6 +90,9 @@ type Runner struct {
 	accounts map[string]*accountPoller
 	pairings map[string]*pairingState
 	router   *progress.Router
+
+	// ingest is the shared message processing layer (#151).
+	ingest *ingest.Ingest
 }
 
 // SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
@@ -102,6 +106,16 @@ func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
 func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
 	if r != nil {
 		r.ownerResolver = resolver
+		if r.ingest != nil {
+			r.ingest.SetOwnerResolver(resolver)
+		}
+	}
+}
+
+// SetIngest injects the shared message processing layer (#151).
+func (r *Runner) SetIngest(ing *ingest.Ingest) {
+	if r != nil {
+		r.ingest = ing
 	}
 }
 
@@ -163,7 +177,6 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 		"base_url_configured", baseURL != "",
 		"state_dir", stateDir,
 		"allow_runtime_pairing", definition.AllowRuntimePairing,
-		"respond_to_unmentioned_group_messages", definition.RespondToUnmentionedGroupMessages,
 	)
 	return runner, nil
 }
@@ -600,21 +613,28 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 		"content_chars", utf8.RuneCountInString(content),
 		"content_preview", previewText(content, 120),
 	)
-	if !shouldHandleMessage(chatType, senderID, content, r.definition, r.ownerResolver) {
-		reason := "unmentioned_group_message"
-		if !r.definition.AllowsSender(senderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), senderID, r.definition.ID)) {
-			reason = "sender_not_authorized"
+	// #151: 通过共享 ingest 层统一处理 gate（授权 + mention）→ observe or dispatch。
+	// ilink 无 mention 概念——群消息也走 AuthorizeSender（Gate 里 ilink 的
+	// Mentioned=false + ChatType=group → observe，但 ilink 不该 observe）。
+	// 所以 ilink 走 ChatType 非 group 语义（直接 dispatch or reject）。
+	input := ingest.MessageInput{
+		Channel: "ilink", EntrypointID: r.definition.ID,
+		ChatID: chatID, ChatType: chatType,
+		SenderID: senderID, Mentioned: true, // ilink 无 mention——总是"Mentioned"走 dispatch 路径
+		Content: content, MessageID: messageID,
+	}
+	if r.ingest != nil {
+		decision := r.ingest.Gate(input, r.definition)
+		if decision == ingest.DecisionReject {
+			slog.Info("ilink message rejected",
+				"entrypoint_id", r.definition.ID,
+				"account_id", account.record.AccountID,
+				"chat_id", chatID,
+				"sender_id", senderID,
+				"message_id", messageID)
+			return
 		}
-		slog.Info("ilink group message ignored",
-			"entrypoint_id", r.definition.ID,
-			"account_id", account.record.AccountID,
-			"chat_id", chatID,
-			"message_id", messageID,
-			"sender_id", senderID,
-			"reason", reason,
-			"respond_to_unmentioned_group_messages", r.definition.RespondToUnmentionedGroupMessages,
-		)
-		return
+		// ilink 的 Gate 总返回 dispatch 或 reject（Mentioned=true 不触发 observe）
 	}
 	dedupeKey := account.messageDedupeKey(messageID)
 	if !account.messages.Begin(dedupeKey, time.Now()) {
@@ -686,6 +706,7 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 			return r.send(ctx, account, msg, text)
 		},
 		DedupeComplete: func() { account.messages.Complete(dedupeKey, time.Now()) },
+		DedupeForget:   func() { account.messages.Forget(dedupeKey) },
 		SpawnResetter: func() {
 			// r.router may be nil in unit tests that construct a Runner
 			// without the full wiring; guard against that.
@@ -955,9 +976,8 @@ func shouldHandleMessage(chatType, senderID, content string, definition entrypoi
 	if chatType != "group" {
 		return isAuthorizedSender(senderID, content, definition, owner)
 	}
-	if !definition.RespondToUnmentionedGroupMessages {
-		return false
-	}
+	// ilink 没有 mention 概念——群消息直接走 sender auth（和私聊一样）。
+	// #151: observe 留 follow-up（ilink 无 mention，群消息当前直接进 agent）。
 	return isAuthorizedSender(senderID, content, definition, owner)
 }
 

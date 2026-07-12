@@ -356,8 +356,17 @@ func textSessionEvent(msg fsession.Message, agentID string, event *adksession.Ev
 		role = genai.RoleUser
 		event.Author = "user"
 	}
+	// #151：群聊 observed 消息带说话人标识（[name|id]\n 前缀），让 LLM 区分谁在说话。
+	content := msg.Content
+	if msg.SenderID != "" && role == genai.RoleUser {
+		name := msg.SenderName
+		if name == "" {
+			name = msg.SenderID
+		}
+		content = "[" + name + "|" + msg.SenderID + "] " + content
+	}
 	event.LLMResponse = adkmodel.LLMResponse{
-		Content: genai.NewContentFromText(msg.Content, role),
+		Content: genai.NewContentFromText(content, role),
 	}
 	return event, contentChars, true
 }
