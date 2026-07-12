@@ -111,6 +111,9 @@ A 配置（无 owner、单实例多 sender）只需要实例内这层；B 配置
 - agent 人设 / persona（`agents/{agent}/`）
 - 技能定义（skills，`skills.LoadFromWorkspace`）
 - 公共知识库（knowledge base）
+- Agent memory（Agent 自己接受的事项、工作经验和跨 sender 上下文；#159）
+
+memory 的归属由内容语义决定，不由 mention 机械决定。`addressed_to=owner|agent` 只描述本轮角色；模型在同一个 Agent Loop 中按 prompt 选择 `scope=sender|agent`，runtime 分别绑定当前真实 SenderID 或当前 Agent ID，模型不能指定任意身份。
 
 > B 配置下 per-agent 层是 per-instance 的（每个 owner 的 Docker 各有一份），不跨 owner 共享。但模型不变——每个实例内部仍是这两层。
 
@@ -195,11 +198,13 @@ Docker 是 B 配置的**目标部署形态**，不是过渡期强制。
 
 以下问题**真实存在但不在本文定义终态**，留作独立 RFC / follow-up：
 
-### 6.1 agent 自写提升（per-sender → per-agent KB）
+### 6.1 sender memory 与 Agent memory 的写入边界
 
 agent 跟张三对话时学到了一条对所有用户都有用的事实（如某 API 用法变了）——写哪？写 per-agent KB 有泄露张三私有上下文的风险；写 per-sender 则其他用户享受不到。Hermes / Mem0 都卡在这。
 
-**安全默认**：一律写 per-sender，**绝不自动提升**到 per-agent；要提升只能走显式 operator 审批。这是 policy 问题，不是纯技术问题。
+**安全默认**：runtime 绝不把 sender memory 自动复制或“提升”成 Agent memory。模型只能通过 sealed `scope=sender|agent` 显式选择地址空间：关于当前人的事实写 sender；Agent 自己接受的事项、经验和上下文写 agent。如何判断由 Agent prompt + 模型负责，runtime 只绑定真实身份并隔离存储。两类 memory 都作为 untrusted data 注入，不因 Agent 自写而升级为 system instruction。
+
+未来 cron 只会周期性触发同一个 Agent Loop 读取 Agent memory；不增加新的记忆类型或第二套 Loop。
 
 ### 6.2 跨 channel 同一 user
 
@@ -229,7 +234,7 @@ agent 跟张三对话时学到了一条对所有用户都有用的事实（如�
 | pairing（用户授权流程） | ⚠️ ilink 有基建，飞书无 | 跨 channel 授权 |
 | per-sender 工具数据隔离 | ❌ 落共享 workspace | §3.1 |
 | `user.md`（用户档案） | ❌ 未实现 | §3.3 |
-| memory | ❌ 未实现 | §3.1 |
+| memory | ✅ per-sender（#128）；🔵 per-agent scope（#159） | §3.1 / §3.2 |
 | @ owner 代理 | ❌ 不存在 | §1.4（B 配置核心） |
 | 特权 skill | ❌ 不存在 | §1.4 |
 | per-instance Docker 部署 | ❌ 单进程 | §5（B 配置推荐形态） |

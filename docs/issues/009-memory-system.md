@@ -1,7 +1,7 @@
 # 009: memory 系统
 
 > **GitHub 号**:https://github.com/xiramesh/xira/issues/128（本地编号 009）
-> **状态**:open
+> **状态**:done（#128）；agent scope follow-up：#159
 > **依赖**:007(per-sender 数据隔离)
 > **优先级**:低(最不紧急,依赖链最深)
 > **架构来源**:[xira-ownership-isolation-v0.zh.md](../architecture/xira-ownership-isolation-v0.zh.md) §3.1、§6.1
@@ -10,19 +10,20 @@
 
 没有 memory。agent 跨会话记不住"我们之前聊过什么"(会话历史是 per-sender 的,但那是原始记录,不是整理后的记忆)。
 
-## 现状
+## 当前实现
 
-- 无 memory 系统。
-- 会话历史 per-sender 隔离(session.dimensions)。
-- OpenClaw MEMORY.md / Hermes MEMORY.md 都是全局单文件(它们的多租户都炸在这),我们 per-sender(架构文档 §3.1)。
+- #128 已实现 per-sender `memory.jsonl`、`update_memory`、`forget_memory`、expiry、active memory prompt 注入和真 DeepSeek live test。
+- 现有文件按真实 SenderID 隔离，省略 scope 的工具调用继续使用这一行为。
+- #159 在同一 memory 系统中增加 `agent` scope，让 Agent 显式记录属于自己的事项、经验和上下文；不新增 Notes / owner inbox / 第二套 Agent Loop。
 
 ## 目标
 
-per-sender 的 memory:
+sender/agent 双 scope memory:
 
 - agent 在对话中整理出"关于这个用户的事实 / 偏好 / 上下文"。
+- agent 也能显式记录"我自己以后要记住的事项 / 经验 / 上下文"。
 - 跨会话保留,下次对话注入 prompt。
-- per-sender 隔离(`users/{sender_id}/memory/`)。
+- sender 与 agent 地址空间物理隔离；模型只选择 sealed scope，不能指定任意身份 ID。
 
 ## 和 #008 user.md 的区别
 
@@ -45,8 +46,9 @@ user.md = "这个人是张三,喜欢简洁回复";memory = "上周张三问过�
 ## 不做什么
 
 - 不做向量检索(第一版全量注入)。
-- 不做自动提升到 per-agent KB(§6.1 deferred,policy 问题)。
-- 不做跨 user 的 memory 共享。
+- 不做 runtime 自动提升（不把 sender memory 静默复制成 agent memory）。
+- 不做跨 user 的 sender memory 共享；agent memory 是 Agent 自己的状态，不是合并用户档案。
+- 不做 cron；未来 cron 只触发同一个 Agent Loop 读取 agent memory。
 
 ## 验证
 

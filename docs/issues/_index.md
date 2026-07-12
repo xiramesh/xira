@@ -31,7 +31,7 @@
 |---|---|---|---|---|
 | [007](007-per-sender-data-isolation.md) | [#126](https://github.com/xiramesh/xira/issues/126) | per-sender 工具数据隔离 | [open] | 无 |
 | [008](008-user-md-profile.md) | [#127](https://github.com/xiramesh/xira/issues/127) | `user.md` 用户档案 | [open] | #126 |
-| [009](009-memory-system.md) | [#128](https://github.com/xiramesh/xira/issues/128) | memory 系统 | [open] | #126 |
+| [009](009-memory-system.md) | [#128](https://github.com/xiramesh/xira/issues/128) / [#159](https://github.com/xiramesh/xira/issues/159) | sender / agent memory 系统 | [in-progress] | #126 |
 
 ### 已从清单移除
 
@@ -40,7 +40,7 @@
 ### deferred(不开 issue,架构文档 §6 跟踪)
 
 - 跨 channel 同一 user(sender_id→user_id 映射)
-- agent 自写提升(per-sender→per-agent KB policy)
+- runtime 自动提升(per-sender→per-agent)仍禁止；显式 Agent memory scope 由 #159 跟踪
 - 访问控制细化(owner admin 能力)
 
 ## 依赖图

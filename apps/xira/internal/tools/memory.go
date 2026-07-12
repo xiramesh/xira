@@ -17,7 +17,7 @@ import (
 	"github.com/xiramesh/xira/internal/session"
 )
 
-// memory.go 实现 #128 per-sender 交互记忆（memory.jsonl）。
+// memory.go 实现 #128/#159 sender/agent 双 scope 交互记忆（memory.jsonl）。
 //
 // 每条记忆是一个 JSON 对象（jsonl 一行），带 key/content/时间/状态等结构化属性。
 // 两个工具：update_memory（upsert by key）+ forget_memory（软删除 by key）。
@@ -33,6 +33,13 @@ const (
 	memoryStatusForgotten = "forgotten"
 )
 
+type memoryScope string
+
+const (
+	memoryScopeSender memoryScope = "sender"
+	memoryScopeAgent  memoryScope = "agent"
+)
+
 // MemoryPath 算出 sender 的 memory.jsonl 路径（#128）。
 // baseDir 是 stateDir（不是 workspace）。落 baseDir/memories/sender_{safe}/memory.jsonl。
 // senderID 为空 → 返回 ""。
@@ -43,6 +50,64 @@ func MemoryPath(baseDir, senderID string) string {
 	}
 	safe := session.SafePathID(senderID)
 	return filepath.Join(baseDir, memoriesSegment, "sender_"+safe, memoryFilename)
+}
+
+// AgentMemoryPath calculates the persistent memory path for one Agent in the
+// current service workspace. stateDir already scopes the workspace, so the
+// path only needs the runtime-bound Agent ID. The model never supplies it.
+func AgentMemoryPath(baseDir, agentID string) string {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return ""
+	}
+	safe := session.SafePathID(agentID)
+	return filepath.Join(baseDir, memoriesSegment, "agent_"+safe, memoryFilename)
+}
+
+// memoryScopeFromArgs resolves the sealed memory address space. Missing scope
+// preserves #128 compatibility by selecting sender; any explicit invalid value
+// fails closed instead of silently writing a different subject.
+// coverage: contract (100% required)
+func memoryScopeFromArgs(args map[string]any) (memoryScope, error) {
+	raw, exists := args["scope"]
+	if !exists {
+		return memoryScopeSender, nil
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("memory scope must be a string")
+	}
+	switch memoryScope(strings.TrimSpace(value)) {
+	case memoryScopeSender:
+		return memoryScopeSender, nil
+	case memoryScopeAgent:
+		return memoryScopeAgent, nil
+	default:
+		return "", fmt.Errorf("memory scope must be sender or agent")
+	}
+}
+
+// memoryPathForScope binds a model-selected scope to runtime-owned identity.
+// The model can choose sender vs agent but can never name either identity.
+// coverage: contract (100% required)
+func memoryPathForScope(ctx context.Context, stateDir, agentID string, scope memoryScope) (string, error) {
+	switch scope {
+	case memoryScopeSender:
+		senderID, _ := chatkey.SenderIDFromContext(ctx)
+		senderID = strings.TrimSpace(senderID)
+		if senderID == "" {
+			return "", fmt.Errorf("sender memory requires a sender (no chatKey in context)")
+		}
+		return MemoryPath(stateDir, senderID), nil
+	case memoryScopeAgent:
+		path := AgentMemoryPath(stateDir, agentID)
+		if path == "" {
+			return "", fmt.Errorf("agent memory requires a runtime-bound agent identity")
+		}
+		return path, nil
+	default:
+		return "", fmt.Errorf("unsupported memory scope %q", scope)
+	}
 }
 
 // MemoryEntry 是一条记忆（jsonl 一行）。
@@ -221,20 +286,27 @@ func truncateForLog(s string, max int) string {
 // 安全模型同 #127 弱便签：不返回路径、非强私密、不存敏感数据。
 type UpdateMemoryTool struct {
 	stateDir string
+	agentID  string
 }
 
 func NewUpdateMemoryTool(stateDir string) *UpdateMemoryTool {
-	return &UpdateMemoryTool{stateDir: strings.TrimSpace(stateDir)}
+	return NewUpdateMemoryToolForAgent(stateDir, "")
+}
+
+func NewUpdateMemoryToolForAgent(stateDir, agentID string) *UpdateMemoryTool {
+	return &UpdateMemoryTool{stateDir: strings.TrimSpace(stateDir), agentID: strings.TrimSpace(agentID)}
 }
 
 func (t *UpdateMemoryTool) Name() string { return "update_memory" }
 
 func (t *UpdateMemoryTool) Description() string {
-	return "Record a fact or context about the user that should persist across conversations — " +
-		"e.g. events, things they mentioned or asked about, time-sensitive plans. " +
+	return "Record a fact or context that should persist across conversations. Choose scope=sender for facts " +
+		"about the current person (events, preferences, things they mentioned), or scope=agent for things you " +
+		"yourself should remember across senders (accepted follow-ups, durable working context, lessons). " +
 		"Provide a key (short topic identifier like \"出差\", \"报销\", \"宠物\") and the content. " +
 		"Same key overwrites the previous entry. Optional expires (ISO8601 date) for time-sensitive memories. " +
-		"For stable identity/preferences (nickname, reply style, language), use update_profile instead. " +
+		"For stable identity/preferences about the current sender (nickname, reply style, language), use update_profile instead; " +
+		"update_profile never writes Agent memory. " +
 		"DO NOT store sensitive data (passwords, contacts, addresses, account IDs)."
 }
 
@@ -243,6 +315,11 @@ func (t *UpdateMemoryTool) Parameters() map[string]any {
 		"type":     "object",
 		"required": []string{"key", "content"},
 		"properties": map[string]any{
+			"scope": map[string]any{
+				"type":        "string",
+				"enum":        []any{"sender", "agent"},
+				"description": "Memory subject. sender = about the current person (default); agent = something you yourself should remember across senders.",
+			},
 			"key": map[string]any{
 				"type":        "string",
 				"description": "Short topic identifier for this memory (e.g. \"出差\", \"报销\", \"宠物\"). Same key overwrites.",
@@ -260,10 +337,9 @@ func (t *UpdateMemoryTool) Parameters() map[string]any {
 }
 
 func (t *UpdateMemoryTool) Execute(ctx context.Context, args map[string]any) (map[string]any, error) {
-	senderID, _ := chatkey.SenderIDFromContext(ctx)
-	senderID = strings.TrimSpace(senderID)
-	if senderID == "" {
-		return nil, fmt.Errorf("update_memory requires a sender (no chatKey in context)")
+	scope, err := memoryScopeFromArgs(args)
+	if err != nil {
+		return nil, err
 	}
 	key, ok := args["key"].(string)
 	if !ok || strings.TrimSpace(key) == "" {
@@ -283,15 +359,15 @@ func (t *UpdateMemoryTool) Execute(ctx context.Context, args map[string]any) (ma
 				"expires_raw", expStr, "err", err)
 		}
 	}
-	path := MemoryPath(t.stateDir, senderID)
-	if path == "" {
-		return nil, fmt.Errorf("cannot resolve memory path for sender %q", senderID)
+	path, err := memoryPathForScope(ctx, t.stateDir, t.agentID, scope)
+	if err != nil {
+		return nil, err
 	}
 	if err := upsertMemory(path, key, content, expires); err != nil {
 		return nil, err
 	}
 	// 不返回路径（安全：防模型拿路径喂 command.run）
-	return map[string]any{"updated": true, "key": key}, nil
+	return map[string]any{"updated": true, "scope": string(scope), "key": key}, nil
 }
 
 // ForgetMemoryTool 让 LLM 标记某主题记忆为遗忘（软删除，#128）。
@@ -300,10 +376,15 @@ func (t *UpdateMemoryTool) Execute(ctx context.Context, args map[string]any) (ma
 // 适合用户说「出差取消了」「这事不用记了」时调用。
 type ForgetMemoryTool struct {
 	stateDir string
+	agentID  string
 }
 
 func NewForgetMemoryTool(stateDir string) *ForgetMemoryTool {
-	return &ForgetMemoryTool{stateDir: strings.TrimSpace(stateDir)}
+	return NewForgetMemoryToolForAgent(stateDir, "")
+}
+
+func NewForgetMemoryToolForAgent(stateDir, agentID string) *ForgetMemoryTool {
+	return &ForgetMemoryTool{stateDir: strings.TrimSpace(stateDir), agentID: strings.TrimSpace(agentID)}
 }
 
 func (t *ForgetMemoryTool) Name() string { return "forget_memory" }
@@ -311,7 +392,8 @@ func (t *ForgetMemoryTool) Name() string { return "forget_memory" }
 func (t *ForgetMemoryTool) Description() string {
 	return "Mark a memory as forgotten — it will no longer be injected into future prompts " +
 		"but is retained in the memory file for audit. Use when the user says something is no longer relevant " +
-		"(e.g. a plan was cancelled, a question was resolved). Provide the key of the memory to forget."
+		"(e.g. a plan was cancelled, a question was resolved). Choose the same sender or agent scope where it " +
+		"was recorded and provide its key."
 }
 
 func (t *ForgetMemoryTool) Parameters() map[string]any {
@@ -319,6 +401,11 @@ func (t *ForgetMemoryTool) Parameters() map[string]any {
 		"type":     "object",
 		"required": []string{"key"},
 		"properties": map[string]any{
+			"scope": map[string]any{
+				"type":        "string",
+				"enum":        []any{"sender", "agent"},
+				"description": "Memory subject. sender = current person (default); agent = your own cross-sender memory.",
+			},
 			"key": map[string]any{
 				"type":        "string",
 				"description": "The key of the memory to forget (e.g. \"出差\").",
@@ -328,21 +415,20 @@ func (t *ForgetMemoryTool) Parameters() map[string]any {
 }
 
 func (t *ForgetMemoryTool) Execute(ctx context.Context, args map[string]any) (map[string]any, error) {
-	senderID, _ := chatkey.SenderIDFromContext(ctx)
-	senderID = strings.TrimSpace(senderID)
-	if senderID == "" {
-		return nil, fmt.Errorf("forget_memory requires a sender (no chatKey in context)")
+	scope, err := memoryScopeFromArgs(args)
+	if err != nil {
+		return nil, err
 	}
 	key, ok := args["key"].(string)
 	if !ok || strings.TrimSpace(key) == "" {
 		return nil, fmt.Errorf("key is required")
 	}
-	path := MemoryPath(t.stateDir, senderID)
-	if path == "" {
-		return nil, fmt.Errorf("cannot resolve memory path for sender %q", senderID)
+	path, err := memoryPathForScope(ctx, t.stateDir, t.agentID, scope)
+	if err != nil {
+		return nil, err
 	}
 	if err := forgetMemory(path, key); err != nil {
 		return nil, err
 	}
-	return map[string]any{"forgotten": true, "key": key}, nil
+	return map[string]any{"forgotten": true, "scope": string(scope), "key": key}, nil
 }
