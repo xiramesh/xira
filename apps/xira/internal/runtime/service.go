@@ -607,10 +607,8 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 			"blocked_by":     interrupt.Reason,
 			"summary":        waitingHumanSummary(interrupt),
 		})
-	} else if strings.TrimSpace(final) == "" && hasSuccessfulNotifyOwner(toolCalls) {
-		resp.VerificationResult = VerificationResult{Status: "passed", Checks: []string{"notify_owner_sent"}}
 	} else {
-		resp.VerificationResult = s.verifier.Verify(final, profile.Verification.DefaultChecks)
+		resp.VerificationResult = s.verifyRunOutcome(final, toolCalls, profile.Verification.DefaultChecks)
 	}
 	resp.EndedAt = time.Now()
 	resp.Usage = summarizeUsage(resp)

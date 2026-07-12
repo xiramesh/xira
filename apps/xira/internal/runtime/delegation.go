@@ -92,6 +92,22 @@ func (s *Service) runtimeADKTools(
 	}
 	out = append(out, notifyOwnerTool)
 
+	finishSilentTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
+		Name:         finishSilentToolName,
+		Description:  finishSilentToolDescription,
+		InputSchema:  finishSilentInputSchema(),
+		OutputSchema: objectSchema(),
+	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
+		rec := finishSilentToolCall(ctx, strings.TrimSpace(toolCtx.FunctionCallID()), args)
+		recordFinishSilentOutcome(rec, recordEvent, recordAudit)
+		recordTool(rec)
+		return rec.Output, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, finishSilentTool)
+
 	// #107: human.interpret — agent 理解用户回复后,声明它答的是哪个 pending HR。
 	// 镜像 answer_child 的异步 resolve,但加四项校验(source/chatKey/存在/无歧义)。
 	// 不 suspend run(非破坏性),resolve 在后台 goroutine 跑。ChatKey 由 runtime
@@ -501,7 +517,7 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 			"blocked_by":     interrupt.Reason,
 		})
 	} else {
-		resp.VerificationResult = s.verifier.Verify(final, req.Target.Verification.DefaultChecks)
+		resp.VerificationResult = s.verifyRunOutcome(final, toolCalls, req.Target.Verification.DefaultChecks)
 	}
 	resp.EndedAt = time.Now()
 	resp.Usage = summarizeUsage(resp)

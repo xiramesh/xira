@@ -209,12 +209,12 @@ func (s *Service) generateADK(
 		}
 	}
 	recordedTools := toolRecords.snapshot()
-	if strings.TrimSpace(final) == "" && hasSuccessfulNotifyOwner(recordedTools) {
-		recordEvent("adk.intentional_silence", "adk.runner", "owner notified; no public final requested", map[string]any{
+	if reason, ok := intentionalSilenceReason(recordedTools); strings.TrimSpace(final) == "" && ok {
+		recordEvent("adk.intentional_silence", "adk.runner", "agent completed without a public final", map[string]any{
 			"agent_id": profile.ID,
-			"reason":   "notify_owner_sent",
+			"reason":   reason,
 		})
-		recordAudit("adk.runner", profile.ID, true, "ADK runner completed with owner notification and intentional silence", nil)
+		recordAudit("adk.runner", profile.ID, true, "ADK runner completed with intentional silence", map[string]any{"reason": reason})
 		return final, recordedTools, nil
 	}
 	if strings.TrimSpace(final) == "" {

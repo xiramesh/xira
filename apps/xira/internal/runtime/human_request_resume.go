@@ -252,7 +252,7 @@ func (s *Service) resumeDirectHumanRequest(ctx context.Context, req *humanreques
 		run.Status = StatusWaitingHuman
 	} else {
 		run.Interrupt = nil
-		run.VerificationResult = s.verifier.Verify(final, profile.Verification.DefaultChecks)
+		run.VerificationResult = s.verifyRunOutcome(final, toolCalls, profile.Verification.DefaultChecks)
 		run.Status = "completed"
 		if run.VerificationResult.Status != "passed" {
 			run.Status = "failed"
