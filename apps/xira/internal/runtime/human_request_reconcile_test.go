@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
@@ -195,5 +196,36 @@ func TestResolveHumanResponseRequiresCurrentOwnerAndPersistedSnapshot(t *testing
 	}
 	if resolved.Resume.Status != humanrequest.ResumeCompleted || resolved.Response == nil || resolved.Response.Actor != "ou_owner" {
 		t.Fatalf("resolved owner request = %+v", resolved)
+	}
+}
+
+func TestNewServiceRecoversInterruptedHumanRequestResume(t *testing.T) {
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	rt := newTestService(t, Config{StateDir: stateRoot})
+	req, err := rt.CreateHumanRequest(context.Background(), humanrequest.CreateRequest{
+		ID: "hrq_startup_running", WorkspaceID: rt.workspace,
+		RunID: "run-startup-running", AgentID: "xira-assistant", SessionID: "session-startup-running",
+		Kind: humanrequest.RequestApproval, Question: "Recover startup resume?",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.humanRequests.Resolve(context.Background(), humanrequest.ResolveRequest{
+		WorkspaceKey: rt.WorkspaceKey(), RequestID: req.ID,
+		Kind: humanrequest.ResponseApprove, Actor: "tester", Message: "approved", IdempotencyKey: "startup-answer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := rt.humanRequests.ClaimResume(context.Background(), rt.WorkspaceKey(), req.ID, time.Now()); err != nil || !ok {
+		t.Fatalf("ClaimResume() ok=%v err=%v", ok, err)
+	}
+
+	restarted := newTestService(t, Config{StateDir: stateRoot})
+	got, err := restarted.GetHumanRequest(context.Background(), req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Resume.Status != humanrequest.ResumeFailed || !strings.Contains(got.Resume.LastError, "interrupted") {
+		t.Fatalf("startup recovered resume = %+v", got.Resume)
 	}
 }

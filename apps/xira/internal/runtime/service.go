@@ -150,8 +150,26 @@ func NewService(cfg Config) (*Service, error) {
 	// a scan failure is warned, never blocks startup. No notify/timeout cleanup
 	// here (those are bigger product decisions); HITL resume itself is
 	// request-driven and works without this scan (run + request persist to disk).
+	svc.recoverInterruptedHumanRequestResumesAtStartup()
 	svc.logPendingHumanRequestsAtStartup()
 	return svc, nil
+}
+
+// recoverInterruptedHumanRequestResumesAtStartup releases durable resume
+// claims left running by a previous process. It does not execute model work;
+// the composition root starts reconciliation after channel dependencies exist.
+func (s *Service) recoverInterruptedHumanRequestResumesAtStartup() {
+	if s == nil || s.humanRequests == nil {
+		return
+	}
+	count, err := s.humanRequests.RecoverInterruptedResumes(context.Background(), s.WorkspaceKey(), time.Now())
+	if err != nil {
+		slog.Warn("startup human request resume recovery failed (non-fatal)", "error", err)
+		return
+	}
+	if count > 0 {
+		slog.Info("interrupted human request resumes recovered for retry", "count", count)
+	}
 }
 
 // logPendingHumanRequestsAtStartup scans the HumanRequest store for pending
