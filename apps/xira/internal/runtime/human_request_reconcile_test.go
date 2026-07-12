@@ -229,3 +229,28 @@ func TestNewServiceRecoversInterruptedHumanRequestResume(t *testing.T) {
 		t.Fatalf("startup recovered resume = %+v", got.Resume)
 	}
 }
+
+func TestOwnerResponseAuthorizationPrefersDynamicBinding(t *testing.T) {
+	tests := []struct {
+		name         string
+		dynamic      ownerBinding
+		dynamicFound bool
+		staticOwner  string
+		sender       string
+		want         bool
+	}{
+		{name: "empty sender", staticOwner: "ou_static", sender: "", want: false},
+		{name: "dynamic match", dynamic: ownerBinding{OwnerSenderID: "ou_dynamic"}, dynamicFound: true, staticOwner: "ou_static", sender: "ou_dynamic", want: true},
+		{name: "dynamic mismatch blocks static", dynamic: ownerBinding{OwnerSenderID: "ou_dynamic"}, dynamicFound: true, staticOwner: "ou_static", sender: "ou_static", want: false},
+		{name: "static match", staticOwner: "ou_static", sender: "ou_static", want: true},
+		{name: "static mismatch", staticOwner: "ou_static", sender: "ou_other", want: false},
+		{name: "no owner", sender: "ou_other", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ownerResponseAuthorized(tt.dynamic, tt.dynamicFound, tt.staticOwner, tt.sender); got != tt.want {
+				t.Fatalf("ownerResponseAuthorized() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

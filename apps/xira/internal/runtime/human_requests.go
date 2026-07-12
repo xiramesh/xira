@@ -111,14 +111,57 @@ func (s *Service) ResolveHumanResponse(ctx context.Context, input humanrequest.H
 	if err != nil {
 		return nil, err
 	}
-	if req.Responder.Type == humanrequest.ResponderOwner && !s.IsOwner(ctx, input.SenderID, input.EntrypointID) {
-		return nil, fmt.Errorf("%w: response actor is not the current owner for entrypoint", humanrequest.ErrConflict)
+	if req.Responder.Type == humanrequest.ResponderOwner {
+		resolved, err := s.resolveExactOwnerResponse(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		return s.resumeResolvedHumanRequest(ctx, resolved)
 	}
 	resolved, err := s.humanRequests.ResolveExact(ctx, input)
 	if err != nil {
 		return nil, err
 	}
 	return s.resumeResolvedHumanRequest(ctx, resolved)
+}
+
+// resolveExactOwnerResponse holds the mutable owner-binding read lock through
+// the exact Store mutation, closing the rebind-vs-response TOCTOU window.
+func (s *Service) resolveExactOwnerResponse(ctx context.Context, input humanrequest.HumanResponseEnvelope) (*humanrequest.HumanRequest, error) {
+	entrypointID := strings.TrimSpace(input.EntrypointID)
+	staticOwnerID := ""
+	if s.entrypoints != nil {
+		if definition, ok := s.entrypoints.Definition(entrypointID); ok {
+			staticOwnerID = definition.OwnerID
+		}
+	}
+	if s.ownerBindings == nil {
+		if !ownerResponseAuthorized(ownerBinding{}, false, staticOwnerID, input.SenderID) {
+			return nil, fmt.Errorf("%w: response actor is not the current owner for entrypoint", humanrequest.ErrConflict)
+		}
+		return s.humanRequests.ResolveExact(ctx, input)
+	}
+	s.ownerBindings.mu.RLock()
+	defer s.ownerBindings.mu.RUnlock()
+	binding, found := s.ownerBindings.bindings[entrypointID]
+	if !ownerResponseAuthorized(binding, found, staticOwnerID, input.SenderID) {
+		return nil, fmt.Errorf("%w: response actor is not the current owner for entrypoint", humanrequest.ErrConflict)
+	}
+	return s.humanRequests.ResolveExact(ctx, input)
+}
+
+// ownerResponseAuthorized is the sealed dynamic-over-static authorization
+// rule used while the caller holds the binding read lock.
+// coverage: contract (100% required)
+func ownerResponseAuthorized(dynamic ownerBinding, dynamicFound bool, staticOwnerID, senderID string) bool {
+	senderID = strings.TrimSpace(senderID)
+	if senderID == "" {
+		return false
+	}
+	if dynamicFound {
+		return strings.TrimSpace(dynamic.OwnerSenderID) == senderID
+	}
+	return strings.TrimSpace(staticOwnerID) != "" && strings.TrimSpace(staticOwnerID) == senderID
 }
 
 // ReconcileHumanRequests retries every response whose durable resume work is
