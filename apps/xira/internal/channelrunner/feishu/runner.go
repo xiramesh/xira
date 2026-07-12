@@ -26,6 +26,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
+	fsession "github.com/xiramesh/xira/internal/session"
 )
 
 var mentionPlaceholderRegex = regexp.MustCompile(`@_user_\d+`)
@@ -68,6 +69,13 @@ type Runner struct {
 	botInfoFetcher func(ctx context.Context) (string, error)
 	// fetchTimeout 是 fetchBotOpenID 的超时（默认 5s，测试可注入短值）。
 	fetchTimeout time.Duration
+
+	// sessionManager lets the runner observe group messages (store them in
+	// session history without triggering an agent turn). Injected by main.go
+	// from *frt.Service.SessionManager(). nil = observe disabled (messages
+	// still dropped at mention gate, pre-#151 behavior).
+	// #151: session store is a shared layer, not a Runtime internal.
+	sessionManager *fsession.Manager
 }
 
 // SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
@@ -84,6 +92,15 @@ func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
 func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
 	if r != nil {
 		r.ownerResolver = resolver
+	}
+}
+
+// SetSessionManager injects the session store for group chat observe (#151).
+// When non-nil, the runner stores unmentioned group messages into session
+// history instead of discarding them. nil = observe disabled (pre-#151).
+func (r *Runner) SetSessionManager(sm *fsession.Manager) {
+	if r != nil {
+		r.sessionManager = sm
 	}
 }
 
@@ -112,7 +129,6 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 		"is_lark", definition.IsLark,
 		"verification_token_configured", resolveValue(definition.VerifyToken, definition.VerifyTokenEnv) != "",
 		"encrypt_key_configured", resolveValue(definition.EncryptKey, definition.EncryptKeyEnv) != "",
-		"respond_to_unmentioned_group_messages", definition.RespondToUnmentionedGroupMessages,
 	)
 	return &Runner{
 		definition: definition,
@@ -270,21 +286,22 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		"content_preview", previewText(content, 120),
 	)
 	if !shouldHandleMessage(chatType, mentioned, senderID, content, r.definition, r.ownerResolver) {
-		// Distinguish the two gates for log clarity: mention gate vs sender auth.
-		// Both gates use AND; report whichever applies (sender auth takes
-		// precedence — even an @mentioned unauthorized sender is still rejected).
 		reason := "unmentioned_group_message"
 		if !r.definition.AllowsSender(senderID) && (r.ownerResolver == nil || !r.ownerResolver.IsOwner(context.Background(), senderID, r.definition.ID)) {
 			reason = "sender_not_authorized"
 		}
-		slog.Info("feishu message ignored",
+		// #151: 没过 gate 的群消息不丢弃——observe（存进 session 供后续 @ bot 时读）。
+		// 只有群聊才 observe；私聊不过这个分支（私聊 mentioned=true 总过 gate）。
+		if chatType == "group" && r.sessionManager != nil {
+			r.observeGroupMessage(senderID, chatID, chatType, content)
+		}
+		slog.Info("feishu message observed (not handled)",
 			"entrypoint_id", r.definition.ID,
 			"chat_id", chatID,
 			"chat_type", chatType,
 			"message_id", messageID,
 			"sender_id", senderID,
 			"reason", reason,
-			"respond_to_unmentioned_group_messages", r.definition.RespondToUnmentionedGroupMessages,
 		)
 		return nil
 	}
@@ -418,10 +435,13 @@ func (r *Runner) messageDedupeKey(messageID string) string {
 
 // shouldHandleMessage decides whether feishu should process an inbound message.
 // Two orthogonal gates, both must pass (AND):
-//  1. mention gate: group messages need @bot unless RespondToUnmentionedGroupMessages.
+//  1. mention gate: group messages need @bot (#151: unmentioned → observe, not handle).
 //  2. sender authorization (#121): sender must be in AllowedSenderIDs (glob),
 //     OR pass the owner check when ownerResolver is non-nil. Empty allowlist
 //     = allow all (backward compat).
+//
+// #151: respond_to_unmentioned_group_messages removed — unmentioned group
+// messages are always observed (stored in session), never handled.
 //
 // /bind pre-auth (#123): a /bind command bypasses the sender-authorization gate
 // so an unbound owner can claim a protected entrypoint on first bind. The mention
@@ -431,7 +451,7 @@ func shouldHandleMessage(chatType string, mentioned bool, senderID, content stri
 		// p2p/direct: mention gate always passes; still check sender auth.
 		return isAuthorizedSender(senderID, content, definition, owner)
 	}
-	if !mentioned && !definition.RespondToUnmentionedGroupMessages {
+	if !mentioned {
 		return false
 	}
 	return isAuthorizedSender(senderID, content, definition, owner)
@@ -679,6 +699,41 @@ func firstJSONStringField(content string, fields ...string) string {
 		}
 	}
 	return ""
+}
+
+// observeGroupMessage stores a group message into session history without
+// triggering an agent turn (#151). The message is stored as a user-role
+// Message with SenderID/SenderName so hydrate can show who said it.
+func (r *Runner) observeGroupMessage(senderID, chatID, chatType, content string) {
+	if r.sessionManager == nil {
+		return
+	}
+	inbound := channel.InboundContext{
+		Channel:      "feishu",
+		EntrypointID: r.definition.ID,
+		ChatID:       chatID,
+		ChatType:     chatType,
+		SenderID:     senderID,
+	}
+	allocation := r.sessionManager.Allocate(fsession.AllocationInput{
+		Context:       inbound,
+		SessionPolicy: r.definition.SessionPolicy,
+	})
+	if err := r.sessionManager.AppendAgentMessages(fsession.AgentTurnInput{
+		SessionID: allocation.SessionID,
+		AgentID:   r.definition.DefaultAgentID,
+		Context:   inbound,
+		Scope:     &allocation.Scope,
+	}, []fsession.Message{{
+		Role:      "user",
+		Kind:      "message",
+		Content:   content,
+		SenderID:  senderID,
+		CreatedAt: time.Now().UTC(),
+	}}); err != nil {
+		slog.Warn("feishu: observe group message failed",
+			"entrypoint_id", r.definition.ID, "chat_id", chatID, "err", err)
+	}
 }
 
 func stripMentionPlaceholders(content string, mentions []*larkim.MentionEvent) string {

@@ -122,8 +122,12 @@ func TestRunAgentPersistsSessionFilesAndReloadsHistory(t *testing.T) {
 	if len(entries) != 1 || !entries[0].IsDir() {
 		t.Fatalf("session entries = %+v, want one conversation dir", entries)
 	}
-	if !strings.Contains(entries[0].Name(), "chat_group_chat-1") || !strings.Contains(entries[0].Name(), "sender_sender-1") {
-		t.Fatalf("conversation dir = %q, want readable chat and sender labels", entries[0].Name())
+	if !strings.Contains(entries[0].Name(), "chat_group_chat-1") {
+		t.Fatalf("conversation dir = %q, want readable chat label", entries[0].Name())
+	}
+	// #151：dimensions=[chat]，目录名不含 sender 段。
+	if strings.Contains(entries[0].Name(), "sender_") {
+		t.Fatalf("conversation dir should not contain sender segment: %q", entries[0].Name())
 	}
 	messagesPath := filepath.Join(entrypointDir, entries[0].Name(), "agents", resp.AgentID, "messages.jsonl")
 	if _, err := os.Stat(messagesPath); err != nil {
@@ -2517,14 +2521,17 @@ func TestAgentProfileSessionDimensionsOverrideDefaultScope(t *testing.T) {
 	if resp.SessionScope == nil {
 		t.Fatal("session scope is nil")
 	}
-	if got := resp.SessionScope.Values["channel"]; got != "channel:websocket" {
-		t.Fatalf("channel scope = %q", got)
+	// #151：dimensions 硬编码 [chat]，配置里的 dimensions 被忽略。
+	// scope 只有 chat，没有 channel（配置写了 channel 但被忽略）。
+	if got := resp.SessionScope.Values["channel"]; got != "" {
+		t.Fatalf("channel scope should be empty (dimensions ignored): %q", got)
 	}
+	if got := resp.SessionScope.Values["chat"]; got == "" {
+		t.Fatalf("chat scope should be present: %+v", resp.SessionScope.Values)
+	}
+	// #151：dimensions=[chat]，sender 不在 scope Values 里。
 	if _, ok := resp.SessionScope.Values["sender"]; ok {
-		t.Fatalf("sender scope should not be present: %+v", resp.SessionScope.Values)
-	}
-	if _, ok := resp.SessionScope.Values["chat"]; ok {
-		t.Fatalf("chat scope should not be present: %+v", resp.SessionScope.Values)
+		t.Fatalf("sender should not be in scope Values: %+v", resp.SessionScope.Values)
 	}
 }
 

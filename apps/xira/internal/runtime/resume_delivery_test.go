@@ -51,19 +51,17 @@ func (r *recordingEmitter) emitted() []channel.OutboundEnvelope {
 var _ channel.OutboundEmitter = (*recordingEmitter)(nil)
 
 // scopeWith returns a SessionScope mimicking what a persisted waiting_human
-// run carries. The sender is stored in its CANONICAL form ("<channel>:<id>"),
-// exactly as session/manager.go canonicalSenderID produces — NOT a hand-clean
-// id. This ensures deliverResumeFinal's reconstruction goes through the real
-// de-prefixing path (PR #71 review CRITICAL: hand-clean senders hid the
-// ilink prefix asymmetry).
+// run carries. #151: sender 的 canonical id 存在 Names["sender_id"]（不再在 Values）。
 func scopeWith(channelName, chatID, senderID string) *fsession.SessionScope {
 	return &fsession.SessionScope{
 		Channel:      channelName,
 		EntrypointID: "feishu-default",
 		Account:      "acct-1",
 		Values: map[string]string{
-			"chat":   "p2p:" + chatID,
-			"sender": channelName + ":" + senderID, // canonical form (manager.go:165)
+			"chat": "p2p:" + chatID,
+		},
+		Names: map[string]string{
+			"sender_id": channelName + ":" + senderID, // canonical form
 		},
 	}
 }

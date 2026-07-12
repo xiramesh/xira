@@ -86,16 +86,14 @@ func inboundContextFromScope(scope *fsession.SessionScope, raw map[string]string
 	ctx.SpaceID = scopeValueID(scope.Values["space"])
 	ctx.SpaceType = scopeValueType(scope.Values["space"])
 	ctx.TopicID = scopeValueID(scope.Values["topic"])
-	// Sender is stored canonical ("<channel>:<id>", see session/manager.go
-	// canonicalSenderID). Strip the prefix symmetrically with chat/space/topic
-	// — otherwise the resumed run's Target.SenderID carries the canonical prefix
-	// and outbound delivery addresses a non-existent user (e.g. ilink resume
-	// delivering to ToUserID="ilink:wxid_abc"). PR #71 review CRITICAL.
-	ctx.SenderID = scopeValueID(scope.Values["sender"])
+	// #151：sender 不再是 dimension（不在 scope.Values 里）。
+	// sender 的 canonical id 存在 scope.Names["sender_id"]（不参与 session ID 计算，
+	// 但 resume delivery 需要它路由）。Strip canonical prefix 同 #71。
+	if scope.Names != nil {
+		ctx.SenderID = scopeValueID(scope.Names["sender_id"])
+	}
 	// Names travel alongside Values (scope.Names) but are not encoded as
-	// "<type>:<id>" — they're plain display strings. Restore as-is. Empty when
-	// the scope predates the Names field (older persisted sessions) or when the
-	// channel runner didn't supply names.
+	// "<type>:<id>" — they're plain display strings. Restore as-is.
 	if scope.Names != nil {
 		ctx.ChatName = scope.Names["chat_name"]
 		ctx.SenderName = scope.Names["sender_name"]

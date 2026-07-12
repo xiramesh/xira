@@ -32,6 +32,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
+	fsession "github.com/xiramesh/xira/internal/session"
 )
 
 const (
@@ -121,6 +122,9 @@ type Runner struct {
 	connMu    sync.Mutex
 	conns     map[frt.ChatKey]*wsConn
 	connIDSeq uint64 // monotonic connection identity, for same-conn detection
+
+	// sessionManager for group chat observe (#151).
+	sessionManager *fsession.Manager
 }
 
 // wsConn holds a live websocket connection's send capability. id is a stable
@@ -174,6 +178,13 @@ func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
 func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
 	if r != nil {
 		r.ownerResolver = resolver
+	}
+}
+
+// SetSessionManager injects the session store for group chat observe (#151).
+func (r *Runner) SetSessionManager(sm *fsession.Manager) {
+	if r != nil {
+		r.sessionManager = sm
 	}
 }
 
@@ -849,7 +860,8 @@ func shouldHandle(ctx channel.InboundContext, content string, definition entrypo
 	if normalizeChannel(ctx.ChatType) != "group" {
 		return isAuthorizedSender(ctx, content, definition, owner)
 	}
-	if !ctx.Mentioned && !definition.RespondToUnmentionedGroupMessages {
+	// #151: respond_to_unmentioned removed — unmentioned group messages → observe.
+	if !ctx.Mentioned {
 		return false
 	}
 	return isAuthorizedSender(ctx, content, definition, owner)

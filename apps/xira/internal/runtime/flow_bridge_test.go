@@ -214,9 +214,7 @@ func TestFlowAgentStepPersistsSessionInTriggerChannel(t *testing.T) {
 	if got := agentRun.SessionScope.Values["chat"]; !strings.Contains(got, "oc_flow_smoke") {
 		t.Fatalf("agent run session chat = %q, want it to contain the real chat oc_flow_smoke", got)
 	}
-	if got := agentRun.SessionScope.Values["sender"]; !strings.Contains(got, "u_flow_smoke") {
-		t.Fatalf("agent run session sender = %q, want it to contain the real sender u_flow_smoke", got)
-	}
+	// #151：dimensions=[chat]，sender 不在 scope 里。
 
 	// And the messages.jsonl must physically live under sessions/feishu/...
 	// (not sessions/flow/...).

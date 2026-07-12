@@ -34,13 +34,16 @@ import (
 func buildScopeViaManager(t *testing.T, ch, chatID, senderID string) *fsession.SessionScope {
 	t.Helper()
 	canonical := ch + ":" + senderID // mirrors canonicalSenderID(ch, senderID, nil)
+	// #151：sender 存 Names["sender_id"]（不参与 dimension），不在 Values["sender"]。
 	return &fsession.SessionScope{
 		Channel:      ch,
 		EntrypointID: "ep-1",
 		Account:      "acct-1",
 		Values: map[string]string{
-			"chat":   "p2p:" + chatID,
-			"sender": canonical,
+			"chat": "p2p:" + chatID,
+		},
+		Names: map[string]string{
+			"sender_id": canonical,
 		},
 	}
 }
@@ -84,9 +87,10 @@ func TestInboundContextFromScopeStripsSenderPrefix(t *testing.T) {
 // that already has no canonical prefix (edge: legacy/foreign scope) is passed
 // through unchanged — scopeValueID returns the input when there's no ":".
 func TestInboundContextFromScopePreservesSenderWithoutPrefix(t *testing.T) {
+	// #151：sender 从 Names["sender_id"] 取（不在 Values）。
 	scope := &fsession.SessionScope{
 		Channel: "ilink",
-		Values:  map[string]string{"sender": "plain_id"},
+		Names:   map[string]string{"sender_id": "plain_id"},
 	}
 	got := inboundContextFromScope(scope, nil)
 	if got.SenderID != "plain_id" {

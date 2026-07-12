@@ -22,6 +22,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	frt "github.com/xiramesh/xira/internal/runtime"
+	fsession "github.com/xiramesh/xira/internal/session"
 )
 
 const (
@@ -89,6 +90,9 @@ type Runner struct {
 	accounts map[string]*accountPoller
 	pairings map[string]*pairingState
 	router   *progress.Router
+
+	// sessionManager for group chat observe (#151).
+	sessionManager *fsession.Manager
 }
 
 // SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
@@ -102,6 +106,13 @@ func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
 func (r *Runner) SetOwnerResolver(resolver frt.OwnerResolver) {
 	if r != nil {
 		r.ownerResolver = resolver
+	}
+}
+
+// SetSessionManager injects the session store for group chat observe (#151).
+func (r *Runner) SetSessionManager(sm *fsession.Manager) {
+	if r != nil {
+		r.sessionManager = sm
 	}
 }
 
@@ -163,7 +174,6 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 		"base_url_configured", baseURL != "",
 		"state_dir", stateDir,
 		"allow_runtime_pairing", definition.AllowRuntimePairing,
-		"respond_to_unmentioned_group_messages", definition.RespondToUnmentionedGroupMessages,
 	)
 	return runner, nil
 }
@@ -612,7 +622,6 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 			"message_id", messageID,
 			"sender_id", senderID,
 			"reason", reason,
-			"respond_to_unmentioned_group_messages", r.definition.RespondToUnmentionedGroupMessages,
 		)
 		return
 	}
@@ -955,9 +964,8 @@ func shouldHandleMessage(chatType, senderID, content string, definition entrypoi
 	if chatType != "group" {
 		return isAuthorizedSender(senderID, content, definition, owner)
 	}
-	if !definition.RespondToUnmentionedGroupMessages {
-		return false
-	}
+	// ilink 没有 mention 概念——群消息直接走 sender auth（和私聊一样）。
+	// #151: observe 留 follow-up（ilink 无 mention，群消息当前直接进 agent）。
 	return isAuthorizedSender(senderID, content, definition, owner)
 }
 

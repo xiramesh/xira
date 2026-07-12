@@ -122,6 +122,9 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 			// IsOwner (entrypoint-level owner declared in entrypoints.yaml).
 			// Runners use it to let the owner bypass the sender allowlist (#121).
 			channelRunners.SetOwnerResolver(rt)
+			// #151: Inject session store so runners can observe group messages
+			// (store without triggering agent turn).
+			channelRunners.SetSessionManager(rt.SessionManager())
 			defer func() {
 				stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel()

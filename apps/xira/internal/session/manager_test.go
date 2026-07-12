@@ -325,15 +325,25 @@ func TestBuildScopeIncludesNames(t *testing.T) {
 // TestBuildScopeOmitsEmptyNames verifies that when no name fields are present,
 // scope.Names is not populated (keeps the zero-value scope clean for backward
 // compatibility with older persisted scopes that predate the Names field).
-func TestBuildScopeOmitsEmptyNames(t *testing.T) {
+func TestBuildScopeOmitsEmptyDisplayNames(t *testing.T) {
+	// #151：sender_id 总会进 Names（供 resume），但 display names（chat_name/sender_name）
+	// 只在实际有值时才存在。
 	ctx := channel.NewInboundContext("feishu", "user-1", map[string]string{
 		"chat_id":   "chat-1",
 		"chat_type": "group",
 	})
-	policy := routing.SessionPolicy{Dimensions: []string{"chat", "sender"}}
+	policy := routing.SessionPolicy{Dimensions: []string{"chat"}}
 	scope := BuildScope(ctx, policy)
-	if scope.Names != nil {
-		t.Errorf("scope.Names = %+v, want nil when no names present", scope.Names)
+	// sender_id 应该在（resume 需要）
+	if scope.Names == nil || scope.Names["sender_id"] == "" {
+		t.Errorf("scope.Names should contain sender_id: %+v", scope.Names)
+	}
+	// 但 chat_name / sender_name 不在（没有 display name）
+	if scope.Names["chat_name"] != "" {
+		t.Errorf("chat_name should be empty: %+v", scope.Names)
+	}
+	if scope.Names["sender_name"] != "" {
+		t.Errorf("sender_name should be empty: %+v", scope.Names)
 	}
 }
 

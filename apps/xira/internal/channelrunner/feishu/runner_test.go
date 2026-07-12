@@ -59,9 +59,9 @@ func TestShouldHandleMessageRespectsGroupMentionPolicy(t *testing.T) {
 		t.Fatal("unmentioned group messages should be ignored by default")
 	}
 
-	respondAllGroups := entrypoints.Definition{RespondToUnmentionedGroupMessages: true}
-	if !shouldHandleMessage("group", false, "ou_1", "", respondAllGroups, nil) {
-		t.Fatal("unmentioned group messages should be handled when configured")
+	// #151: 群消息不 @ bot → 不处理（observe 存 session）。
+	if shouldHandleMessage("group", false, "ou_1", "", entrypoints.Definition{}, nil) {
+		t.Fatal("unmentioned group message should not be handled (observe only)")
 	}
 }
 
@@ -74,8 +74,7 @@ func TestShouldHandleMessageRespectsGroupMentionPolicy(t *testing.T) {
 //   - mention gate fails + sender in allowlist → still reject (AND)
 func TestShouldHandleMessageSenderAllowlist(t *testing.T) {
 	allowlist := entrypoints.Definition{
-		RespondToUnmentionedGroupMessages: true, // ensure mention gate passes, isolate allowlist
-		AllowedSenderIDs:                  []string{"ou_allowed"},
+		AllowedSenderIDs: []string{"ou_allowed"},
 	}
 	// empty allowlist → allow all.
 	if !shouldHandleMessage("group", true, "ou_anyone", "", entrypoints.Definition{}, nil) {
@@ -93,9 +92,8 @@ func TestShouldHandleMessageSenderAllowlist(t *testing.T) {
 	// owner resolver receives definition.ID (entrypoint ID), not a channel
 	// name — owner bypass is a privilege boundary (#139 review).
 	ownerDef := entrypoints.Definition{
-		ID:                                "feishu-owner-test",
-		RespondToUnmentionedGroupMessages: true,
-		AllowedSenderIDs:                  []string{"ou_allowed"},
+		ID:               "feishu-owner-test",
+		AllowedSenderIDs: []string{"ou_allowed"},
 	}
 	owner := &stubOwnerResolver{ownerSenderID: "ou_owner"}
 	if !shouldHandleMessage("group", true, "ou_owner", "", ownerDef, owner) {
@@ -106,8 +104,7 @@ func TestShouldHandleMessageSenderAllowlist(t *testing.T) {
 	}
 	// mention gate fails + sender in allowlist → still reject (AND).
 	strictGroup := entrypoints.Definition{
-		RespondToUnmentionedGroupMessages: false,
-		AllowedSenderIDs:                  []string{"ou_allowed"},
+		AllowedSenderIDs: []string{"ou_allowed"},
 	}
 	if shouldHandleMessage("group", false, "ou_allowed", "", strictGroup, nil) {
 		t.Error("mention gate fail should reject even if sender is in allowlist (AND)")
@@ -121,9 +118,8 @@ func TestShouldHandleMessageSenderAllowlist(t *testing.T) {
 // /bind must @bot).
 func TestShouldHandleMessageBindPreAuth(t *testing.T) {
 	allowlist := entrypoints.Definition{
-		ID:                                "feishu-protected",
-		RespondToUnmentionedGroupMessages: true, // mention gate passes, isolate auth
-		AllowedSenderIDs:                  []string{"ou_allowed"},
+		ID:               "feishu-protected",
+		AllowedSenderIDs: []string{"ou_allowed"},
 	}
 	// /bind command from unauthorized sender → passes auth (pre-auth bypass).
 	if !shouldHandleMessage("group", true, "ou_stranger", "/bind WDJM-LHKD", allowlist, nil) {
@@ -143,8 +139,7 @@ func TestShouldHandleMessageBindPreAuth(t *testing.T) {
 	}
 	// mention gate still applies to /bind in groups.
 	strictGroup := entrypoints.Definition{
-		RespondToUnmentionedGroupMessages: false,
-		AllowedSenderIDs:                  []string{"ou_allowed"},
+		AllowedSenderIDs: []string{"ou_allowed"},
 	}
 	if shouldHandleMessage("group", false, "ou_stranger", "/bind WDJM-LHKD", strictGroup, nil) {
 		t.Error("/bind without @bot in strict group should be rejected by mention gate")
