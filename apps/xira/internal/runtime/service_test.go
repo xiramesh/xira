@@ -2188,7 +2188,7 @@ default_agent: xira-assistant
 	if err != nil {
 		t.Fatalf("before: %v", err)
 	}
-	if strings.Contains(instBefore, "# Memory") {
+	if strings.Contains(instBefore, "# Sender Memory") || strings.Contains(instBefore, "# Agent Memory") {
 		t.Error("instruction should not contain Memory block before memory exists")
 	}
 
@@ -2206,11 +2206,71 @@ default_agent: xira-assistant
 	if err != nil {
 		t.Fatalf("after: %v", err)
 	}
-	if !strings.Contains(instAfter, "# Memory") {
-		t.Error("instruction should contain Memory block after memory created")
+	if !strings.Contains(instAfter, "# Sender Memory") {
+		t.Error("instruction should contain Sender Memory block after memory created")
 	}
 	if !strings.Contains(instAfter, "出差") {
 		t.Errorf("instruction should contain memory content (出差):\n%s", instAfter)
+	}
+}
+
+func TestInstructionTextForRunInjectsSenderAndAgentMemorySeparately(t *testing.T) {
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+`)
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
+	profile, _ := rt.agents.Get("xira-assistant")
+	sender := "ou_agent_scope_sender"
+	ctx := WithChatKey(context.Background(), ChatKey{SenderID: sender})
+	tool := rtools.NewUpdateMemoryToolForAgent(rt.stateDir, profile.ID)
+	if _, err := tool.Execute(ctx, map[string]any{"scope": "sender", "key": "person", "content": "sender-only fact"}); err != nil {
+		t.Fatalf("write sender memory: %v", err)
+	}
+	if _, err := tool.Execute(ctx, map[string]any{"scope": "agent", "key": "followup", "content": "agent-only commitment"}); err != nil {
+		t.Fatalf("write agent memory: %v", err)
+	}
+
+	inbound := channel.NewInboundContext("feishu", sender, map[string]string{"chat_id": "group-1", "chat_type": "group"})
+	inbound.AddressedTo = []channel.AddressTarget{channel.AddressTargetOwner}
+	instruction, _, err := rt.instructionTextForRun(profile, inbound)
+	if err != nil {
+		t.Fatalf("instructionTextForRun: %v", err)
+	}
+	for _, want := range []string{"# Sender Memory", "sender-only fact", "# Agent Memory", "agent-only commitment", "owner's AI intern"} {
+		if !strings.Contains(instruction, want) {
+			t.Errorf("instruction missing %q:\n%s", want, instruction)
+		}
+	}
+	if strings.Index(instruction, "# Sender Memory") > strings.Index(instruction, "# Agent Memory") {
+		t.Error("Sender Memory must be injected before Agent Memory")
+	}
+}
+
+func TestInstructionTextForRunAgentMemoryIsolatedByAgentID(t *testing.T) {
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
+	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
+	profileA, _ := rt.agents.Get("xira-assistant")
+	profileB, _ := rt.agents.Get("research-assistant")
+	if _, err := rtools.NewUpdateMemoryToolForAgent(rt.stateDir, profileA.ID).Execute(context.Background(), map[string]any{
+		"scope": "agent", "key": "identity", "content": "only agent A knows this",
+	}); err != nil {
+		t.Fatalf("write agent A memory: %v", err)
+	}
+	inbound := channel.NewInboundContext("test", "sender", nil)
+	instA, _, err := rt.instructionTextForRun(profileA, inbound)
+	if err != nil {
+		t.Fatalf("agent A instruction: %v", err)
+	}
+	instB, _, err := rt.instructionTextForRun(profileB, inbound)
+	if err != nil {
+		t.Fatalf("agent B instruction: %v", err)
+	}
+	if !strings.Contains(instA, "only agent A knows this") {
+		t.Fatal("agent A memory missing from agent A instruction")
+	}
+	if strings.Contains(instB, "only agent A knows this") {
+		t.Fatal("agent A memory leaked into agent B instruction")
 	}
 }
 

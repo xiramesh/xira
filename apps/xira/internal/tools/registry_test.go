@@ -10,6 +10,43 @@ import (
 	"time"
 )
 
+type registryContractTool struct {
+	name     string
+	lastArgs map[string]any
+}
+
+func (t *registryContractTool) Name() string               { return t.name }
+func (t *registryContractTool) Description() string        { return "registry contract probe" }
+func (t *registryContractTool) Parameters() map[string]any { return map[string]any{"type": "object"} }
+func (t *registryContractTool) Execute(_ context.Context, args map[string]any) (map[string]any, error) {
+	t.lastArgs = args
+	return map[string]any{"ok": true}, nil
+}
+
+func TestRegistryRejectsInvalidToolsAndUnknownExecution(t *testing.T) {
+	blank := &registryContractTool{name: "  "}
+	probe := &registryContractTool{name: " probe "}
+	registry := NewRegistry([]Tool{nil, blank, probe})
+	if got := registry.List(); len(got) != 1 || got[0] != "probe" {
+		t.Fatalf("registry list = %v, want only probe", got)
+	}
+	if !registry.Has(" probe ") {
+		t.Fatal("registry lookup must normalize surrounding whitespace")
+	}
+	if _, err := registry.Execute(context.Background(), "probe", nil); err != nil {
+		t.Fatalf("Execute nil args: %v", err)
+	}
+	if probe.lastArgs == nil {
+		t.Fatal("Execute must normalize nil args to an empty object")
+	}
+	if _, err := registry.Execute(context.Background(), "missing", nil); err == nil {
+		t.Fatal("Execute must reject an unregistered tool")
+	}
+	if _, ok := registry.GetDefinition("missing"); ok {
+		t.Fatal("GetDefinition must report an unregistered tool")
+	}
+}
+
 func TestBuiltinRegistryFiltersAllowedTools(t *testing.T) {
 	registry := NewBuiltinRegistry(t.TempDir(), []string{"read_file", "command.run", "shell.run", "tool_output.read", "exec", "missing"}, SandboxRoots{}, "")
 
