@@ -801,10 +801,15 @@ func TestSessionOnTurnResultSteeringRetry(t *testing.T) {
 		fakeRuntimeStep{err: runtime.ErrSteered},
 		fakeRuntimeStep{resp: runtime.TurnResponse{RunID: "r2", Status: "completed"}},
 	)
+	// Keep the first RunAgent call parked until the steering message is in the
+	// queue. Observing Router.active=true does not prove the fast fake has not
+	// already returned ErrSteered and drained an empty queue.
+	blockFirstRun := make(chan struct{})
+	blocking := &blockingRuntime{inner: rt, block: blockFirstRun}
 	router := NewRouter()
 	var gotRunID string
 	cfg := ChatKeySessionConfig{
-		Runtime:      rt,
+		Runtime:      blocking,
 		EntrypointID: "ep1",
 		Inbound:      testInbound(),
 		OnTurnResult: func(resp runtime.TurnResponse, _ error) { gotRunID = resp.RunID },
@@ -820,11 +825,13 @@ func TestSessionOnTurnResultSteeringRetry(t *testing.T) {
 		t.Fatal("turn never became active")
 	}
 	router.SteeringQueue(testKey()).Enqueue("interjection")
+	close(blockFirstRun)
 	if !waitForActive(router, false) {
 		t.Fatal("turn never finished")
 	}
-	if rt.callCount() != 2 {
-		t.Errorf("RunAgent calls = %d, want 2 (orig + steer retry)", rt.callCount())
+	calls := rt.callsSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("RunAgent calls = %d, want 2 (orig + steer retry)", len(calls))
 	}
 	if gotRunID != "r2" {
 		t.Errorf("OnTurnResult RunID = %q, want r2 (retried run)", gotRunID)
