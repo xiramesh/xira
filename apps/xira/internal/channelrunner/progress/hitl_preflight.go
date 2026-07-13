@@ -9,14 +9,14 @@ import (
 	"github.com/xiramesh/xira/internal/runtime"
 )
 
-// hitl_preflight.go: shared HITL preflight check for all channel adapters (#92).
+// hitl_preflight.go: legacy implicit same-chat HITL preflight (#92).
 //
-// All three channels (feishu/ilink/websocket) call TryResolveHITL before
-// session.Handle. If it returns true, the adapter returns (skip session.Handle);
-// if false, the adapter continues to session.Handle (start/steer a turn).
+// Only WebSocket still calls TryResolveHITL before session.Handle. Feishu and
+// iLink use the exact correlated HumanResponse protocols introduced by
+// #164/#165 and must not select a request by pending order.
 //
-// This is the single place where "does this chatKey have a pending HITL that
-// can be resolved via IM text?" is decided. No per-channel duplication.
+// This remains the single compatibility path for WebSocket's implicit text
+// replies until #166 replaces them with structured HumanResponse frames.
 
 // TryResolveHITL checks if chatKey has a pending HITL that can be resolved via
 // the user's IM text reply. If yes, it resolves it and returns true (adapter

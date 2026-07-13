@@ -54,7 +54,12 @@ func buildHumanRequestCard(req humanrequest.HumanRequest) (string, error) {
 	return marshalHumanRequestCard("需要你的确认", "blue", elements)
 }
 
-func buildResolvedHumanRequestCard(req humanrequest.HumanRequest, kind humanrequest.ResponseKind, answer string) (string, error) {
+func buildResolvedHumanRequestCard(req humanrequest.HumanRequest) (string, error) {
+	if req.Response == nil {
+		return "", fmt.Errorf("resolved Feishu HumanRequest card requires a persisted response")
+	}
+	kind := req.Response.Kind
+	answer := req.Response.Message
 	status := "已处理"
 	template := "green"
 	switch kind {
@@ -190,7 +195,7 @@ func (r *Runner) handleCardAction(ctx context.Context, event *callback.CardActio
 		slog.Warn("feishu HumanRequest card action rejected", "entrypoint_id", r.definition.ID, "request_id", command.RequestID, "message_id", messageID, "error", err)
 		return cardErrorResponse(), nil
 	}
-	content, err := buildResolvedHumanRequestCard(*resolved, command.Kind, command.Answer)
+	content, err := buildResolvedHumanRequestCard(*resolved)
 	if err != nil {
 		return cardErrorResponse(), nil
 	}

@@ -89,13 +89,37 @@ func TestBuildHumanRequestCardRendersNativeActions(t *testing.T) {
 
 func TestBuildResolvedHumanRequestCardRemovesActions(t *testing.T) {
 	t.Parallel()
-	req := humanrequest.HumanRequest{ID: "hrq-1", Kind: humanrequest.RequestApproval, Question: "Deploy?"}
-	content, err := buildResolvedHumanRequestCard(req, humanrequest.ResponseApprove, "")
+	req := humanrequest.HumanRequest{
+		ID: "hrq-1", Kind: humanrequest.RequestApproval, Question: "Deploy?",
+		Response: &humanrequest.HumanResponse{Kind: humanrequest.ResponseApprove},
+	}
+	content, err := buildResolvedHumanRequestCard(req)
 	if err != nil {
 		t.Fatalf("buildResolvedHumanRequestCard() error = %v", err)
 	}
 	if strings.Contains(content, `"behaviors"`) || !strings.Contains(content, "已批准") {
 		t.Fatalf("resolved card = %s", content)
+	}
+}
+
+func TestBuildResolvedHumanRequestCardUsesPersistedResponse(t *testing.T) {
+	t.Parallel()
+	req := humanrequest.HumanRequest{
+		ID:       "hrq-source-of-truth",
+		Kind:     humanrequest.RequestApproval,
+		Question: "Deploy?",
+		Response: &humanrequest.HumanResponse{
+			Kind:    humanrequest.ResponseDeny,
+			Message: "persisted decision",
+		},
+	}
+
+	content, err := buildResolvedHumanRequestCard(req)
+	if err != nil {
+		t.Fatalf("buildResolvedHumanRequestCard() error = %v", err)
+	}
+	if !strings.Contains(content, "已拒绝") || !strings.Contains(content, "persisted decision") {
+		t.Fatalf("resolved card does not use persisted response: %s", content)
 	}
 }
 
@@ -115,11 +139,14 @@ func TestHumanRequestCardRejectsInvalidInputs(t *testing.T) {
 		})
 	}
 	for _, kind := range []humanrequest.ResponseKind{humanrequest.ResponseApprove, humanrequest.ResponseDeny, humanrequest.ResponseCancel, humanrequest.ResponseAnswer} {
-		if _, err := buildResolvedHumanRequestCard(humanrequest.HumanRequest{Question: "Q"}, kind, "detail"); err != nil {
+		if _, err := buildResolvedHumanRequestCard(humanrequest.HumanRequest{Question: "Q", Response: &humanrequest.HumanResponse{Kind: kind, Message: "detail"}}); err != nil {
 			t.Fatalf("buildResolvedHumanRequestCard(%q): %v", kind, err)
 		}
 	}
-	if _, err := buildResolvedHumanRequestCard(humanrequest.HumanRequest{}, "other", ""); err == nil {
+	if _, err := buildResolvedHumanRequestCard(humanrequest.HumanRequest{}); err == nil {
+		t.Fatal("missing persisted response succeeded")
+	}
+	if _, err := buildResolvedHumanRequestCard(humanrequest.HumanRequest{Response: &humanrequest.HumanResponse{Kind: "other"}}); err == nil {
 		t.Fatal("unknown response kind succeeded")
 	}
 }
@@ -263,7 +290,10 @@ func (r *recordingAsyncExactResolver) ResolveHumanResponseAsync(_ context.Contex
 	if r.nilReq {
 		return nil, nil
 	}
-	return &humanrequest.HumanRequest{ID: input.RequestID, Question: "Deploy?", Kind: humanrequest.RequestApproval}, nil
+	return &humanrequest.HumanRequest{
+		ID: input.RequestID, Question: "Deploy?", Kind: humanrequest.RequestApproval,
+		Response: &humanrequest.HumanResponse{Kind: input.Kind, Message: input.Message},
+	}, nil
 }
 
 func TestHandleCardActionCommitsExactResponseBeforeUpdatingCard(t *testing.T) {
