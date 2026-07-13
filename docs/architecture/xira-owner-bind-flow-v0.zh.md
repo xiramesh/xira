@@ -132,8 +132,9 @@ device code 是**一次性握手码**（不是长期凭证），打印到终端�
 - 现有 IM 消息都是自然语言进 agent turn，无 `/xxx` 前缀识别。
 - `hitl_classify.go` 注释明确拒绝自然语言关键词匹配（「No keyword matching」）——但 `/bind` 是
   **显式 slash command（管理操作）**，不是自然语言意图理解，和 hitl_classify 的哲学不冲突。
-- 唯一的结构化拦截是 `TryResolveHITL`（`hitl_preflight.go`），只在有 pending HITL 时生效。
-  `/bind` 拦截是新的 channel→service 层 slash command 路径。
+- HITL 已迁移到显式协议：iLink/Feishu 文字引用、Feishu callback、WebSocket
+  structured `human_response` 都必须携带完整 correlation；普通自然语言不再隐式选择
+  pending request。`/bind` 仍是独立的 channel→service 管理命令路径。
 
 ---
 

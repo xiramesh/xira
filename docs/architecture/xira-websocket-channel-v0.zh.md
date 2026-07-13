@@ -2,10 +2,9 @@
 
 > 本文定义 Xira 自身的通用 WebSocket channel 标准：别人连进 `xira serve`，
 > 通过同一条 WebSocket 连接向 runtime 发送 inbound 消息，并接收 outbound
-> ack、runtime events、最终回复、interrupt 和错误。`assistant_delta`、
-> `human_response` resume-over-WS、`outbound_message` 是 Channel Contract
-> 保留帧，待 channel adapter / streaming / proactive dispatch slice 落地后
-> 才会在 `ready.capabilities` 广告。
+> ack、runtime events、最终回复、interrupt 和错误。`human_response` 已支持
+> current-sender 的结构化 HITL 响应；`assistant_delta`、`outbound_message`
+> 仍是 Channel Contract 保留帧。
 >
 > 通用 channel inbound / outbound 语义见
 > `docs/architecture/xira-channel-contract-v0.zh.md`。本文只定义 WebSocket
@@ -15,8 +14,8 @@
 
 ### 1.1 结论
 
-Xira 的通用 WebSocket channel 是 **inbound runtime API**，不是
-`channelrunner`。
+Xira 的通用 WebSocket channel 是 **inbound runtime API**。HTTP endpoint
+只负责 upgrade，连接协议与 ChatKey 路由由 `channelrunner/websocket` 实现。
 
 ```
 client / gateway / UI / local tool
@@ -25,8 +24,8 @@ client / gateway / UI / local tool
         <- ack / event / response / interrupt / error
 ```
 
-`channelrunner` 只用于必须由 Xira 主动连出去的平台，例如 Feishu / iLink
-这类 SDK 长连接。通用 WebSocket 不属于这个模型。
+WebSocket 与 Feishu / iLink 复用 channel runner 的公共契约，但连接建立方向
+不同：WebSocket 被动接收 HTTP upgrade，后两者由平台 SDK 管理连接。
 
 ### 1.2 术语
 
@@ -35,14 +34,13 @@ client / gateway / UI / local tool
 | WebSocket endpoint | `xira serve` 暴露的 HTTP upgrade 入口，属于 API server。 |
 | channel | runtime 来源身份。v0 固定为 `websocket`。 |
 | entrypoint | Xira 路由配置，决定默认 agent、允许 agent、session policy、鉴权策略。 |
-| inbound frame | 客户端发给 Xira 的帧，例如 `message`、`ping`；`human_response` 是保留帧。 |
+| inbound frame | 客户端发给 Xira 的帧，例如 `message`、`human_response`、`ping`。 |
 | outbound frame | Xira 发给客户端的帧，例如 `ack`、`event`、`response`、`interrupt`、`error`；`assistant_delta`、`outbound_message` 是保留帧。 |
 | request_id | 单次 inbound 请求的相关 ID。所有对应 outbound 帧必须回带。 |
 | run_id | Xira runtime 生成的 agent run ID。 |
 
 ### 1.3 非目标
 
-- v0 不做 `apps/xira/internal/channelrunner/websocket`。
 - v0 不让 Xira 主动 dial 外部 WebSocket server。
 - v0 不支持二进制帧、文件传输、语音流、模型 token 级流式输出。
 - v0 不支持任意 runtime channel 名；通用 WS 入口的 channel 是 `websocket`。
@@ -260,24 +258,35 @@ frt.TurnRequest{
 
 ### 4.3 `human_response`
 
-用于回答 runtime 发出的 human request。当前 #14 transport slice 只保留协议形状，
-不在 `ready.capabilities` 广告，也不处理该帧；客户端需要继续使用现有 HTTP
-human-request API。完整 resume-over-WS 需要后续 slice 把 resume 后的新 run 与
-原 WebSocket request 重新关联。
+用于回答 runtime 发出的 human request。该能力在 `ready.capabilities` 中以
+`human_response` 广告，并映射到 channel capability
+`interactive_human_response`。
 
 ```json
 {
   "type": "human_response",
   "id": "hrsp_001",
-  "data": {
-    "human_request_id": "hr_20260618_001",
-    "kind": "approve",
-    "actor": "user-1",
-    "message": "同意执行",
-    "idempotency_key": "hrsp_001"
-  }
+  "request_id": "hr_20260618_001",
+  "correlation_token": "完整 opaque token",
+  "action": "approve"
 }
 ```
+
+freeform 回答使用 `"action":"answer"` 和顶层 `"answer":"..."`。
+approval 支持 `approve` / `deny` / `cancel`；freeform 支持 `answer` /
+`cancel`。普通 `message` 帧里的自然语言不会隐式选择 pending request。
+
+帧不能提供 sender、sender type、chat、entrypoint 或 idempotency key：runner
+从 persisted request 读取这些字段，并要求发送该帧的物理连接仍是原始
+WebSocket ChatKey 的当前 owner。WebSocket 没有可信 typed identity，因此只支持
+`current_sender` 且 persisted `sender_id_type` 为空；`owner` 明确 fail closed。
+runtime/store 继续原子校验状态、完整 correlation、过期、幂等和 responder，commit
+后由共享 durable resume 在后台继续 Agent Run / Flow。
+
+成功返回 `ack(status=human_response_accepted)`；查找、token、状态、过期、权限等
+失败统一返回 `human_response_rejected`，不向客户端泄露请求是否存在。owner 返回
+`unsupported_responder`，resolver 未注入时返回可重试的
+`human_response_unavailable`。
 
 ### 4.4 `ping`
 
@@ -481,8 +490,8 @@ run 因 HITL 或其他 suspendable condition 暂停时发送。
 `human_requests[]` 直接使用 `humanrequest.HumanRequest` 的 JSON 形状；
 问题文本字段是 `question`。
 
-当前 #14 transport slice 中，客户端需通过现有 HTTP human-request API 回复；
-`human_response` 帧保留给后续 resume-over-WS slice。
+客户端可用 §4.3 的 `human_response` 帧回复。响应先持久化，再异步 resume；resume
+产生的 final 通过现有 ChatKey live connection 以 `response` 帧投递。
 
 ### 5.7 `outbound_message`
 

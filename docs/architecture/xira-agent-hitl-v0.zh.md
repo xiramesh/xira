@@ -1345,7 +1345,9 @@ HumanRequest 状态机上的 channel-specific presentation：
 
 卡片/文字 adapter 只负责平台渲染与可信 transport facts；request 状态、当前 owner、
 过期、幂等、correlation、delivery message 和 resume 仍全部由 runtime/store 校验。
-WebSocket 的 structured `human_response` 留在 #166，owner route 未可信前继续 fail closed。
+WebSocket 的 structured `human_response` 已由 #166 接入同一 async exact resolver：
+只支持当前 live ChatKey connection 对应的 untyped current sender；frame 不能自报
+identity/chat/entrypoint。owner route 没有可信 typed identity，继续 fail closed。
 
 原因：
 

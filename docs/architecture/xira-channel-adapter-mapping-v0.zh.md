@@ -52,7 +52,7 @@ apps/xira/internal/channel
 |---|---|---|---|---|
 | CLI | `xira agent run` | final-only | `assistant_final` 映射为 stdout final response；`--json` 输出完整 `TurnResponse`。 | `assistant_delta` streaming、inline `interrupt` prompt、proactive `outbound_message`。 |
 | TUI | 无内置 TUI command | not implemented | 无。 | 若未来新增 TUI，按 CLI + HTTP/WebSocket contract 实现。 |
-| WebSocket | `GET /api/v1/channels/websocket/messages` | final-only + runtime-event-stream | `ack`、`event`(binding of `runtime_event`)、`response`(binding of `assistant_final`/无 recipient 的 proactive resume)、`interrupt`、`error`。 | `assistant_delta`、`human_response` resume-over-WS、typed-recipient 私信。 |
+| WebSocket | `GET /api/v1/channels/websocket/messages` | final-only + runtime-event-stream + interactive-human-response | `ack`、`event`(binding of `runtime_event`)、`response`(binding of `assistant_final`/无 recipient 的 proactive resume)、`interrupt`、`error`；structured `human_response` 支持 current sender。 | `assistant_delta`、owner/typed-recipient 私信。 |
 | Feishu | `channelrunner/feishu` | final-only + proactive-outbound | `assistant_final` 发到 `target.chat_id`；`outbound_message` 可发到 typed `open_id` / `user_id` / `union_id` recipient。 | delta 默认 buffer/drop；`runtime_event` 只进 run log；owner 双向 HITL 尚未实现。 |
 | iLink | `channelrunner/ilink` | final-only + proactive-outbound | `assistant_final` 通过 `SendText` 或 `Push`；`outbound_message` 可使用 typed user recipient。 | delta 默认 buffer/drop；`runtime_event` 只进 run log；owner 双向 HITL 尚未实现。 |
 
@@ -85,10 +85,11 @@ WebSocket binding 已在 `docs/architecture/xira-websocket-channel-v0.zh.md` 定
 | `assistant_final` | `response` |
 | `interrupt` | `interrupt` |
 | `error` | `error` |
+| inbound `human_response` | exact request/correlation + current live ChatKey connection；commit 后异步 resume |
 
 `assistant_delta` 和 `outbound_message` 是 contract-defined，但当前 WebSocket
-transport 不在 `ready.capabilities` 广告。`human_response` 也保留到后续
-resume-over-WS slice。
+transport 不在 `ready.capabilities` 广告。`human_response` 已广告；它不接受
+客户端自报 sender/chat/entrypoint，只支持 untyped current sender，owner fail closed。
 
 ### 4.4 Feishu
 

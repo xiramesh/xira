@@ -557,11 +557,13 @@ WebSocket 是 Channel Contract 的第一个实时 transport binding。当前实�
 - `runtime_event` -> `event` frame
 - `assistant_final` -> `response` frame
 - `interrupt` -> `interrupt` frame
+- `human_response` -> persisted request authority + current live ChatKey connection -> async exact resume
 - `error` -> `error` frame
 
 WebSocket 支持把无 `recipient` 的 proactive/resume final 投递到当前 ChatKey live connection，
 但没有平台用户 DM/typed-recipient 语义。任何带 `recipient` 的 envelope 必须拒绝，不能发送给
-触发 turn 的连接。`assistant_delta` 和 resume-over-WS `human_response` 仍是保留能力。
+触发 turn 的连接。`human_response` 已支持 untyped current sender；sender/chat/entrypoint
+不接受客户端自报，owner/typed responder fail closed。`assistant_delta` 仍是保留能力。
 
 WebSocket 语义细节见 `docs/architecture/xira-websocket-channel-v0.zh.md`。
 
