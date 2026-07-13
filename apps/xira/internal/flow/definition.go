@@ -114,6 +114,13 @@ func ValidateDefinition(def *Definition) error {
 func validateExecutor(step *Step) error {
 	hasAgent := strings.TrimSpace(step.Executor.Agent) != ""
 	hasType := strings.TrimSpace(step.Executor.Type) != ""
+	responder := strings.TrimSpace(step.Executor.Responder)
+	if responder != "" && step.Executor.Type != "human_approval" {
+		return fmt.Errorf("executor responder is only valid for human_approval")
+	}
+	if responder != "" && responder != "current_sender" && responder != "owner" {
+		return fmt.Errorf("human_approval responder must be current_sender or owner")
+	}
 	if hasAgent && hasType {
 		return fmt.Errorf("executor must specify either agent or type, not both")
 	}

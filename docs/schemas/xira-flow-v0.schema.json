@@ -478,6 +478,13 @@
           },
           "uniqueItems": true
         },
+        "responder": {
+          "type": "string",
+          "enum": [
+            "current_sender",
+            "owner"
+          ]
+        },
         "artifacts": {
           "type": "array",
           "items": {

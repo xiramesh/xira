@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/entrypoints"
 	"github.com/xiramesh/xira/internal/flow"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	fsession "github.com/xiramesh/xira/internal/session"
@@ -99,6 +101,54 @@ func TestFlowHumanApprovalUsesRuntimeHumanRequestStore(t *testing.T) {
 	}
 	if resolvedRequest.Resume.Status != humanrequest.ResumeCompleted || resolvedRequest.Resume.Attempts != 1 {
 		t.Fatalf("flow HumanRequest resume = %+v", resolvedRequest.Resume)
+	}
+}
+
+func TestFlowOwnerTextResponseKeepsPersistedOriginContext(t *testing.T) {
+	rt := newTestService(t, Config{StateDir: filepath.Join(t.TempDir(), "state")})
+	const entrypointID = "ilink-owner"
+	rt.entrypoints = entrypoints.NewRegistry(agents.DefaultAgentID, []entrypoints.Definition{{ID: entrypointID, Channel: "ilink", Account: "acct-1"}})
+	rt.ownerBindings.Set(ownerBinding{EntrypointID: entrypointID, OwnerSenderID: "owner-1", OwnerSenderIDType: "ilink_user_id"})
+	outbound := &fakeHumanRequestOutbound{receiptID: "flow-owner-request"}
+	rt.SetOutboundEmitter(outbound)
+	definition := &flow.Definition{
+		SchemaVersion: flow.SchemaVersionDefinition, ID: "owner-approval-flow", Name: "Owner approval", Version: "0.1.0",
+		Entrypoints: []flow.Entrypoint{{ID: "ad_hoc", StartStep: "approve"}},
+		Steps: []flow.Step{{
+			ID: "approve", Objective: "owner approves",
+			Executor:       flow.Executor{Type: "human_approval", Responder: "owner", Question: "Owner approve?", Options: []string{"approve", "cancel"}},
+			OutputContract: flow.OutputContract{RequiredSlots: []flow.OutputSlot{{ID: "approval_signal"}}},
+		}},
+	}
+	rt.FlowKernel().Definitions = flowStaticDefinitions{defs: map[string]*flow.Definition{"owner-approval-flow": definition}}
+	origin := channel.InboundContext{Channel: "ilink", EntrypointID: entrypointID, Account: "acct-1", ChatID: "origin-group", ChatType: "group", SenderID: "coworker-1", SenderIDType: "ilink_user_id"}
+	run, err := rt.StartFlow(context.Background(), flow.StartRequest{FlowID: definition.ID, EntrypointID: "ad_hoc", Context: origin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err = rt.AdvanceFlow(context.Background(), run.ID)
+	if err != nil || run.Status != flow.RunWaitingHuman || len(run.PendingHumanRequests) != 1 {
+		t.Fatalf("owner flow wait = %+v, %v", run, err)
+	}
+	request, err := rt.GetHumanRequest(context.Background(), run.PendingHumanRequests[0])
+	if err != nil || request.Responder.Type != humanrequest.ResponderOwner || request.Delivery.Status != humanrequest.DeliverySent {
+		t.Fatalf("owner flow request = %+v, %v", request, err)
+	}
+	_, err = rt.ResolveHumanTextResponse(context.Background(), humanrequest.TextResponseEnvelope{
+		CorrelationToken: request.CorrelationToken, EntrypointID: entrypointID,
+		SenderID: "owner-1", SenderIDType: "ilink_user_id",
+		ChatKey:  ChatKey{Channel: "ilink", ChatID: "owner-1", SenderID: "owner-1"}.String(),
+		ChatType: "direct", Answer: "approve", IdempotencyKey: "flow-owner-answer-1",
+	})
+	if err != nil {
+		t.Fatalf("owner flow response: %v", err)
+	}
+	resumed, err := rt.GetFlowRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Status != flow.RunCompleted || resumed.Context == nil || resumed.Context.ChatID != "origin-group" || resumed.Context.SenderID != "coworker-1" {
+		t.Fatalf("owner DM replaced flow origin context: %+v", resumed)
 	}
 }
 

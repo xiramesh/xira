@@ -205,6 +205,9 @@ func TestBuildMetadataKeepsContextTokenAndGroupScope(t *testing.T) {
 	if metadata["space_type"] != "group" {
 		t.Fatalf("space_type = %q", metadata["space_type"])
 	}
+	if metadata["sender_id_type"] != "ilink_user_id" {
+		t.Fatalf("sender_id_type = %q", metadata["sender_id_type"])
+	}
 }
 
 func TestSyncBufPersistence(t *testing.T) {
@@ -376,7 +379,7 @@ func TestRunnerSetOwnerResolver(t *testing.T) {
 	}
 }
 
-// TestIlinkRunnerIDChannelSetters covers ID()/Channel()/SetHITLResolver on
+// TestIlinkRunnerIDChannelSetters covers ID()/Channel()/SetTextHITLResolver on
 // a constructed runner (previously 0%).
 func TestIlinkRunnerIDChannelSetters(t *testing.T) {
 	runner, err := NewRunner(entrypoints.Definition{
@@ -392,9 +395,9 @@ func TestIlinkRunnerIDChannelSetters(t *testing.T) {
 	if runner.Channel() != "ilink" {
 		t.Errorf("Channel() = %q, want ilink", runner.Channel())
 	}
-	runner.SetHITLResolver(nil)
-	if runner.hitlResolver != nil {
-		t.Error("SetHITLResolver(nil) should leave field nil")
+	runner.SetTextHITLResolver(nil)
+	if runner.textResolver != nil {
+		t.Error("SetTextHITLResolver(nil) should leave field nil")
 	}
 }
 

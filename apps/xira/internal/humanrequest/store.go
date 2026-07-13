@@ -271,6 +271,45 @@ func (s *Store) Get(ctx context.Context, workspaceKey, requestID string) (*Human
 	return s.loadRequest(workspaceKey, requestID)
 }
 
+// FindByCorrelation returns the unique request carrying one full opaque
+// correlation token across pending and resolved states. Resolved records must
+// remain addressable so exact idempotent retries can reach sameResponseRetry.
+// coverage: contract (100% required)
+func (s *Store) FindByCorrelation(ctx context.Context, workspaceKey, correlation string) (*HumanRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateWorkspaceKey(workspaceKey); err != nil {
+		return nil, err
+	}
+	correlation = strings.TrimSpace(correlation)
+	if correlation == "" {
+		return nil, fmt.Errorf("%w: correlation token is required", ErrValidation)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	requests, err := s.listLocked(ListQuery{WorkspaceKey: workspaceKey})
+	if err != nil {
+		return nil, err
+	}
+	var match *HumanRequest
+	for i := range requests {
+		candidate := strings.TrimSpace(requests[i].CorrelationToken)
+		if candidate == "" || subtle.ConstantTimeCompare([]byte(candidate), []byte(correlation)) != 1 {
+			continue
+		}
+		if match != nil {
+			return nil, fmt.Errorf("%w: multiple human requests share one correlation token", ErrConflict)
+		}
+		copy := requests[i]
+		match = &copy
+	}
+	if match == nil {
+		return nil, fmt.Errorf("%w: human request correlation not found", ErrNotFound)
+	}
+	return match, nil
+}
+
 func (s *Store) List(ctx context.Context, query ListQuery) ([]HumanRequest, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -278,7 +317,7 @@ func (s *Store) List(ctx context.Context, query ListQuery) ([]HumanRequest, erro
 	if err := validateWorkspaceKey(query.WorkspaceKey); err != nil {
 		return nil, err
 	}
-	if query.Status != "" && query.Status != StatusPending && query.Status != StatusResolved {
+	if query.Status != "" && query.Status != StatusPending && query.Status != StatusResolved && query.Status != StatusFailed {
 		return nil, fmt.Errorf("%w: invalid status %q", ErrValidation, query.Status)
 	}
 	s.mu.Lock()

@@ -184,6 +184,7 @@ type Executor struct {
 	Prompt            string   `yaml:"prompt,omitempty" json:"prompt,omitempty"`
 	Question          string   `yaml:"question,omitempty" json:"question,omitempty"`
 	Options           []string `yaml:"options,omitempty" json:"options,omitempty"`
+	Responder         string   `yaml:"responder,omitempty" json:"responder,omitempty"`
 	Artifacts         []string `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`
 	Signal            string   `yaml:"signal,omitempty" json:"signal,omitempty"`
 	TimeoutSeconds    int      `yaml:"timeout_seconds,omitempty" json:"timeout_seconds,omitempty"`

@@ -12,6 +12,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelrunner/ilink"
 	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/channelrunner/websocket"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/runtime"
 )
 
@@ -114,9 +115,8 @@ func (m *Manager) WSRunner() *websocket.Runner {
 	return nil
 }
 
-// SetHITLResolver injects the HITL resolve capability into all channel runners
-// (feishu, ilink, websocket). Called by main.go after NewManager (#92 — HITL IM
-// direct answer). All three channels use the same shared TryResolveHITL logic.
+// SetHITLResolver retains legacy implicit same-chat resolution for channels
+// that have not yet migrated to explicit or native interaction protocols.
 func (m *Manager) SetHITLResolver(resolver runtime.HITLResolver) {
 	if m == nil {
 		return
@@ -125,10 +125,21 @@ func (m *Manager) SetHITLResolver(resolver runtime.HITLResolver) {
 		switch r := runner.(type) {
 		case *feishu.Runner:
 			r.SetHITLResolver(resolver)
-		case *ilink.Runner:
-			r.SetHITLResolver(resolver)
 		case *websocket.Runner:
 			r.SetHITLResolver(resolver)
+		}
+	}
+}
+
+// SetTextHITLResolver injects the explicit full-correlation text protocol into
+// text-only runners. iLink is the first implementation (#164).
+func (m *Manager) SetTextHITLResolver(resolver runtime.TextHITLResolver) {
+	if m == nil {
+		return
+	}
+	for _, runner := range m.runners {
+		if r, ok := runner.(*ilink.Runner); ok {
+			r.SetTextHITLResolver(resolver)
 		}
 	}
 }
@@ -268,6 +279,57 @@ func (m *Manager) Emit(ctx context.Context, env channel.OutboundEnvelope) error 
 	return fmt.Errorf("no runner registered for channel %q", target)
 }
 
+// ValidateHumanRequestDelivery performs side-effect-free, exact-entrypoint
+// routing before runtime creates an owner-targeted durable request.
+func (m *Manager) ValidateHumanRequestDelivery(target runtime.HumanRequestDeliveryTarget) error {
+	deliverer, err := m.humanRequestDeliverer(target)
+	if err != nil {
+		return err
+	}
+	return deliverer.ValidateHumanRequestDelivery(target)
+}
+
+// DeliverHumanRequest routes one durable request through the same exact runner
+// validated above and returns its platform receipt.
+func (m *Manager) DeliverHumanRequest(ctx context.Context, req humanrequest.HumanRequest, target runtime.HumanRequestDeliveryTarget) (runtime.HumanRequestDeliveryReceipt, error) {
+	deliverer, err := m.humanRequestDeliverer(target)
+	if err != nil {
+		return runtime.HumanRequestDeliveryReceipt{}, err
+	}
+	if err := deliverer.ValidateHumanRequestDelivery(target); err != nil {
+		return runtime.HumanRequestDeliveryReceipt{}, err
+	}
+	return deliverer.DeliverHumanRequest(ctx, req, target)
+}
+
+// humanRequestDeliverer requires an exact entrypoint so a fleet capability or
+// ambiguous channel fallback can never route a private request incorrectly.
+// coverage: contract (100% required)
+func (m *Manager) humanRequestDeliverer(target runtime.HumanRequestDeliveryTarget) (runtime.HumanRequestDeliverer, error) {
+	if m == nil {
+		return nil, fmt.Errorf("channel manager is not configured")
+	}
+	entrypointID := strings.TrimSpace(target.Route.EntrypointID)
+	if entrypointID == "" {
+		return nil, fmt.Errorf("HumanRequest delivery target requires entrypoint_id")
+	}
+	for _, runner := range m.runners {
+		if runner.ID() != entrypointID {
+			continue
+		}
+		channelName := strings.TrimSpace(target.Route.Channel)
+		if channelName != "" && !strings.EqualFold(channelName, runner.Channel()) {
+			return nil, fmt.Errorf("HumanRequest entrypoint %q uses channel %q, target requested %q", entrypointID, runner.Channel(), channelName)
+		}
+		deliverer, ok := runner.(runtime.HumanRequestDeliverer)
+		if !ok {
+			return nil, fmt.Errorf("%w: runner %q (channel %q) does not implement HumanRequest delivery", runtime.ErrHumanRequestDeliveryUnsupported, runner.ID(), runner.Channel())
+		}
+		return deliverer, nil
+	}
+	return nil, fmt.Errorf("no runner registered for HumanRequest entrypoint %q", entrypointID)
+}
+
 // emitWithRunner enforces recipient capability on the selected route. The
 // Manager fleet union is discovery-only and must never authorize a different
 // runner to receive a typed private message.
@@ -312,6 +374,7 @@ func (m *Manager) Capabilities() channel.CapabilitySet {
 
 // Compile-time: *Manager implements channel.OutboundEmitter.
 var _ channel.OutboundEmitter = (*Manager)(nil)
+var _ runtime.HumanRequestDeliverer = (*Manager)(nil)
 
 func stopRunners(ctx context.Context, runners []Runner) error {
 	var firstErr error

@@ -88,6 +88,15 @@ func renderEventText(evt runtime.Event) (string, string, bool) {
 		return "任务没有成功完成，我会改用当前上下文继续处理。", "agent.delegate.failed", true
 
 	case runtime.HumanRequested:
+		if e.ResponderType == "owner" || e.DeliveryStatus == "sent" {
+			return "", "", false
+		}
+		// The run-level signal is the single fallback presentation point. The
+		// request-created signal remains useful to state/audit consumers but
+		// must not render a second copy into IM.
+		if e.RequestID != "" && e.SignalKind == "human.request.created" {
+			return "", "", false
+		}
 		question := strings.TrimSpace(e.Question)
 		if question == "" {
 			return "这里需要你确认后才能继续。", "run.waiting_human", true

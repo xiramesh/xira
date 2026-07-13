@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -123,6 +124,57 @@ func (s *Service) ResolveHumanResponse(ctx context.Context, input humanrequest.H
 		return nil, err
 	}
 	return s.resumeResolvedHumanRequest(ctx, resolved)
+}
+
+// ResolveHumanTextResponse maps one opaque correlation reference to the
+// existing exact response path. It never chooses a pending request by order.
+func (s *Service) ResolveHumanTextResponse(ctx context.Context, input humanrequest.TextResponseEnvelope) (*humanrequest.HumanRequest, error) {
+	if s == nil || s.humanRequests == nil {
+		return nil, fmt.Errorf("human request store is not available")
+	}
+	req, err := s.humanRequests.FindByCorrelation(ctx, s.WorkspaceKey(), input.CorrelationToken)
+	if err != nil {
+		return nil, err
+	}
+	if !textResponseChatAuthorized(req, input.ChatKey, input.ChatType) {
+		return nil, fmt.Errorf("%w: human response chat is not authorized for request", humanrequest.ErrConflict)
+	}
+	answer, err := humanrequest.NormalizeTextAnswer(*req, input.Answer)
+	if err != nil {
+		return nil, err
+	}
+	return s.ResolveHumanResponse(ctx, humanrequest.HumanResponseEnvelope{
+		RequestID:         req.ID,
+		CorrelationToken:  req.CorrelationToken,
+		EntrypointID:      input.EntrypointID,
+		SenderID:          input.SenderID,
+		SenderIDType:      input.SenderIDType,
+		DeliveryMessageID: req.Delivery.MessageID,
+		Kind:              humanrequest.ResponseAnswer,
+		Message:           answer,
+		IdempotencyKey:    input.IdempotencyKey,
+		ResolvedAt:        input.ResolvedAt,
+	})
+}
+
+// textResponseChatAuthorized seals the text-protocol chat rule: current sender
+// must answer in the originating chat; owner may answer in a private DM.
+// coverage: contract (100% required)
+func textResponseChatAuthorized(req *humanrequest.HumanRequest, inboundChatKey, inboundChatType string) bool {
+	if req == nil {
+		return false
+	}
+	switch req.Responder.Type {
+	case humanrequest.ResponderCurrentSender:
+		persisted := strings.TrimSpace(req.ChatKey)
+		return persisted != "" && persisted == strings.TrimSpace(inboundChatKey)
+	case humanrequest.ResponderOwner:
+		key, ok := ParseChatKey(inboundChatKey)
+		ownerID := strings.TrimSpace(req.Responder.SenderID)
+		return ok && strings.EqualFold(strings.TrimSpace(inboundChatType), "direct") && ownerID != "" && key.ChatID == ownerID && key.SenderID == ownerID
+	default:
+		return false
+	}
 }
 
 // resolveExactOwnerResponse holds the mutable owner-binding read lock through
@@ -260,7 +312,11 @@ func (s *Service) createAgentHumanRequest(ctx context.Context, callID string, ar
 	}
 	question := stringArg(args, "question")
 	options := humanOptionsFromAny(args["options"])
-	req, err := s.CreateHumanRequest(ctx, humanrequest.CreateRequest{
+	responder, deliveryTarget, deliveryRequired, err := s.prepareHumanRequestInteraction(ctx, exec.Request.Context, stringArg(args, "responder"))
+	if err != nil {
+		return nil, err
+	}
+	req, err := s.createAndDeliverHumanRequest(ctx, humanrequest.CreateRequest{
 		WorkspaceID:  s.workspace,
 		WorkspaceKey: s.WorkspaceKey(),
 		RunID:        exec.Base.RunID,
@@ -273,14 +329,107 @@ func (s *Service) createAgentHumanRequest(ctx context.Context, callID string, ar
 		Options:      options,
 		DedupeKey:    "agent_request:" + exec.Base.RunID + ":" + callID + ":" + question,
 		ChatKey:      chatKeyStringFromContext(ctx),
-		Responder:    currentSenderResponder(exec.Request.Context),
-	})
+		Responder:    responder,
+	}, deliveryTarget, deliveryRequired)
 	if err != nil {
 		return nil, err
 	}
 	collector.AddHumanRequest(*req, "agent_request")
 	cancelRuntimeOnInterrupt(ctx)
 	return req, nil
+}
+
+// prepareHumanRequestInteraction binds the model-selected responder type to
+// authoritative runtime identity and validates the exact delivery route before
+// any durable request is created.
+// coverage: contract (100% required)
+func (s *Service) prepareHumanRequestInteraction(ctx context.Context, inbound channel.InboundContext, requested string) (humanrequest.ResponderPolicy, HumanRequestDeliveryTarget, bool, error) {
+	inbound = channel.NormalizeInboundContext(inbound)
+	requested = strings.ToLower(strings.TrimSpace(requested))
+	if requested == "" {
+		requested = string(humanrequest.ResponderCurrentSender)
+	}
+	deliverer, hasDeliverer := s.outbound.(HumanRequestDeliverer)
+	switch humanrequest.ResponderType(requested) {
+	case humanrequest.ResponderCurrentSender:
+		policy := currentSenderResponder(inbound)
+		target := HumanRequestDeliveryTarget{Route: inbound}
+		if !hasDeliverer {
+			return policy, target, false, nil
+		}
+		if err := deliverer.ValidateHumanRequestDelivery(target); err != nil {
+			if errors.Is(err, ErrHumanRequestDeliveryUnsupported) {
+				return policy, target, false, nil
+			}
+			return humanrequest.ResponderPolicy{}, HumanRequestDeliveryTarget{}, false, fmt.Errorf("validate current-sender human request delivery: %w", err)
+		}
+		return policy, target, true, nil
+	case humanrequest.ResponderOwner:
+		if !hasDeliverer {
+			return humanrequest.ResponderPolicy{}, HumanRequestDeliveryTarget{}, false, fmt.Errorf("owner human request delivery is not configured")
+		}
+		owner, err := s.ResolveOwnerTarget(ctx, inbound.EntrypointID)
+		if err != nil {
+			return humanrequest.ResponderPolicy{}, HumanRequestDeliveryTarget{}, false, fmt.Errorf("resolve owner human request delivery: %w", err)
+		}
+		target := HumanRequestDeliveryTarget{Route: owner.Route, Recipient: &owner.Recipient}
+		if err := deliverer.ValidateHumanRequestDelivery(target); err != nil {
+			return humanrequest.ResponderPolicy{}, HumanRequestDeliveryTarget{}, false, fmt.Errorf("validate owner human request delivery: %w", err)
+		}
+		return humanrequest.ResponderPolicy{
+			Type:         humanrequest.ResponderOwner,
+			EntrypointID: strings.TrimSpace(owner.Route.EntrypointID),
+			SenderID:     strings.TrimSpace(owner.Recipient.ID),
+			SenderIDType: strings.ToLower(strings.TrimSpace(owner.Recipient.IDType)),
+		}, target, true, nil
+	default:
+		return humanrequest.ResponderPolicy{}, HumanRequestDeliveryTarget{}, false, fmt.Errorf("%w: responder must be current_sender or owner", humanrequest.ErrValidation)
+	}
+}
+
+func (s *Service) createAndDeliverHumanRequest(ctx context.Context, input humanrequest.CreateRequest, target HumanRequestDeliveryTarget, deliveryRequired bool) (*humanrequest.HumanRequest, error) {
+	input.DeliveryRequired = deliveryRequired
+	req, err := s.CreateHumanRequest(ctx, input)
+	if err != nil || !deliveryRequired {
+		return req, err
+	}
+	deliverer, ok := s.outbound.(HumanRequestDeliverer)
+	if !ok {
+		return nil, fmt.Errorf("human request delivery became unavailable after validation")
+	}
+	receipt, deliverErr := deliverer.DeliverHumanRequest(ctx, *req, target)
+	attempt := humanrequest.DeliveryAttempt{AttemptedAt: time.Now()}
+	deliveryFailure := deliverErr
+	if deliverErr != nil {
+		attempt.Error = deliverErr.Error()
+	} else if strings.TrimSpace(receipt.MessageID) == "" {
+		deliveryFailure = errors.New("human request delivery returned an empty message id")
+		attempt.Error = deliveryFailure.Error()
+	} else {
+		attempt.MessageID = strings.TrimSpace(receipt.MessageID)
+	}
+	var updated *humanrequest.HumanRequest
+	var recordErr error
+	if deliveryFailure != nil {
+		updated, recordErr = s.humanRequests.FailDelivery(context.WithoutCancel(ctx), req.WorkspaceKey, req.ID, attempt)
+	} else {
+		updated, recordErr = s.humanRequests.RecordDelivery(context.WithoutCancel(ctx), req.WorkspaceKey, req.ID, attempt)
+	}
+	if recordErr != nil {
+		slog.Error("persist human request delivery receipt", "request_id", req.ID, "error", recordErr)
+		if deliveryFailure == nil {
+			// The human has the correlation reference. Preserve the paused
+			// request so their answer remains usable even though the receipt
+			// could not be durably attached.
+			return req, nil
+		}
+		return req, fmt.Errorf("persist human request delivery result: %w", recordErr)
+	}
+	if deliveryFailure != nil {
+		slog.Error("deliver human request", "request_id", req.ID, "error", attempt.Error)
+		return updated, fmt.Errorf("deliver human request: %w", deliveryFailure)
+	}
+	return updated, nil
 }
 
 // currentSenderResponder binds the generic responder policy to authoritative

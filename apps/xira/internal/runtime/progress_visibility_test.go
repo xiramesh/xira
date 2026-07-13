@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 )
 
@@ -66,6 +67,25 @@ func TestWaitingHumanSummaryFallsBackToReason(t *testing.T) {
 	got := waitingHumanSummary(&RunInterrupt{Reason: "awaiting approval"})
 	if got != "awaiting approval" {
 		t.Fatalf("summary = %q, want reason fallback", got)
+	}
+}
+
+func TestWaitingHumanEventPayloadDoesNotExposeOwnerQuestion(t *testing.T) {
+	request := humanrequest.HumanRequest{
+		ID: "hrq-owner", Question: "Confidential owner decision",
+		Responder: humanrequest.ResponderPolicy{Type: humanrequest.ResponderOwner},
+		Delivery:  humanrequest.DeliveryState{Status: humanrequest.DeliverySent},
+	}
+	payload := waitingHumanEventPayload(&RunInterrupt{Reason: "human input requested", HumanRequests: []humanrequest.HumanRequest{request}})
+	if payload["summary"] != "" || payload["question"] != nil {
+		t.Fatalf("owner question leaked into waiting payload: %+v", payload)
+	}
+	if payload["human_request_id"] != "hrq-owner" || payload["responder_type"] != humanrequest.ResponderOwner || payload["delivery_status"] != humanrequest.DeliverySent {
+		t.Fatalf("owner routing state missing from waiting payload: %+v", payload)
+	}
+	created := humanRequestEventPayload(request)
+	if created["question"] != nil {
+		t.Fatalf("owner question leaked into created payload: %+v", created)
 	}
 }
 

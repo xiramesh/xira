@@ -86,6 +86,10 @@ func EventFromRuntime(evt RuntimeEvent) (Event, bool) {
 			ParentAgentTurnIDVal: base.parent,
 			TimestampVal:         base.ts,
 			Question:             humanRequestedQuestion(evt),
+			RequestID:            stringField(evt, "human_request_id"),
+			ResponderType:        stringField(evt, "responder_type"),
+			DeliveryStatus:       stringField(evt, "delivery_status"),
+			SignalKind:           evt.Kind,
 		}, true
 
 	// --- progress: assistant status / final ---

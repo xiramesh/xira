@@ -45,6 +45,7 @@ func (e *AgentExecutor) doHumanApproval(ctx context.Context, run *Run, def *Defi
 		Kind:        "approval",
 		Question:    question,
 		Options:     options,
+		Responder:   strings.TrimSpace(step.Executor.Responder),
 		DedupeKey:   toolCallID,
 		Metadata:    metadata,
 		Context:     runContext(run),

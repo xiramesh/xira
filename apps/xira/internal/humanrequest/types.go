@@ -14,6 +14,7 @@ type RequestStatus string
 const (
 	StatusPending  RequestStatus = "pending"
 	StatusResolved RequestStatus = "resolved"
+	StatusFailed   RequestStatus = "failed"
 )
 
 type ResponderType string
@@ -150,6 +151,21 @@ type HumanResponseEnvelope struct {
 	Message           string
 	IdempotencyKey    string
 	ResolvedAt        time.Time
+}
+
+// TextResponseEnvelope is the channel-neutral authority attached to one
+// parsed explicit-text response. CorrelationToken comes from the opaque
+// protocol reference; all identity and chat fields come from the runner.
+type TextResponseEnvelope struct {
+	CorrelationToken string
+	EntrypointID     string
+	SenderID         string
+	SenderIDType     string
+	ChatKey          string
+	ChatType         string
+	Answer           string
+	IdempotencyKey   string
+	ResolvedAt       time.Time
 }
 
 type AuditRecord struct {

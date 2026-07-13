@@ -631,11 +631,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		resp.Interrupt = interrupt
 		resp.HumanRequests = append([]humanrequest.HumanRequest(nil), interrupt.HumanRequests...)
 		resp.VerificationResult = VerificationResult{Status: StatusWaitingHuman, Checks: []string{"runtime_interrupt"}}
-		recordEvent("run.waiting_human", "runtime", "agent run waiting for human input", map[string]any{
-			"human_requests": len(interrupt.HumanRequests),
-			"blocked_by":     interrupt.Reason,
-			"summary":        waitingHumanSummary(interrupt),
-		})
+		recordEvent("run.waiting_human", "runtime", "agent run waiting for human input", waitingHumanEventPayload(interrupt))
 	} else {
 		resp.VerificationResult = s.verifyRunOutcome(final, toolCalls, profile.Verification.DefaultChecks)
 	}
@@ -1067,13 +1063,7 @@ func (s *Service) generateNativeDeepSeek(
 				recordAudit("human.request", call.ID, false, err.Error(), args)
 				return "", toolRecords, err
 			}
-			recordEvent("human.request.created", "runtime", "human request created", map[string]any{
-				"human_request_id": req.ID,
-				"kind":             req.Kind,
-				"source":           req.Source,
-				"tool_call_id":     req.ToolCallID,
-				"question":         req.Question, // #109
-			})
+			recordEvent("human.request.created", "runtime", "human request created", humanRequestEventPayload(*req))
 			recordAudit("human.request", req.ID, true, "agent requested human input", map[string]any{
 				"kind":         req.Kind,
 				"tool_call_id": req.ToolCallID,

@@ -39,6 +39,61 @@ func (s *Store) RecordDelivery(ctx context.Context, workspaceKey, requestID stri
 	return req, nil
 }
 
+// FailDelivery atomically records a terminal transport failure. Production
+// create paths use this instead of leaving an undeliverable request pending.
+func (s *Store) FailDelivery(ctx context.Context, workspaceKey, requestID string, attempt DeliveryAttempt) (*HumanRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateWorkspaceKey(workspaceKey); err != nil {
+		return nil, err
+	}
+	if err := validatePathID(requestID, "request id"); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	req, err := s.loadRequest(workspaceKey, requestID)
+	if err != nil {
+		return nil, err
+	}
+	now := attempt.AttemptedAt
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if err := applyTerminalDeliveryFailure(req, attempt, now); err != nil {
+		return nil, err
+	}
+	if err := s.writeRequest(req); err != nil {
+		return nil, err
+	}
+	return req, nil
+}
+
+// applyTerminalDeliveryFailure seals delivery failure into a terminal request
+// state so it cannot be resolved or silently reconciled later.
+// coverage: contract (100% required)
+func applyTerminalDeliveryFailure(req *HumanRequest, attempt DeliveryAttempt, now time.Time) error {
+	if req == nil {
+		return fmt.Errorf("%w: human request is required", ErrValidation)
+	}
+	if req.Status != StatusPending {
+		return fmt.Errorf("%w: human request %s is already %s", ErrConflict, req.ID, req.Status)
+	}
+	if strings.TrimSpace(attempt.Error) == "" || strings.TrimSpace(attempt.MessageID) != "" {
+		return fmt.Errorf("%w: terminal delivery failure requires only an error", ErrValidation)
+	}
+	if err := applyDeliveryAttempt(req, attempt, now); err != nil {
+		return err
+	}
+	req.Status = StatusFailed
+	req.Resume = ResumeState{}
+	req.Audit = append(req.Audit, AuditRecord{
+		Time: now, Action: "human_request.failed", FromStatus: StatusPending, ToStatus: StatusFailed, Message: strings.TrimSpace(attempt.Error),
+	})
+	return nil
+}
+
 // applyDeliveryAttempt is the sealed delivery transition table.
 // coverage: contract (100% required)
 func applyDeliveryAttempt(req *HumanRequest, attempt DeliveryAttempt, now time.Time) error {
@@ -49,6 +104,9 @@ func applyDeliveryAttempt(req *HumanRequest, attempt DeliveryAttempt, now time.T
 	}
 	if req == nil {
 		return fmt.Errorf("%w: human request is required", ErrValidation)
+	}
+	if req.Status != StatusPending {
+		return fmt.Errorf("%w: human request %s is already %s", ErrConflict, req.ID, req.Status)
 	}
 	if req.Delivery.Status != DeliveryPending && req.Delivery.Status != DeliveryFailed {
 		return fmt.Errorf("%w: delivery for human request %s is %s", ErrConflict, req.ID, req.Delivery.Status)

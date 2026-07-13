@@ -22,6 +22,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
@@ -72,9 +73,9 @@ type pairingState struct {
 type Runner struct {
 	definition entrypoints.Definition
 	runtime    *frt.Service
-	// hitlResolver, when non-nil, lets ilink resolve pending HITL directly
-	// from IM text replies (#92). nil = HITL direct-answer disabled.
-	hitlResolver frt.HITLResolver
+	// textResolver accepts only explicit, full-correlation /answer commands.
+	// Ordinary text never resolves an arbitrary most-recent request.
+	textResolver frt.TextHITLResolver
 	// ownerResolver, when non-nil, lets the owner bypass the sender allowlist
 	// (#121). nil = owner concept not configured (allowlist-only auth).
 	ownerResolver   frt.OwnerResolver
@@ -95,10 +96,10 @@ type Runner struct {
 	ingest *ingest.Ingest
 }
 
-// SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
-func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
+// SetTextHITLResolver injects explicit text-protocol resolution.
+func (r *Runner) SetTextHITLResolver(resolver frt.TextHITLResolver) {
 	if r != nil {
-		r.hitlResolver = resolver
+		r.textResolver = resolver
 	}
 }
 
@@ -671,14 +672,13 @@ func (r *Runner) handleMessage(account *accountPoller, msg openilink.WeixinMessa
 	)
 	inbound := channel.NewInboundContextWithEntrypoint("ilink", r.definition.ID, senderID, metadata)
 	chatKey := frt.ChatKeyFromInbound(inbound)
+	if r.tryResolveTextHumanResponse(ctx, account, msg, inbound, chatKey, content, dedupeKey) {
+		return
+	}
 	// Per-chat-key turn handling is delegated to ChatKeySession (RFC
 	// xira-chatkey-session-engine-rfc-v0 Step 1). The session owns the
 	// steering retry loop, ChatContext lifecycle, SpawnCollector cleanup, and
 	// child-cancel registry; ilink injects only the channel-specific delivery
-	// HITL direct-answer (#92): shared preflight check (same logic as feishu).
-	if progress.TryResolveHITL(ctx, r.hitlResolver, chatKey, content, senderID) {
-		return
-	}
 	// IMEventRenderer receives raw RuntimeEvents and renders them to localized
 	// text + quota + dedup (the behavior the old ChatContext baked in). Per-turn
 	// instance. See feishu/runner.go for the same wiring.
@@ -753,6 +753,7 @@ func (r *Runner) buildMetadata(account *accountPoller, msg openilink.WeixinMessa
 		"seq":            strconv.FormatInt(msg.Seq, 10),
 		"channel_app_id": account.record.AccountID,
 		"bot_id":         account.record.AccountID,
+		"sender_id_type": "ilink_user_id",
 	}
 	if account.record.UserID != "" {
 		metadata["account_user_id"] = account.record.UserID
@@ -768,14 +769,121 @@ func (r *Runner) buildMetadata(account *accountPoller, msg openilink.WeixinMessa
 	return compactMetadata(metadata)
 }
 
-// Capabilities advertises what this channel can do. ilink supports proactive
-// outbound (resume delivery). Interactive human response (in-IM approve/deny)
-// is not yet available — HITL is surfaced as text via progress events.
+// tryResolveTextHumanResponse consumes every /answer command, valid or not.
+// This prevents protocol traffic from ever becoming an Agent Turn.
+// coverage: contract (100% required)
+func (r *Runner) tryResolveTextHumanResponse(ctx context.Context, account *accountPoller, msg openilink.WeixinMessage, inbound channel.InboundContext, chatKey frt.ChatKey, content, dedupeKey string) bool {
+	command, recognized, parseErr := humanrequest.ParseTextResponse(content)
+	if !recognized {
+		return false
+	}
+	responseText := "已收到回答。"
+	responseCommitted := false
+	if parseErr != nil {
+		responseText = "回答格式无效，请使用请求中提供的完整 /answer 命令。"
+	} else if r.textResolver == nil {
+		responseText = "无法接受该回答。请确认请求编号、回答选项和回复身份。"
+	} else {
+		_, err := r.textResolver.ResolveHumanTextResponse(ctx, humanrequest.TextResponseEnvelope{
+			CorrelationToken: command.CorrelationToken,
+			EntrypointID:     strings.TrimSpace(inbound.EntrypointID),
+			SenderID:         strings.TrimSpace(inbound.SenderID),
+			SenderIDType:     strings.ToLower(strings.TrimSpace(inbound.SenderIDType)),
+			ChatKey:          chatKey.String(),
+			ChatType:         strings.ToLower(strings.TrimSpace(inbound.ChatType)),
+			Answer:           command.Answer,
+			IdempotencyKey:   "ilink:" + strings.TrimSpace(inbound.EntrypointID) + ":" + strings.TrimSpace(inbound.MessageID),
+		})
+		if err != nil {
+			slog.Warn("ilink human response rejected", "entrypoint_id", inbound.EntrypointID, "message_id", inbound.MessageID, "error", err)
+			responseText = "无法接受该回答。请确认请求编号、回答选项和回复身份。"
+		} else {
+			responseCommitted = true
+		}
+	}
+	if responseCommitted {
+		account.messages.Complete(dedupeKey, time.Now())
+	}
+	if err := r.send(ctx, account, msg, responseText); err != nil {
+		if !responseCommitted {
+			account.messages.Forget(dedupeKey)
+		}
+		slog.Error("ilink human response acknowledgement failed", "entrypoint_id", inbound.EntrypointID, "message_id", inbound.MessageID, "error", err)
+	} else if !responseCommitted {
+		account.messages.Complete(dedupeKey, time.Now())
+	}
+	return true
+}
+
+// Capabilities advertises what this channel can do. iLink presents interactive
+// requests through the explicit full-correlation text protocol.
 func (r *Runner) Capabilities() channel.CapabilitySet {
 	return channel.CapabilitySet{
+		channel.CapabilityInteractiveHumanResponse,
 		channel.CapabilityProactiveOutbound,
 		channel.CapabilityTypedRecipientOutbound,
 	}
+}
+
+// ValidateHumanRequestDelivery checks the concrete iLink account and typed
+// recipient without sending. Current-sender delivery uses Route.SenderID;
+// owner delivery uses a typed Recipient.
+func (r *Runner) ValidateHumanRequestDelivery(target frt.HumanRequestDeliveryTarget) error {
+	_, _, _, err := r.humanRequestDeliveryRoute(target)
+	return err
+}
+
+// DeliverHumanRequest renders the shared text protocol and returns the real
+// iLink SDK message id for durable DeliveryState.
+func (r *Runner) DeliverHumanRequest(ctx context.Context, req humanrequest.HumanRequest, target frt.HumanRequestDeliveryTarget) (frt.HumanRequestDeliveryReceipt, error) {
+	account, recipient, contextToken, err := r.humanRequestDeliveryRoute(target)
+	if err != nil {
+		return frt.HumanRequestDeliveryReceipt{}, err
+	}
+	content, err := humanrequest.RenderTextRequest(req)
+	if err != nil {
+		return frt.HumanRequestDeliveryReceipt{}, err
+	}
+	messageID := ""
+	if target.Recipient == nil && contextToken != "" {
+		messageID, err = account.client.SendText(ctx, recipient, content, contextToken)
+	} else {
+		messageID, err = account.client.Push(ctx, recipient, content)
+	}
+	if err != nil {
+		return frt.HumanRequestDeliveryReceipt{}, err
+	}
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return frt.HumanRequestDeliveryReceipt{}, fmt.Errorf("ilink HumanRequest delivery returned no message id")
+	}
+	return frt.HumanRequestDeliveryReceipt{MessageID: messageID}, nil
+}
+
+// coverage: contract (100% required)
+func (r *Runner) humanRequestDeliveryRoute(target frt.HumanRequestDeliveryTarget) (*accountPoller, string, string, error) {
+	accountID := strings.TrimSpace(target.Route.Account)
+	if accountID == "" {
+		return nil, "", "", fmt.Errorf("ilink HumanRequest target has no account")
+	}
+	r.mu.Lock()
+	account, ok := r.accounts[accountID]
+	r.mu.Unlock()
+	if !ok || account == nil {
+		return nil, "", "", fmt.Errorf("ilink HumanRequest account %q is not registered", accountID)
+	}
+	recipient := strings.TrimSpace(target.Route.SenderID)
+	if target.Recipient != nil {
+		typed := target.Recipient.Normalize()
+		if typed.IDType != "ilink_user_id" && typed.IDType != "user_id" {
+			return nil, "", "", fmt.Errorf("ilink HumanRequest unsupported recipient id_type %q", typed.IDType)
+		}
+		recipient = typed.ID
+	}
+	if recipient == "" {
+		return nil, "", "", fmt.Errorf("ilink HumanRequest target has no recipient")
+	}
+	return account, recipient, strings.TrimSpace(target.Route.Raw["context_token"]), nil
 }
 
 // Emit delivers an OutboundEnvelope to the originating ilink user. Unified
@@ -839,6 +947,7 @@ func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
 
 // Compile-time: *Runner implements channel.OutboundEmitter.
 var _ channel.OutboundEmitter = (*Runner)(nil)
+var _ frt.HumanRequestDeliverer = (*Runner)(nil)
 
 func (r *Runner) send(ctx context.Context, account *accountPoller, msg openilink.WeixinMessage, content string) error {
 	to := strings.TrimSpace(msg.FromUserID)

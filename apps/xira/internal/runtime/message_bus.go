@@ -138,6 +138,10 @@ type HumanRequested struct {
 	ParentAgentTurnIDVal AgentTurnID
 	TimestampVal         time.Time
 	Question             string
+	RequestID            string
+	ResponderType        string
+	DeliveryStatus       string
+	SignalKind           string
 }
 
 func (HumanRequested) isEvent()                         {}
