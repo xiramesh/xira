@@ -217,7 +217,7 @@ entrypoints: entrypoints.yaml
 	// Nil receiver guard: must not panic on nil Manager.
 	var nilMgr *Manager
 	nilMgr.SetOwnerResolver(nil)
-	nilMgr.SetHITLResolver(nil)
+	nilMgr.SetStructuredHITLResolver(nil)
 	nilMgr.SetTextHITLResolver(nil)
 	nilMgr.SetAsyncExactHITLResolver(nil)
 	// WSRunner must find the websocket runner.
@@ -405,9 +405,9 @@ entrypoints: entrypoints.yaml
 	}
 }
 
-// TestManagerSetHITLResolverForwarding covers SetHITLResolver forwarding to
+// TestManagerSetStructuredHITLResolverForwarding covers resolver forwarding to
 // all runners (previously 28.6% — only the nil guard was covered).
-func TestManagerSetHITLResolverForwarding(t *testing.T) {
+func TestManagerSetStructuredHITLResolverForwarding(t *testing.T) {
 	instance := t.TempDir()
 	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
 default_agent: xira-assistant
@@ -426,7 +426,7 @@ entrypoints: entrypoints.yaml
 		t.Fatalf("NewManager: %v", err)
 	}
 	// Forward nil resolver — must not panic on websocket runner.
-	manager.SetHITLResolver(nil)
+	manager.SetStructuredHITLResolver(nil)
 	// WSRunner nil-receiver guard.
 	var nilMgr *Manager
 	if nilMgr.WSRunner() != nil {

@@ -118,7 +118,7 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 			}
 			// #151: Inject all shared capabilities BEFORE Start (消除启动窗口）。
 			rt.SetOutboundEmitter(channelRunners)
-			channelRunners.SetHITLResolver(rt)
+			channelRunners.SetStructuredHITLResolver(rt)
 			channelRunners.SetTextHITLResolver(rt)
 			channelRunners.SetAsyncExactHITLResolver(rt)
 			channelRunners.SetOwnerResolver(rt)

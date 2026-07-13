@@ -212,9 +212,8 @@ func TestEmitRejectsMalformedEnvelope(t *testing.T) {
 }
 
 // TestCapabilitiesAdvertisesProactiveOutbound verifies websocket advertises
-// ONLY proactive outbound — not interactive human response, whose inbound frame
-// (human_response) is still rejected (see HandleConnection). Advertising an
-// unimplemented capability would be a lie that callers (resume) might act on.
+// proactive outbound and structured current-sender human responses, but never
+// typed-recipient delivery (WebSocket has no trusted platform identity).
 func TestCapabilitiesAdvertisesProactiveOutbound(t *testing.T) {
 	runner := newTestRunner(t, newFakeRuntime())
 	caps := runner.Capabilities()
@@ -231,8 +230,8 @@ func TestCapabilitiesAdvertisesProactiveOutbound(t *testing.T) {
 	if has[channel.CapabilityTypedRecipientOutbound] {
 		t.Error("websocket must not advertise typed recipient outbound")
 	}
-	if has[channel.CapabilityInteractiveHumanResponse] {
-		t.Error("should NOT advertise CapabilityInteractiveHumanResponse (human_response frame not yet wired)")
+	if !has[channel.CapabilityInteractiveHumanResponse] {
+		t.Error("missing CapabilityInteractiveHumanResponse")
 	}
 }
 

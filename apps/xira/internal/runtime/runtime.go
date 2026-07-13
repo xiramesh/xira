@@ -27,19 +27,6 @@ type Runtime interface {
 	RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, error)
 }
 
-// HITLResolver is the injectable subset of *Service for HITL resolve/query.
-// Channel adapters use it to check "does this chatKey have a pending HITL?"
-// and to resolve it from an IM reply (#92 — HITL IM direct answer). Separate
-// from Runtime so fakes for RunAgent-only tests don't need to implement HITL
-// methods; channel adapters that want HITL direct-answer set this field (nil =
-// HITL direct-answer disabled, messages always start a new turn).
-//
-// *Service satisfies this implicitly.
-type HITLResolver interface {
-	ListPendingHumanRequestsByChatKey(ctx context.Context, chatKey string) ([]humanrequest.HumanRequest, error)
-	ResolveHumanRequest(ctx context.Context, requestID string, input humanrequest.ResolveRequest) (*humanrequest.HumanRequest, error)
-}
-
 // ExactHITLResolver is the channel-neutral structured response surface used by
 // native buttons and explicit request-id protocols.
 type ExactHITLResolver interface {
@@ -50,6 +37,15 @@ type ExactHITLResolver interface {
 // the existing durable Agent/Flow resume without making a platform callback
 // wait for model work.
 type AsyncExactHITLResolver interface {
+	ResolveHumanResponseAsync(ctx context.Context, input humanrequest.HumanResponseEnvelope) (*humanrequest.HumanRequest, error)
+}
+
+// StructuredHITLResolver is the channel-neutral surface for transports whose
+// response frame carries only opaque request correlation. The runner first
+// loads the persisted request to bind transport authority, then commits and
+// resumes through the shared async state machine.
+type StructuredHITLResolver interface {
+	GetHumanRequest(ctx context.Context, requestID string) (*humanrequest.HumanRequest, error)
 	ResolveHumanResponseAsync(ctx context.Context, input humanrequest.HumanResponseEnvelope) (*humanrequest.HumanRequest, error)
 }
 
@@ -96,11 +92,11 @@ type OwnerTargetResolver interface {
 	ResolveOwnerTarget(ctx context.Context, entrypointID string) (OwnerDeliveryTarget, error)
 }
 
-// Compile-time assertions: *Service implements Runtime + HITLResolver + OwnerResolver.
+// Compile-time assertions for the runtime surfaces injected into adapters.
 var _ Runtime = (*Service)(nil)
-var _ HITLResolver = (*Service)(nil)
 var _ ExactHITLResolver = (*Service)(nil)
 var _ AsyncExactHITLResolver = (*Service)(nil)
+var _ StructuredHITLResolver = (*Service)(nil)
 var _ TextHITLResolver = (*Service)(nil)
 var _ OwnerResolver = (*Service)(nil)
 var _ OwnerTargetResolver = (*Service)(nil)

@@ -115,16 +115,17 @@ func (m *Manager) WSRunner() *websocket.Runner {
 	return nil
 }
 
-// SetHITLResolver retains legacy implicit same-chat resolution for channels
-// that have not yet migrated to explicit or native interaction protocols.
-func (m *Manager) SetHITLResolver(resolver runtime.HITLResolver) {
+// SetStructuredHITLResolver injects structured request-correlation response
+// handling into WebSocket. Identity stays runner-owned; the frame cannot name
+// a sender, chat, or entrypoint.
+func (m *Manager) SetStructuredHITLResolver(resolver runtime.StructuredHITLResolver) {
 	if m == nil {
 		return
 	}
 	for _, runner := range m.runners {
 		switch r := runner.(type) {
 		case *websocket.Runner:
-			r.SetHITLResolver(resolver)
+			r.SetStructuredHITLResolver(resolver)
 		}
 	}
 }
