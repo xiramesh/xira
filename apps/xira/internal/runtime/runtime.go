@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 )
 
@@ -46,6 +47,22 @@ type ExactHITLResolver interface {
 // runner identity. It is separate from legacy same-chat HITL resolution.
 type TextHITLResolver interface {
 	ResolveHumanTextResponse(ctx context.Context, input humanrequest.TextResponseEnvelope) (*humanrequest.HumanRequest, error)
+}
+
+type HumanRequestDeliveryTarget struct {
+	Route     channel.InboundContext
+	Recipient *channel.OutboundRecipient
+}
+
+type HumanRequestDeliveryReceipt struct {
+	MessageID string
+}
+
+// HumanRequestDeliverer is the receipt-returning adapter port for interactive
+// request presentation. Validate must be route-local and side-effect free.
+type HumanRequestDeliverer interface {
+	ValidateHumanRequestDelivery(HumanRequestDeliveryTarget) error
+	DeliverHumanRequest(context.Context, humanrequest.HumanRequest, HumanRequestDeliveryTarget) (HumanRequestDeliveryReceipt, error)
 }
 
 // OwnerResolver is the injectable subset of *Service for owner queries (#122).

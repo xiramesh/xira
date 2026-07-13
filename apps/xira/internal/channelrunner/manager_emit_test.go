@@ -9,6 +9,8 @@ import (
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/channelrunner/ingest"
+	"github.com/xiramesh/xira/internal/humanrequest"
+	"github.com/xiramesh/xira/internal/runtime"
 )
 
 // manager_emit_test.go: tests Manager.Emit routing (RFC #27 — unified outbound
@@ -24,6 +26,26 @@ type mockEmitRunner struct {
 	mu      sync.Mutex
 	calls   []channel.OutboundEnvelope
 	emitErr error
+}
+
+type mockHumanRequestRunner struct {
+	*mockEmitRunner
+	validateErr error
+	deliverErr  error
+	receipt     runtime.HumanRequestDeliveryReceipt
+	delivered   []humanrequest.HumanRequest
+}
+
+func (m *mockHumanRequestRunner) ValidateHumanRequestDelivery(target runtime.HumanRequestDeliveryTarget) error {
+	return m.validateErr
+}
+
+func (m *mockHumanRequestRunner) DeliverHumanRequest(_ context.Context, req humanrequest.HumanRequest, _ runtime.HumanRequestDeliveryTarget) (runtime.HumanRequestDeliveryReceipt, error) {
+	if m.deliverErr != nil {
+		return runtime.HumanRequestDeliveryReceipt{}, m.deliverErr
+	}
+	m.delivered = append(m.delivered, req)
+	return m.receipt, nil
 }
 
 func (m *mockEmitRunner) ID() string                  { return m.id }
@@ -273,5 +295,65 @@ func TestManagerCapabilities(t *testing.T) {
 	}
 	if !caps.Supports(channel.CapabilityTypedRecipientOutbound) {
 		t.Errorf("Manager.Capabilities() missing typed_recipient_outbound; got %v", caps)
+	}
+}
+
+func TestManagerHumanRequestDeliveryUsesExactEntrypointAndReturnsReceipt(t *testing.T) {
+	first := &mockHumanRequestRunner{mockEmitRunner: &mockEmitRunner{id: "ilink-first", ch: "ilink"}, receipt: runtime.HumanRequestDeliveryReceipt{MessageID: "msg-first"}}
+	owner := &mockHumanRequestRunner{mockEmitRunner: &mockEmitRunner{id: "ilink-owner", ch: "ilink"}, receipt: runtime.HumanRequestDeliveryReceipt{MessageID: "msg-owner"}}
+	mgr := &Manager{runners: []Runner{first, owner}}
+	target := runtime.HumanRequestDeliveryTarget{
+		Route:     channel.InboundContext{Channel: "ilink", EntrypointID: "ilink-owner", Account: "acct"},
+		Recipient: &channel.OutboundRecipient{ID: "owner", IDType: "ilink_user_id"},
+	}
+	if err := mgr.ValidateHumanRequestDelivery(target); err != nil {
+		t.Fatalf("ValidateHumanRequestDelivery() error = %v", err)
+	}
+	receipt, err := mgr.DeliverHumanRequest(context.Background(), humanrequest.HumanRequest{ID: "hrq-1"}, target)
+	if err != nil || receipt.MessageID != "msg-owner" {
+		t.Fatalf("DeliverHumanRequest() = %+v, %v", receipt, err)
+	}
+	if len(first.delivered) != 0 || len(owner.delivered) != 1 {
+		t.Fatalf("delivery routing first=%d owner=%d", len(first.delivered), len(owner.delivered))
+	}
+}
+
+func TestManagerHumanRequestDeliveryFailsClosedOnRouteAndImplementation(t *testing.T) {
+	mgr := &Manager{runners: []Runner{
+		&bareRunner{id: "ilink-bare", ch: "ilink"},
+		&mockHumanRequestRunner{mockEmitRunner: &mockEmitRunner{id: "ilink-owner", ch: "ilink"}, validateErr: errors.New("typed recipient rejected")},
+	}}
+	if err := mgr.ValidateHumanRequestDelivery(runtime.HumanRequestDeliveryTarget{Route: channel.InboundContext{Channel: "ilink", EntrypointID: "ilink-bare"}}); err == nil || !strings.Contains(err.Error(), "HumanRequest") {
+		t.Fatalf("missing implementation error = %v", err)
+	}
+	target := runtime.HumanRequestDeliveryTarget{Route: channel.InboundContext{Channel: "ilink", EntrypointID: "ilink-owner"}}
+	if err := mgr.ValidateHumanRequestDelivery(target); err == nil || !strings.Contains(err.Error(), "typed recipient") {
+		t.Fatalf("route validation error = %v", err)
+	}
+	if _, err := mgr.DeliverHumanRequest(context.Background(), humanrequest.HumanRequest{ID: "hrq"}, target); err == nil || !strings.Contains(err.Error(), "typed recipient") {
+		t.Fatalf("delivery must revalidate route, error = %v", err)
+	}
+	if err := mgr.ValidateHumanRequestDelivery(runtime.HumanRequestDeliveryTarget{}); err == nil {
+		t.Fatal("empty target validation succeeded")
+	}
+	var nilManager *Manager
+	if err := nilManager.ValidateHumanRequestDelivery(target); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("nil manager validation error = %v", err)
+	}
+	missing := runtime.HumanRequestDeliveryTarget{Route: channel.InboundContext{Channel: "ilink", EntrypointID: "ilink-missing"}}
+	if err := mgr.ValidateHumanRequestDelivery(missing); err == nil || !strings.Contains(err.Error(), "registered") {
+		t.Fatalf("missing entrypoint error = %v", err)
+	}
+	mismatch := runtime.HumanRequestDeliveryTarget{Route: channel.InboundContext{Channel: "feishu", EntrypointID: "ilink-owner"}}
+	if err := mgr.ValidateHumanRequestDelivery(mismatch); err == nil || !strings.Contains(err.Error(), "channel") {
+		t.Fatalf("channel mismatch error = %v", err)
+	}
+
+	sendFailure := errors.New("delivery failed")
+	failing := &mockHumanRequestRunner{mockEmitRunner: &mockEmitRunner{id: "ilink-failing", ch: "ilink"}, deliverErr: sendFailure}
+	failingManager := &Manager{runners: []Runner{failing}}
+	failingTarget := runtime.HumanRequestDeliveryTarget{Route: channel.InboundContext{Channel: "ilink", EntrypointID: "ilink-failing"}}
+	if _, err := failingManager.DeliverHumanRequest(context.Background(), humanrequest.HumanRequest{ID: "hrq"}, failingTarget); !errors.Is(err, sendFailure) {
+		t.Fatalf("delivery error = %v, want sentinel", err)
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelrunner/ingest"
 	"github.com/xiramesh/xira/internal/channelrunner/progress"
 	"github.com/xiramesh/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
@@ -773,9 +774,71 @@ func (r *Runner) buildMetadata(account *accountPoller, msg openilink.WeixinMessa
 // is not yet available — HITL is surfaced as text via progress events.
 func (r *Runner) Capabilities() channel.CapabilitySet {
 	return channel.CapabilitySet{
+		channel.CapabilityInteractiveHumanResponse,
 		channel.CapabilityProactiveOutbound,
 		channel.CapabilityTypedRecipientOutbound,
 	}
+}
+
+// ValidateHumanRequestDelivery checks the concrete iLink account and typed
+// recipient without sending. Current-sender delivery uses Route.SenderID;
+// owner delivery uses a typed Recipient.
+func (r *Runner) ValidateHumanRequestDelivery(target frt.HumanRequestDeliveryTarget) error {
+	_, _, _, err := r.humanRequestDeliveryRoute(target)
+	return err
+}
+
+// DeliverHumanRequest renders the shared text protocol and returns the real
+// iLink SDK message id for durable DeliveryState.
+func (r *Runner) DeliverHumanRequest(ctx context.Context, req humanrequest.HumanRequest, target frt.HumanRequestDeliveryTarget) (frt.HumanRequestDeliveryReceipt, error) {
+	account, recipient, contextToken, err := r.humanRequestDeliveryRoute(target)
+	if err != nil {
+		return frt.HumanRequestDeliveryReceipt{}, err
+	}
+	content, err := humanrequest.RenderTextRequest(req)
+	if err != nil {
+		return frt.HumanRequestDeliveryReceipt{}, err
+	}
+	messageID := ""
+	if target.Recipient == nil && contextToken != "" {
+		messageID, err = account.client.SendText(ctx, recipient, content, contextToken)
+	} else {
+		messageID, err = account.client.Push(ctx, recipient, content)
+	}
+	if err != nil {
+		return frt.HumanRequestDeliveryReceipt{}, err
+	}
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return frt.HumanRequestDeliveryReceipt{}, fmt.Errorf("ilink HumanRequest delivery returned no message id")
+	}
+	return frt.HumanRequestDeliveryReceipt{MessageID: messageID}, nil
+}
+
+// coverage: contract (100% required)
+func (r *Runner) humanRequestDeliveryRoute(target frt.HumanRequestDeliveryTarget) (*accountPoller, string, string, error) {
+	accountID := strings.TrimSpace(target.Route.Account)
+	if accountID == "" {
+		return nil, "", "", fmt.Errorf("ilink HumanRequest target has no account")
+	}
+	r.mu.Lock()
+	account, ok := r.accounts[accountID]
+	r.mu.Unlock()
+	if !ok || account == nil {
+		return nil, "", "", fmt.Errorf("ilink HumanRequest account %q is not registered", accountID)
+	}
+	recipient := strings.TrimSpace(target.Route.SenderID)
+	if target.Recipient != nil {
+		typed := target.Recipient.Normalize()
+		if typed.IDType != "ilink_user_id" && typed.IDType != "user_id" {
+			return nil, "", "", fmt.Errorf("ilink HumanRequest unsupported recipient id_type %q", typed.IDType)
+		}
+		recipient = typed.ID
+	}
+	if recipient == "" {
+		return nil, "", "", fmt.Errorf("ilink HumanRequest target has no recipient")
+	}
+	return account, recipient, strings.TrimSpace(target.Route.Raw["context_token"]), nil
 }
 
 // Emit delivers an OutboundEnvelope to the originating ilink user. Unified
@@ -839,6 +902,7 @@ func (r *Runner) Emit(ctx context.Context, env channel.OutboundEnvelope) error {
 
 // Compile-time: *Runner implements channel.OutboundEmitter.
 var _ channel.OutboundEmitter = (*Runner)(nil)
+var _ frt.HumanRequestDeliverer = (*Runner)(nil)
 
 func (r *Runner) send(ctx context.Context, account *accountPoller, msg openilink.WeixinMessage, content string) error {
 	to := strings.TrimSpace(msg.FromUserID)

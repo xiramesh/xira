@@ -23,6 +23,7 @@ import (
 type recordingClient struct {
 	mu      sync.Mutex
 	sent    []string
+	methods []string
 	token   string
 	baseURL string
 	sendErr error
@@ -34,6 +35,7 @@ func (c *recordingClient) Monitor(context.Context, openilink.MessageHandler, *op
 func (c *recordingClient) SendText(_ context.Context, _, content, _ string) (string, error) {
 	c.mu.Lock()
 	c.sent = append(c.sent, content)
+	c.methods = append(c.methods, "send_text")
 	err := c.sendErr
 	c.mu.Unlock()
 	if err != nil {
@@ -44,8 +46,14 @@ func (c *recordingClient) SendText(_ context.Context, _, content, _ string) (str
 func (c *recordingClient) Push(_ context.Context, _, content string) (string, error) {
 	c.mu.Lock()
 	c.sent = append(c.sent, content)
+	c.methods = append(c.methods, "push")
 	c.mu.Unlock()
 	return "client-id", nil
+}
+func (c *recordingClient) deliveryMethods() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.methods...)
 }
 func (c *recordingClient) Token() string   { return c.token }
 func (c *recordingClient) BaseURL() string { return c.baseURL }
