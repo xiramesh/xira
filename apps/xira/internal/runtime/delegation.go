@@ -55,12 +55,7 @@ func (s *Service) runtimeADKTools(
 		if err != nil {
 			return map[string]any{"status": "rejected", "error": err.Error()}, nil
 		}
-		recordEvent("human.request.created", "runtime", "human request created", map[string]any{
-			"human_request_id": req.ID,
-			"kind":             req.Kind,
-			"source":           req.Source,
-			"tool_call_id":     callID,
-		})
+		recordEvent("human.request.created", "runtime", "human request created", humanRequestEventPayload(*req))
 		recordAudit("human.request", req.ID, true, "agent requested human input", map[string]any{
 			"kind":         req.Kind,
 			"tool_call_id": callID,
@@ -513,10 +508,7 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 		resp.Interrupt = interrupt
 		resp.HumanRequests = append([]humanrequest.HumanRequest(nil), interrupt.HumanRequests...)
 		resp.VerificationResult = VerificationResult{Status: StatusWaitingHuman, Checks: []string{"runtime_interrupt"}}
-		recordChildEvent("run.waiting_human", "runtime", "child agent run waiting for human input", map[string]any{
-			"human_requests": len(interrupt.HumanRequests),
-			"blocked_by":     interrupt.Reason,
-		})
+		recordChildEvent("run.waiting_human", "runtime", "child agent run waiting for human input", waitingHumanEventPayload(interrupt))
 	} else {
 		resp.VerificationResult = s.verifyRunOutcome(final, toolCalls, req.Target.Verification.DefaultChecks)
 	}

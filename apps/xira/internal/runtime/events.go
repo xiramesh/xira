@@ -10,6 +10,7 @@ import (
 
 	"github.com/xiramesh/xira/internal/agents"
 	"github.com/xiramesh/xira/internal/channel"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	fsession "github.com/xiramesh/xira/internal/session"
 )
 
@@ -272,9 +273,55 @@ func waitingHumanSummary(interrupt *RunInterrupt) string {
 		return ""
 	}
 	for _, hr := range interrupt.HumanRequests {
+		if hr.Responder.Type == humanrequest.ResponderOwner {
+			continue
+		}
 		if q := strings.TrimSpace(hr.Question); q != "" {
 			return q
 		}
 	}
+	if len(interrupt.HumanRequests) > 0 {
+		return ""
+	}
 	return strings.TrimSpace(interrupt.Reason)
+}
+
+func humanRequestEventPayload(req humanrequest.HumanRequest) map[string]any {
+	payload := map[string]any{
+		"human_request_id": req.ID,
+		"kind":             req.Kind,
+		"source":           req.Source,
+		"tool_call_id":     req.ToolCallID,
+		"responder_type":   req.Responder.Type,
+		"delivery_status":  req.Delivery.Status,
+	}
+	if req.Responder.Type != humanrequest.ResponderOwner {
+		payload["question"] = req.Question
+	}
+	return payload
+}
+
+func waitingHumanEventPayload(interrupt *RunInterrupt) map[string]any {
+	if interrupt == nil {
+		return map[string]any{}
+	}
+	payload := map[string]any{
+		"blocked_by": interrupt.Reason,
+		"summary":    waitingHumanSummary(interrupt),
+	}
+	payload["human_requests"] = len(interrupt.HumanRequests)
+	if len(interrupt.HumanRequests) == 0 {
+		return payload
+	}
+	selected := interrupt.HumanRequests[0]
+	for _, req := range interrupt.HumanRequests {
+		if req.Responder.Type != humanrequest.ResponderOwner {
+			selected = req
+			break
+		}
+	}
+	for key, value := range humanRequestEventPayload(selected) {
+		payload[key] = value
+	}
+	return payload
 }

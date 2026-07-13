@@ -66,3 +66,17 @@ func TestHumanRequestedQuestionFromAgentRequest(t *testing.T) {
 		t.Errorf("Question = %q, want the agent's natural-language question from payload", hr.Question)
 	}
 }
+
+func TestHumanRequestedCarriesInteractionRoutingState(t *testing.T) {
+	evt := helperRuntimeEvent("run.waiting_human", "waiting", map[string]any{
+		"human_request_id": "hrq-1", "responder_type": "owner", "delivery_status": "sent",
+	})
+	got, ok := runtimeEventToEvent(evt)
+	if !ok {
+		t.Fatal("runtimeEventToEvent returned ok=false")
+	}
+	hr := got.(HumanRequested)
+	if hr.RequestID != "hrq-1" || hr.ResponderType != "owner" || hr.DeliveryStatus != "sent" || hr.SignalKind != "run.waiting_human" {
+		t.Fatalf("HumanRequested routing state = %+v", hr)
+	}
+}

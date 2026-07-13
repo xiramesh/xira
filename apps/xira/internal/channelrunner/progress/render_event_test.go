@@ -86,6 +86,29 @@ func TestRenderEventHumanRequestedNoQuestion(t *testing.T) {
 	}
 }
 
+func TestRenderEventHumanRequestedHonorsDeliveryPrivacy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		evt  runtime.HumanRequested
+	}{
+		{name: "owner never leaks into origin chat", evt: runtime.HumanRequested{Question: "Owner secret?", ResponderType: "owner", SignalKind: "run.waiting_human", DeliveryStatus: "failed"}},
+		{name: "already delivered is not duplicated", evt: runtime.HumanRequested{Question: "Choose", ResponderType: "current_sender", SignalKind: "run.waiting_human", DeliveryStatus: "sent"}},
+		{name: "creation signal waits for run-level fallback", evt: runtime.HumanRequested{RequestID: "hrq-1", Question: "Choose", ResponderType: "current_sender", SignalKind: "human.request.created", DeliveryStatus: "failed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := RenderEvent(tc.evt, 0); ok {
+				t.Fatalf("RenderEvent(%+v) rendered private/duplicate request", tc.evt)
+			}
+		})
+	}
+
+	fallback := runtime.HumanRequested{RequestID: "hrq-1", Question: "Choose", ResponderType: "current_sender", SignalKind: "run.waiting_human", DeliveryStatus: "failed"}
+	msg, ok := RenderEvent(fallback, 0)
+	if !ok || !strings.Contains(msg.Text, "Choose") {
+		t.Fatalf("failed delivery fallback = (%+v, %v)", msg, ok)
+	}
+}
+
 func TestRenderEventAssistantFinalNotRendered(t *testing.T) {
 	// AssistantFinal is drain-only — not rendered as text.
 	evt := runtime.AssistantFinal{

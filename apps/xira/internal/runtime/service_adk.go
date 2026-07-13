@@ -149,13 +149,7 @@ func (s *Service) generateADK(
 				recordAudit("human.request", part.FunctionCall.ID, false, err.Error(), part.FunctionCall.Args)
 				return final, toolRecords.snapshot(), err
 			}
-			recordEvent("human.request.created", "runtime", "human request created", map[string]any{
-				"human_request_id": req.ID,
-				"kind":             req.Kind,
-				"source":           req.Source,
-				"tool_call_id":     req.ToolCallID,
-				"question":         req.Question, // #109: LLM-written question, surfaced to IM via humanRequestedQuestion
-			})
+			recordEvent("human.request.created", "runtime", "human request created", humanRequestEventPayload(*req))
 			recordAudit("human.request", req.ID, true, "agent requested human input", map[string]any{
 				"kind":         req.Kind,
 				"tool_call_id": req.ToolCallID,
