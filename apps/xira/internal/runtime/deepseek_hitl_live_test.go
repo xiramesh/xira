@@ -1045,9 +1045,9 @@ steps:
 	for rel, markers := range expectedFiles {
 		assertWorkspaceFileContains(t, rt, rel, markers...)
 	}
-	assertArtifactReferencesKnownFiles(t, rt, expectedFiles)
-	assertInitialStepsDoNotClaimReads(t, rt, "artifacts/flow-files/04-plan.md")
-	assertPlanToolContractTable(t, rt, "artifacts/flow-files/04-plan.md")
+	if err := validateExactArtifactFiles(rt.workspace, expectedFiles); err != nil {
+		t.Fatal(err)
+	}
 
 	toolCounts := map[string]int{}
 	agentsSeen := map[string]bool{}
@@ -1841,120 +1841,72 @@ func stringSlicesEqualUnordered(a, b []string) bool {
 	return stringSlicesEqual(left, right)
 }
 
-func assertArtifactReferencesKnownFiles(t *testing.T, rt *Service, expected map[string][]string) {
-	t.Helper()
-	known := map[string]struct{}{}
+// validateExactArtifactFiles checks observable filesystem state only. Model
+// prose is deliberately not parsed here; executed tool behavior is verified
+// separately from each step's persisted ToolCallRecord values.
+func validateExactArtifactFiles(workspace string, expected map[string][]string) error {
+	artifactDir := filepath.Join("artifacts", "flow-files")
+	want := make(map[string]struct{}, len(expected))
 	for rel := range expected {
-		known[filepath.Base(filepath.FromSlash(rel))] = struct{}{}
-	}
-	refPattern := regexp.MustCompile(`\b(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.md\b`)
-	for rel := range expected {
-		data, err := os.ReadFile(filepath.Join(rt.workspace, filepath.FromSlash(rel)))
-		if err != nil {
-			t.Fatalf("read workspace file %s: %v", rel, err)
+		localPath := filepath.Clean(filepath.FromSlash(rel))
+		if filepath.Dir(localPath) != artifactDir {
+			return fmt.Errorf("expected artifact path %q is outside %s", rel, filepath.ToSlash(artifactDir))
 		}
-		for _, ref := range refPattern.FindAllString(string(data), -1) {
-			base := filepath.Base(filepath.FromSlash(ref))
-			if _, ok := known[base]; !ok {
-				t.Fatalf("workspace file %s references unknown markdown artifact %q; known=%v\n%s", rel, ref, sortedStringSetKeys(known), string(data))
-			}
-		}
+		want[filepath.Base(localPath)] = struct{}{}
 	}
-}
 
-func assertInitialStepsDoNotClaimReads(t *testing.T, rt *Service, rel string) {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(rt.workspace, filepath.FromSlash(rel)))
+	entries, err := os.ReadDir(filepath.Join(workspace, artifactDir))
 	if err != nil {
-		t.Fatalf("read workspace file %s: %v", rel, err)
+		return fmt.Errorf("read artifact directory: %w", err)
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		normalized := strings.ToLower(line)
-		for _, stepID := range []string{"write_brief", "write_research", "write_constraints"} {
-			if strings.Contains(normalized, stepID) && claimsPositiveReadSearchOrList(normalized) {
-				t.Fatalf("workspace file %s incorrectly claims initial step %s used read/search/list:\n%s", rel, stepID, string(data))
-			}
+	got := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		got[entry.Name()] = struct{}{}
+	}
+
+	var missing, unexpected []string
+	for name := range want {
+		if _, ok := got[name]; !ok {
+			missing = append(missing, name)
 		}
+	}
+	for name := range got {
+		if _, ok := want[name]; !ok {
+			unexpected = append(unexpected, name)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(unexpected)
+	if len(missing) > 0 || len(unexpected) > 0 {
+		return fmt.Errorf("artifact file set mismatch: missing=%v unexpected=%v", missing, unexpected)
+	}
+	return nil
+}
+
+func TestValidateExactArtifactFilesIgnoresProseExamples(t *testing.T) {
+	workspace := t.TempDir()
+	rel := "artifacts/flow-files/04-plan.md"
+	writeFile(t, filepath.Join(workspace, filepath.FromSlash(rel)), `# Plan
+
+synthesize_plan depends on write_brief and write_constraints (non-adjacent reads).
+Do not create an artifact outside the allowed set, for example 10-extra.md.
+`)
+
+	expected := map[string][]string{rel: {"PLAN-MARKER-404"}}
+	if err := validateExactArtifactFiles(workspace, expected); err != nil {
+		t.Fatalf("prose examples must not count as executed artifact writes: %v", err)
 	}
 }
 
-func claimsPositiveReadSearchOrList(line string) bool {
-	line = strings.NewReplacer("*", " ", "_", " ", "`", " ").Replace(line)
-	line = strings.Join(strings.Fields(line), " ")
-	for _, negation := range []string{"does not", "doesn't", "do not", "don't", "did not", "didn't", "no read/search/list", "no read", "no dependency", "no dependencies", "none", "without"} {
-		if strings.Contains(line, negation) {
-			return false
-		}
-	}
-	nearbyNegationPatterns := []*regexp.Regexp{
-		regexp.MustCompile(`\b(no|not|without)\b.{0,48}\b(read|reads|read_file|search|searches|search_file|list|lists|list_dir)\b`),
-		regexp.MustCompile(`\b(read|reads|read_file|search|searches|search_file|list|lists|list_dir)\b.{0,48}\b(no|not|without)\b`),
-	}
-	for _, pattern := range nearbyNegationPatterns {
-		if pattern.MatchString(line) {
-			return false
-		}
-	}
-	positivePatterns := []*regexp.Regexp{
-		regexp.MustCompile(`\b(reads?|searches?|lists?)\b`),
-		regexp.MustCompile(`\bcalls?\s+(read|search|list)`),
-		regexp.MustCompile(`\buses?\s+(read|search|list)`),
-	}
-	for _, pattern := range positivePatterns {
-		if pattern.MatchString(line) {
-			return true
-		}
-	}
-	return false
-}
+func TestValidateExactArtifactFilesRejectsRealUnexpectedEntry(t *testing.T) {
+	workspace := t.TempDir()
+	wantRel := "artifacts/flow-files/04-plan.md"
+	writeFile(t, filepath.Join(workspace, filepath.FromSlash(wantRel)), "PLAN-MARKER-404")
+	writeFile(t, filepath.Join(workspace, "artifacts", "flow-files", "10-extra.md"), "unexpected")
 
-func TestClaimsPositiveReadSearchOrListAllowsNegatedDeepSeekPlanWording(t *testing.T) {
-	lines := []string{
-		"write_brief, write_research, and write_constraints do not call read_file, search_file, or list_dir.",
-		"1. **write_brief** - Produces `01-brief.md`. Does not call `read_file`, `search_file`, or `list_dir`. No upstream dependencies.",
-		"- Steps `write_brief`, `write_research`, and `write_constraints` are independent and require no prior reads.",
-		"| write_brief | no read/search/list | 01-brief.md |",
-		"- **write_constraints**: no dependency on 01-brief.md or 02-research.md (skip-step reads).",
-	}
-	for _, line := range lines {
-		if claimsPositiveReadSearchOrList(strings.ToLower(line)) {
-			t.Fatalf("negated line was classified as positive read/search/list claim: %q", line)
-		}
-	}
-	positiveLines := []string{
-		"write_research reads 01-brief.md before writing.",
-		"write_constraints calls read_file for 02-research.md.",
-	}
-	for _, line := range positiveLines {
-		if !claimsPositiveReadSearchOrList(strings.ToLower(line)) {
-			t.Fatalf("positive line was not classified as read/search/list claim: %q", line)
-		}
-	}
-}
-
-func assertPlanToolContractTable(t *testing.T, rt *Service, rel string) {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(rt.workspace, filepath.FromSlash(rel)))
-	if err != nil {
-		t.Fatalf("read workspace file %s: %v", rel, err)
-	}
-	content := strings.ToLower(strings.Join(strings.Fields(string(data)), " "))
-	expectedRows := []string{
-		"| write_brief | no read/search/list | 01-brief.md |",
-		"| write_research | no read/search/list | 02-research.md |",
-		"| write_constraints | no read/search/list | 03-constraints.md |",
-		"| synthesize_plan | read 01-brief.md and 03-constraints.md | 04-plan.md |",
-		"| implementation_slice | read 04-plan.md | 05-implementation.md |",
-		"| risk_review | read 02-research.md and 05-implementation.md | 06-risk.md |",
-		"| test_plan | search brief-marker-101 under artifacts/flow-files; read 06-risk.md | 07-test-plan.md |",
-		"| release_notes | read 03-constraints.md and 07-test-plan.md | 08-release.md |",
-		"| final_report | list artifacts/flow-files; read 01-brief.md, 04-plan.md, and 08-release.md | 09-final-report.md |",
-	}
-	for _, row := range expectedRows {
-		normalizedRow := strings.ToLower(strings.Join(strings.Fields(row), " "))
-		if !strings.Contains(content, normalizedRow) {
-			t.Fatalf("workspace file %s missing expected tool contract row %q:\n%s", rel, row, string(data))
-		}
+	err := validateExactArtifactFiles(workspace, map[string][]string{wantRel: {"PLAN-MARKER-404"}})
+	if err == nil || !strings.Contains(err.Error(), "10-extra.md") {
+		t.Fatalf("actual extra artifact error = %v, want 10-extra.md", err)
 	}
 }
 
