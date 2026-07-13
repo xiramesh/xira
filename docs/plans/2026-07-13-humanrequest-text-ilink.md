@@ -84,7 +84,8 @@
 3. Run focused tests; expect RED.
 4. Add the sealed `responder` enum to the model tool schema and Flow executor schema; runtime binds authoritative IDs and targets.
 5. Add one common create-and-deliver helper. Current sender may fall back on unsupported channels; owner must fail closed before create.
-6. Record successful/failed delivery attempts without inventing delivery success.
+6. Record successful delivery receipts; atomically terminal-fail an
+   undeliverable request and propagate the error without suspending.
 7. Rerun tests; expect GREEN.
 8. Commit `feat: bind and deliver human request responders`.
 
@@ -105,7 +106,8 @@
 3. Run focused iLink tests; expect RED.
 4. Inject `TextHITLResolver`, preserve sender ID type in metadata, and handle protocol traffic after authorization/dedupe but before ChatKeySession.
 5. Remove iLink's call to implicit `TryResolveHITL`; leave Feishu/WebSocket unchanged.
-6. Send deterministic ACK/error text and complete/forget dedupe consistently.
+6. Complete dedupe before best-effort ACK after a committed response; only
+   uncommitted protocol errors are forgotten when their error ACK fails.
 7. Rerun tests and `-race`; expect GREEN.
 8. Commit `feat: handle explicit human responses in ilink`.
 
@@ -123,7 +125,7 @@
 **Steps:**
 
 1. Write failing event roundtrip tests for request ID, responder type, and delivery status from real request creation output.
-2. Write failing renderer tests: delivered explicit requests do not duplicate; owner requests never render publicly; failed current-sender delivery retains generic fallback.
+2. Write failing renderer tests: delivered explicit requests do not duplicate; owner requests never render publicly; terminal delivery failure does not create a waiting-human signal.
 3. Run focused runtime/progress tests; expect RED.
 4. Extend the sealed HumanRequested event and every producer/mapping case; update renderer switch explicitly.
 5. Rerun tests and contract coverage; expect GREEN.

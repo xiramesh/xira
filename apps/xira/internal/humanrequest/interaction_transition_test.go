@@ -84,6 +84,33 @@ func TestStoreRecordDeliveryRejectsInvalidTransitions(t *testing.T) {
 	}
 }
 
+func TestStoreFailDeliveryTerminatesUndeliverableRequest(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	req := mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_delivery_terminal", WorkspaceID: "workspace", WorkspaceKey: "ws_delivery_terminal",
+		RunID: "run-delivery-terminal", AgentID: "agent", SessionID: "session",
+		Kind: RequestFreeform, Question: "Owner question?", DeliveryRequired: true,
+	})
+	failedAt := time.Date(2026, 7, 13, 13, 0, 0, 0, time.UTC)
+	failed, err := store.FailDelivery(context.Background(), req.WorkspaceKey, req.ID, DeliveryAttempt{Error: "private push unavailable", AttemptedAt: failedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != StatusFailed || failed.Delivery.Status != DeliveryFailed || failed.Delivery.Attempts != 1 || failed.Resume.Status != "" || failed.Response != nil {
+		t.Fatalf("terminal delivery failure = %+v", failed)
+	}
+	if _, err := store.RecordDelivery(context.Background(), req.WorkspaceKey, req.ID, DeliveryAttempt{MessageID: "late-message"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("retry after terminal delivery failure = %v, want conflict", err)
+	}
+	if _, err := store.Resolve(context.Background(), ResolveRequest{WorkspaceKey: req.WorkspaceKey, RequestID: req.ID, Kind: ResponseAnswer, Message: "late"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("response after terminal delivery failure = %v, want conflict", err)
+	}
+	listed, err := store.List(context.Background(), ListQuery{WorkspaceKey: req.WorkspaceKey, Status: StatusFailed})
+	if err != nil || len(listed) != 1 || listed[0].ID != req.ID {
+		t.Fatalf("failed request listing = %+v, %v", listed, err)
+	}
+}
+
 func TestStoreResumeLifecycleSupportsFailureRetryAndCompletion(t *testing.T) {
 	store := newTestStore(t, t.TempDir())
 	req := resolvedTrackedRequest(t, store, "ws_resume_lifecycle", "hrq_resume_lifecycle")
@@ -276,6 +303,21 @@ func resolvedTrackedRequest(t *testing.T, store *Store, workspaceKey, requestID 
 
 func TestInteractionTransitionTablesFailClosed(t *testing.T) {
 	now := time.Date(2026, 7, 13, 14, 0, 0, 0, time.UTC)
+	if err := applyTerminalDeliveryFailure(nil, DeliveryAttempt{Error: "down"}, now); !errors.Is(err, ErrValidation) {
+		t.Fatalf("nil terminal delivery request error = %v", err)
+	}
+	if err := applyTerminalDeliveryFailure(&HumanRequest{ID: "resolved", Status: StatusResolved}, DeliveryAttempt{Error: "down"}, now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("resolved terminal delivery error = %v", err)
+	}
+	if err := applyTerminalDeliveryFailure(&HumanRequest{ID: "empty", Status: StatusPending}, DeliveryAttempt{}, now); !errors.Is(err, ErrValidation) {
+		t.Fatalf("empty terminal delivery attempt error = %v", err)
+	}
+	if err := applyTerminalDeliveryFailure(&HumanRequest{ID: "both", Status: StatusPending}, DeliveryAttempt{MessageID: "om_x", Error: "down"}, now); !errors.Is(err, ErrValidation) {
+		t.Fatalf("ambiguous terminal delivery attempt error = %v", err)
+	}
+	if err := applyTerminalDeliveryFailure(&HumanRequest{ID: "untracked", Status: StatusPending, Delivery: DeliveryState{Status: DeliveryNone}}, DeliveryAttempt{Error: "down"}, now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("untracked terminal delivery error = %v", err)
+	}
 	if err := applyDeliveryAttempt(nil, DeliveryAttempt{MessageID: "om_x"}, now); !errors.Is(err, ErrValidation) {
 		t.Fatalf("nil delivery request error = %v", err)
 	}

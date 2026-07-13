@@ -66,8 +66,8 @@ func TestE2EOwnerTextResponseResumesAndDeliversFinalToOrigin(t *testing.T) {
 	resolved, err := rt.ResolveHumanTextResponse(context.Background(), humanrequest.TextResponseEnvelope{
 		CorrelationToken: command.CorrelationToken, EntrypointID: entrypointID,
 		SenderID: "owner-1", SenderIDType: "ilink_user_id",
-		ChatKey: ChatKey{Channel: "ilink", ChatID: "owner-1", SenderID: "owner-1"}.String(),
-		Answer:  command.Answer, IdempotencyKey: "ilink-owner-answer-1",
+		ChatKey:  ChatKey{Channel: "ilink", ChatID: "owner-1", SenderID: "owner-1"}.String(),
+		ChatType: "direct", Answer: command.Answer, IdempotencyKey: "ilink-owner-answer-1",
 	})
 	if err != nil || resolved.Resume.Status != humanrequest.ResumeCompleted {
 		t.Fatalf("owner text resolve = %+v, %v", resolved, err)

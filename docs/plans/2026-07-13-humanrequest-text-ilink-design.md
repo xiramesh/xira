@@ -34,9 +34,13 @@ protocol; Feishu and WebSocket keep their current behavior until #165/#166.
   platform message ID for `DeliveryState`.
 - Owner requests fail before creation when the exact entrypoint has no typed
   owner route or the selected runner lacks HumanRequest delivery support.
-- A transport failure after creation is persisted as `delivery_failed`; the
-  run/flow remains paused. #164 does not add cron or background delivery retry.
-- A response received in an owner DM resumes the original Run/Flow scope. The
+- A transport failure after creation is atomically persisted as terminal
+  request status `failed` plus delivery status `delivery_failed`; the Agent
+  run or Flow approval step fails visibly instead of suspending. #164 does not
+  add cron or background delivery retry.
+- An owner text response is accepted only from the bound owner's direct chat;
+  owner `/answer` traffic in a group is consumed and rejected. A response
+  received in an owner DM resumes the original Run/Flow scope. The
   response chat must never replace the persisted origin SessionScope.
 
 ## Architecture
@@ -117,7 +121,9 @@ The iLink runner processes an authenticated message in this order:
 1. ingest authorization and message dedupe;
 2. build authoritative inbound context, including `ilink_user_id` type;
 3. parse/consume `/answer` and call `ResolveHumanTextResponse`;
-4. send a deterministic ACK or safe protocol error;
+4. after a successful resolve, mark the inbound message complete before a
+   best-effort ACK; rejected/malformed commands remain retryable when their
+   error ACK cannot be sent;
 5. only non-protocol messages enter ChatKeySession / Agent Turn.
 
 The old implicit `TryResolveHITL` call is removed from iLink. Other runners are
@@ -135,8 +141,10 @@ unchanged in #164.
 | Conflicting retry | conflict |
 | Expired request | safe expired response, no resume |
 | Unsupported owner route | reject before request creation |
-| Send fails after create | persist `delivery_failed`, keep paused, log error |
+| Send fails after create | atomically mark request `failed` + `delivery_failed`; fail run/step visibly; do not suspend |
 | Receipt persistence fails after send | log explicitly; correlation remains resolvable |
+| Owner answers in a group | consume command, reject without mutation |
+| Success ACK times out | keep inbound dedupe completed; do not send duplicate confirmation |
 
 ## Alternatives Rejected
 

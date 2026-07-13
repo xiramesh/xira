@@ -285,7 +285,7 @@ func humanCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 			return printJSON(cmd, list)
 		},
 	})
-	cmd.Commands()[0].Flags().StringVar(&status, "status", "", "Filter by status: pending or resolved")
+	cmd.Commands()[0].Flags().StringVar(&status, "status", "", "Filter by status: pending, resolved, or failed")
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "show [request-id]",

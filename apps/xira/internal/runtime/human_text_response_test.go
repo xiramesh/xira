@@ -93,8 +93,14 @@ func TestResolveHumanTextResponseAllowsOwnerDMButRequiresCurrentOwner(t *testing
 	input := humanrequest.TextResponseEnvelope{
 		CorrelationToken: req.CorrelationToken, EntrypointID: "ilink-owner",
 		SenderID: "owner-1", SenderIDType: "ilink_user_id",
-		ChatKey: ChatKey{Channel: "ilink", ChatID: "owner-1", SenderID: "owner-1"}.String(),
-		Answer:  "Proceed Tuesday", IdempotencyKey: "owner-dm-1",
+		ChatKey:  ChatKey{Channel: "ilink", ChatID: "owner-1", SenderID: "owner-1"}.String(),
+		ChatType: "direct", Answer: "Proceed Tuesday", IdempotencyKey: "owner-dm-1",
+	}
+	groupInput := input
+	groupInput.ChatKey = ChatKey{Channel: "ilink", ChatID: "origin-group", SenderID: "owner-1"}.String()
+	groupInput.ChatType = "group"
+	if _, err := rt.ResolveHumanTextResponse(context.Background(), groupInput); !errors.Is(err, humanrequest.ErrConflict) {
+		t.Fatalf("owner group response error = %v, want conflict", err)
 	}
 	resolved, err := rt.ResolveHumanTextResponse(context.Background(), input)
 	if err != nil || resolved.Response == nil || resolved.Response.Actor != "owner-1" {
@@ -135,21 +141,24 @@ const textProtocolRuntimeCorrelation = "550e8400-e29b-41d4-a716-446655440000"
 
 func TestTextResponseChatAuthorized(t *testing.T) {
 	tests := []struct {
-		name    string
-		req     *humanrequest.HumanRequest
-		chatKey string
-		want    bool
+		name     string
+		req      *humanrequest.HumanRequest
+		chatKey  string
+		chatType string
+		want     bool
 	}{
 		{name: "nil request", want: false},
 		{name: "current match", req: &humanrequest.HumanRequest{ChatKey: "ilink/chat/user", Responder: humanrequest.ResponderPolicy{Type: humanrequest.ResponderCurrentSender}}, chatKey: "ilink/chat/user", want: true},
 		{name: "current mismatch", req: &humanrequest.HumanRequest{ChatKey: "ilink/chat/user", Responder: humanrequest.ResponderPolicy{Type: humanrequest.ResponderCurrentSender}}, chatKey: "ilink/other/user", want: false},
 		{name: "current missing persisted chat", req: &humanrequest.HumanRequest{Responder: humanrequest.ResponderPolicy{Type: humanrequest.ResponderCurrentSender}}, chatKey: "ilink/chat/user", want: false},
-		{name: "owner dm", req: &humanrequest.HumanRequest{ChatKey: "ilink/origin/coworker", Responder: humanrequest.ResponderPolicy{Type: humanrequest.ResponderOwner}}, chatKey: "ilink/owner/owner", want: true},
+		{name: "owner dm", req: &humanrequest.HumanRequest{ChatKey: "ilink/origin/coworker", Responder: humanrequest.ResponderPolicy{Type: humanrequest.ResponderOwner, SenderID: "owner"}}, chatKey: "ilink/owner/owner", chatType: "direct", want: true},
+		{name: "owner group rejected", req: &humanrequest.HumanRequest{ChatKey: "ilink/origin/coworker", Responder: humanrequest.ResponderPolicy{Type: humanrequest.ResponderOwner, SenderID: "owner"}}, chatKey: "ilink/origin/owner", chatType: "group", want: false},
+		{name: "owner mismatched dm rejected", req: &humanrequest.HumanRequest{Responder: humanrequest.ResponderPolicy{Type: humanrequest.ResponderOwner, SenderID: "owner"}}, chatKey: "ilink/someone/owner", chatType: "direct", want: false},
 		{name: "unknown responder", req: &humanrequest.HumanRequest{Responder: humanrequest.ResponderPolicy{Type: "other"}}, chatKey: "ilink/chat/user", want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := textResponseChatAuthorized(tt.req, tt.chatKey); got != tt.want {
+			if got := textResponseChatAuthorized(tt.req, tt.chatKey, tt.chatType); got != tt.want {
 				t.Fatalf("textResponseChatAuthorized() = %v, want %v", got, tt.want)
 			}
 		})

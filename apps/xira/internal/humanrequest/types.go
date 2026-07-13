@@ -14,6 +14,7 @@ type RequestStatus string
 const (
 	StatusPending  RequestStatus = "pending"
 	StatusResolved RequestStatus = "resolved"
+	StatusFailed   RequestStatus = "failed"
 )
 
 type ResponderType string
@@ -161,6 +162,7 @@ type TextResponseEnvelope struct {
 	SenderID         string
 	SenderIDType     string
 	ChatKey          string
+	ChatType         string
 	Answer           string
 	IdempotencyKey   string
 	ResolvedAt       time.Time

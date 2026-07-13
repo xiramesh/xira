@@ -243,15 +243,27 @@ func TestRunnerExplicitHumanResponseHandlesMissingResolverAndAckFailure(t *testi
 		}
 	})
 
-	t.Run("ack failure releases dedupe", func(t *testing.T) {
+	t.Run("committed answer completes dedupe before ack", func(t *testing.T) {
 		runner, account, rec := newProgressTestRunner(t, func(*http.Request) string { return dsText("must not run") })
 		runner.SetTextHITLResolver(&recordingTextHITLResolver{})
 		rec.sendErr = errors.New("ilink unavailable")
 		msg := userTextMsg(answer)
 		runner.handleMessage(account, msg)
 		key := account.messageDedupeKey(messageID(msg))
+		if account.messages.Begin(key, time.Now()) {
+			t.Fatalf("committed answer dedupe key %q was released after acknowledgement failure", key)
+		}
+	})
+
+	t.Run("rejected answer releases dedupe when error ack fails", func(t *testing.T) {
+		runner, account, rec := newProgressTestRunner(t, func(*http.Request) string { return dsText("must not run") })
+		runner.SetTextHITLResolver(&recordingTextHITLResolver{err: errors.New("unauthorized")})
+		rec.sendErr = errors.New("ilink unavailable")
+		msg := userTextMsg(answer)
+		runner.handleMessage(account, msg)
+		key := account.messageDedupeKey(messageID(msg))
 		if !account.messages.Begin(key, time.Now()) {
-			t.Fatalf("dedupe key %q was not released after acknowledgement failure", key)
+			t.Fatalf("uncommitted answer dedupe key %q was not released", key)
 		}
 	})
 }

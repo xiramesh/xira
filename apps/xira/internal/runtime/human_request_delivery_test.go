@@ -2,8 +2,11 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +14,7 @@ import (
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/entrypoints"
 	"github.com/xiramesh/xira/internal/humanrequest"
+	"github.com/xiramesh/xira/internal/model/deepseek"
 )
 
 type fakeHumanRequestOutbound struct {
@@ -91,29 +95,78 @@ func TestCreateAgentHumanRequestRejectsUnreachableOwnerBeforePersist(t *testing.
 	}
 }
 
-func TestCreateAgentHumanRequestPersistsDeliveryFailureAndStillSuspends(t *testing.T) {
+func TestCreateAgentHumanRequestFailsDeliveryWithoutSuspending(t *testing.T) {
 	rt, baseCtx := newHumanRequestToolTestRuntime(t, "run-delivery-failed", "session-delivery-failed")
+	entrypointID := "ilink-owner"
+	rt.entrypoints = entrypoints.NewRegistry(agents.DefaultAgentID, []entrypoints.Definition{{ID: entrypointID, Channel: "ilink", Account: "acct-1"}})
+	rt.ownerBindings.Set(ownerBinding{EntrypointID: entrypointID, OwnerSenderID: "owner-1", OwnerSenderIDType: "ilink_user_id"})
 	outbound := &fakeHumanRequestOutbound{deliverErr: errors.New("ilink unavailable")}
 	rt.SetOutboundEmitter(outbound)
 	exec, _ := runExecutionFromContext(baseCtx)
-	exec.Base.EntrypointID = "test-default"
+	exec.Base.EntrypointID = entrypointID
 	exec.Request.Context = channel.InboundContext{
-		Channel: "ilink", EntrypointID: "test-default", Account: "acct-1",
-		ChatID: "user-1", SenderID: "user-1", SenderIDType: "ilink_user_id",
+		Channel: "ilink", EntrypointID: entrypointID, Account: "acct-1",
+		ChatID: "origin-group", ChatType: "group", SenderID: "coworker-1", SenderIDType: "ilink_user_id",
 	}
 	ctx := contextWithRunExecution(baseCtx, exec)
 	req, err := rt.createAgentHumanRequest(ctx, "human-delivery-failed", map[string]any{
-		"kind": "freeform", "question": "Which window?",
+		"kind": "freeform", "question": "Which window?", "responder": "owner",
 	})
-	if err != nil {
-		t.Fatalf("delivery failure must not orphan the durable request: %v", err)
-	}
-	if req.Delivery.Status != humanrequest.DeliveryFailed || req.Delivery.LastError == "" {
-		t.Fatalf("failed delivery = %+v", req.Delivery)
+	if err == nil || !strings.Contains(err.Error(), "ilink unavailable") {
+		t.Fatalf("delivery failure error = %v", err)
 	}
 	collector := runtimeSuspendCollectorFromContext(ctx)
-	if collector == nil || collector.Interrupt() == nil {
-		t.Fatal("delivery failure did not preserve waiting_human interrupt")
+	if collector == nil || collector.Interrupt() != nil {
+		t.Fatal("delivery failure must not leave the run waiting_human")
+	}
+	pending, listErr := rt.ListHumanRequests(context.Background(), humanrequest.StatusPending)
+	if listErr != nil || len(pending) != 0 {
+		t.Fatalf("delivery failure left pending requests = %+v, %v", pending, listErr)
+	}
+	failed, listErr := rt.ListHumanRequests(context.Background(), humanrequest.StatusFailed)
+	if listErr != nil || len(failed) != 1 || failed[0].Delivery.Status != humanrequest.DeliveryFailed || failed[0].Delivery.LastError == "" {
+		t.Fatalf("terminal failed requests = %+v, %v (returned=%+v)", failed, listErr, req)
+	}
+}
+
+func TestRunAgentOwnerDeliveryFailureFailsRunInsteadOfHanging(t *testing.T) {
+	var modelCalls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		modelCalls++
+		var request deepseek.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			return nil, err
+		}
+		if modelCalls == 1 {
+			return deepSeekHTTPResponse(deepSeekToolCallResponseWithArgs("owner-delivery-fails", "human_request", map[string]any{
+				"kind": "freeform", "question": "Owner decision?", "responder": "owner",
+			})), nil
+		}
+		return deepSeekHTTPResponse(deepSeekTextResponse("unexpected second model call")), nil
+	})}
+	rt := newTestService(t, Config{
+		StateDir: filepath.Join(t.TempDir(), "state"),
+		DeepSeekClient: deepseek.New(
+			deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client),
+		),
+	})
+	const entrypointID = "ilink-owner"
+	rt.entrypoints = entrypoints.NewRegistry(agents.DefaultAgentID, []entrypoints.Definition{{ID: entrypointID, Channel: "ilink", Account: "acct-1"}})
+	rt.ownerBindings.Set(ownerBinding{EntrypointID: entrypointID, OwnerSenderID: "owner-1", OwnerSenderIDType: "ilink_user_id"})
+	rt.SetOutboundEmitter(&fakeHumanRequestOutbound{deliverErr: errors.New("private push unavailable")})
+	response, err := rt.RunAgent(context.Background(), TurnRequest{
+		EntrypointID: entrypointID, Message: "ask owner",
+		Context: channel.InboundContext{Channel: "ilink", EntrypointID: entrypointID, Account: "acct-1", ChatID: "origin-group", ChatType: "group", SenderID: "coworker-1", SenderIDType: "ilink_user_id"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "private push unavailable") || response.Status != "failed" || response.Interrupt != nil || len(response.HumanRequests) != 0 {
+		t.Fatalf("RunAgent delivery failure response = %+v, %v", response, err)
+	}
+	if modelCalls != 1 {
+		t.Fatalf("model calls = %d, want delivery failure to stop the run", modelCalls)
+	}
+	failed, err := rt.ListHumanRequests(context.Background(), humanrequest.StatusFailed)
+	if err != nil || len(failed) != 1 || failed[0].Delivery.Status != humanrequest.DeliveryFailed {
+		t.Fatalf("terminal owner delivery records = %+v, %v", failed, err)
 	}
 }
 
@@ -188,7 +241,7 @@ func TestCreateAndDeliverHumanRequestHandlesDeliveryEdgeCases(t *testing.T) {
 		rt := newTestService(t, Config{})
 		rt.SetOutboundEmitter(&fakeHumanRequestOutbound{})
 		req, err := rt.createAndDeliverHumanRequest(context.Background(), validHumanRequestCreate("empty-receipt"), HumanRequestDeliveryTarget{}, true)
-		if err != nil || req.Delivery.Status != humanrequest.DeliveryFailed || !strings.Contains(req.Delivery.LastError, "empty message id") {
+		if err == nil || req.Status != humanrequest.StatusFailed || req.Delivery.Status != humanrequest.DeliveryFailed || !strings.Contains(req.Delivery.LastError, "empty message id") {
 			t.Fatalf("empty receipt request = (%+v, %v)", req, err)
 		}
 	})

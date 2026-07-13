@@ -317,7 +317,7 @@ func (s *Store) List(ctx context.Context, query ListQuery) ([]HumanRequest, erro
 	if err := validateWorkspaceKey(query.WorkspaceKey); err != nil {
 		return nil, err
 	}
-	if query.Status != "" && query.Status != StatusPending && query.Status != StatusResolved {
+	if query.Status != "" && query.Status != StatusPending && query.Status != StatusResolved && query.Status != StatusFailed {
 		return nil, fmt.Errorf("%w: invalid status %q", ErrValidation, query.Status)
 	}
 	s.mu.Lock()

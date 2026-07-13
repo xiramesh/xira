@@ -136,7 +136,7 @@ func (s *Service) ResolveHumanTextResponse(ctx context.Context, input humanreque
 	if err != nil {
 		return nil, err
 	}
-	if !textResponseChatAuthorized(req, input.ChatKey) {
+	if !textResponseChatAuthorized(req, input.ChatKey, input.ChatType) {
 		return nil, fmt.Errorf("%w: human response chat is not authorized for request", humanrequest.ErrConflict)
 	}
 	answer, err := humanrequest.NormalizeTextAnswer(*req, input.Answer)
@@ -160,7 +160,7 @@ func (s *Service) ResolveHumanTextResponse(ctx context.Context, input humanreque
 // textResponseChatAuthorized seals the text-protocol chat rule: current sender
 // must answer in the originating chat; owner may answer in a private DM.
 // coverage: contract (100% required)
-func textResponseChatAuthorized(req *humanrequest.HumanRequest, inboundChatKey string) bool {
+func textResponseChatAuthorized(req *humanrequest.HumanRequest, inboundChatKey, inboundChatType string) bool {
 	if req == nil {
 		return false
 	}
@@ -169,7 +169,9 @@ func textResponseChatAuthorized(req *humanrequest.HumanRequest, inboundChatKey s
 		persisted := strings.TrimSpace(req.ChatKey)
 		return persisted != "" && persisted == strings.TrimSpace(inboundChatKey)
 	case humanrequest.ResponderOwner:
-		return true
+		key, ok := ParseChatKey(inboundChatKey)
+		ownerID := strings.TrimSpace(req.Responder.SenderID)
+		return ok && strings.EqualFold(strings.TrimSpace(inboundChatType), "direct") && ownerID != "" && key.ChatID == ownerID && key.SenderID == ownerID
 	default:
 		return false
 	}
@@ -397,20 +399,35 @@ func (s *Service) createAndDeliverHumanRequest(ctx context.Context, input humanr
 	}
 	receipt, deliverErr := deliverer.DeliverHumanRequest(ctx, *req, target)
 	attempt := humanrequest.DeliveryAttempt{AttemptedAt: time.Now()}
+	deliveryFailure := deliverErr
 	if deliverErr != nil {
 		attempt.Error = deliverErr.Error()
 	} else if strings.TrimSpace(receipt.MessageID) == "" {
-		attempt.Error = "human request delivery returned an empty message id"
+		deliveryFailure = errors.New("human request delivery returned an empty message id")
+		attempt.Error = deliveryFailure.Error()
 	} else {
 		attempt.MessageID = strings.TrimSpace(receipt.MessageID)
 	}
-	updated, recordErr := s.humanRequests.RecordDelivery(context.WithoutCancel(ctx), req.WorkspaceKey, req.ID, attempt)
+	var updated *humanrequest.HumanRequest
+	var recordErr error
+	if deliveryFailure != nil {
+		updated, recordErr = s.humanRequests.FailDelivery(context.WithoutCancel(ctx), req.WorkspaceKey, req.ID, attempt)
+	} else {
+		updated, recordErr = s.humanRequests.RecordDelivery(context.WithoutCancel(ctx), req.WorkspaceKey, req.ID, attempt)
+	}
 	if recordErr != nil {
 		slog.Error("persist human request delivery receipt", "request_id", req.ID, "error", recordErr)
-		return req, nil
+		if deliveryFailure == nil {
+			// The human has the correlation reference. Preserve the paused
+			// request so their answer remains usable even though the receipt
+			// could not be durably attached.
+			return req, nil
+		}
+		return req, fmt.Errorf("persist human request delivery result: %w", recordErr)
 	}
-	if attempt.Error != "" {
+	if deliveryFailure != nil {
 		slog.Error("deliver human request", "request_id", req.ID, "error", attempt.Error)
+		return updated, fmt.Errorf("deliver human request: %w", deliveryFailure)
 	}
 	return updated, nil
 }

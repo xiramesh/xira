@@ -778,6 +778,7 @@ func (r *Runner) tryResolveTextHumanResponse(ctx context.Context, account *accou
 		return false
 	}
 	responseText := "已收到回答。"
+	responseCommitted := false
 	if parseErr != nil {
 		responseText = "回答格式无效，请使用请求中提供的完整 /answer 命令。"
 	} else if r.textResolver == nil {
@@ -789,18 +790,26 @@ func (r *Runner) tryResolveTextHumanResponse(ctx context.Context, account *accou
 			SenderID:         strings.TrimSpace(inbound.SenderID),
 			SenderIDType:     strings.ToLower(strings.TrimSpace(inbound.SenderIDType)),
 			ChatKey:          chatKey.String(),
+			ChatType:         strings.ToLower(strings.TrimSpace(inbound.ChatType)),
 			Answer:           command.Answer,
 			IdempotencyKey:   "ilink:" + strings.TrimSpace(inbound.EntrypointID) + ":" + strings.TrimSpace(inbound.MessageID),
 		})
 		if err != nil {
 			slog.Warn("ilink human response rejected", "entrypoint_id", inbound.EntrypointID, "message_id", inbound.MessageID, "error", err)
 			responseText = "无法接受该回答。请确认请求编号、回答选项和回复身份。"
+		} else {
+			responseCommitted = true
 		}
 	}
+	if responseCommitted {
+		account.messages.Complete(dedupeKey, time.Now())
+	}
 	if err := r.send(ctx, account, msg, responseText); err != nil {
-		account.messages.Forget(dedupeKey)
+		if !responseCommitted {
+			account.messages.Forget(dedupeKey)
+		}
 		slog.Error("ilink human response acknowledgement failed", "entrypoint_id", inbound.EntrypointID, "message_id", inbound.MessageID, "error", err)
-	} else {
+	} else if !responseCommitted {
 		account.messages.Complete(dedupeKey, time.Now())
 	}
 	return true

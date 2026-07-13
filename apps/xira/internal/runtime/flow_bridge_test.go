@@ -137,8 +137,8 @@ func TestFlowOwnerTextResponseKeepsPersistedOriginContext(t *testing.T) {
 	_, err = rt.ResolveHumanTextResponse(context.Background(), humanrequest.TextResponseEnvelope{
 		CorrelationToken: request.CorrelationToken, EntrypointID: entrypointID,
 		SenderID: "owner-1", SenderIDType: "ilink_user_id",
-		ChatKey: ChatKey{Channel: "ilink", ChatID: "owner-1", SenderID: "owner-1"}.String(),
-		Answer:  "approve", IdempotencyKey: "flow-owner-answer-1",
+		ChatKey:  ChatKey{Channel: "ilink", ChatID: "owner-1", SenderID: "owner-1"}.String(),
+		ChatType: "direct", Answer: "approve", IdempotencyKey: "flow-owner-answer-1",
 	})
 	if err != nil {
 		t.Fatalf("owner flow response: %v", err)
