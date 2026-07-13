@@ -47,6 +47,7 @@ var capabilities = []string{
 	"event",
 	"response",
 	"interrupt",
+	"human_response",
 }
 
 var errUnsupportedMessage = errors.New("only JSON text frames are supported")
@@ -59,10 +60,13 @@ type badJSONError struct{ err error }
 func (e badJSONError) Error() string { return e.err.Error() }
 
 type inboundFrame struct {
-	Type      string          `json:"type"`
-	ID        string          `json:"id,omitempty"`
-	RequestID string          `json:"request_id,omitempty"`
-	Data      json.RawMessage `json:"data,omitempty"`
+	Type             string          `json:"type"`
+	ID               string          `json:"id,omitempty"`
+	RequestID        string          `json:"request_id,omitempty"`
+	CorrelationToken string          `json:"correlation_token,omitempty"`
+	Action           string          `json:"action,omitempty"`
+	Answer           string          `json:"answer,omitempty"`
+	Data             json.RawMessage `json:"data,omitempty"`
 }
 
 type outboundFrame struct {
@@ -99,12 +103,12 @@ type activeRequest struct {
 // Runner is the websocket channel runner. One instance per websocket
 // entrypoint, registered in channelrunner.Manager alongside ilink/feishu.
 type Runner struct {
-	definition    entrypoints.Definition
-	runtime       frt.Runtime
-	hitlResolver  frt.HITLResolver
-	ownerResolver frt.OwnerResolver
-	router        *progress.Router
-	dedupe        *dedupe.MessageDeduper
+	definition             entrypoints.Definition
+	runtime                frt.Runtime
+	structuredHITLResolver frt.StructuredHITLResolver
+	ownerResolver          frt.OwnerResolver
+	router                 *progress.Router
+	dedupe                 *dedupe.MessageDeduper
 
 	// conns is the per-Runner connection registry (RFC chatkey-session Step 3b).
 	// It maps a ChatKey to its single live connection, so outbound delivery
@@ -168,10 +172,10 @@ func NewRunner(def entrypoints.Definition, rt *frt.Service, stateRoot string) (*
 func (r *Runner) ID() string      { return r.definition.ID }
 func (r *Runner) Channel() string { return "websocket" }
 
-// SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
-func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
+// SetStructuredHITLResolver injects exact WebSocket human-response handling.
+func (r *Runner) SetStructuredHITLResolver(resolver frt.StructuredHITLResolver) {
 	if r != nil {
-		r.hitlResolver = resolver
+		r.structuredHITLResolver = resolver
 	}
 }
 
@@ -201,16 +205,14 @@ func (r *Runner) Start(ctx context.Context) error { return nil }
 func (r *Runner) Stop(ctx context.Context) error { return nil }
 
 // Capabilities advertises what this channel can do. websocket supports
-// proactive outbound (resume delivery to a live connection), but not typed
-// recipient outbound because a connection is keyed by the inbound ChatKey,
-// not by a server-verified platform user identity. Interactive
-// human response (in-IM approve/deny via human_response frames) is a future
-// concern — the inbound human_response frame is still rejected (see
-// HandleConnection) — so we do NOT advertise CapabilityInteractiveHumanResponse
-// yet (advertising an unimplemented capability would be a lie).
+// proactive outbound (resume delivery to a live connection) and structured
+// current-sender human responses. It does not support typed-recipient outbound:
+// a connection is keyed by the inbound ChatKey, not by a server-verified
+// platform user identity. Owner responses therefore remain fail-closed.
 func (r *Runner) Capabilities() channel.CapabilitySet {
 	return channel.CapabilitySet{
 		channel.CapabilityProactiveOutbound,
+		channel.CapabilityInteractiveHumanResponse,
 	}
 }
 
@@ -369,6 +371,18 @@ func (r *Runner) lookupConn(key frt.ChatKey) *wsConn {
 	r.connMu.Lock()
 	defer r.connMu.Unlock()
 	return r.conns[canonicalKey(key)]
+}
+
+// connOwnsKey checks the live registry, not conn.keys: a stale connection may
+// retain historical keys after a later connection takes ownership.
+func (r *Runner) connOwnsKey(conn *wsConn, key frt.ChatKey) bool {
+	if conn == nil {
+		return false
+	}
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
+	current := r.conns[canonicalKey(key)]
+	return current != nil && current.id == conn.id
 }
 
 // canonicalKey lowercases ChatID and SenderID so the registry key is stable
@@ -540,7 +554,7 @@ func (r *Runner) HandleConnection(ctx context.Context, conn *websocket.Conn, def
 				return r.registerConnKey(wsHandle, key)
 			})
 		case "human_response":
-			_ = writeFrame(errorFrame(frame.ID, requestID, "unsupported_type", "human_response is reserved for a later websocket resume slice; use the HTTP human-request API for now", false))
+			r.handleHumanResponse(connCtx, wsHandle, frame, writeFrame)
 		case "ping":
 			_ = writeFrame(outboundFrame{
 				Type:      "pong",
@@ -624,18 +638,6 @@ func (r *Runner) handleMessage(
 			ID:        "srv_ack_" + requestID,
 			RequestID: requestID,
 			Data:      ackData,
-		})
-		return
-	}
-	// HITL direct-answer (#92): shared preflight check (same logic as feishu/ilink).
-	// If this chatKey has a pending HITL (agent_request only), resolve it from
-	// the user's message text and return. Resume runs async via Emit.
-	if progress.TryResolveHITL(ctx, r.hitlResolver, chatKey, prepared.turn.Message, prepared.eventContext.SenderID) {
-		_ = writeFrame(outboundFrame{
-			Type:      "ack",
-			ID:        "srv_ack_" + requestID,
-			RequestID: requestID,
-			Data:      map[string]any{"status": "hitl_resolved"},
 		})
 		return
 	}

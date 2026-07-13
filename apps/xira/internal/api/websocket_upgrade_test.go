@@ -12,6 +12,7 @@ import (
 	"github.com/xiramesh/xira/internal/channelcontrol"
 	wschannel "github.com/xiramesh/xira/internal/channelrunner/websocket"
 	"github.com/xiramesh/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
 
@@ -52,7 +53,7 @@ func TestWebSocketChannelMessageEmitsAckEventAndResponse(t *testing.T) {
 	if ready.Type != "ready" || frameDataString(ready, "entrypoint_id") != websocketDefaultEntrypoint {
 		t.Fatalf("ready = %+v", ready)
 	}
-	assertWebSocketCapabilities(t, ready, []string{"message", "event", "response", "interrupt"})
+	assertWebSocketCapabilities(t, ready, []string{"message", "event", "response", "interrupt", "human_response"})
 
 	writeWebSocketFrame(t, conn, map[string]any{
 		"type": "message",
@@ -259,8 +260,20 @@ func TestWebSocketChannelIgnoresUnmentionedGroupMessage(t *testing.T) {
 	}
 }
 
-func TestWebSocketChannelRejectsHumanResponseUntilResumeBindingExists(t *testing.T) {
+func TestWebSocketChannelAcceptsStructuredHumanResponse(t *testing.T) {
 	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
+	req, err := rt.CreateHumanRequest(context.Background(), humanrequest.CreateRequest{
+		ID: "hrq_ws_api", RunID: "run-ws-api", AgentID: "xira-assistant", SessionID: "session-ws-api",
+		Source: "api_test", Kind: humanrequest.RequestApproval, Question: "Approve?",
+		CorrelationToken: "0123456789abcdef0123456789abcdef",
+		ChatKey:          (frt.ChatKey{Channel: "websocket", ChatID: "chat-1", SenderID: "user-1"}).String(),
+		Responder: humanrequest.ResponderPolicy{
+			Type: humanrequest.ResponderCurrentSender, EntrypointID: websocketDefaultEntrypoint, SenderID: "user-1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	server := newWebSocketTestServer(t, rt)
@@ -271,17 +284,32 @@ func TestWebSocketChannelRejectsHumanResponseUntilResumeBindingExists(t *testing
 	defer conn.CloseNow()
 
 	writeWebSocketFrame(t, conn, map[string]any{
-		"type": "human_response",
-		"id":   "hrsp_001",
+		"type": "message", "id": "register_hr_chat",
 		"data": map[string]any{
-			"human_request_id": "hrq_001",
-			"kind":             "approve",
-			"actor":            "user-1",
+			"message": "register connection",
+			"context": map[string]any{"chat_id": "chat-1", "sender_id": "user-1", "message_id": "register_hr_chat"},
 		},
 	})
-	errFrame := readWebSocketFrame(t, conn)
-	if errFrame.Type != "error" || frameDataString(errFrame, "code") != "unsupported_type" {
-		t.Fatalf("error frame = %+v", errFrame)
+	if ack := readWebSocketFrame(t, conn); ack.Type != "ack" {
+		t.Fatalf("registration ack = %+v", ack)
+	}
+	for {
+		if frame := readWebSocketFrame(t, conn); frame.Type == "response" {
+			break
+		}
+	}
+
+	writeWebSocketFrame(t, conn, map[string]any{
+		"type": "human_response", "id": "hrsp_001", "request_id": req.ID,
+		"correlation_token": req.CorrelationToken, "action": "approve",
+	})
+	accepted := readWebSocketFrame(t, conn)
+	if accepted.Type != "ack" || frameDataString(accepted, "status") != "human_response_accepted" {
+		t.Fatalf("accepted frame = %+v", accepted)
+	}
+	stored, err := rt.GetHumanRequest(context.Background(), req.ID)
+	if err != nil || stored.Status != humanrequest.StatusResolved || stored.Response == nil || stored.Response.Actor != "user-1" {
+		t.Fatalf("stored response = %+v, err=%v", stored, err)
 	}
 }
 
@@ -388,6 +416,7 @@ func newWebSocketTestServer(t *testing.T, rt *frt.Service) *Server {
 	if err != nil {
 		t.Fatalf("wschannel.NewRunner: %v", err)
 	}
+	runner.SetStructuredHITLResolver(rt)
 	controls := &testWSControls{runner: runner}
 	return NewServer(rt, "127.0.0.1:0", controls)
 }

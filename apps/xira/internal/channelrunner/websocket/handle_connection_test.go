@@ -116,25 +116,15 @@ func TestHandleConnectionHelloReady(t *testing.T) {
 		if eid, _ := d["entrypoint_id"].(string); eid != "ws-custom" {
 			t.Errorf("ready entrypoint_id = %q, want ws-custom", eid)
 		}
-	}
-}
-
-// TestHandleConnectionHumanResponseRejected covers the human_response →
-// unsupported_type error branch.
-func TestHandleConnectionHumanResponseRejected(t *testing.T) {
-	srv := newWSLoopbackServer(t, newFakeRuntime())
-	defer srv.close()
-	c := srv.dial(t)
-	defer c.Close(websocket.StatusNormalClosure, "")
-
-	writeFrameClient(t, c, inboundFrame{Type: "human_response", ID: "hr1"})
-	err := readFrameClient(t, c)
-	if err.Type != "error" {
-		t.Errorf("got %q, want error", err.Type)
-	}
-	if d, _ := err.Data.(map[string]any); d != nil {
-		if code, _ := d["code"].(string); code != "unsupported_type" {
-			t.Errorf("error code = %q, want unsupported_type", code)
+		caps, _ := d["capabilities"].([]any)
+		found := false
+		for _, capability := range caps {
+			if capability == "human_response" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("ready capabilities = %v, missing human_response", caps)
 		}
 	}
 }
@@ -377,12 +367,12 @@ func TestRunnerSetOwnerResolver(t *testing.T) {
 	}
 }
 
-// TestRunnerSetHITLResolver covers the HITL setter (nil-safe). Previously 0%.
-func TestRunnerSetHITLResolver(t *testing.T) {
+// TestRunnerSetStructuredHITLResolver covers the exact HITL setter.
+func TestRunnerSetStructuredHITLResolver(t *testing.T) {
 	r := &Runner{}
-	r.SetHITLResolver(nil)
-	if r.hitlResolver != nil {
-		t.Error("SetHITLResolver(nil) should leave field nil")
+	r.SetStructuredHITLResolver(nil)
+	if r.structuredHITLResolver != nil {
+		t.Error("SetStructuredHITLResolver(nil) should leave field nil")
 	}
 }
 
