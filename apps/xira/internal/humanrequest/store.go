@@ -3,6 +3,7 @@ package humanrequest
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,8 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"encoding/json"
-
 	"github.com/google/uuid"
 )
 
@@ -22,6 +21,7 @@ var (
 	ErrValidation = errors.New("validation")
 	ErrNotFound   = errors.New("not found")
 	ErrConflict   = errors.New("conflict")
+	ErrExpired    = errors.New("expired")
 )
 
 type Store struct {
@@ -69,28 +69,39 @@ func (s *Store) Create(ctx context.Context, input CreateRequest) (*HumanRequest,
 		return nil, err
 	}
 	req := &HumanRequest{
-		ID:           id,
-		WorkspaceID:  strings.TrimSpace(input.WorkspaceID),
-		WorkspaceKey: strings.TrimSpace(input.WorkspaceKey),
-		RunID:        strings.TrimSpace(input.RunID),
-		AgentID:      strings.TrimSpace(input.AgentID),
-		SessionID:    strings.TrimSpace(input.SessionID),
-		ToolCallID:   strings.TrimSpace(input.ToolCallID),
-		Source:       strings.TrimSpace(input.Source),
-		Kind:         input.Kind,
-		Status:       StatusPending,
-		Question:     strings.TrimSpace(input.Question),
-		Options:      append([]HumanOption(nil), input.Options...),
-		DedupeKey:    strings.TrimSpace(input.DedupeKey),
-		ChatKey:      strings.TrimSpace(input.ChatKey),
-		CreatedAt:    now,
-		Metadata:     cloneStringMap(input.Metadata),
+		ID:               id,
+		WorkspaceID:      strings.TrimSpace(input.WorkspaceID),
+		WorkspaceKey:     strings.TrimSpace(input.WorkspaceKey),
+		RunID:            strings.TrimSpace(input.RunID),
+		AgentID:          strings.TrimSpace(input.AgentID),
+		SessionID:        strings.TrimSpace(input.SessionID),
+		ToolCallID:       strings.TrimSpace(input.ToolCallID),
+		Source:           strings.TrimSpace(input.Source),
+		Kind:             input.Kind,
+		Status:           StatusPending,
+		Question:         strings.TrimSpace(input.Question),
+		Options:          append([]HumanOption(nil), input.Options...),
+		DedupeKey:        strings.TrimSpace(input.DedupeKey),
+		Responder:        normalizeResponderPolicy(input.Responder),
+		CorrelationToken: strings.TrimSpace(input.CorrelationToken),
+		ChatKey:          strings.TrimSpace(input.ChatKey),
+		CreatedAt:        now,
+		ExpiresAt:        copyTime(input.ExpiresAt),
+		Metadata:         cloneStringMap(input.Metadata),
 		Audit: []AuditRecord{{
 			Time:     now,
 			Action:   "human_request.created",
 			ToStatus: StatusPending,
 		}},
 	}
+	if req.CorrelationToken == "" {
+		req.CorrelationToken = uuid.NewString()
+	}
+	req.Delivery.Status = DeliveryNone
+	if input.DeliveryRequired {
+		req.Delivery.Status = DeliveryPending
+	}
+	req.Resume.Status = ResumeWaitingResponse
 	if err := s.writeRequest(req); err != nil {
 		return nil, err
 	}
@@ -98,6 +109,25 @@ func (s *Store) Create(ctx context.Context, input CreateRequest) (*HumanRequest,
 }
 
 func (s *Store) Resolve(ctx context.Context, input ResolveRequest) (*HumanRequest, error) {
+	return s.resolve(ctx, input, nil)
+}
+
+// ResolveExact resolves one request only when the channel-supplied correlation
+// and typed responder identity match the authority persisted at creation.
+// coverage: contract (100% required)
+func (s *Store) ResolveExact(ctx context.Context, input HumanResponseEnvelope) (*HumanRequest, error) {
+	return s.resolve(ctx, ResolveRequest{
+		WorkspaceKey:   input.WorkspaceKey,
+		RequestID:      input.RequestID,
+		Kind:           input.Kind,
+		Actor:          input.SenderID,
+		Message:        input.Message,
+		IdempotencyKey: input.IdempotencyKey,
+		ResolvedAt:     input.ResolvedAt,
+	}, &input)
+}
+
+func (s *Store) resolve(ctx context.Context, input ResolveRequest, exact *HumanResponseEnvelope) (*HumanRequest, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -120,12 +150,20 @@ func (s *Store) Resolve(ctx context.Context, input ResolveRequest) (*HumanReques
 	if input.Kind == ResponseAnswer && strings.TrimSpace(input.Message) == "" {
 		return nil, fmt.Errorf("%w: answer message is required", ErrValidation)
 	}
-	if req.Status != StatusPending {
-		return nil, fmt.Errorf("%w: human request %s is already %s", ErrConflict, req.ID, req.Status)
-	}
 	now := input.ResolvedAt
 	if now.IsZero() {
 		now = time.Now()
+	}
+	if exact != nil {
+		if err := validateExactResponse(req, *exact, now); err != nil {
+			return nil, err
+		}
+	}
+	if req.Status != StatusPending {
+		if sameResponseRetry(req.Response, input, exact) {
+			return req, nil
+		}
+		return nil, fmt.Errorf("%w: human request %s is already %s", ErrConflict, req.ID, req.Status)
 	}
 	response := &HumanResponse{
 		ID:             "hrs_" + uuid.NewString(),
@@ -136,9 +174,18 @@ func (s *Store) Resolve(ctx context.Context, input ResolveRequest) (*HumanReques
 		IdempotencyKey: strings.TrimSpace(input.IdempotencyKey),
 		CreatedAt:      now,
 	}
+	if exact != nil {
+		response.ActorIDType = strings.ToLower(strings.TrimSpace(exact.SenderIDType))
+		response.EntrypointID = strings.TrimSpace(exact.EntrypointID)
+		response.DeliveryMessageID = strings.TrimSpace(exact.DeliveryMessageID)
+	}
 	req.Status = StatusResolved
 	req.ResolvedAt = &now
 	req.Response = response
+	if req.Resume.Status == ResumeWaitingResponse {
+		req.Resume.Status = ResumePending
+		req.Resume.LastError = ""
+	}
 	req.Audit = append(req.Audit, AuditRecord{
 		Time:       now,
 		Actor:      response.Actor,
@@ -155,6 +202,58 @@ func (s *Store) Resolve(ctx context.Context, input ResolveRequest) (*HumanReques
 		return nil, err
 	}
 	return req, nil
+}
+
+// validateExactResponse checks every authority dimension before the request is
+// mutated. Empty persisted optional dimensions are legacy-compatible; a
+// non-empty persisted value must match exactly.
+// coverage: contract (100% required)
+func validateExactResponse(req *HumanRequest, input HumanResponseEnvelope, now time.Time) error {
+	if req == nil {
+		return fmt.Errorf("%w: human request is required", ErrValidation)
+	}
+	correlation := strings.TrimSpace(input.CorrelationToken)
+	if correlation == "" || subtle.ConstantTimeCompare([]byte(correlation), []byte(req.CorrelationToken)) != 1 {
+		return fmt.Errorf("%w: human response correlation does not match request", ErrConflict)
+	}
+	entrypointID := strings.TrimSpace(input.EntrypointID)
+	senderID := strings.TrimSpace(input.SenderID)
+	senderIDType := strings.ToLower(strings.TrimSpace(input.SenderIDType))
+	if req.Responder.EntrypointID != "" && entrypointID != req.Responder.EntrypointID {
+		return fmt.Errorf("%w: human response entrypoint does not match request", ErrConflict)
+	}
+	if req.Responder.SenderID != "" && senderID != req.Responder.SenderID {
+		return fmt.Errorf("%w: human response sender does not match request", ErrConflict)
+	}
+	if req.Responder.SenderIDType != "" && senderIDType != req.Responder.SenderIDType {
+		return fmt.Errorf("%w: human response sender id type does not match request", ErrConflict)
+	}
+	deliveryMessageID := strings.TrimSpace(input.DeliveryMessageID)
+	if req.Delivery.MessageID != "" && deliveryMessageID != req.Delivery.MessageID {
+		return fmt.Errorf("%w: human response delivery message does not match request", ErrConflict)
+	}
+	if req.ExpiresAt != nil && now.After(*req.ExpiresAt) {
+		return fmt.Errorf("%w: human request %s expired at %s", ErrExpired, req.ID, req.ExpiresAt.Format(time.RFC3339))
+	}
+	return nil
+}
+
+// sameResponseRetry recognizes an exact retry only when a non-empty stable
+// idempotency key and every persisted response field match.
+// coverage: contract (100% required)
+func sameResponseRetry(existing *HumanResponse, input ResolveRequest, exact *HumanResponseEnvelope) bool {
+	if existing == nil || strings.TrimSpace(input.IdempotencyKey) == "" || existing.IdempotencyKey != strings.TrimSpace(input.IdempotencyKey) {
+		return false
+	}
+	if existing.Kind != input.Kind || existing.Actor != strings.TrimSpace(input.Actor) || existing.Message != strings.TrimSpace(input.Message) {
+		return false
+	}
+	if exact == nil {
+		return true
+	}
+	return existing.ActorIDType == strings.ToLower(strings.TrimSpace(exact.SenderIDType)) &&
+		existing.EntrypointID == strings.TrimSpace(exact.EntrypointID) &&
+		existing.DeliveryMessageID == strings.TrimSpace(exact.DeliveryMessageID)
 }
 
 func (s *Store) Get(ctx context.Context, workspaceKey, requestID string) (*HumanRequest, error) {
@@ -352,6 +451,9 @@ func validateCreate(input CreateRequest) error {
 	if strings.TrimSpace(input.Question) == "" {
 		return fmt.Errorf("%w: question is required", ErrValidation)
 	}
+	if err := validateResponderPolicy(normalizeResponderPolicy(input.Responder)); err != nil {
+		return err
+	}
 	seenOptions := map[string]struct{}{}
 	for _, opt := range input.Options {
 		id := strings.TrimSpace(opt.ID)
@@ -364,6 +466,52 @@ func validateCreate(input CreateRequest) error {
 		seenOptions[id] = struct{}{}
 	}
 	return nil
+}
+
+// normalizeResponderPolicy keeps persisted responder identity deterministic.
+// A zero-value policy defaults to the human who triggered the conversation.
+// coverage: contract (100% required)
+func normalizeResponderPolicy(policy ResponderPolicy) ResponderPolicy {
+	policy.Type = ResponderType(strings.ToLower(strings.TrimSpace(string(policy.Type))))
+	if policy.Type == "" {
+		policy.Type = ResponderCurrentSender
+	}
+	policy.EntrypointID = strings.TrimSpace(policy.EntrypointID)
+	policy.SenderID = strings.TrimSpace(policy.SenderID)
+	policy.SenderIDType = strings.ToLower(strings.TrimSpace(policy.SenderIDType))
+	return policy
+}
+
+// validateResponderPolicy protects the authorization address persisted with a
+// request. Owner requests must be fully bound before they are stored. Current
+// sender fields may be absent for legacy CLI/Flow contexts.
+// coverage: contract (100% required)
+func validateResponderPolicy(policy ResponderPolicy) error {
+	switch policy.Type {
+	case ResponderCurrentSender:
+		return nil
+	case ResponderOwner:
+		if policy.EntrypointID == "" {
+			return fmt.Errorf("%w: owner responder entrypoint id is required", ErrValidation)
+		}
+		if policy.SenderID == "" {
+			return fmt.Errorf("%w: owner responder sender id is required", ErrValidation)
+		}
+		if policy.SenderIDType == "" {
+			return fmt.Errorf("%w: owner responder sender id type is required", ErrValidation)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: invalid responder type %q", ErrValidation, policy.Type)
+	}
+}
+
+func copyTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copied := value.UTC()
+	return &copied
 }
 
 func validateWorkspaceKey(key string) error {
@@ -391,68 +539,4 @@ func validateResponseKind(kind ResponseKind) error {
 	default:
 		return fmt.Errorf("%w: invalid response kind %q", ErrValidation, kind)
 	}
-}
-
-func readJSONFile[T any](path string) (T, error) {
-	var value T
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return value, err
-	}
-	if err := json.Unmarshal(data, &value); err != nil {
-		return value, err
-	}
-	return value, nil
-}
-
-func writeJSONAtomic(path string, value any, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*.json")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	cleanup = false
-	return nil
-}
-
-func cloneStringMap(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
 }

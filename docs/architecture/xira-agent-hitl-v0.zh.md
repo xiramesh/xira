@@ -10,6 +10,8 @@
 >
 > **仍有效**的部分：`agent_request`（协作型 HITL）、`flow_human_approval`（flow 审批 step）、HumanRequest/HumanResponse 数据模型、suspend/resume、agent delegation。阅读时请跳过 runtime_tool_gate / ActionSnapshot / replay 相关段落。
 
+> **#163 现行补充（2026-07-13）**：HumanRequest 的来源（Agent Run / Flow）、回答者（`current_sender` / `owner`）和 channel 表现（按钮 / 显式文字 / structured frame）是三个正交维度。新记录持久化 runtime 绑定的 `ResponderPolicy`、随机 correlation、可选 delivery receipt，以及独立的 resume 状态：`waiting_response → pending → running → completed|failed`。HumanResponse 落盘与 resume 不再是一个不可恢复的同步动作；进程在两者之间退出时，启动恢复把遗留 `running` 变为可重试 `failed`，composition root 在 channel 依赖就绪后 reconcile。旧 JSON 没有 resume 状态，继续可读，但不会被自动重放。平台 UI/回调只在各 runner，授权、幂等、过期和 resume 状态机只在 runtime/humanrequest。详见 `docs/plans/2026-07-13-humanrequest-interaction-design.md`。
+
 ## 摘要
 
 Agent Runtime Boundary v0 定义三件基础能力：

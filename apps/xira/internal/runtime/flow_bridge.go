@@ -130,6 +130,7 @@ func (b *flowBridge) CreateHumanRequest(ctx context.Context, input flow.CreateHu
 		DedupeKey:   input.DedupeKey,
 		Metadata:    input.Metadata,
 		ChatKey:     chatKeyStringFromInbound(input.Context),
+		Responder:   currentSenderResponder(input.Context),
 	})
 	if err != nil {
 		return flow.HumanRequestView{}, err

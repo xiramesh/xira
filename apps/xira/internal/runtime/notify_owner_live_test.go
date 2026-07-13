@@ -102,8 +102,13 @@ entrypoints: entrypoints.yaml
 	if resp.Status != "completed" || resp.FinalResponse != "" {
 		t.Fatalf("live notify response status=%q final=%q verification=%+v", resp.Status, resp.FinalResponse, resp.VerificationResult)
 	}
-	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != notifyOwnerToolName || resp.ToolCalls[0].Output["status"] != "sent" {
+	if len(resp.ToolCalls) < 1 || len(resp.ToolCalls) > 2 ||
+		resp.ToolCalls[0].Name != notifyOwnerToolName || resp.ToolCalls[0].Output["status"] != "sent" {
 		t.Fatalf("live notify tool calls = %+v", resp.ToolCalls)
+	}
+	if len(resp.ToolCalls) == 2 &&
+		(resp.ToolCalls[1].Name != finishSilentToolName || resp.ToolCalls[1].Output["status"] != "accepted") {
+		t.Fatalf("live notify optional silence tool call = %+v", resp.ToolCalls[1])
 	}
 	calls := emitter.emitted()
 	if len(calls) != 1 || calls[0].Recipient == nil || calls[0].Recipient.ID != "owner-live" || calls[0].Data["content"] != "Live notify_owner smoke passed." {

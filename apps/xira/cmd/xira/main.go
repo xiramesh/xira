@@ -128,6 +128,11 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 				return err
 			}
 			slog.Info("channel runners started", "count", channelRunners.Count())
+			go func() {
+				if err := rt.ReconcileHumanRequests(ctx); err != nil && ctx.Err() == nil {
+					slog.Error("startup human request reconciliation failed", "error", err)
+				}
+			}()
 			defer func() {
 				stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel()

@@ -63,6 +63,13 @@ func TestE2EDirectHumanRequestAnswerResumesRun(t *testing.T) {
 	if resumed.Status != "completed" || !strings.Contains(resumed.FinalResponse, "Tuesday window") {
 		t.Fatalf("resumed run = %+v", resumed)
 	}
+	resolvedRequest, err := rt.GetHumanRequest(context.Background(), resp.HumanRequests[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedRequest.Resume.Status != humanrequest.ResumeCompleted || resolvedRequest.Resume.Attempts != 1 {
+		t.Fatalf("human request resume = %+v, want one completed attempt", resolvedRequest.Resume)
+	}
 }
 
 func TestE2EDirectHumanRequestApproveAndResume(t *testing.T) {

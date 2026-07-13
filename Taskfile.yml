@@ -115,7 +115,13 @@ tasks:
         fi
         export DEEPSEEK_API_KEY="$(cat DEEPSEEK_API_KEY)"
         export XIRA_DEEPSEEK_LIVE=1
-        go test ./apps/xira/... -v -count=1 2>&1 | tee /tmp/xira-live-test.log
+        if go test ./apps/xira/... -v -count=1 > /tmp/xira-live-test.log 2>&1; then
+          cat /tmp/xira-live-test.log
+        else
+          status=$?
+          cat /tmp/xira-live-test.log
+          exit "$status"
+        fi
         # Check for live-test skips specifically — a live test that SKIPped
         # under the double-gate (key present + LIVE=1) means it didn't run.
         # Platform-related skips (case-sensitive FS etc.) are NOT live-gated

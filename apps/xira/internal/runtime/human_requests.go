@@ -3,11 +3,14 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/flow"
 	"github.com/xiramesh/xira/internal/humanrequest"
 )
@@ -93,23 +96,145 @@ func (s *Service) ResolveHumanRequest(ctx context.Context, requestID string, inp
 	if err != nil {
 		return nil, err
 	}
-	// Resume the run after the human response. Only agent-request-sourced
-	// interrupts trigger a direct resume (others no-op).
-	if resolved.Source == "agent_request" {
-		if err := s.resumeDirectHumanRequest(ctx, resolved); err != nil {
+	return s.resumeResolvedHumanRequest(ctx, resolved)
+}
+
+// ResolveHumanResponse validates an exact, channel-neutral response envelope.
+// Owner authority is checked against the current binding as well as the
+// persisted responder snapshot before the Store mutates the request.
+func (s *Service) ResolveHumanResponse(ctx context.Context, input humanrequest.HumanResponseEnvelope) (*humanrequest.HumanRequest, error) {
+	if s == nil || s.humanRequests == nil {
+		return nil, fmt.Errorf("human request store is not available")
+	}
+	input.WorkspaceKey = s.WorkspaceKey()
+	req, err := s.humanRequests.Get(ctx, input.WorkspaceKey, input.RequestID)
+	if err != nil {
+		return nil, err
+	}
+	if req.Responder.Type == humanrequest.ResponderOwner {
+		resolved, err := s.resolveExactOwnerResponse(ctx, input)
+		if err != nil {
 			return nil, err
 		}
+		return s.resumeResolvedHumanRequest(ctx, resolved)
 	}
-	if resolved.Source == flow.SourceFlowHumanApproval {
+	resolved, err := s.humanRequests.ResolveExact(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return s.resumeResolvedHumanRequest(ctx, resolved)
+}
+
+// resolveExactOwnerResponse holds the mutable owner-binding read lock through
+// the exact Store mutation, closing the rebind-vs-response TOCTOU window.
+func (s *Service) resolveExactOwnerResponse(ctx context.Context, input humanrequest.HumanResponseEnvelope) (*humanrequest.HumanRequest, error) {
+	entrypointID := strings.TrimSpace(input.EntrypointID)
+	staticOwnerID := ""
+	if s.entrypoints != nil {
+		if definition, ok := s.entrypoints.Definition(entrypointID); ok {
+			staticOwnerID = definition.OwnerID
+		}
+	}
+	if s.ownerBindings == nil {
+		if !ownerResponseAuthorized(ownerBinding{}, false, staticOwnerID, input.SenderID) {
+			return nil, fmt.Errorf("%w: response actor is not the current owner for entrypoint", humanrequest.ErrConflict)
+		}
+		return s.humanRequests.ResolveExact(ctx, input)
+	}
+	s.ownerBindings.mu.RLock()
+	defer s.ownerBindings.mu.RUnlock()
+	binding, found := s.ownerBindings.bindings[entrypointID]
+	if !ownerResponseAuthorized(binding, found, staticOwnerID, input.SenderID) {
+		return nil, fmt.Errorf("%w: response actor is not the current owner for entrypoint", humanrequest.ErrConflict)
+	}
+	return s.humanRequests.ResolveExact(ctx, input)
+}
+
+// ownerResponseAuthorized is the sealed dynamic-over-static authorization
+// rule used while the caller holds the binding read lock.
+// coverage: contract (100% required)
+func ownerResponseAuthorized(dynamic ownerBinding, dynamicFound bool, staticOwnerID, senderID string) bool {
+	senderID = strings.TrimSpace(senderID)
+	if senderID == "" {
+		return false
+	}
+	if dynamicFound {
+		return strings.TrimSpace(dynamic.OwnerSenderID) == senderID
+	}
+	return strings.TrimSpace(staticOwnerID) != "" && strings.TrimSpace(staticOwnerID) == senderID
+}
+
+// ReconcileHumanRequests retries every response whose durable resume work is
+// pending or previously failed. Individual failures do not prevent unrelated
+// requests from being attempted.
+func (s *Service) ReconcileHumanRequests(ctx context.Context) error {
+	if s == nil || s.humanRequests == nil {
+		return fmt.Errorf("human request store is not available")
+	}
+	requests, err := s.humanRequests.ListResumable(ctx, s.WorkspaceKey())
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for i := range requests {
+		if err := ctx.Err(); err != nil {
+			failures = append(failures, err)
+			break
+		}
+		if _, err := s.resumeResolvedHumanRequest(ctx, &requests[i]); err != nil {
+			failures = append(failures, fmt.Errorf("resume human request %s: %w", requests[i].ID, err))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func (s *Service) resumeResolvedHumanRequest(ctx context.Context, resolved *humanrequest.HumanRequest) (*humanrequest.HumanRequest, error) {
+	if resolved == nil {
+		return nil, fmt.Errorf("human request is required")
+	}
+	// Backward compatibility: pre-#163 records have no durable resume state.
+	// Preserve the former synchronous behavior but never auto-reconcile them.
+	if resolved.Resume.Status == "" {
+		if err := s.dispatchHumanRequestResume(ctx, resolved); err != nil {
+			return nil, err
+		}
+		return resolved, nil
+	}
+	claimed, ok, err := s.humanRequests.ClaimResume(ctx, s.WorkspaceKey(), resolved.ID, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return claimed, nil
+	}
+	if err := s.dispatchHumanRequestResume(ctx, claimed); err != nil {
+		failed, markErr := s.humanRequests.FailResume(context.WithoutCancel(ctx), s.WorkspaceKey(), claimed.ID, err.Error(), time.Now())
+		if markErr != nil {
+			return failed, errors.Join(err, fmt.Errorf("persist resume failure: %w", markErr))
+		}
+		return failed, err
+	}
+	completed, err := s.humanRequests.CompleteResume(context.WithoutCancel(ctx), s.WorkspaceKey(), claimed.ID, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	return completed, nil
+}
+
+func (s *Service) dispatchHumanRequestResume(ctx context.Context, resolved *humanrequest.HumanRequest) error {
+	switch resolved.Source {
+	case "agent_request":
+		return s.resumeDirectHumanRequest(ctx, resolved)
+	case flow.SourceFlowHumanApproval:
 		flowRunID := strings.TrimSpace(resolved.Metadata[flow.MetadataFlowRunID])
 		if flowRunID == "" {
-			return nil, fmt.Errorf("flow human approval %s missing %s metadata", resolved.ID, flow.MetadataFlowRunID)
+			return fmt.Errorf("flow human approval %s missing %s metadata", resolved.ID, flow.MetadataFlowRunID)
 		}
-		if _, err := s.ResumeFlow(ctx, flowRunID, resolved.ID); err != nil {
-			return nil, err
-		}
+		_, err := s.ResumeFlow(ctx, flowRunID, resolved.ID)
+		return err
+	default:
+		return nil
 	}
-	return resolved, nil
 }
 
 func (s *Service) createAgentHumanRequest(ctx context.Context, callID string, args map[string]any) (*humanrequest.HumanRequest, error) {
@@ -148,6 +273,7 @@ func (s *Service) createAgentHumanRequest(ctx context.Context, callID string, ar
 		Options:      options,
 		DedupeKey:    "agent_request:" + exec.Base.RunID + ":" + callID + ":" + question,
 		ChatKey:      chatKeyStringFromContext(ctx),
+		Responder:    currentSenderResponder(exec.Request.Context),
 	})
 	if err != nil {
 		return nil, err
@@ -155,6 +281,18 @@ func (s *Service) createAgentHumanRequest(ctx context.Context, callID string, ar
 	collector.AddHumanRequest(*req, "agent_request")
 	cancelRuntimeOnInterrupt(ctx)
 	return req, nil
+}
+
+// currentSenderResponder binds the generic responder policy to authoritative
+// inbound identity. It never accepts model-provided IDs.
+func currentSenderResponder(ctx channel.InboundContext) humanrequest.ResponderPolicy {
+	ctx = channel.NormalizeInboundContext(ctx)
+	return humanrequest.ResponderPolicy{
+		Type:         humanrequest.ResponderCurrentSender,
+		EntrypointID: strings.TrimSpace(ctx.EntrypointID),
+		SenderID:     strings.TrimSpace(ctx.SenderID),
+		SenderIDType: strings.ToLower(strings.TrimSpace(ctx.SenderIDType)),
+	}
 }
 
 func isHumanRequestToolWireName(name string) bool {

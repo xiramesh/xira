@@ -39,7 +39,7 @@ func TestFlowHumanApprovalUsesRuntimeHumanRequestStore(t *testing.T) {
 	k := rt.FlowKernel()
 	k.Definitions = flowStaticDefinitions{defs: map[string]*flow.Definition{"approval-flow": def}}
 
-	trigger := channel.InboundContext{Channel: "feishu", ChatID: "oc_flow", SenderID: "u_flow", ChatType: "group"}
+	trigger := channel.InboundContext{Channel: "feishu", EntrypointID: "feishu-default", ChatID: "oc_flow", SenderID: "u_flow", SenderIDType: "open_id", ChatType: "group"}
 	run, err := rt.StartFlow(context.Background(), flow.StartRequest{
 		FlowID:       "approval-flow",
 		EntrypointID: "ad_hoc",
@@ -76,6 +76,9 @@ func TestFlowHumanApprovalUsesRuntimeHumanRequestStore(t *testing.T) {
 	if req.ChatKey != wantChatKey {
 		t.Fatalf("flow HumanRequest chat_key = %q, want %q", req.ChatKey, wantChatKey)
 	}
+	if req.Responder.Type != humanrequest.ResponderCurrentSender || req.Responder.EntrypointID != "feishu-default" || req.Responder.SenderID != "u_flow" || req.Responder.SenderIDType != "open_id" {
+		t.Fatalf("flow HumanRequest responder = %+v", req.Responder)
+	}
 	if _, err := rt.ResolveHumanRequest(context.Background(), req.ID, humanrequest.ResolveRequest{
 		Kind:    humanrequest.ResponseAnswer,
 		Actor:   "tester",
@@ -89,6 +92,13 @@ func TestFlowHumanApprovalUsesRuntimeHumanRequestStore(t *testing.T) {
 	}
 	if run.Status != flow.RunRunning || run.CurrentStepID != "report" {
 		t.Fatalf("after resume status=%q current=%q, want running/report", run.Status, run.CurrentStepID)
+	}
+	resolvedRequest, err := rt.GetHumanRequest(context.Background(), req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedRequest.Resume.Status != humanrequest.ResumeCompleted || resolvedRequest.Resume.Attempts != 1 {
+		t.Fatalf("flow HumanRequest resume = %+v", resolvedRequest.Resume)
 	}
 }
 
