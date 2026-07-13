@@ -137,6 +137,20 @@ func TestHumanApprovalStepPassesRunContextToHumanRequest(t *testing.T) {
 	}
 }
 
+func TestHumanApprovalStepPassesResponderChoice(t *testing.T) {
+	creator := newFakeHumanCreator()
+	exec := &AgentExecutor{Human: creator}
+	run := &Run{ID: "fr_owner", FlowID: "test", Steps: map[string]StepState{}}
+	step := Step{ID: "approve_owner", Executor: Executor{Type: "human_approval", Responder: "owner", Question: "Owner approve?"}}
+	result, err := exec.ExecuteStep(context.Background(), run, &Definition{ID: "test"}, step)
+	if err != nil || result.Status != StepWaitingHuman {
+		t.Fatalf("ExecuteStep() = %+v, %v", result, err)
+	}
+	if len(creator.created) != 1 || creator.created[0].Responder != "owner" {
+		t.Fatalf("created HumanRequest = %+v", creator.created)
+	}
+}
+
 func TestHumanApprovalStepUsesQuestionField(t *testing.T) {
 	creator := newFakeHumanCreator()
 	exec := &AgentExecutor{Human: creator}

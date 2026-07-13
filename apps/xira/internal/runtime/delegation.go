@@ -361,8 +361,9 @@ func humanRequestToolInputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"kind":     {Type: "string", Enum: []any{string(humanrequest.RequestFreeform), string(humanrequest.RequestApproval)}},
-			"question": {Type: "string"},
+			"kind":      {Type: "string", Enum: []any{string(humanrequest.RequestFreeform), string(humanrequest.RequestApproval)}},
+			"question":  {Type: "string"},
+			"responder": {Type: "string", Enum: []any{string(humanrequest.ResponderCurrentSender), string(humanrequest.ResponderOwner)}},
 			"options": {
 				Type: "array",
 				Items: &jsonschema.Schema{

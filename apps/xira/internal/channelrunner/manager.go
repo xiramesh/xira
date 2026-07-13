@@ -313,7 +313,7 @@ func (m *Manager) humanRequestDeliverer(target runtime.HumanRequestDeliveryTarge
 		}
 		deliverer, ok := runner.(runtime.HumanRequestDeliverer)
 		if !ok {
-			return nil, fmt.Errorf("runner %q (channel %q) does not implement HumanRequest delivery", runner.ID(), runner.Channel())
+			return nil, fmt.Errorf("%w: runner %q (channel %q) does not implement HumanRequest delivery", runtime.ErrHumanRequestDeliveryUnsupported, runner.ID(), runner.Channel())
 		}
 		return deliverer, nil
 	}

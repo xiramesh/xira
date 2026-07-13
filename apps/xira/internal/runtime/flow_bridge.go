@@ -117,7 +117,11 @@ func (b *flowBridge) CreateHumanRequest(ctx context.Context, input flow.CreateHu
 	for _, opt := range input.Options {
 		options = append(options, humanrequest.HumanOption{ID: opt, Label: opt})
 	}
-	req, err := b.service.CreateHumanRequest(ctx, humanrequest.CreateRequest{
+	responder, deliveryTarget, deliveryRequired, err := b.service.prepareHumanRequestInteraction(ctx, input.Context, input.Responder)
+	if err != nil {
+		return flow.HumanRequestView{}, err
+	}
+	req, err := b.service.createAndDeliverHumanRequest(ctx, humanrequest.CreateRequest{
 		WorkspaceID: input.WorkspaceID,
 		RunID:       input.RunID,
 		AgentID:     input.AgentID,
@@ -130,8 +134,8 @@ func (b *flowBridge) CreateHumanRequest(ctx context.Context, input flow.CreateHu
 		DedupeKey:   input.DedupeKey,
 		Metadata:    input.Metadata,
 		ChatKey:     chatKeyStringFromInbound(input.Context),
-		Responder:   currentSenderResponder(input.Context),
-	})
+		Responder:   responder,
+	}, deliveryTarget, deliveryRequired)
 	if err != nil {
 		return flow.HumanRequestView{}, err
 	}

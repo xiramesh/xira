@@ -3,6 +3,7 @@ package flow
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -188,6 +189,21 @@ steps:
 	_, err := LoadDefinition(path)
 	if err == nil {
 		t.Fatalf("expected error for command executor")
+	}
+}
+
+func TestValidateExecutorRejectsInvalidHumanResponder(t *testing.T) {
+	valid := Step{ID: "approval", Executor: Executor{Type: "human_approval", Responder: "owner"}}
+	if err := validateExecutor(&valid); err != nil {
+		t.Fatalf("owner responder rejected: %v", err)
+	}
+	invalid := Step{ID: "approval", Executor: Executor{Type: "human_approval", Responder: "everyone"}}
+	if err := validateExecutor(&invalid); err == nil || !strings.Contains(err.Error(), "responder") {
+		t.Fatalf("invalid responder error = %v", err)
+	}
+	nonHuman := Step{ID: "agent", Executor: Executor{Agent: "worker", Responder: "owner"}}
+	if err := validateExecutor(&nonHuman); err == nil || !strings.Contains(err.Error(), "human_approval") {
+		t.Fatalf("non-human responder error = %v", err)
 	}
 }
 

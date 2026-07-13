@@ -2,10 +2,13 @@ package runtime
 
 import (
 	"context"
+	"errors"
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/humanrequest"
 )
+
+var ErrHumanRequestDeliveryUnsupported = errors.New("human request delivery unsupported")
 
 // runtime.go: package-level interface declarations for the runtime package.
 //

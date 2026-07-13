@@ -40,6 +40,7 @@ type CreateHumanRequestInput struct {
 	Kind        string // "approval" or "freeform"
 	Question    string
 	Options     []string
+	Responder   string
 	DedupeKey   string
 	Metadata    map[string]string
 	Context     channel.InboundContext
