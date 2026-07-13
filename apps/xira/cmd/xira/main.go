@@ -120,6 +120,7 @@ func serveCommand(newRuntime func() (*runtime.Service, error)) *cobra.Command {
 			rt.SetOutboundEmitter(channelRunners)
 			channelRunners.SetHITLResolver(rt)
 			channelRunners.SetTextHITLResolver(rt)
+			channelRunners.SetAsyncExactHITLResolver(rt)
 			channelRunners.SetOwnerResolver(rt)
 			// #151: 创建共享 ingest 层，注入所有 runner。
 			// ingest 统一处理 gate（授权+mention）/ dedupe / observe。

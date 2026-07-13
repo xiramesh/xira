@@ -218,6 +218,8 @@ entrypoints: entrypoints.yaml
 	var nilMgr *Manager
 	nilMgr.SetOwnerResolver(nil)
 	nilMgr.SetHITLResolver(nil)
+	nilMgr.SetTextHITLResolver(nil)
+	nilMgr.SetAsyncExactHITLResolver(nil)
 	// WSRunner must find the websocket runner.
 	if manager.WSRunner() == nil {
 		t.Error("WSRunner() returned nil, want websocket runner registered")

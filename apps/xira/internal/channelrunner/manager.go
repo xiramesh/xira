@@ -123,8 +123,6 @@ func (m *Manager) SetHITLResolver(resolver runtime.HITLResolver) {
 	}
 	for _, runner := range m.runners {
 		switch r := runner.(type) {
-		case *feishu.Runner:
-			r.SetHITLResolver(resolver)
 		case *websocket.Runner:
 			r.SetHITLResolver(resolver)
 		}
@@ -138,8 +136,24 @@ func (m *Manager) SetTextHITLResolver(resolver runtime.TextHITLResolver) {
 		return
 	}
 	for _, runner := range m.runners {
-		if r, ok := runner.(*ilink.Runner); ok {
+		switch r := runner.(type) {
+		case *feishu.Runner:
 			r.SetTextHITLResolver(resolver)
+		case *ilink.Runner:
+			r.SetTextHITLResolver(resolver)
+		}
+	}
+}
+
+// SetAsyncExactHITLResolver injects native callback resolution into runners
+// whose platform can return an authenticated structured action.
+func (m *Manager) SetAsyncExactHITLResolver(resolver runtime.AsyncExactHITLResolver) {
+	if m == nil {
+		return
+	}
+	for _, runner := range m.runners {
+		if r, ok := runner.(*feishu.Runner); ok {
+			r.SetAsyncExactHITLResolver(resolver)
 		}
 	}
 }

@@ -638,8 +638,8 @@ func TestStringValue(t *testing.T) {
 	}
 }
 
-// TestFeishuRunnerIDChannelSetters covers ID()/Channel()/SetHITLResolver/
-// SetOwnerResolver on a constructed runner. Previously 0%.
+// TestFeishuRunnerIDChannelSetters covers ID()/Channel() and resolver setters
+// on a constructed runner.
 func TestFeishuRunnerIDChannelSetters(t *testing.T) {
 	runner, err := NewRunner(entrypoints.Definition{
 		ID:        "feishu-id-test",
@@ -656,10 +656,14 @@ func TestFeishuRunnerIDChannelSetters(t *testing.T) {
 	if runner.Channel() != "feishu" {
 		t.Errorf("Channel() = %q, want feishu", runner.Channel())
 	}
-	// SetHITLResolver nil-safe.
-	runner.SetHITLResolver(nil)
-	if runner.hitlResolver != nil {
-		t.Error("SetHITLResolver(nil) should leave field nil")
+	// Native + text HITL setters are nil-safe.
+	runner.SetAsyncExactHITLResolver(nil)
+	if runner.asyncExactResolver != nil {
+		t.Error("SetAsyncExactHITLResolver(nil) should leave field nil")
+	}
+	runner.SetTextHITLResolver(nil)
+	if runner.textResolver != nil {
+		t.Error("SetTextHITLResolver(nil) should leave field nil")
 	}
 }
 
