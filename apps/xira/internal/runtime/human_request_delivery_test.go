@@ -18,10 +18,13 @@ type fakeHumanRequestOutbound struct {
 	deliverErr  error
 	receiptID   string
 	targets     []HumanRequestDeliveryTarget
+	emitted     []channel.OutboundEnvelope
 }
 
 func (f *fakeHumanRequestOutbound) Capabilities() channel.CapabilitySet { return nil }
-func (f *fakeHumanRequestOutbound) Emit(context.Context, channel.OutboundEnvelope) error {
+
+func (f *fakeHumanRequestOutbound) Emit(_ context.Context, env channel.OutboundEnvelope) error {
+	f.emitted = append(f.emitted, env)
 	return nil
 }
 func (f *fakeHumanRequestOutbound) ValidateHumanRequestDelivery(target HumanRequestDeliveryTarget) error {

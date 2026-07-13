@@ -36,10 +36,10 @@
 
 **Steps:**
 
-1. Write failing Store tests for unique pending correlation lookup, missing token, duplicate token, and resolved-record exclusion.
+1. Write failing Store tests for unique correlation lookup, missing token, duplicate token, and resolved-record lookup for idempotent retry.
 2. Write failing runtime tests for exact current-sender chat, wrong chat/sender/type/entrypoint, owner response, option normalization, expiry, and idempotent retry.
 3. Run the focused Store/runtime tests; expect RED.
-4. Add `TextResponseEnvelope`, `FindPendingByCorrelation`, `ResolveHumanTextResponse`, and a sealed current-sender chat check.
+4. Add `TextResponseEnvelope`, `FindByCorrelation`, `ResolveHumanTextResponse`, and a sealed current-sender chat check.
 5. Map the parsed reference to the existing `HumanResponseEnvelope`; do not add a second resolve state machine.
 6. Rerun focused tests and coverage; expect GREEN and contract functions at 100%.
 7. Commit `feat: resolve explicit human responses exactly`.
@@ -159,4 +159,3 @@
 4. Copy the ignored local key only for validation, run `task live-test`, verify no FAIL/live-gated SKIP, then remove the copied key.
 5. Verify every commit with `git show --stat`, push `codex/164-humanrequest-text-ilink`, and open a PR closing #164 and linking #155/#165.
 6. List package coverage and every uncovered core/contract function with explanation in the PR description.
-

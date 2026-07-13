@@ -62,8 +62,10 @@ func NormalizeTextAnswer(req HumanRequest, answer string) (string, error)
 
 ### Exact reference lookup and response
 
-The Store adds a constant-time pending-correlation lookup that rejects zero or
-multiple matches. Runtime exposes `ResolveHumanTextResponse`. It converts the
+The Store scans the workspace's persisted requests under its lock, compares
+correlations in constant time, and rejects zero or multiple matches. Resolved
+records remain searchable so an identical transport retry can reach the
+existing idempotency check. Runtime exposes `ResolveHumanTextResponse`. It converts the
 parsed reference and authoritative iLink inbound identity into the existing
 `HumanResponseEnvelope`, then calls `ResolveHumanResponse`; there is still one
 authorization/resume state machine.
@@ -168,4 +170,3 @@ unchanged in #164.
 - WebSocket structured response frames (#166).
 - Owner transfer/unbind (#168).
 - Delivery cron, retry scheduler, or cross-channel person graph.
-
