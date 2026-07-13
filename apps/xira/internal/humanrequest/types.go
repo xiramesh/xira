@@ -140,12 +140,17 @@ type HumanResponse struct {
 // runner authenticates the native event and supplies typed identity; runtime
 // and Store revalidate it against the persisted request authority.
 type HumanResponseEnvelope struct {
-	WorkspaceKey      string
-	RequestID         string
-	CorrelationToken  string
-	EntrypointID      string
-	SenderID          string
-	SenderIDType      string
+	WorkspaceKey     string
+	RequestID        string
+	CorrelationToken string
+	EntrypointID     string
+	SenderID         string
+	SenderIDType     string
+	// SenderIdentities contains equivalent, transport-authenticated operator
+	// identities keyed by canonical id type. Native callbacks such as Feishu
+	// may carry user_id and open_id together; runtime selects only the type
+	// sealed in the persisted responder policy before Store validation.
+	SenderIdentities  map[string]string
 	DeliveryMessageID string
 	Kind              ResponseKind
 	Message           string
