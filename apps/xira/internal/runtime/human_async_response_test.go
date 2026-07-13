@@ -135,3 +135,67 @@ func TestResolveHumanResponseAsyncRejectsUnavailableStore(t *testing.T) {
 		t.Fatal("nil service async resolve succeeded")
 	}
 }
+
+func TestResolveHumanResponseAsyncRejectsUnknownRequestAndMissingTrustedIdentity(t *testing.T) {
+	rt := newTestService(t, Config{StateDir: filepath.Join(t.TempDir(), "state")})
+	if _, err := rt.ResolveHumanResponseAsync(context.Background(), humanrequest.HumanResponseEnvelope{RequestID: "missing"}); err == nil {
+		t.Fatal("unknown request async resolve succeeded")
+	}
+	req, err := rt.CreateHumanRequest(context.Background(), humanrequest.CreateRequest{
+		ID: "hrq_async_identity", WorkspaceID: rt.workspace, RunID: "run-identity", AgentID: "xira-assistant",
+		SessionID: "session-identity", Source: "async_test", Kind: humanrequest.RequestApproval,
+		Question: "Approve?", CorrelationToken: "550e8400-e29b-41d4-a716-446655440003",
+		Responder: humanrequest.ResponderPolicy{Type: humanrequest.ResponderCurrentSender,
+			EntrypointID: "feishu-main", SenderID: "u_operator", SenderIDType: "user_id"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = rt.ResolveHumanResponseAsync(context.Background(), humanrequest.HumanResponseEnvelope{
+		RequestID: req.ID, CorrelationToken: req.CorrelationToken, EntrypointID: "feishu-main",
+		SenderIdentities: map[string]string{"open_id": "ou_operator"},
+		Kind:             humanrequest.ResponseApprove, IdempotencyKey: "missing-user-id",
+	})
+	if !errors.Is(err, humanrequest.ErrConflict) {
+		t.Fatalf("missing trusted identity error = %v, want conflict", err)
+	}
+}
+
+func TestResolveHumanResponseAsyncPersistsResumeFailure(t *testing.T) {
+	rt := newTestService(t, Config{StateDir: filepath.Join(t.TempDir(), "state")})
+	req, err := rt.CreateHumanRequest(context.Background(), humanrequest.CreateRequest{
+		ID: "hrq_async_failure", WorkspaceID: rt.workspace, RunID: "missing-run", AgentID: "xira-assistant",
+		SessionID: "session-failure", Source: "agent_request", Kind: humanrequest.RequestApproval,
+		Question: "Approve?", CorrelationToken: "550e8400-e29b-41d4-a716-446655440004",
+		Responder: humanrequest.ResponderPolicy{Type: humanrequest.ResponderCurrentSender,
+			EntrypointID: "feishu-main", SenderID: "u_operator", SenderIDType: "user_id"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = rt.ResolveHumanResponseAsync(context.Background(), humanrequest.HumanResponseEnvelope{
+		RequestID: req.ID, CorrelationToken: req.CorrelationToken, EntrypointID: "feishu-main",
+		SenderIdentities: map[string]string{"user_id": "u_operator"},
+		Kind:             humanrequest.ResponseApprove, IdempotencyKey: "async-failure",
+	})
+	if err != nil {
+		t.Fatalf("accept response: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, getErr := rt.GetHumanRequest(context.Background(), req.ID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if got.Resume.Status == humanrequest.ResumeFailed {
+			if got.Resume.LastError == "" {
+				t.Fatalf("failed resume has no error: %+v", got.Resume)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("async resume failure was not persisted: %+v", got.Resume)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
