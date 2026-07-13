@@ -3,6 +3,8 @@ package humanrequest
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -123,6 +125,67 @@ func TestStoreResolveExactRejectsExpiredRequest(t *testing.T) {
 	})
 	if !errors.Is(err, ErrExpired) {
 		t.Fatalf("ResolveExact() error = %v, want ErrExpired", err)
+	}
+}
+
+func TestStoreFindByCorrelationRequiresOneExactMatchAcrossStatuses(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	workspaceKey := "ws_find_correlation"
+	first := mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_find_first", WorkspaceID: "workspace", WorkspaceKey: workspaceKey,
+		RunID: "run-first", AgentID: "agent", SessionID: "session",
+		Kind: RequestFreeform, Question: "First?", CorrelationToken: "550e8400-e29b-41d4-a716-446655440000",
+	})
+	mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_find_second", WorkspaceID: "workspace", WorkspaceKey: workspaceKey,
+		RunID: "run-second", AgentID: "agent", SessionID: "session",
+		Kind: RequestFreeform, Question: "Second?", CorrelationToken: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+	})
+
+	got, err := store.FindByCorrelation(context.Background(), workspaceKey, first.CorrelationToken)
+	if err != nil || got.ID != first.ID {
+		t.Fatalf("FindByCorrelation() = %+v, %v; want %s", got, err, first.ID)
+	}
+	if _, err := store.Resolve(context.Background(), ResolveRequest{
+		WorkspaceKey: workspaceKey, RequestID: first.ID, Kind: ResponseAnswer,
+		Actor: "user", Message: "done", IdempotencyKey: "find-first",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := store.FindByCorrelation(context.Background(), workspaceKey, first.CorrelationToken)
+	if err != nil || resolved.Status != StatusResolved {
+		t.Fatalf("resolved correlation lookup = %+v, %v", resolved, err)
+	}
+	if _, err := store.FindByCorrelation(context.Background(), workspaceKey, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing correlation error = %v, want not found", err)
+	}
+	if _, err := store.FindByCorrelation(context.Background(), "", first.CorrelationToken); !errors.Is(err, ErrValidation) {
+		t.Fatalf("invalid workspace error = %v, want validation", err)
+	}
+	if _, err := store.FindByCorrelation(context.Background(), workspaceKey, " "); !errors.Is(err, ErrValidation) {
+		t.Fatalf("empty correlation error = %v, want validation", err)
+	}
+
+	mustCreateHumanRequest(t, store, CreateRequest{
+		ID: "hrq_find_duplicate", WorkspaceID: "workspace", WorkspaceKey: workspaceKey,
+		RunID: "run-duplicate", AgentID: "agent", SessionID: "session",
+		Kind: RequestFreeform, Question: "Duplicate?", CorrelationToken: first.CorrelationToken,
+	})
+	if _, err := store.FindByCorrelation(context.Background(), workspaceKey, first.CorrelationToken); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate correlation error = %v, want conflict", err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.FindByCorrelation(canceled, workspaceKey, first.CorrelationToken); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled lookup error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(store.requestsDir(workspaceKey), "broken.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FindByCorrelation(context.Background(), workspaceKey, first.CorrelationToken); err == nil {
+		t.Fatal("corrupt request store lookup succeeded, want read error")
 	}
 }
 

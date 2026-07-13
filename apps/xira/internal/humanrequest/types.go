@@ -152,6 +152,20 @@ type HumanResponseEnvelope struct {
 	ResolvedAt        time.Time
 }
 
+// TextResponseEnvelope is the channel-neutral authority attached to one
+// parsed explicit-text response. CorrelationToken comes from the opaque
+// protocol reference; all identity and chat fields come from the runner.
+type TextResponseEnvelope struct {
+	CorrelationToken string
+	EntrypointID     string
+	SenderID         string
+	SenderIDType     string
+	ChatKey          string
+	Answer           string
+	IdempotencyKey   string
+	ResolvedAt       time.Time
+}
+
 type AuditRecord struct {
 	Time       time.Time     `json:"time" yaml:"time"`
 	Actor      string        `json:"actor,omitempty" yaml:"actor,omitempty"`

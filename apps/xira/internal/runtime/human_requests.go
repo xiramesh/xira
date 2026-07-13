@@ -125,6 +125,55 @@ func (s *Service) ResolveHumanResponse(ctx context.Context, input humanrequest.H
 	return s.resumeResolvedHumanRequest(ctx, resolved)
 }
 
+// ResolveHumanTextResponse maps one opaque correlation reference to the
+// existing exact response path. It never chooses a pending request by order.
+func (s *Service) ResolveHumanTextResponse(ctx context.Context, input humanrequest.TextResponseEnvelope) (*humanrequest.HumanRequest, error) {
+	if s == nil || s.humanRequests == nil {
+		return nil, fmt.Errorf("human request store is not available")
+	}
+	req, err := s.humanRequests.FindByCorrelation(ctx, s.WorkspaceKey(), input.CorrelationToken)
+	if err != nil {
+		return nil, err
+	}
+	if !textResponseChatAuthorized(req, input.ChatKey) {
+		return nil, fmt.Errorf("%w: human response chat is not authorized for request", humanrequest.ErrConflict)
+	}
+	answer, err := humanrequest.NormalizeTextAnswer(*req, input.Answer)
+	if err != nil {
+		return nil, err
+	}
+	return s.ResolveHumanResponse(ctx, humanrequest.HumanResponseEnvelope{
+		RequestID:         req.ID,
+		CorrelationToken:  req.CorrelationToken,
+		EntrypointID:      input.EntrypointID,
+		SenderID:          input.SenderID,
+		SenderIDType:      input.SenderIDType,
+		DeliveryMessageID: req.Delivery.MessageID,
+		Kind:              humanrequest.ResponseAnswer,
+		Message:           answer,
+		IdempotencyKey:    input.IdempotencyKey,
+		ResolvedAt:        input.ResolvedAt,
+	})
+}
+
+// textResponseChatAuthorized seals the text-protocol chat rule: current sender
+// must answer in the originating chat; owner may answer in a private DM.
+// coverage: contract (100% required)
+func textResponseChatAuthorized(req *humanrequest.HumanRequest, inboundChatKey string) bool {
+	if req == nil {
+		return false
+	}
+	switch req.Responder.Type {
+	case humanrequest.ResponderCurrentSender:
+		persisted := strings.TrimSpace(req.ChatKey)
+		return persisted != "" && persisted == strings.TrimSpace(inboundChatKey)
+	case humanrequest.ResponderOwner:
+		return true
+	default:
+		return false
+	}
+}
+
 // resolveExactOwnerResponse holds the mutable owner-binding read lock through
 // the exact Store mutation, closing the rebind-vs-response TOCTOU window.
 func (s *Service) resolveExactOwnerResponse(ctx context.Context, input humanrequest.HumanResponseEnvelope) (*humanrequest.HumanRequest, error) {

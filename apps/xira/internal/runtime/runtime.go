@@ -42,6 +42,12 @@ type ExactHITLResolver interface {
 	ResolveHumanResponse(ctx context.Context, input humanrequest.HumanResponseEnvelope) (*humanrequest.HumanRequest, error)
 }
 
+// TextHITLResolver resolves a parsed explicit text reference with authoritative
+// runner identity. It is separate from legacy same-chat HITL resolution.
+type TextHITLResolver interface {
+	ResolveHumanTextResponse(ctx context.Context, input humanrequest.TextResponseEnvelope) (*humanrequest.HumanRequest, error)
+}
+
 // OwnerResolver is the injectable subset of *Service for owner queries (#122).
 // Channel runners use it to let the owner bypass the sender allowlist (#121)
 // even when they aren't explicitly listed. nil = owner concept not configured
@@ -67,5 +73,6 @@ type OwnerTargetResolver interface {
 var _ Runtime = (*Service)(nil)
 var _ HITLResolver = (*Service)(nil)
 var _ ExactHITLResolver = (*Service)(nil)
+var _ TextHITLResolver = (*Service)(nil)
 var _ OwnerResolver = (*Service)(nil)
 var _ OwnerTargetResolver = (*Service)(nil)
