@@ -18,6 +18,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
@@ -41,10 +42,10 @@ type Runner struct {
 	// implicitly (runtime.go var _ assertion). Production wiring via NewRunner
 	// is unchanged.
 	runtime frt.Runtime
-	// hitlResolver, when non-nil, lets feishu resolve pending HITL directly
-	// from IM text replies (#92). Injected by main.go from *frt.Service.
-	// nil = HITL direct-answer disabled (messages always start a new turn).
-	hitlResolver frt.HITLResolver
+	// asyncExactResolver accepts native card actions without making Feishu's
+	// callback wait for Agent/Flow resume. textResolver handles exact fallback.
+	asyncExactResolver frt.AsyncExactHITLResolver
+	textResolver       frt.TextHITLResolver
 	// ownerResolver, when non-nil, lets the owner bypass the sender allowlist
 	// (#121) even when not explicitly listed. Injected by main.go from
 	// *frt.Service once #122 implements IsOwner. nil = owner concept not
@@ -75,11 +76,15 @@ type Runner struct {
 	ingest *ingest.Ingest
 }
 
-// SetHITLResolver injects the HITL resolve capability for IM direct-answer (#92).
-// Called by main.go after NewRunner. nil = HITL direct-answer disabled.
-func (r *Runner) SetHITLResolver(resolver frt.HITLResolver) {
+func (r *Runner) SetAsyncExactHITLResolver(resolver frt.AsyncExactHITLResolver) {
 	if r != nil {
-		r.hitlResolver = resolver
+		r.asyncExactResolver = resolver
+	}
+}
+
+func (r *Runner) SetTextHITLResolver(resolver frt.TextHITLResolver) {
+	if r != nil {
+		r.textResolver = resolver
 	}
 }
 
@@ -167,7 +172,10 @@ func (r *Runner) Start(ctx context.Context) error {
 
 	dispatcher := larkdispatcher.NewEventDispatcher(r.verify, r.encryptKey).
 		OnP2MessageReceiveV1(r.handleMessageReceive).
-		OnP2MessageReadV1(r.handleMessageRead)
+		OnP2MessageReadV1(r.handleMessageRead).
+		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+			return r.handleCardAction(ctx, event)
+		})
 
 	runCtx, cancel := context.WithCancel(ctx)
 	domain := lark.FeishuBaseUrl
@@ -350,11 +358,9 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 	)
 	inbound := input.InboundContext()
 	chatKey := frt.ChatKeyFromInbound(inbound)
-	// HITL direct-answer (#92): shared preflight check. If this chatKey has a
-	// pending HITL (agent_request only — tool gates need precise approve/deny),
-	// resolve it from the user's IM text and return. Checked BEFORE
-	// imRenderer.Start() to avoid goroutine leak on resolve.
-	if progress.TryResolveHITL(ctx, r.hitlResolver, chatKey, content, senderID) {
+	// Explicit fallback protocol is consumed before Agent Turn. Feishu no
+	// longer guesses that arbitrary text answers the newest pending request.
+	if r.tryResolveTextHumanResponse(ctx, inbound, chatKey, content, dedupeKey) {
 		return nil
 	}
 	// IMEventRenderer receives raw RuntimeEvents and renders them to localized
@@ -596,42 +602,36 @@ func (r *Runner) sendTo(ctx context.Context, receiveIDType, receiveID, content s
 }
 
 func (r *Runner) sendCardTo(ctx context.Context, receiveIDType, receiveID, cardContent string) error {
-	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(receiveIDType).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(receiveID).
-			MsgType(larkim.MsgTypeInteractive).
-			Content(cardContent).
-			Build()).
-		Build()
-	resp, err := r.client.Im.V1.Message.Create(ctx, req)
-	if err != nil {
-		return err
-	}
-	if !resp.Success() {
-		return fmt.Errorf("feishu api error code=%d msg=%s", resp.Code, resp.Msg)
-	}
-	return nil
+	_, err := r.createMessage(ctx, receiveIDType, receiveID, larkim.MsgTypeInteractive, cardContent)
+	return err
 }
 
 func (r *Runner) sendTextTo(ctx context.Context, receiveIDType, receiveID, text string) error {
 	content, _ := json.Marshal(map[string]string{"text": text})
+	_, err := r.createMessage(ctx, receiveIDType, receiveID, larkim.MsgTypeText, string(content))
+	return err
+}
+
+func (r *Runner) createMessage(ctx context.Context, receiveIDType, receiveID, msgType, content string) (string, error) {
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(receiveIDType).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(receiveID).
-			MsgType(larkim.MsgTypeText).
-			Content(string(content)).
+			MsgType(msgType).
+			Content(content).
 			Build()).
 		Build()
 	resp, err := r.client.Im.V1.Message.Create(ctx, req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !resp.Success() {
-		return fmt.Errorf("feishu api error code=%d msg=%s", resp.Code, resp.Msg)
+		return "", fmt.Errorf("feishu api error code=%d msg=%s", resp.Code, resp.Msg)
 	}
-	return nil
+	if resp.Data == nil || resp.Data.MessageId == nil || strings.TrimSpace(*resp.Data.MessageId) == "" {
+		return "", fmt.Errorf("feishu message delivery returned no message id")
+	}
+	return strings.TrimSpace(*resp.Data.MessageId), nil
 }
 
 // feishuReceiveIDType is the sealed adapter boundary for direct recipients.

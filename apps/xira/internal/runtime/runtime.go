@@ -46,6 +46,13 @@ type ExactHITLResolver interface {
 	ResolveHumanResponse(ctx context.Context, input humanrequest.HumanResponseEnvelope) (*humanrequest.HumanRequest, error)
 }
 
+// AsyncExactHITLResolver atomically accepts a native response, then schedules
+// the existing durable Agent/Flow resume without making a platform callback
+// wait for model work.
+type AsyncExactHITLResolver interface {
+	ResolveHumanResponseAsync(ctx context.Context, input humanrequest.HumanResponseEnvelope) (*humanrequest.HumanRequest, error)
+}
+
 // TextHITLResolver resolves a parsed explicit text reference with authoritative
 // runner identity. It is separate from legacy same-chat HITL resolution.
 type TextHITLResolver interface {
@@ -93,6 +100,7 @@ type OwnerTargetResolver interface {
 var _ Runtime = (*Service)(nil)
 var _ HITLResolver = (*Service)(nil)
 var _ ExactHITLResolver = (*Service)(nil)
+var _ AsyncExactHITLResolver = (*Service)(nil)
 var _ TextHITLResolver = (*Service)(nil)
 var _ OwnerResolver = (*Service)(nil)
 var _ OwnerTargetResolver = (*Service)(nil)

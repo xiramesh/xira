@@ -104,6 +104,31 @@ func (s *Service) ResolveHumanRequest(ctx context.Context, requestID string, inp
 // Owner authority is checked against the current binding as well as the
 // persisted responder snapshot before the Store mutates the request.
 func (s *Service) ResolveHumanResponse(ctx context.Context, input humanrequest.HumanResponseEnvelope) (*humanrequest.HumanRequest, error) {
+	resolved, err := s.resolveExactHumanResponse(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return s.resumeResolvedHumanRequest(ctx, resolved)
+}
+
+// ResolveHumanResponseAsync commits an exact native response before returning,
+// then performs the existing durable resume in the background. This keeps
+// platform callback latency independent of an Agent/Flow model turn.
+func (s *Service) ResolveHumanResponseAsync(ctx context.Context, input humanrequest.HumanResponseEnvelope) (*humanrequest.HumanRequest, error) {
+	resolved, err := s.resolveExactHumanResponse(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	resumeCtx := context.WithoutCancel(ctx)
+	go func(requestID string) {
+		if _, resumeErr := s.resumeResolvedHumanRequest(resumeCtx, resolved); resumeErr != nil {
+			slog.Error("async human request resume failed", "request_id", requestID, "error", resumeErr)
+		}
+	}(resolved.ID)
+	return resolved, nil
+}
+
+func (s *Service) resolveExactHumanResponse(ctx context.Context, input humanrequest.HumanResponseEnvelope) (*humanrequest.HumanRequest, error) {
 	if s == nil || s.humanRequests == nil {
 		return nil, fmt.Errorf("human request store is not available")
 	}
@@ -112,18 +137,52 @@ func (s *Service) ResolveHumanResponse(ctx context.Context, input humanrequest.H
 	if err != nil {
 		return nil, err
 	}
-	if req.Responder.Type == humanrequest.ResponderOwner {
-		resolved, err := s.resolveExactOwnerResponse(ctx, input)
-		if err != nil {
-			return nil, err
-		}
-		return s.resumeResolvedHumanRequest(ctx, resolved)
-	}
-	resolved, err := s.humanRequests.ResolveExact(ctx, input)
+	input, err = bindHumanResponseIdentity(req, input)
 	if err != nil {
 		return nil, err
 	}
-	return s.resumeResolvedHumanRequest(ctx, resolved)
+	if req.Responder.Type == humanrequest.ResponderOwner {
+		return s.resolveExactOwnerResponse(ctx, input)
+	}
+	return s.humanRequests.ResolveExact(ctx, input)
+}
+
+// bindHumanResponseIdentity selects the responder type sealed in the persisted
+// request from a set of transport-authenticated identities. A callback cannot
+// choose which ID type is authoritative.
+// coverage: contract (100% required)
+func bindHumanResponseIdentity(req *humanrequest.HumanRequest, input humanrequest.HumanResponseEnvelope) (humanrequest.HumanResponseEnvelope, error) {
+	if req == nil {
+		return input, fmt.Errorf("%w: human request is required", humanrequest.ErrConflict)
+	}
+	if len(input.SenderIdentities) == 0 {
+		return input, nil
+	}
+	expectedType := strings.ToLower(strings.TrimSpace(req.Responder.SenderIDType))
+	if expectedType == "" {
+		return input, fmt.Errorf("%w: persisted responder has no sender id type", humanrequest.ErrConflict)
+	}
+	identities := make(map[string]string, len(input.SenderIdentities))
+	for idType, id := range input.SenderIdentities {
+		idType = strings.ToLower(strings.TrimSpace(idType))
+		id = strings.TrimSpace(id)
+		if idType != "" && id != "" {
+			identities[idType] = id
+		}
+	}
+	selected := identities[expectedType]
+	if selected == "" {
+		return input, fmt.Errorf("%w: callback has no authenticated %s identity", humanrequest.ErrConflict, expectedType)
+	}
+	if existingID := strings.TrimSpace(input.SenderID); existingID != "" && existingID != selected {
+		return input, fmt.Errorf("%w: callback sender identities disagree", humanrequest.ErrConflict)
+	}
+	if existingType := strings.ToLower(strings.TrimSpace(input.SenderIDType)); existingType != "" && existingType != expectedType {
+		return input, fmt.Errorf("%w: callback sender identity types disagree", humanrequest.ErrConflict)
+	}
+	input.SenderID = selected
+	input.SenderIDType = expectedType
+	return input, nil
 }
 
 // ResolveHumanTextResponse maps one opaque correlation reference to the

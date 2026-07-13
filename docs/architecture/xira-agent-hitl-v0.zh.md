@@ -1325,6 +1325,28 @@ Channel slash command 只是可选快捷写法：
 
 v0 决策：channel 里的自然语言回复先作为普通消息进入 runtime router。`/approve` / `/deny` / `/answer` 如果要 resolve HumanRequest，必须由 channel/router 解析成结构化 HumanResponse、带上 transport 层用户身份；如果要用于强制型 approval，该 channel 还必须显式开启 strong approval。
 
+### 当前 channel 交互实现（#163 / #164 / #165）
+
+上面的 slash command 是早期概念格式。当前生产契约已经收敛为同一套持久化
+HumanRequest 状态机上的 channel-specific presentation：
+
+- iLink 使用完整 correlation 的显式文字协议：
+  `/answer HR-<32 位 UUID hex> <回答>`。不接受短前缀，也不按 pending 顺序猜请求。
+- Feishu 优先发送 Card JSON 2.0 交互卡片。按钮回传 request id、完整
+  correlation 和 action；operator typed identity、entrypoint 与 delivery message id
+  来自 SDK/runtime，不接受卡片 value 自报身份。
+- Feishu 卡片不可构造或发送失败时，降级到与 iLink 相同的完整 `/answer`
+  文字协议；普通自然语言不再隐式 resolve 最新 pending request。
+- Feishu callback 先原子校验并持久化 response，再立即返回 Toast/终态卡片；
+  Agent Run / Flow resume 走后台的同一 durable resume claim，不让模型调用占用
+  飞书三秒 callback 窗口。
+- current sender 与 owner 只是 responder policy。二者以及 Agent Run / Flow 的
+  四种组合复用同一个 resolve/resume 状态机，不新增第二套 Agent Loop。
+
+卡片/文字 adapter 只负责平台渲染与可信 transport facts；request 状态、当前 owner、
+过期、幂等、correlation、delivery message 和 resume 仍全部由 runtime/store 校验。
+WebSocket 的 structured `human_response` 留在 #166，owner route 未可信前继续 fail closed。
+
 原因：
 
 - channel runner 保持薄，只做消息归一化。
