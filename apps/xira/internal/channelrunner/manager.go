@@ -115,9 +115,8 @@ func (m *Manager) WSRunner() *websocket.Runner {
 	return nil
 }
 
-// SetHITLResolver injects the HITL resolve capability into all channel runners
-// (feishu, ilink, websocket). Called by main.go after NewManager (#92 — HITL IM
-// direct answer). All three channels use the same shared TryResolveHITL logic.
+// SetHITLResolver retains legacy implicit same-chat resolution for channels
+// that have not yet migrated to explicit or native interaction protocols.
 func (m *Manager) SetHITLResolver(resolver runtime.HITLResolver) {
 	if m == nil {
 		return
@@ -126,10 +125,21 @@ func (m *Manager) SetHITLResolver(resolver runtime.HITLResolver) {
 		switch r := runner.(type) {
 		case *feishu.Runner:
 			r.SetHITLResolver(resolver)
-		case *ilink.Runner:
-			r.SetHITLResolver(resolver)
 		case *websocket.Runner:
 			r.SetHITLResolver(resolver)
+		}
+	}
+}
+
+// SetTextHITLResolver injects the explicit full-correlation text protocol into
+// text-only runners. iLink is the first implementation (#164).
+func (m *Manager) SetTextHITLResolver(resolver runtime.TextHITLResolver) {
+	if m == nil {
+		return
+	}
+	for _, runner := range m.runners {
+		if r, ok := runner.(*ilink.Runner); ok {
+			r.SetTextHITLResolver(resolver)
 		}
 	}
 }

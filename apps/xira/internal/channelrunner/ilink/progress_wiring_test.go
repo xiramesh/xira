@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	openilink "github.com/openilink/openilink-sdk-go"
 
 	"github.com/xiramesh/xira/internal/entrypoints"
+	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 	frt "github.com/xiramesh/xira/internal/runtime"
 )
@@ -27,6 +29,21 @@ type recordingClient struct {
 	token   string
 	baseURL string
 	sendErr error
+}
+
+type recordingTextHITLResolver struct {
+	input humanrequest.TextResponseEnvelope
+	err   error
+	calls int
+}
+
+func (r *recordingTextHITLResolver) ResolveHumanTextResponse(_ context.Context, input humanrequest.TextResponseEnvelope) (*humanrequest.HumanRequest, error) {
+	r.calls++
+	r.input = input
+	if r.err != nil {
+		return nil, r.err
+	}
+	return &humanrequest.HumanRequest{ID: "hrq-resolved"}, nil
 }
 
 func (c *recordingClient) Monitor(context.Context, openilink.MessageHandler, *openilink.MonitorOptions) error {
@@ -156,6 +173,87 @@ func TestRunnerReleasesDedupeAfterFinalSendFailure(t *testing.T) {
 	msg := userTextMsg("hello")
 	runner.handleMessage(account, msg)
 	awaitDedupeReleased(t, account, account.messageDedupeKey(messageID(msg)))
+}
+
+func TestRunnerConsumesExplicitHumanResponseWithoutAgentTurn(t *testing.T) {
+	var modelCalls atomic.Int32
+	runner, account, rec := newProgressTestRunner(t, func(*http.Request) string {
+		modelCalls.Add(1)
+		return dsText("must not run")
+	})
+	resolver := &recordingTextHITLResolver{}
+	runner.SetTextHITLResolver(resolver)
+	msg := userTextMsg("/answer HR-550E8400E29B41D4A716446655440000 approve")
+	runner.handleMessage(account, msg)
+
+	if modelCalls.Load() != 0 {
+		t.Fatalf("explicit response started %d agent turns", modelCalls.Load())
+	}
+	if resolver.calls != 1 || resolver.input.CorrelationToken != "550e8400-e29b-41d4-a716-446655440000" || resolver.input.Answer != "approve" {
+		t.Fatalf("resolver input = %+v, calls = %d", resolver.input, resolver.calls)
+	}
+	if resolver.input.EntrypointID != runner.definition.ID || resolver.input.SenderID != "wxid-user" || resolver.input.SenderIDType != "ilink_user_id" || resolver.input.IdempotencyKey == "" {
+		t.Fatalf("authoritative response envelope = %+v", resolver.input)
+	}
+	if got := rec.contents(); len(got) != 1 || got[0] != "已收到回答。" {
+		t.Fatalf("response acknowledgement = %v", got)
+	}
+}
+
+func TestRunnerConsumesMalformedAndRejectedHumanResponsesWithoutAgentTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		content    string
+		resolveErr error
+		wantText   string
+		wantCalls  int
+	}{
+		{name: "malformed", content: "/answer short yes", wantText: "回答格式无效", wantCalls: 0},
+		{name: "rejected", content: "/answer HR-550E8400E29B41D4A716446655440000 yes", resolveErr: errors.New("wrong sender"), wantText: "无法接受该回答", wantCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var modelCalls atomic.Int32
+			runner, account, rec := newProgressTestRunner(t, func(*http.Request) string {
+				modelCalls.Add(1)
+				return dsText("must not run")
+			})
+			resolver := &recordingTextHITLResolver{err: tc.resolveErr}
+			runner.SetTextHITLResolver(resolver)
+			runner.handleMessage(account, userTextMsg(tc.content))
+			if modelCalls.Load() != 0 || resolver.calls != tc.wantCalls {
+				t.Fatalf("model calls = %d, resolver calls = %d", modelCalls.Load(), resolver.calls)
+			}
+			got := rec.contents()
+			if len(got) != 1 || !strings.Contains(got[0], tc.wantText) {
+				t.Fatalf("safe response = %v", got)
+			}
+		})
+	}
+}
+
+func TestRunnerExplicitHumanResponseHandlesMissingResolverAndAckFailure(t *testing.T) {
+	const answer = "/answer HR-550E8400E29B41D4A716446655440000 yes"
+
+	t.Run("missing resolver stays protocol traffic", func(t *testing.T) {
+		runner, account, rec := newProgressTestRunner(t, func(*http.Request) string { return dsText("must not run") })
+		runner.handleMessage(account, userTextMsg(answer))
+		got := rec.contents()
+		if len(got) != 1 || !strings.Contains(got[0], "无法接受该回答") {
+			t.Fatalf("missing resolver response = %v", got)
+		}
+	})
+
+	t.Run("ack failure releases dedupe", func(t *testing.T) {
+		runner, account, rec := newProgressTestRunner(t, func(*http.Request) string { return dsText("must not run") })
+		runner.SetTextHITLResolver(&recordingTextHITLResolver{})
+		rec.sendErr = errors.New("ilink unavailable")
+		msg := userTextMsg(answer)
+		runner.handleMessage(account, msg)
+		key := account.messageDedupeKey(messageID(msg))
+		if !account.messages.Begin(key, time.Now()) {
+			t.Fatalf("dedupe key %q was not released after acknowledgement failure", key)
+		}
+	})
 }
 
 func awaitDedupeReleased(t *testing.T, account *accountPoller, key string) {
