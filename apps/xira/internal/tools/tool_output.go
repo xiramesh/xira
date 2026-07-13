@@ -39,14 +39,18 @@ func runDirFromContext(ctx context.Context) string {
 
 func (t *ToolOutputReadTool) Name() string { return "tool_output.read" }
 func (t *ToolOutputReadTool) Description() string {
-	return "Read a bounded slice of a command.run or shell.run raw stdout/stderr artifact for the current Xira run. Use this when stdout_preview or stderr_preview is truncated or insufficient."
+	return "Read a bounded slice of a raw stdout/stderr artifact produced during the current Xira run."
+}
+func (t *ToolOutputReadTool) Guidance() string {
+	return "Use this when a prior command result says its stdout or stderr preview was truncated and the missing content matters to the task. " +
+		"For failures, inspect the relevant error tail before diagnosing or claiming a cause; do not guess from an incomplete preview."
 }
 func (t *ToolOutputReadTool) Parameters() map[string]any {
 	return map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
 		"properties": map[string]any{
-			"raw_output_path": map[string]any{"type": "string", "description": "Relative raw output artifact path returned by command.run or shell.run, for example artifacts/tool-outputs/<call>.json."},
+			"raw_output_path": map[string]any{"type": "string", "description": "Relative raw output artifact path returned by an earlier command tool call, for example artifacts/tool-outputs/<call>.json."},
 			"stream":          map[string]any{"type": "string", "enum": []string{"stdout", "stderr"}, "description": "Which stream to read."},
 			"offset_bytes":    map[string]any{"type": "integer", "description": "Byte offset for slice reads. Ignored when tail_lines is set."},
 			"limit_bytes":     map[string]any{"type": "integer", "description": "Maximum bytes to return. Defaults to 20000 and is capped at 65536."},

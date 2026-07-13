@@ -79,8 +79,11 @@ func TestVerifyRunOutcomeContract(t *testing.T) {
 }
 
 func TestFinishSilentToolIsSealedAndRegisteredForProductionADK(t *testing.T) {
-	if !strings.Contains(finishSilentToolDescription, "Do not call this after notify_owner succeeds") {
-		t.Fatalf("finish_silent description does not preserve separate notify_owner silence semantics: %q", finishSilentToolDescription)
+	if strings.Contains(finishSilentToolDescription, notifyOwnerToolName) {
+		t.Fatalf("finish_silent description depends on another tool: %q", finishSilentToolDescription)
+	}
+	if !strings.Contains(finishSilentToolGuidance, "all required work") || !strings.Contains(finishSilentToolGuidance, "failed or rejected action") {
+		t.Fatalf("finish_silent Guidance misses its independent use boundary: %q", finishSilentToolGuidance)
 	}
 	schema := finishSilentInputSchema()
 	if schema.Type != "object" || len(schema.Properties) != 0 || len(schema.Required) != 0 || schema.AdditionalProperties == nil {

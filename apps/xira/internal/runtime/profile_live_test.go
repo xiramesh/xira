@@ -17,7 +17,7 @@ import (
 // 验证端到端链路：user.md 注入 prompt → LLM 理解该调 update_profile → 产出合法
 // function call → handler 执行 → user.md 更新。这是单元测试覆盖不到的「LLM 真的会调」。
 //
-// prompt 明确引导 LLM 调 update_profile（避免 LLM 自由发挥导致 flaky）。
+// Profile 不包含工具名或调用规则；模型只能从该工具自己的 Guidance 判断是否调用。
 func TestRealDeepSeekUpdateProfileTool(t *testing.T) {
 	if os.Getenv("XIRA_DEEPSEEK_LIVE") != "1" {
 		t.Skip("set XIRA_DEEPSEEK_LIVE=1 to run live DeepSeek profile smoke tests")
@@ -49,13 +49,14 @@ model_policy:
 permissions:
   tools:
     - update_profile
+    - update_memory
 verification:
   default_checks:
     - final_response_non_empty
 ---
 # Working Contract
 
-When the user tells you their name or a preference, record it using the update_profile tool.
+Reply briefly and truthfully.
 `)
 	writeFile(t, filepath.Join(workspace, "agents", "xira-assistant", "SOUL.md"), "# Soul\n\nDirect.\n")
 	writeFile(t, filepath.Join(workspace, "xira.yaml"), `workspace: .
@@ -86,13 +87,19 @@ entrypoints: entrypoints.yaml
 
 	sender := "ou_live_profile_user"
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
-		Message: "你好！我叫大明，以后请这样称呼我。请用 update_profile 工具记住我的名字。",
+		Message: "我是大铭，你记住了，以后就这样称呼我。",
 		Context: channel.NewInboundContext("test", sender, nil),
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
 	t.Logf("live profile run: status=%q final=%q tool_calls=%d", resp.Status, previewText(resp.FinalResponse, 80), len(resp.ToolCalls))
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "update_profile" {
+		t.Fatalf("profile run tool calls = %+v, want update_profile rather than update_memory", resp.ToolCalls)
+	}
+	if entries, err := rtools.LoadMemories(rtools.MemoryPath(rt.stateDir, sender)); err != nil || len(entries) != 0 {
+		t.Fatalf("stable identity leaked into sender memory: entries=%+v err=%v", entries, err)
+	}
 
 	// 核心断言：user.md 被更新（含"大明"）。
 	userPath := rtools.UserProfilePath(rt.stateDir, sender)
@@ -101,8 +108,8 @@ entrypoints: entrypoints.yaml
 		t.Fatalf("user.md not created at %s after update_profile run: %v (status=%q)", userPath, readErr, resp.Status)
 	}
 	body := string(data)
-	if !strings.Contains(body, "大明") {
-		t.Errorf("user.md does not contain 大明 after run:\n%s", body)
+	if !strings.Contains(body, "大铭") {
+		t.Errorf("user.md does not contain 大铭 after run:\n%s", body)
 	}
 	t.Logf("user.md content after run:\n%s", body)
 }

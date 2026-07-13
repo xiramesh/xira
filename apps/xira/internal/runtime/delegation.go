@@ -73,7 +73,7 @@ func (s *Service) runtimeADKTools(
 
 	notifyOwnerTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
 		Name:         notifyOwnerToolName,
-		Description:  "Privately notify this agent's configured owner through the authoritative bound channel. You provide only the message, never a recipient. After a successful notification, return an empty final response when no public reply is needed.",
+		Description:  "Privately deliver a message to this Agent's configured owner through the authoritative bound channel. The runtime resolves the recipient.",
 		InputSchema:  notifyOwnerInputSchema(),
 		OutputSchema: objectSchema(),
 	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
@@ -109,7 +109,7 @@ func (s *Service) runtimeADKTools(
 	// 从 ctx 填(防模型伪造跨 chat)。详见 human_interpret.go。
 	humanInterpretTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
 		Name:         humanInterpretToolName,
-		Description:  "Declare that the user's reply answers a specific pending HumanRequest (from the Pending Human Requests summary). Resolves it in the background. Use ONLY for agent_request or flow_human_approval requests whose request_id appeared in the summary. If the user's reply is ambiguous across multiple pending requests, ask for clarification instead of calling this tool.",
+		Description:  "Resolve one pending HumanRequest in the background by binding the current user's interpreted response to its request_id.",
 		InputSchema:  humanInterpretInputSchema(),
 		OutputSchema: objectSchema(),
 	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
@@ -174,7 +174,7 @@ func (s *Service) runtimeADKTools(
 	// spawn_turn: async child turn spawn (Phase 3, RFC §2.4).
 	spawnTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
 		Name:         spawnTurnToolName,
-		Description:  "Asynchronously spawn a child agent turn. Returns immediately with {agent_turn_id, status:spawned}; the child runs in the background. Use this instead of delegate_agent when you do not need to block on the child's result.",
+		Description:  "Asynchronously start a child Agent Turn for a selected agent and task. Returns immediately with {agent_turn_id, status:spawned} while the child runs in the background.",
 		InputSchema:  spawnTurnInputSchema(),
 		OutputSchema: objectSchema(),
 	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
@@ -254,7 +254,7 @@ func (s *Service) runtimeADKTools(
 	// (PR #53 review). poll_turn peeks instead.
 	pollTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
 		Name:         pollTurnToolName,
-		Description:  "Check whether a spawned child agent turn has finished and return its result if so. Pass the agent_turn_id from spawn_turn. Returns immediately: {status:completed/failed, result_summary} when done, or {status:pending} when the child is still running. If pending, do other work and poll again later — do NOT block waiting. When the child is waiting for human input, the response also includes pending_questions: a list of {human_request_id, question} the child needs answered. For each, either answer it yourself via answer_child (passing that human_request_id) or do nothing to let the user answer in this chat.",
+		Description:  "Inspect a child Agent Turn by agent_turn_id without blocking. Returns completed or failed with a result summary, pending while it is running, or pending_questions when it awaits input.",
 		InputSchema:  pollTurnInputSchema(),
 		OutputSchema: objectSchema(),
 	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
@@ -299,7 +299,7 @@ func (s *Service) runtimeADKTools(
 	// blocks the parent's event loop / steering checkpoint.
 	answerTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
 		Name:         answerChildToolName,
-		Description:  "Answer a spawned child agent's question on its behalf. Pass the human_request_id that poll_turn surfaced when the child was waiting_human, plus your answer. The child turn resumes in the background with your answer as the human response, and its result routes back to this chat when done. Use this when a child asks a question you can answer yourself; if you want the user to answer instead, simply do nothing (the child's question escalates to the user in this chat).",
+		Description:  "Submit an answer for one child Agent Turn's pending human_request_id. The child resumes in the background and its eventual result routes back to this chat.",
 		InputSchema:  answerChildInputSchema(),
 		OutputSchema: objectSchema(),
 	}, func(toolCtx adktool.Context, args map[string]any) (map[string]any, error) {
@@ -493,7 +493,7 @@ func (s *Service) RunChildAgent(ctx context.Context, req childAgentRequest) (Tur
 	}, recordChildEvent, func(call LLMCallRecord) {
 		resp.LLMCalls = append(resp.LLMCalls, call)
 	})
-	childInstruction, _, activationErr := s.instructionTextForRun(req.Target, childReq.Context)
+	childInstruction, _, activationErr := s.instructionTextForRunContext(childCtx, req.Target, childReq.Context)
 	var final string
 	var toolCalls []ToolCallRecord
 	var runErr error

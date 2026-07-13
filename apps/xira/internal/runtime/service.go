@@ -450,7 +450,11 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	if !ok {
 		return TurnResponse{}, fmt.Errorf("agent profile %q not found", entrypointDecision.AgentID)
 	}
-	runInstruction, activeSkillIDs, err := s.instructionTextForRun(profile, req.Context)
+	if req.AllowedToolsSet || len(req.AllowedTools) > 0 {
+		ctx = contextWithRuntimeToolAllowlist(ctx, req.AllowedTools)
+	}
+	ctx = contextWithRuntimeToolInputAllowlist(ctx, req.ToolInputAllowlist)
+	runInstruction, activeSkillIDs, err := s.instructionTextForRunContext(ctx, profile, req.Context)
 	if err != nil {
 		return TurnResponse{}, err
 	}
@@ -574,10 +578,6 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 	}
 	ctx = contextWithToolFailureGuard(ctx)
 	ctx = contextWithToolTrace(ctx, runID)
-	if req.AllowedToolsSet || len(req.AllowedTools) > 0 {
-		ctx = contextWithRuntimeToolAllowlist(ctx, req.AllowedTools)
-	}
-	ctx = contextWithRuntimeToolInputAllowlist(ctx, req.ToolInputAllowlist)
 	suspendCollector := newRuntimeSuspendCollector()
 	ctx = contextWithRuntimeSuspendCollector(ctx, suspendCollector)
 	ctx = contextWithRunExecution(ctx, runExecutionContext{
@@ -1716,6 +1716,10 @@ func (s *Service) instructionText(profile agents.Profile) string {
 }
 
 func (s *Service) instructionTextForRun(profile agents.Profile, inbound channel.InboundContext) (string, []string, error) {
+	return s.instructionTextForRunContext(context.Background(), profile, inbound)
+}
+
+func (s *Service) instructionTextForRunContext(ctx context.Context, profile agents.Profile, inbound channel.InboundContext) (string, []string, error) {
 	activeSkills, activeSkillIDs, err := s.activateSkills(profile, profile.Skills)
 	if err != nil {
 		return "", nil, err
@@ -1737,7 +1741,12 @@ func (s *Service) instructionTextForRun(profile agents.Profile, inbound channel.
 	if memoryBlock := s.loadMemoryBlock(rtools.AgentMemoryPath(s.stateDir, profile.ID), "Agent Memory", "owned by this Agent across senders"); memoryBlock != "" {
 		blocks = append(blocks, memoryBlock)
 	}
-	return s.composeInstructionText(profile, blocks, inbound), activeSkillIDs, nil
+	effectiveTools := s.effectiveToolNames(ctx, profile)
+	instruction := s.composeInstructionTextWithTools(profile, blocks, inbound, effectiveTools)
+	if guidance := s.compileToolGuidance(profile, effectiveTools); guidance != "" {
+		instruction += "\n\n" + guidance
+	}
+	return instruction, activeSkillIDs, nil
 }
 
 // loadMemoryBlock reads one already-resolved memory scope and renders it as a
@@ -1824,6 +1833,10 @@ func untrustedProfileDelimiter() string {
 }
 
 func (s *Service) composeInstructionText(profile agents.Profile, skillBlocks []string, inbound channel.InboundContext) string {
+	return s.composeInstructionTextWithTools(profile, skillBlocks, inbound, s.toolRegistry(profile).List())
+}
+
+func (s *Service) composeInstructionTextWithTools(profile agents.Profile, skillBlocks []string, inbound channel.InboundContext, tools []string) string {
 	base := strings.TrimSpace(profile.InstructionText())
 	if skillText := strings.TrimSpace(strings.Join(skillBlocks, "\n\n")); skillText != "" {
 		if base == "" {
@@ -1832,7 +1845,6 @@ func (s *Service) composeInstructionText(profile agents.Profile, skillBlocks []s
 			base += "\n\n" + skillText
 		}
 	}
-	tools := s.toolRegistry(profile).List()
 	identity := fmt.Sprintf(
 		"Current Xira agent: %s (%s).\nThis agent profile and runtime instruction are authoritative. If prior assistant messages or model defaults conflict with this agent identity, follow the current profile and correct the conflict. When asked who you are or which agent is active, answer as this Xira agent; do not identify as the underlying model provider unless the user explicitly asks about the model provider.\nCurrent date: %s (use this for `created`/`updated`/`review_at`/Decision Log entries when the user does not specify a date).",
 		profile.ID,

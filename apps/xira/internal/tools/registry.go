@@ -17,6 +17,14 @@ type Tool interface {
 	Execute(context.Context, map[string]any) (map[string]any, error)
 }
 
+// GuidanceProvider is optional. Description explains a tool's operation and
+// schema; Guidance explains when the model should independently choose that
+// tool. Keeping this separate lets the runtime inject guidance only for tools
+// that are actually available in the current turn.
+type GuidanceProvider interface {
+	Guidance() string
+}
+
 type Registry struct {
 	tools map[string]Tool
 }
@@ -24,6 +32,7 @@ type Registry struct {
 type Definition struct {
 	Name         string
 	Description  string
+	Guidance     string
 	Parameters   map[string]any
 	InputSchema  *jsonschema.Schema
 	OutputSchema *jsonschema.Schema
@@ -133,6 +142,7 @@ func (r *Registry) Definitions() []Definition {
 		out = append(out, Definition{
 			Name:         tool.Name(),
 			Description:  tool.Description(),
+			Guidance:     guidanceForTool(tool),
 			Parameters:   parameters,
 			InputSchema:  schemaFromMap(parameters),
 			OutputSchema: &jsonschema.Schema{Type: "object"},
@@ -155,11 +165,20 @@ func (r *Registry) GetDefinition(name string) (Definition, bool) {
 	return Definition{
 		Name:         tool.Name(),
 		Description:  tool.Description(),
+		Guidance:     guidanceForTool(tool),
 		Parameters:   parameters,
 		InputSchema:  schemaFromMap(parameters),
 		OutputSchema: &jsonschema.Schema{Type: "object"},
 		Policy:       policy,
 	}, true
+}
+
+func guidanceForTool(tool Tool) string {
+	provider, ok := tool.(GuidanceProvider)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(provider.Guidance())
 }
 
 func (r *Registry) Execute(ctx context.Context, name string, args map[string]any) (map[string]any, error) {

@@ -7,6 +7,20 @@ import (
 	"testing"
 )
 
+func TestLoadFromWorkspaceRejectsMissingWorkspaceAndEmptyAgentSet(t *testing.T) {
+	if _, err := LoadFromWorkspace("  "); err == nil || !strings.Contains(err.Error(), "workspace root is required") {
+		t.Fatalf("blank workspace error = %v", err)
+	}
+
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "agents", "notes-only"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFromWorkspace(workspace); err == nil || !strings.Contains(err.Error(), "no agent profiles found") {
+		t.Fatalf("empty agent set error = %v", err)
+	}
+}
+
 func TestLoadFromWorkspaceReadsProfileFrontmatterBodyAndSoul(t *testing.T) {
 	workspace := t.TempDir()
 	writeAgentProfile(t, workspace, "research-assistant", `---
