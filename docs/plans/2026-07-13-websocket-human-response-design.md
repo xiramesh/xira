@@ -91,4 +91,3 @@ an Agent Turn message; it can never consume a pending request implicitly.
   schema has no such authority fields;
 - prove capability and `ready.capabilities` match the production handler;
 - run package coverage, full build/test/race, and real DeepSeek live tests.
-

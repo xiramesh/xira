@@ -89,4 +89,3 @@
 4. Run `task live-test` from the repository root and confirm no live-gated SKIP.
 5. Commit in coherent TDD slices, verify each commit's actual file set, push `codex/166-websocket-human-response`, and open a ready PR closing #166 and linking #155.
 6. List package coverage plus every uncovered core/contract function in the PR body.
-
