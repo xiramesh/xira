@@ -12,10 +12,8 @@ import (
 
 const (
 	finishSilentToolName        = "finish_silent"
-	finishSilentToolDescription = "Explicitly complete this Agent Turn without a public reply or owner notification. " +
-		"Use only when you independently decide no outbound message is needed after any required work succeeds. " +
-		"Do not call this after notify_owner succeeds; that successful notification already authorizes an empty public final. " +
-		"This cannot hide a failed or rejected tool call. It accepts no arguments."
+	finishSilentToolDescription = "Declare this Agent Turn complete without an outbound message. " +
+		"The declaration cannot override a failed or rejected tool call and accepts no arguments."
 )
 
 func finishSilentInputSchema() *jsonschema.Schema {

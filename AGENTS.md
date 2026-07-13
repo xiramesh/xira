@@ -88,6 +88,23 @@ fact kind 忘在 switch 里开 `conversation=true` 就被静默 drop。
 - 静默成功不发布 `assistant.final`（没有 final）；仍发布 `run.finished(completed)`。`agent.silence_declared` 与
   `adk.intentional_silence` 是 observability/audit kind，不映射进 IM。
 
+### 1.6 Tool Guidance —— 每个工具零段或一段，按本轮实际工具集注入
+
+- 每个模型可见工具对应 **零段或一段**自包含 Guidance。普通 builtin tool 通过可选
+  `GuidanceProvider` 提供；runtime-owned tool 使用同样的一工具一 Guidance 元数据。没有 Guidance 的简单
+  工具不生成空区块。
+- `Description` 只说明工具做什么、参数和返回值；`Guidance` 说明模型何时应主动想到它、何时不该用、
+  成功或失败意味着什么。不要在 profile instructions 里再复制一份通用工具策略，否则自定义 profile、
+  工具子集和后续描述会发生漂移。
+- **任何单个工具的 model-visible definition 与 Guidance 都必须自包含**，不能点名另一个可能没有开放的
+  工具。工具之间确有编排关系时，用当前工具自己的输入/输出语义表达，不把另一个工具名写成隐式依赖。
+- Guidance 只能从本轮经过 profile permissions、runtime-native 开关、delegation policy 和 per-run allowlist
+  过滤后的 `effectiveToolNames` 编译。`Available tools`、实际 ADK tool schema 和 `# Tool Guidance` 必须是
+  同一个集合；未开放工具的名字和策略都不能泄漏进 prompt。
+- parent turn、spawned child 和 HITL resume 统一走 context-aware instruction 组装路径。新增工具门控时，
+  必须用真实 `RunAgent → ADK request` 测试证明 tool schema、capability list 和 Guidance 同步生效，不能只测
+  内部字符串 helper。
+
 ## 2. 设计评审方法论（本次复盘总结）
 
 - **先核实，再判断。** 评审设计文档时，文档声称存在的代码契约（事件、接口、字段）必须先

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,6 +238,16 @@ func TestResumeDirectHumanRequestRestoresPersistedExecutionPolicy(t *testing.T) 
 		sawResume = true
 		if len(req.Tools) != 0 {
 			t.Fatalf("resume exposed tools despite persisted explicit empty policy: %+v", req.Tools)
+		}
+		if len(req.Messages) == 0 || req.Messages[0].Role != "system" {
+			t.Fatalf("resume messages = %+v, want leading system instruction", req.Messages)
+		}
+		instruction, ok := req.Messages[0].Content.(string)
+		if !ok {
+			t.Fatalf("resume system instruction type = %T, want string", req.Messages[0].Content)
+		}
+		if !strings.Contains(instruction, "Available tools: none.") || strings.Contains(instruction, "# Tool Guidance") {
+			t.Fatalf("resume instruction drifted from persisted empty tool policy:\n%s", instruction)
 		}
 		return deepSeekHTTPResponse(deepSeekTextResponse("resumed without tools")), nil
 	})}

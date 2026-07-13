@@ -46,7 +46,7 @@ type answerChildInput struct {
 
 func (in answerChildInput) Validate() error {
 	if strings.TrimSpace(in.HumanRequestID) == "" {
-		return fmt.Errorf("human_request_id is required (the id poll_turn surfaced)")
+		return fmt.Errorf("human_request_id is required")
 	}
 	if strings.TrimSpace(in.Answer) == "" {
 		return fmt.Errorf("answer is required")
@@ -59,7 +59,7 @@ func answerChildInputSchema() *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"human_request_id": {Type: "string", Description: "The id poll_turn surfaced when the child entered waiting_human."},
+			"human_request_id": {Type: "string", Description: "The id of the child Agent Turn's pending human request."},
 			"answer":           {Type: "string", Description: "Your answer to the child's question. The child resumes with this as the human response."},
 		},
 		Required:             []string{"human_request_id", "answer"},

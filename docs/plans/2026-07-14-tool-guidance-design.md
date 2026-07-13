@@ -16,6 +16,6 @@
 
 ## 数据流与验证
 
-runtime 先解析本轮 effective tool names，再按稳定顺序收集非空 Guidance，渲染为独立的 `# Tool Guidance` system-instruction 区块。ADK、child turn 和 HITL resume 共用同一条 instruction 组装路径；native DeepSeek 兼容路径也使用同一编译器。
+runtime 先解析本轮 effective tool names，再按稳定顺序收集非空 Guidance，渲染为独立的 `# Tool Guidance` system-instruction 区块。当前生产使用的 ADK parent turn、child turn 和 HITL resume 共用同一条 instruction 组装路径。没有生产调用方的 legacy native DeepSeek 生成函数不在本次范围内，避免为了 dead code 再维护一套虚假的工具集合契约。
 
 测试覆盖：零 Guidance 工具不产生区块；任意单工具 allowlist 只注入自身 Guidance；native-tools disabled 时不泄漏 runtime Guidance；delegation disabled 时不出现 child-turn Guidance；Guidance 顺序稳定且去重；每段文本不引用其他 Xira 工具名；effective-name 解析与实际 ADK tool set 保持一致。真实 DeepSeek live test 验证用户明确要求跨会话记住稳定事实时调用 `update_memory`，而临时任务状态不机械写入。

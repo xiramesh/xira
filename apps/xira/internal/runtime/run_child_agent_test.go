@@ -339,6 +339,8 @@ func TestRunChildAgentPreservesNamesInChildContext(t *testing.T) {
 		"ChatName: 工作群",
 		"Sender: user-42",
 		"SenderName: 张三",
+		"# Tool Guidance",
+		"## update_memory",
 	} {
 		if !strings.Contains(systemInstruction, want) {
 			t.Errorf("child system instruction missing %q\n--- instruction ---\n%s", want, systemInstruction)
@@ -443,6 +445,8 @@ func TestResumeDirectHumanRequestPropagatesContextToBase(t *testing.T) {
 		"Addressed to: owner",
 		"owner's AI intern",
 		"Never impersonate the owner",
+		"# Tool Guidance",
+		"## update_memory",
 	} {
 		if !strings.Contains(systemInstruction, want) {
 			t.Errorf("resumed run system instruction missing %q\n--- instruction ---\n%s", want, systemInstruction)

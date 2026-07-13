@@ -44,6 +44,7 @@ model_policy:
   stream: false
 permissions:
   tools:
+    - update_profile
     - update_memory
 verification:
   default_checks:
@@ -51,9 +52,7 @@ verification:
 ---
 # Working Contract
 
-When the user asks you to remember a fact about that user, call update_memory exactly once with scope=sender.
-When the user asks you to remember your own durable procedure or follow-up across users, call update_memory exactly once with scope=agent.
-After the tool succeeds, reply with a short confirmation.
+Use durable context responsibly and reply briefly.
 `)
 	writeFile(t, filepath.Join(workspace, "agents", "xira-assistant", "SOUL.md"), "# Soul\n\nDirect.\n")
 	writeFile(t, filepath.Join(workspace, "xira.yaml"), `workspace: .
@@ -83,14 +82,14 @@ entrypoints: entrypoints.yaml
 
 	sender := "ou_live_memory_user"
 	resp, err := rt.RunAgent(context.Background(), TurnRequest{
-		Message: "你好！我下周三要去上海出差，请用 update_memory 工具帮我记一下。",
+		Message: "你好！我下周三要去上海出差，这件事之后还会用到，请帮我记住。",
 		Context: channel.NewInboundContext("test", sender, nil),
 	})
 	if err != nil {
 		t.Fatalf("RunAgent() error = %v", err)
 	}
 	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "update_memory" || resp.ToolCalls[0].Input["scope"] != "sender" {
-		t.Fatalf("sender run tool calls = %+v, want one update_memory scope=sender", resp.ToolCalls)
+		t.Fatalf("sender run tool calls = %+v, want update_memory scope=sender rather than update_profile", resp.ToolCalls)
 	}
 	t.Logf("live memory run: status=%q final=%q tool_calls=%d", resp.Status, previewText(resp.FinalResponse, 80), len(resp.ToolCalls))
 
@@ -112,9 +111,26 @@ entrypoints: entrypoints.yaml
 	}
 	t.Logf("memory entries after run: %+v", entries)
 
+	transientSender := "ou_live_memory_transient"
+	transientResp, err := rt.RunAgent(context.Background(), TurnRequest{
+		Message: "我刚刚喝了一口水，这只与当前这句话有关。回复收到即可。",
+		Context: channel.NewInboundContext("test", transientSender, nil),
+	})
+	if err != nil {
+		t.Fatalf("transient RunAgent() error = %v", err)
+	}
+	for _, call := range transientResp.ToolCalls {
+		if call.Name == "update_memory" {
+			t.Fatalf("transient fact was mechanically persisted: %+v", transientResp.ToolCalls)
+		}
+	}
+	if transientEntries, transientErr := rtools.LoadMemories(rtools.MemoryPath(rt.stateDir, transientSender)); transientErr != nil || len(transientEntries) != 0 {
+		t.Fatalf("transient sender memory = %+v err=%v, want empty", transientEntries, transientErr)
+	}
+
 	secondSender := "ou_live_memory_colleague"
 	agentResp, err := rt.RunAgent(context.Background(), TurnRequest{
-		Message: "请把『每次发布前先检查 CI』记成你自己跨用户都要遵循的长期工作经验；必须调用 update_memory，scope 使用 agent。",
+		Message: "从现在起，你自己每次发布前都先检查 CI；这是你跨对话、面对任何人都应保留的长期工作习惯。",
 		Context: channel.NewInboundContext("test", secondSender, nil),
 	})
 	if err != nil {

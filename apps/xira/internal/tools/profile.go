@@ -177,11 +177,14 @@ func NewUpdateProfileTool(stateDir string) *UpdateProfileTool {
 func (t *UpdateProfileTool) Name() string { return "update_profile" }
 
 func (t *UpdateProfileTool) Description() string {
-	return "Update the current user's profile (user.md) with NON-SENSITIVE preferences worth remembering " +
-		"across conversations — e.g. nickname, reply style, language preference, background context. " +
-		"Provide a section name (e.g. \"偏好\", \"背景\") and the content to store under it. " +
-		"Call this when the user shares preferences you should remember. " +
-		"DO NOT store sensitive data: no passwords, secrets, contact details, addresses, or account identifiers."
+	return "Persist one section of non-sensitive facts in the current sender's profile (user.md). " +
+		"Provide the section name and its Markdown content; an existing section is replaced and a new section is appended."
+}
+
+func (t *UpdateProfileTool) Guidance() string {
+	return "Proactively save non-sensitive, stable facts about the current sender that should shape future conversations, such as their name, preferred form of address, language, response style, role, or durable background. " +
+		"This tool owns identity and interaction-profile facts; do not use it for episodic events, task progress, reminders, or temporary state. Keep the profile compact and factual. Do not save secrets, contact details, account identifiers, or assumptions the sender has not established. " +
+		"Without a successful call, do not claim that the sender's profile was persistently updated."
 }
 
 func (t *UpdateProfileTool) Parameters() map[string]any {

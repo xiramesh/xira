@@ -46,7 +46,11 @@ func NewShellRunTool(workspaceRoot string, writeRoots []string) *ShellRunTool {
 
 func (t *CommandRunTool) Name() string { return "command.run" }
 func (t *CommandRunTool) Description() string {
-	return "Run one local program with structured argv in the Xira workspace. Use this by default for commands that do not need shell pipes, redirection, command substitution, or other shell language."
+	return "Run one local program with structured argv and no shell interpretation in the Xira workspace."
+}
+func (t *CommandRunTool) Guidance() string {
+	return "Use this as the default way to run a local program when the task does not require shell language. " +
+		"Pass arguments as structured values, use the relevant working directory, and rely on the real result before claiming the command succeeded."
 }
 func (t *CommandRunTool) Parameters() map[string]any {
 	return map[string]any{
@@ -100,7 +104,11 @@ func (t *CommandRunTool) Execute(ctx context.Context, args map[string]any) (map[
 
 func (t *ShellRunTool) Name() string { return "shell.run" }
 func (t *ShellRunTool) Description() string {
-	return "Run a shell command in the Xira workspace. Use only when shell language is required, such as pipes, redirection, &&, command substitution, or heredocs."
+	return "Run one shell-language command in the Xira workspace, including pipelines, redirection, chaining, substitution, and heredocs."
+}
+func (t *ShellRunTool) Guidance() string {
+	return "Use this only when the task genuinely requires shell syntax such as pipelines, redirection, command chaining, substitution, or heredocs. " +
+		"Keep the command scoped to the authorized workspace and treat its actual exit status and output as authoritative."
 }
 func (t *ShellRunTool) Parameters() map[string]any {
 	return map[string]any{

@@ -25,6 +25,32 @@ func TestBuiltinResearchAssistantValidates(t *testing.T) {
 	}
 }
 
+func TestBuiltinManagerListsProfilesWithoutDuplicatingToolStrategy(t *testing.T) {
+	manager, err := NewBuiltinManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles := manager.List()
+	if len(profiles) != 2 || profiles[0].ID != ResearchAssistantAgentID || profiles[1].ID != DefaultAgentID {
+		t.Fatalf("builtin profiles = %+v, want sorted research and default profiles", profiles)
+	}
+	for _, profile := range profiles {
+		instructions := profile.InstructionText()
+		for _, toolName := range []string{"command.run", "shell.run", "tool_output.read"} {
+			if strings.Contains(instructions, toolName) {
+				t.Errorf("profile %s duplicates strategy for %s:\n%s", profile.ID, toolName, instructions)
+			}
+		}
+	}
+}
+
+func TestNewManagerRejectsInvalidProfileWithIdentity(t *testing.T) {
+	_, err := NewManager([]Profile{{ID: "broken-agent"}})
+	if err == nil || !strings.Contains(err.Error(), `invalid profile "broken-agent"`) {
+		t.Fatalf("NewManager() error = %v, want invalid profile identity", err)
+	}
+}
+
 func TestProfileValidateRequiresBoundaries(t *testing.T) {
 	profile := Profile{ID: "x", Name: "X", Version: "0.1.1"}
 	if err := profile.Validate(); err == nil {
