@@ -235,6 +235,54 @@ func TestManagerPersistsLayeredAgentSession(t *testing.T) {
 	}
 }
 
+func TestManagerRoundTripsLosslessMessageFacts(t *testing.T) {
+	root := t.TempDir()
+	manager, err := NewManagerWithStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := AgentTurnInput{
+		SessionID: "conversation:fidelity",
+		AgentID:   "agent-1",
+		Context: channel.InboundContext{
+			Channel: "feishu", EntrypointID: "feishu-main", ChatID: "oc_group", ChatType: "group", SenderID: "ou_sender",
+		},
+		Scope: &SessionScope{EntrypointID: "feishu-main", Channel: "feishu", Dimensions: []string{"chat"}, Values: map[string]string{"chat": "group:oc_group"}},
+	}
+	want := Message{
+		Role:            "user",
+		Kind:            MessageKindMessage,
+		Content:         "@张三 请 @李四 review",
+		OriginalContent: `{"text":"@_user_2 请 @_user_1 review"}`,
+		MessageID:       "om_1",
+		MessageType:     "text",
+		MentionTargets: []channel.MentionTarget{
+			{Key: "@_user_1", ID: "ou_lisi", IDType: "open_id", Name: "李四"},
+			{Key: "@_user_2", ID: "ou_zhangsan", IDType: "open_id", Name: "张三"},
+		},
+		SenderID: "ou_sender",
+	}
+	if err := manager.AppendAgentMessages(input, []Message{want}); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewManagerWithStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := reloaded.AgentHistory(input.SessionID, input.AgentID)
+	if len(history) != 1 {
+		t.Fatalf("history = %+v", history)
+	}
+	got := history[0]
+	if got.Content != want.Content || got.OriginalContent != want.OriginalContent || got.MessageID != want.MessageID || got.MessageType != want.MessageType {
+		t.Fatalf("message facts = %+v, want %+v", got, want)
+	}
+	if len(got.MentionTargets) != 2 || got.MentionTargets[0] != want.MentionTargets[0] || got.MentionTargets[1] != want.MentionTargets[1] {
+		t.Fatalf("mention mappings = %+v, want %+v", got.MentionTargets, want.MentionTargets)
+	}
+}
+
 func TestManagerPersistsReadableIlinkSessionPath(t *testing.T) {
 	root := t.TempDir()
 	manager, err := NewManagerWithStore(root)

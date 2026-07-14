@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -283,8 +284,10 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		addressedTo = append(addressedTo, channel.AddressTargetOwner)
 	}
 	messageType := stringValue(message.MessageType)
-	content := extractContent(messageType, stringValue(message.Content))
-	content = stripMentionPlaceholders(content, message.Mentions)
+	originalContent := stringValue(message.Content)
+	extractedContent := extractContent(messageType, originalContent)
+	content := renderMentionedContent(extractedContent, message.Mentions)
+	commandContent := mentionStrippedCommandContent(extractedContent, message.Mentions)
 	if strings.TrimSpace(content) == "" {
 		content = "[empty message]"
 	}
@@ -312,7 +315,9 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 		ChatID:  chatID, ChatType: chatType,
 		SenderID: senderID, SenderIDType: senderIDType, Mentioned: mentioned,
 		MentionTargets: mentionTargets, AddressedTo: addressedTo,
-		Content: content, MessageID: messageID, Metadata: metadata,
+		Content: content, CommandContent: commandContent,
+		OriginalContent: originalContent, MessageID: messageID, MessageType: messageType,
+		Metadata: metadata,
 	}
 	switch r.ingest.Gate(input, r.definition) {
 	case ingest.DecisionObserve:
@@ -360,7 +365,7 @@ func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2Messa
 	chatKey := frt.ChatKeyFromInbound(inbound)
 	// Explicit fallback protocol is consumed before Agent Turn. Feishu no
 	// longer guesses that arbitrary text answers the newest pending request.
-	if r.tryResolveTextHumanResponse(ctx, inbound, chatKey, content, dedupeKey) {
+	if r.tryResolveTextHumanResponse(ctx, inbound, chatKey, commandContent, dedupeKey) {
 		return nil
 	}
 	// IMEventRenderer receives raw RuntimeEvents and renders them to localized
@@ -741,7 +746,45 @@ func firstJSONStringField(content string, fields ...string) string {
 	return ""
 }
 
-func stripMentionPlaceholders(content string, mentions []*larkim.MentionEvent) string {
+// renderMentionedContent returns a model-readable projection while preserving
+// every mention in its original inline position. Unknown placeholders remain
+// untouched: losing an identity marker is worse than exposing an opaque token.
+// coverage: contract (100% required)
+func renderMentionedContent(content string, mentions []*larkim.MentionEvent) string {
+	replacements := make(map[string]string, len(mentions))
+	keys := make([]string, 0, len(mentions))
+	for _, mention := range mentions {
+		if mention == nil {
+			continue
+		}
+		key := strings.TrimSpace(stringValue(mention.Key))
+		name := strings.TrimSpace(stringValue(mention.Name))
+		if key == "" || name == "" {
+			continue
+		}
+		if _, exists := replacements[key]; !exists {
+			keys = append(keys, key)
+		}
+		replacements[key] = "@" + strings.TrimPrefix(name, "@")
+	}
+	if len(keys) == 0 {
+		return strings.TrimSpace(content)
+	}
+	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
+	patterns := make([]string, 0, len(keys))
+	for _, key := range keys {
+		patterns = append(patterns, regexp.QuoteMeta(key))
+	}
+	matcher := regexp.MustCompile(strings.Join(patterns, "|"))
+	return strings.TrimSpace(matcher.ReplaceAllStringFunc(content, func(key string) string {
+		return replacements[key]
+	}))
+}
+
+// mentionStrippedCommandContent is deliberately lossy and must only be used by
+// command parsers. The persisted/model-visible Content uses
+// renderMentionedContent instead.
+func mentionStrippedCommandContent(content string, mentions []*larkim.MentionEvent) string {
 	for _, mention := range mentions {
 		if mention != nil && mention.Key != nil && *mention.Key != "" {
 			content = strings.ReplaceAll(content, *mention.Key, "")

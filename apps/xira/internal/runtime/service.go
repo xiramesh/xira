@@ -693,7 +693,7 @@ func (s *Service) RunAgent(ctx context.Context, req TurnRequest) (TurnResponse, 
 		UserMessage:    req.Message,
 		AssistantReply: final,
 	}
-	if err := s.sessions.AppendAgentMessages(sessionTurn, sessionMessagesForRun(req.Message, final, profile.ID, runID, toolCalls, resp.HumanRequests, resp.Status, req.Context.SenderID, req.Context.SenderName)); err != nil {
+	if err := s.sessions.AppendAgentMessages(sessionTurn, sessionMessagesForRun(req.Message, req.Context, final, profile.ID, runID, toolCalls, resp.HumanRequests, resp.Status)); err != nil {
 		slog.Warn("session history persistence failed",
 			"run_id", runID,
 			"agent_id", profile.ID,
@@ -1379,16 +1379,20 @@ func mapString(input map[string]any, key string) string {
 // options), and the assistant reply. The reply may be empty when the run pauses
 // for human input — that is intentional, the human-request messages are the
 // audit record of why it paused.
-func sessionMessagesForRun(userMessage, finalResponse, agentID, runID string, toolCalls []ToolCallRecord, humanRequests []humanrequest.HumanRequest, runStatus, senderID, senderName string) []fsession.Message {
+func sessionMessagesForRun(userMessage string, inbound channel.InboundContext, finalResponse, agentID, runID string, toolCalls []ToolCallRecord, humanRequests []humanrequest.HumanRequest, runStatus string) []fsession.Message {
 	messages := []fsession.Message{
 		{
-			Role:       "user",
-			Kind:       fsession.MessageKindMessage,
-			Content:    strings.TrimSpace(userMessage),
-			AgentID:    agentID,
-			RunID:      runID,
-			SenderID:   senderID,
-			SenderName: senderName,
+			Role:            "user",
+			Kind:            fsession.MessageKindMessage,
+			Content:         strings.TrimSpace(userMessage),
+			OriginalContent: inbound.OriginalContent,
+			MessageID:       inbound.MessageID,
+			MessageType:     inbound.MessageType,
+			MentionTargets:  append([]channel.MentionTarget(nil), inbound.MentionTargets...),
+			AgentID:         agentID,
+			RunID:           runID,
+			SenderID:        inbound.SenderID,
+			SenderName:      inbound.SenderName,
 		},
 	}
 	for _, rec := range toolCalls {

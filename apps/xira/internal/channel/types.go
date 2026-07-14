@@ -15,6 +15,7 @@ const (
 )
 
 type MentionTarget struct {
+	Key    string `json:"key,omitempty" yaml:"key,omitempty"`
 	ID     string `json:"id" yaml:"id"`
 	IDType string `json:"id_type,omitempty" yaml:"id_type,omitempty"`
 	Name   string `json:"name,omitempty" yaml:"name,omitempty"`
@@ -36,6 +37,8 @@ type InboundContext struct {
 	SenderIDType     string            `json:"sender_id_type,omitempty" yaml:"sender_id_type,omitempty"`
 	SenderName       string            `json:"sender_name,omitempty" yaml:"sender_name,omitempty"`
 	MessageID        string            `json:"message_id,omitempty" yaml:"message_id,omitempty"`
+	MessageType      string            `json:"message_type,omitempty" yaml:"message_type,omitempty"`
+	OriginalContent  string            `json:"original_content,omitempty" yaml:"original_content,omitempty"`
 	Mentioned        bool              `json:"mentioned,omitempty" yaml:"mentioned,omitempty"`
 	MentionTargets   []MentionTarget   `json:"mention_targets,omitempty" yaml:"mention_targets,omitempty"`
 	AddressedTo      []AddressTarget   `json:"addressed_to,omitempty" yaml:"addressed_to,omitempty"`
@@ -95,6 +98,7 @@ func NewInboundContextWithEntrypoint(channelName, entrypointID, userID string, m
 	ctx.SpaceID = firstMetadata(metadata, "space_id", "tenant_id", "workspace_id")
 	ctx.SpaceType = firstMetadata(metadata, "space_type")
 	ctx.MessageID = firstMetadata(metadata, "message_id")
+	ctx.MessageType = firstMetadata(metadata, "message_type")
 	ctx.ReplyToMessageID = firstMetadata(metadata, "reply_to_message_id")
 	ctx.ReplyToSenderID = firstMetadata(metadata, "reply_to_sender_id")
 	ctx.SenderName = firstMetadata(metadata, "sender_name")
@@ -130,6 +134,7 @@ func NormalizeInboundContext(ctx InboundContext) InboundContext {
 	}
 	ctx.SenderName = strings.TrimSpace(ctx.SenderName)
 	ctx.MessageID = strings.TrimSpace(ctx.MessageID)
+	ctx.MessageType = strings.ToLower(strings.TrimSpace(ctx.MessageType))
 	ctx.ReplyToMessageID = strings.TrimSpace(ctx.ReplyToMessageID)
 	ctx.ReplyToSenderID = strings.TrimSpace(ctx.ReplyToSenderID)
 	ctx.MentionTargets = normalizeMentionTargets(ctx.MentionTargets)
@@ -205,17 +210,21 @@ func normalizeMentionTargets(targets []MentionTarget) []MentionTarget {
 	seen := map[string]bool{}
 	result := make([]MentionTarget, 0, len(targets))
 	for _, target := range targets {
+		target.Key = strings.TrimSpace(target.Key)
 		target.ID = strings.TrimSpace(target.ID)
 		target.IDType = strings.ToLower(strings.TrimSpace(target.IDType))
 		target.Name = strings.TrimSpace(target.Name)
 		if target.ID == "" {
 			continue
 		}
-		key := target.IDType + "\x00" + target.ID
-		if seen[key] {
+		dedupeKey := target.IDType + "\x00" + target.ID
+		if target.Key != "" {
+			dedupeKey = "key\x00" + target.Key
+		}
+		if seen[dedupeKey] {
 			continue
 		}
-		seen[key] = true
+		seen[dedupeKey] = true
 		result = append(result, target)
 	}
 	return result

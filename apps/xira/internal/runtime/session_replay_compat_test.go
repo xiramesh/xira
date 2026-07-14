@@ -3,6 +3,7 @@ package runtime
 import (
 	"testing"
 
+	"github.com/xiramesh/xira/internal/channel"
 	fsession "github.com/xiramesh/xira/internal/session"
 )
 
@@ -66,5 +67,47 @@ func TestSessionReplayExecToolStillDropped(t *testing.T) {
 	_, _, ok := adkEventFromSessionMessage(msg, "xira-assistant")
 	if ok {
 		t.Error("exec tool call should be DROPPED on replay (legacy behavior), but was preserved")
+	}
+}
+
+func TestSessionMessagesForRunPreservesInboundMessageFacts(t *testing.T) {
+	inbound := channel.InboundContext{
+		SenderID:        "ou_sender",
+		SenderName:      "大铭",
+		MessageID:       "om_1",
+		MessageType:     "text",
+		OriginalContent: `{"text":"@_user_1 请处理"}`,
+		MentionTargets: []channel.MentionTarget{
+			{Key: "@_user_1", ID: "ou_zhangsan", IDType: "open_id", Name: "张三"},
+		},
+	}
+	messages := sessionMessagesForRun("@张三 请处理", inbound, "done", "agent-1", "run-1", nil, nil, "completed")
+	if len(messages) < 1 {
+		t.Fatal("sessionMessagesForRun returned no user message")
+	}
+	got := messages[0]
+	if got.Content != "@张三 请处理" || got.OriginalContent != inbound.OriginalContent || got.MessageID != "om_1" || got.MessageType != "text" {
+		t.Fatalf("user message facts = %+v", got)
+	}
+	if got.SenderID != "ou_sender" || got.SenderName != "大铭" || len(got.MentionTargets) != 1 || got.MentionTargets[0].Key != "@_user_1" {
+		t.Fatalf("user identity/mentions = %+v", got)
+	}
+}
+
+func TestSessionReplayUsesReadableContentNotRawPlatformPayload(t *testing.T) {
+	msg := fsession.Message{
+		Role:            "user",
+		Kind:            fsession.MessageKindMessage,
+		Content:         "@张三 请处理",
+		OriginalContent: `{"text":"@_user_1 请处理"}`,
+		SenderID:        "ou_sender",
+		SenderName:      "大铭",
+	}
+	event, _, ok := adkEventFromSessionMessage(msg, "agent-1")
+	if !ok || event == nil || event.LLMResponse.Content == nil || len(event.LLMResponse.Content.Parts) != 1 {
+		t.Fatalf("event = %+v, ok = %v", event, ok)
+	}
+	if got := event.LLMResponse.Content.Parts[0].Text; got != "[大铭|ou_sender] @张三 请处理" {
+		t.Fatalf("replayed text = %q", got)
 	}
 }

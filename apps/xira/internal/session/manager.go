@@ -43,15 +43,19 @@ type Allocation struct {
 }
 
 type Message struct {
-	Role       string         `json:"role" yaml:"role"`
-	Kind       string         `json:"kind,omitempty" yaml:"kind,omitempty"`
-	Content    string         `json:"content" yaml:"content"`
-	ToolCallID string         `json:"tool_call_id,omitempty" yaml:"tool_call_id,omitempty"`
-	ToolName   string         `json:"tool_name,omitempty" yaml:"tool_name,omitempty"`
-	Metadata   map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	CreatedAt  time.Time      `json:"created_at,omitempty" yaml:"created_at,omitempty"`
-	AgentID    string         `json:"agent_id,omitempty" yaml:"agent_id,omitempty"`
-	RunID      string         `json:"run_id,omitempty" yaml:"run_id,omitempty"`
+	Role            string                  `json:"role" yaml:"role"`
+	Kind            string                  `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Content         string                  `json:"content" yaml:"content"`
+	OriginalContent string                  `json:"original_content,omitempty" yaml:"original_content,omitempty"`
+	MessageID       string                  `json:"message_id,omitempty" yaml:"message_id,omitempty"`
+	MessageType     string                  `json:"message_type,omitempty" yaml:"message_type,omitempty"`
+	MentionTargets  []channel.MentionTarget `json:"mention_targets,omitempty" yaml:"mention_targets,omitempty"`
+	ToolCallID      string                  `json:"tool_call_id,omitempty" yaml:"tool_call_id,omitempty"`
+	ToolName        string                  `json:"tool_name,omitempty" yaml:"tool_name,omitempty"`
+	Metadata        map[string]any          `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	CreatedAt       time.Time               `json:"created_at,omitempty" yaml:"created_at,omitempty"`
+	AgentID         string                  `json:"agent_id,omitempty" yaml:"agent_id,omitempty"`
+	RunID           string                  `json:"run_id,omitempty" yaml:"run_id,omitempty"`
 	// SenderID/SenderName 标记群聊 observed 消息的说话人（#151）。
 	// 空值 = agent 回复或非群聊消息（正常 user 消息也可能是空的——
 	// hydrate 时只有非空才加说话人前缀）。

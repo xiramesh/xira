@@ -17,6 +17,7 @@ package ingest
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/xiramesh/xira/internal/channel"
@@ -54,26 +55,35 @@ type MessageInput struct {
 	MentionTargets []channel.MentionTarget
 	AddressedTo    []channel.AddressTarget
 	Content        string
-	MessageID      string
-	Metadata       map[string]string
+	// CommandContent is a lossy mention-stripped projection used only for
+	// channel commands such as /bind and /answer. It must never be persisted
+	// or sent to the model in place of Content.
+	CommandContent  string
+	OriginalContent string
+	MessageID       string
+	MessageType     string
+	Metadata        map[string]string
 }
 
 // InboundContext 从 MessageInput 构造标准 InboundContext。
 func (m MessageInput) InboundContext() channel.InboundContext {
 	return channel.NormalizeInboundContext(channel.InboundContext{
-		Channel:        m.Channel,
-		EntrypointID:   m.EntrypointID,
-		Account:        m.Account,
-		ChatID:         m.ChatID,
-		ChatType:       m.ChatType,
-		SenderID:       m.SenderID,
-		SenderIDType:   m.SenderIDType,
-		SenderName:     m.SenderName,
-		ChatName:       m.ChatName,
-		Mentioned:      m.Mentioned,
-		MentionTargets: m.MentionTargets,
-		AddressedTo:    m.AddressedTo,
-		Raw:            m.Metadata,
+		Channel:         m.Channel,
+		EntrypointID:    m.EntrypointID,
+		Account:         m.Account,
+		ChatID:          m.ChatID,
+		ChatType:        m.ChatType,
+		SenderID:        m.SenderID,
+		SenderIDType:    m.SenderIDType,
+		SenderName:      m.SenderName,
+		MessageID:       m.MessageID,
+		MessageType:     m.MessageType,
+		OriginalContent: m.OriginalContent,
+		ChatName:        m.ChatName,
+		Mentioned:       m.Mentioned,
+		MentionTargets:  m.MentionTargets,
+		AddressedTo:     m.AddressedTo,
+		Raw:             m.Metadata,
 	})
 }
 
@@ -142,7 +152,11 @@ func (ing *Ingest) Gate(input MessageInput, def entrypoints.Definition) Decision
 		return DecisionObserve
 	}
 	// 私聊 or 群聊 @ bot：走完整授权（含 /bind pre-auth）。
-	if !AuthorizeSender(input.SenderID, input.Content, def, ing.ownerResolver) {
+	authorizationContent := input.Content
+	if strings.TrimSpace(input.CommandContent) != "" {
+		authorizationContent = input.CommandContent
+	}
+	if !AuthorizeSender(input.SenderID, authorizationContent, def, ing.ownerResolver) {
 		return DecisionReject
 	}
 	return DecisionDispatch
@@ -217,12 +231,16 @@ func (ing *Ingest) Observe(input MessageInput, def entrypoints.Definition, dedup
 		Context:   inbound,
 		Scope:     &allocation.Scope,
 	}, []fsession.Message{{
-		Role:       "user",
-		Kind:       "message",
-		Content:    input.Content,
-		SenderID:   input.SenderID,
-		SenderName: input.SenderName,
-		CreatedAt:  time.Now().UTC(),
+		Role:            "user",
+		Kind:            "message",
+		Content:         input.Content,
+		OriginalContent: inbound.OriginalContent,
+		MessageID:       inbound.MessageID,
+		MessageType:     inbound.MessageType,
+		MentionTargets:  append([]channel.MentionTarget(nil), inbound.MentionTargets...),
+		SenderID:        inbound.SenderID,
+		SenderName:      inbound.SenderName,
+		CreatedAt:       time.Now().UTC(),
 	}}); err != nil {
 		slog.Warn("ingest: observe failed",
 			"entrypoint_id", def.ID, "chat_id", input.ChatID, "err", err)

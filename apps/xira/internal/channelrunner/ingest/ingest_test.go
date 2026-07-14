@@ -143,9 +143,12 @@ func TestMessageInputInboundContextPreservesAddressingFacts(t *testing.T) {
 		SenderIDType: "open_id",
 		Mentioned:    false,
 		MentionTargets: []channel.MentionTarget{
-			{ID: "ou_owner", IDType: "open_id", Name: "Owner"},
+			{Key: "@_user_1", ID: "ou_owner", IDType: "open_id", Name: "Owner"},
 		},
-		AddressedTo: []channel.AddressTarget{channel.AddressTargetOwner},
+		AddressedTo:     []channel.AddressTarget{channel.AddressTargetOwner},
+		OriginalContent: `{"text":"@_user_1 please review"}`,
+		MessageType:     "text",
+		MessageID:       "om_1",
 	}
 
 	ctx := input.InboundContext()
@@ -155,8 +158,26 @@ func TestMessageInputInboundContextPreservesAddressingFacts(t *testing.T) {
 	if len(ctx.MentionTargets) != 1 || ctx.MentionTargets[0].ID != "ou_owner" {
 		t.Fatalf("MentionTargets = %+v, want owner target", ctx.MentionTargets)
 	}
+	if ctx.OriginalContent != input.OriginalContent || ctx.MessageType != "text" || ctx.MessageID != "om_1" {
+		t.Fatalf("message fidelity facts not preserved: %+v", ctx)
+	}
 	if ctx.SenderIDType != "open_id" || ctx.Raw["sender_id_type"] != "open_id" {
 		t.Fatalf("sender identity type not preserved: %+v", ctx)
+	}
+}
+
+func TestGateUsesMentionStrippedCommandContentOnlyForAuthorization(t *testing.T) {
+	ing := New(nil, nil)
+	def := entrypoints.Definition{AllowedSenderIDs: []string{"ou_allowed"}}
+	input := MessageInput{
+		ChatType:       "group",
+		Mentioned:      true,
+		SenderID:       "ou_unbound",
+		Content:        "@Xira /bind ABCD-EFGH",
+		CommandContent: "/bind ABCD-EFGH",
+	}
+	if got := ing.Gate(input, def); got != DecisionDispatch {
+		t.Fatalf("Gate() = %v, want dispatch using command-only projection", got)
 	}
 }
 
@@ -247,8 +268,10 @@ func TestObserveStoresWithSender(t *testing.T) {
 
 	ing.Observe(MessageInput{
 		ChatType: "group", SenderID: "ou_alice", SenderName: "Alice",
-		Content: "hello from alice", ChatID: "chat-1",
+		Content: "@Bob hello from alice", OriginalContent: `{"text":"@_user_1 hello from alice"}`,
+		MessageType: "text", ChatID: "chat-1",
 		Channel: "test", MessageID: "msg-1",
+		MentionTargets: []channel.MentionTarget{{Key: "@_user_1", ID: "ou_bob", IDType: "open_id", Name: "Bob"}},
 	}, def, "", nil)
 
 	entries := readHistory(t, mgr, "test", "chat-1", "group", "ou_alice")
@@ -260,6 +283,12 @@ func TestObserveStoresWithSender(t *testing.T) {
 	}
 	if entries[0].SenderName != "Alice" {
 		t.Errorf("SenderName = %q, want Alice", entries[0].SenderName)
+	}
+	if entries[0].OriginalContent != `{"text":"@_user_1 hello from alice"}` || entries[0].MessageID != "msg-1" || entries[0].MessageType != "text" {
+		t.Fatalf("message source facts = %+v", entries[0])
+	}
+	if len(entries[0].MentionTargets) != 1 || entries[0].MentionTargets[0].Key != "@_user_1" || entries[0].MentionTargets[0].ID != "ou_bob" {
+		t.Fatalf("stored mention mappings = %+v", entries[0].MentionTargets)
 	}
 }
 
