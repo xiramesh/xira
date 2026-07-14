@@ -335,6 +335,8 @@ func compactMessages(messages []Message) []Message {
 			msg.Kind = MessageKindMessage
 		}
 		msg.Content = strings.TrimSpace(msg.Content)
+		msg.MessageID = strings.TrimSpace(msg.MessageID)
+		msg.MessageType = strings.ToLower(strings.TrimSpace(msg.MessageType))
 		msg.ToolCallID = strings.TrimSpace(msg.ToolCallID)
 		msg.ToolName = strings.TrimSpace(msg.ToolName)
 		msg.AgentID = strings.TrimSpace(msg.AgentID)

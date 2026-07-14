@@ -34,8 +34,9 @@ func TestNewInboundContextNormalizesChannelFacts(t *testing.T) {
 func TestNormalizeInboundContextPreservesAddressingFacts(t *testing.T) {
 	addressed := []AddressTarget{AddressTargetOwner, AddressTargetAgent, AddressTargetOwner, AddressTarget("unknown")}
 	mentions := []MentionTarget{
-		{ID: " u_owner ", IDType: " user_id ", Name: " Owner "},
-		{ID: "u_owner", IDType: "user_id", Name: "duplicate"},
+		{Key: " @_user_1 ", ID: " u_owner ", IDType: " user_id ", Name: " Owner "},
+		{Key: "@_user_1", ID: "u_owner", IDType: "user_id", Name: "duplicate"},
+		{Key: "@_user_2", ID: "u_owner", IDType: "user_id", Name: "Owner again"},
 		{ID: " ", IDType: "open_id", Name: "empty"},
 	}
 	ctx := NormalizeInboundContext(InboundContext{
@@ -49,12 +50,15 @@ func TestNormalizeInboundContextPreservesAddressingFacts(t *testing.T) {
 	if len(ctx.AddressedTo) != 2 || ctx.AddressedTo[0] != AddressTargetAgent || ctx.AddressedTo[1] != AddressTargetOwner {
 		t.Fatalf("AddressedTo = %v, want [agent owner]", ctx.AddressedTo)
 	}
-	if len(ctx.MentionTargets) != 1 {
-		t.Fatalf("MentionTargets = %+v, want one normalized target", ctx.MentionTargets)
+	if len(ctx.MentionTargets) != 2 {
+		t.Fatalf("MentionTargets = %+v, want one mapping per placeholder key", ctx.MentionTargets)
 	}
-	wantMention := (MentionTarget{ID: "u_owner", IDType: "user_id", Name: "Owner"})
+	wantMention := (MentionTarget{Key: "@_user_1", ID: "u_owner", IDType: "user_id", Name: "Owner"})
 	if ctx.MentionTargets[0] != wantMention {
 		t.Fatalf("MentionTargets[0] = %+v, want %+v", ctx.MentionTargets[0], wantMention)
+	}
+	if ctx.MentionTargets[1].Key != "@_user_2" || ctx.MentionTargets[1].ID != "u_owner" {
+		t.Fatalf("MentionTargets[1] = %+v, want second placeholder for same identity", ctx.MentionTargets[1])
 	}
 	if ctx.Raw["addressed_to"] != "agent,owner" {
 		t.Fatalf("raw addressed_to = %q, want agent,owner", ctx.Raw["addressed_to"])

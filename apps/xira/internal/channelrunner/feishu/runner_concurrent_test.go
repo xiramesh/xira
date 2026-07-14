@@ -171,9 +171,9 @@ func TestFeishuOwnerAndAgentMentionStartsOneTurnWithBothFacts(t *testing.T) {
 	runner.botOpenID.Store("ou_bot")
 
 	msg := makeP2GroupMessageWithMentions(
-		"oc_group", "u_sender", "om_both", "both please review",
-		&larkim.MentionEvent{Id: &larkim.UserId{UserId: strPtr("u_owner"), OpenId: strPtr("ou_owner")}, Name: strPtr("Owner")},
-		&larkim.MentionEvent{Id: &larkim.UserId{OpenId: strPtr("ou_bot")}, Name: strPtr("Xira")},
+		"oc_group", "u_sender", "om_both", "@_user_2 请 @_user_1 review",
+		&larkim.MentionEvent{Key: strPtr("@_user_1"), Id: &larkim.UserId{UserId: strPtr("u_owner"), OpenId: strPtr("ou_owner")}, Name: strPtr("Owner")},
+		&larkim.MentionEvent{Key: strPtr("@_user_2"), Id: &larkim.UserId{OpenId: strPtr("ou_bot")}, Name: strPtr("Xira")},
 	)
 	if err := runner.handleMessageReceive(context.Background(), msg); err != nil {
 		t.Fatalf("handleMessageReceive: %v", err)
@@ -184,8 +184,17 @@ func TestFeishuOwnerAndAgentMentionStartsOneTurnWithBothFacts(t *testing.T) {
 		t.Fatalf("RunAgent calls = %d, want exactly 1", len(captured))
 	}
 	req := <-captured
+	if req.Message != "@Xira 请 @Owner review" {
+		t.Fatalf("Message = %q, want inline mentions preserved", req.Message)
+	}
+	if req.Context.OriginalContent != `{"text":"@_user_2 请 @_user_1 review"}` || req.Context.MessageType != "text" || req.Context.MessageID != "om_both" {
+		t.Fatalf("runtime context lost original message facts: %+v", req.Context)
+	}
 	if len(req.Context.AddressedTo) != 2 || req.Context.AddressedTo[0] != channel.AddressTargetAgent || req.Context.AddressedTo[1] != channel.AddressTargetOwner {
 		t.Fatalf("AddressedTo = %v, want [agent owner]", req.Context.AddressedTo)
+	}
+	if len(req.Context.MentionTargets) != 2 || req.Context.MentionTargets[0].Key != "@_user_1" || req.Context.MentionTargets[1].Key != "@_user_2" {
+		t.Fatalf("MentionTargets = %+v, want placeholder mappings", req.Context.MentionTargets)
 	}
 }
 
@@ -484,7 +493,12 @@ func TestFeishuObservePersistsAuthorizedUnmentionedGroupMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner.SetIngest(ingest.New(mgr, nil))
-	event := makeP2Message("group-1", "ou_allowed", "om-observe", "remember this")
+	event := makeP2GroupMessageWithMentions(
+		"group-1", "ou_allowed", "om-observe",
+		"@_user_2 请把文件交给 @_user_1，@_user_2 先等一下",
+		&larkim.MentionEvent{Key: strPtr("@_user_1"), Id: &larkim.UserId{OpenId: strPtr("ou_lisi")}, Name: strPtr("李四")},
+		&larkim.MentionEvent{Key: strPtr("@_user_2"), Id: &larkim.UserId{OpenId: strPtr("ou_zhangsan")}, Name: strPtr("张三")},
+	)
 	*event.Event.Message.ChatType = "group"
 
 	if err := runner.handleMessageReceive(context.Background(), event); err != nil {
@@ -495,8 +509,17 @@ func TestFeishuObservePersistsAuthorizedUnmentionedGroupMessage(t *testing.T) {
 	}
 	scope := mgr.Allocate(fsession.AllocationInput{Context: fsessionTestInbound("feishu-observe", "group-1", "ou_allowed"), SessionPolicy: def.SessionPolicy})
 	history := mgr.AgentHistory(scope.SessionID, def.DefaultAgentID)
-	if len(history) != 1 || history[0].Content != "remember this" || history[0].SenderID != "ou_allowed" {
+	if len(history) != 1 || history[0].Content != "@张三 请把文件交给 @李四，@张三 先等一下" || history[0].SenderID != "ou_allowed" {
 		t.Fatalf("observed history = %+v", history)
+	}
+	if history[0].OriginalContent != `{"text":"@_user_2 请把文件交给 @_user_1，@_user_2 先等一下"}` {
+		t.Fatalf("OriginalContent = %q", history[0].OriginalContent)
+	}
+	if history[0].MessageID != "om-observe" || history[0].MessageType != "text" {
+		t.Fatalf("message identity = %+v", history[0])
+	}
+	if len(history[0].MentionTargets) != 2 || history[0].MentionTargets[0].Key != "@_user_1" || history[0].MentionTargets[1].Key != "@_user_2" {
+		t.Fatalf("MentionTargets = %+v", history[0].MentionTargets)
 	}
 	if err := runner.handleMessageReceive(context.Background(), event); err != nil {
 		t.Fatalf("duplicate handleMessageReceive: %v", err)

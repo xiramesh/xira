@@ -26,11 +26,33 @@ func TestExtractContentText(t *testing.T) {
 	}
 }
 
-func TestStripMentionPlaceholders(t *testing.T) {
+func TestRenderMentionedContentPreservesInlineOrder(t *testing.T) {
+	firstKey := "@_user_1"
+	secondKey := "@_user_10"
+	got := renderMentionedContent(
+		"@_user_10 请把文件交给 @_user_1，@_user_10 先等一下；未知 @_user_9 保留",
+		[]*larkim.MentionEvent{
+			nil,
+			{Key: &firstKey, Name: strPtr("李四")},
+			{Key: &secondKey, Name: strPtr("张三")},
+		},
+	)
+	want := "@张三 请把文件交给 @李四，@张三 先等一下；未知 @_user_9 保留"
+	if got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
+func TestMentionStrippedCommandContentIsSeparateFromRenderedContent(t *testing.T) {
 	key := "@_user_1"
-	got := stripMentionPlaceholders("hello @_user_1 world", []*larkim.MentionEvent{{Key: &key}})
-	if got != "hello  world" {
-		t.Fatalf("content = %q", got)
+	mentions := []*larkim.MentionEvent{{Key: &key, Name: strPtr("Xira")}}
+	rendered := renderMentionedContent("@_user_1 /bind ABCD-EFGH", mentions)
+	command := mentionStrippedCommandContent("@_user_1 /bind ABCD-EFGH", mentions)
+	if rendered != "@Xira /bind ABCD-EFGH" {
+		t.Fatalf("rendered content = %q", rendered)
+	}
+	if command != "/bind ABCD-EFGH" {
+		t.Fatalf("command content = %q", command)
 	}
 }
 
@@ -222,6 +244,7 @@ func TestIsBotMentioned(t *testing.T) {
 func TestExtractMentionTargetsUsesSenderIdentityPriority(t *testing.T) {
 	targets := extractMentionTargets([]*larkim.MentionEvent{
 		{
+			Key: strPtr("@_user_1"),
 			Id: &larkim.UserId{
 				UserId:  strPtr("u_owner"),
 				OpenId:  strPtr("ou_owner"),
@@ -229,17 +252,17 @@ func TestExtractMentionTargetsUsesSenderIdentityPriority(t *testing.T) {
 			},
 			Name: strPtr(" Owner "),
 		},
-		{Id: &larkim.UserId{OpenId: strPtr("ou_colleague")}, Name: strPtr("Colleague")},
-		{Id: &larkim.UserId{UnionId: strPtr("on_guest")}, Name: strPtr("Guest")},
+		{Key: strPtr("@_user_2"), Id: &larkim.UserId{OpenId: strPtr("ou_colleague")}, Name: strPtr("Colleague")},
+		{Key: strPtr("@_user_3"), Id: &larkim.UserId{UnionId: strPtr("on_guest")}, Name: strPtr("Guest")},
 		nil,
 		{Name: strPtr("No ID")},
 		{Id: &larkim.UserId{}, Name: strPtr("Empty ID")},
 	})
 
 	want := []channel.MentionTarget{
-		{ID: "u_owner", IDType: "user_id", Name: "Owner"},
-		{ID: "ou_colleague", IDType: "open_id", Name: "Colleague"},
-		{ID: "on_guest", IDType: "union_id", Name: "Guest"},
+		{Key: "@_user_1", ID: "u_owner", IDType: "user_id", Name: "Owner"},
+		{Key: "@_user_2", ID: "ou_colleague", IDType: "open_id", Name: "Colleague"},
+		{Key: "@_user_3", ID: "on_guest", IDType: "union_id", Name: "Guest"},
 	}
 	if len(targets) != len(want) {
 		t.Fatalf("targets = %+v, want %+v", targets, want)

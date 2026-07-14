@@ -21,6 +21,7 @@ func extractMentionTargets(mentions []*larkim.MentionEvent) []channel.MentionTar
 			continue
 		}
 		targets = append(targets, channel.MentionTarget{
+			Key:    stringValue(mention.Key),
 			ID:     id,
 			IDType: idType,
 			Name:   stringValue(mention.Name),
