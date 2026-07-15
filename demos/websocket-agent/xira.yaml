@@ -1,0 +1,4 @@
+workspace: ../../workspace
+default_agent: xira-assistant
+entrypoints: ../demos/websocket-agent/entrypoints.yaml
+state_dir: .state
