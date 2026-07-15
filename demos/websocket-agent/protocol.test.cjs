@@ -307,3 +307,28 @@ test("XiraSocketClient invokes browser timer functions without rebinding this", 
   assert.equal(intervalReceiver, undefined);
   assert.equal(clearReceiver, undefined);
 });
+
+test("XiraSocketClient can use browser WebSocket and ID defaults", (t) => {
+  const originalWebSocket = global.WebSocket;
+  global.WebSocket = FakeWebSocket;
+  t.after(() => {
+    global.WebSocket = originalWebSocket;
+  });
+  FakeWebSocket.instances = [];
+
+  const client = new XiraSocketClient({
+    setIntervalImpl: () => 1,
+    clearIntervalImpl: () => {},
+  });
+  client.connect({
+    endpoint: DEFAULT_ENDPOINT,
+    entrypointId: "websocket-default",
+    chatId: "demo-chat",
+    senderId: "browser-user",
+  });
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+
+  assert.match(socket.sent[0].id, /^hello_/);
+  client.disconnect();
+});

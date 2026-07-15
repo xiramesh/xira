@@ -83,6 +83,29 @@ test("error and unknown frames stay visible instead of disappearing", () => {
   assert.match(unknown.body, /"value": 1/);
 });
 
+test("ack, ready, and pong control frames remain visible in the wire trace", () => {
+  const ack = frameToPresentation({
+    type: "ack",
+    request_id: "msg-1",
+    data: { status: "accepted", message_id: "server-msg-1" },
+  });
+  assert.equal(ack.title, "ACK · accepted");
+  assert.equal(ack.body, "server-msg-1");
+  assert.equal(ack.tone, "success");
+
+  const ready = frameToPresentation({
+    type: "ready",
+    data: { entrypoint_id: "websocket-default" },
+  });
+  assert.equal(ready.title, "CHANNEL READY");
+  assert.equal(ready.body, "entrypoint · websocket-default");
+  assert.equal(ready.tone, "online");
+
+  const pong = frameToPresentation({ type: "pong" });
+  assert.equal(pong.title, "PONG");
+  assert.equal(pong.body, "心跳响应");
+});
+
 test("connection states map to clear operator-facing labels", () => {
   assert.deepEqual(stateToPresentation("connecting", {}), {
     label: "正在接入",
