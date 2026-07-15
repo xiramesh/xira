@@ -25,6 +25,8 @@ test("normalizeEndpoint supplies the channel path without changing custom paths"
     normalizeEndpoint("wss://xira.example.test/custom/socket"),
     "wss://xira.example.test/custom/socket",
   );
+  assert.throws(() => normalizeEndpoint("not a url"), /invalid/i);
+  assert.throws(() => normalizeEndpoint("ftp://xira.example.test"), /must use ws/i);
 });
 
 test("frame builders preserve correlation and leave agent routing to the entrypoint", () => {
@@ -55,6 +57,7 @@ test("frame builders preserve correlation and leave agent routing to the entrypo
   assert.equal(Object.hasOwn(message.data, "agent_id"), false);
 
   assert.deepEqual(buildPingFrame("ping-1"), { type: "ping", id: "ping-1" });
+  assert.throws(() => buildHelloFrame("", "websocket-default"), /hello id is required/);
 });
 
 test("human response frames carry only request correlation and the selected action", () => {
@@ -192,6 +195,20 @@ test("XiraSocketClient opens with hello, sends default-agent messages, and corre
   assert.equal(socket.sent[1].data.message, "测试默认 Agent");
   assert.equal(Object.hasOwn(socket.sent[1].data, "agent_id"), false);
 
+  const humanResponseID = harness.client.sendHumanResponse({
+    requestId: "hr-1",
+    correlationToken: "token-1",
+    action: "approve",
+  });
+  assert.equal(humanResponseID, "human-3");
+  assert.deepEqual(socket.sent[2], {
+    type: "human_response",
+    id: "human-3",
+    request_id: "hr-1",
+    correlation_token: "token-1",
+    action: "approve",
+  });
+
   socket.receive({
     type: "response",
     request_id: requestID,
@@ -201,8 +218,8 @@ test("XiraSocketClient opens with hello, sends default-agent messages, and corre
   assert.equal(harness.frames[0].data.final_response, "收到");
 
   harness.interval().callback();
-  assert.equal(socket.sent[2].type, "ping");
-  assert.match(socket.sent[2].id, /^ping-/);
+  assert.equal(socket.sent[3].type, "ping");
+  assert.match(socket.sent[3].id, /^ping-/);
 });
 
 test("XiraSocketClient reports invalid frames and clears heartbeat when the connection closes", () => {
@@ -219,6 +236,9 @@ test("XiraSocketClient reports invalid frames and clears heartbeat when the conn
   socket.receive("not-json");
   assert.equal(harness.protocolErrors.length, 1);
   assert.match(harness.protocolErrors[0].message, /JSON/);
+  socket.onmessage({ data: new Uint8Array([1, 2, 3]) });
+  assert.equal(harness.protocolErrors.length, 2);
+  assert.match(harness.protocolErrors[1].message, /not JSON text/);
 
   socket.fail();
   assert.equal(harness.states.at(-1).state, "error");
@@ -238,6 +258,15 @@ test("XiraSocketClient refuses sends before open and closes explicitly", () => {
   });
   const socket = FakeWebSocket.instances[0];
 
+  assert.throws(
+    () => harness.client.connect({
+      endpoint: DEFAULT_ENDPOINT,
+      entrypointId: "websocket-default",
+      chatId: "demo-chat",
+      senderId: "browser-user",
+    }),
+    /already connected or connecting/i,
+  );
   assert.throws(() => harness.client.sendMessage("too soon"), /not connected/i);
   socket.open();
   harness.client.disconnect();
