@@ -1,0 +1,11 @@
+entrypoints:
+  - id: websocket-default
+    enabled: true
+    channel: websocket
+    default_agent: xira-assistant
+    allowed_agents:
+      - xira-assistant
+    session:
+      dimensions:
+        - chat
+        - sender

@@ -2,33 +2,21 @@
 
 这是一个零依赖静态演示页，用来从浏览器验证 Xira WebSocket channel 与 entrypoint 默认 Agent 的交互。它不需要 `npm install`、构建命令或前端开发服务器。
 
-## 1. 启用 WebSocket entrypoint
-
-运行实例必须有一个启用的 WebSocket entrypoint。示例：
-
-```yaml
-entrypoints:
-  - id: websocket-default
-    enabled: true
-    channel: websocket
-    default_agent: xira-assistant
-    allowed_agents:
-      - xira-assistant
-    session:
-      dimensions:
-        - chat
-        - sender
-```
-
-页面发送的 `message` 帧不包含 `agent_id`，因此实际使用哪个 Agent 完全由这里的 `default_agent` 决定。
-
-## 2. 启动 Xira
+## 1. 启动 Demo 专用 Xira 实例
 
 在仓库根目录执行：
 
 ```bash
-go run ./apps/xira/cmd/xira --config xira.yaml serve
+export DEEPSEEK_API_KEY="$(cat DEEPSEEK_API_KEY)"
+go run ./apps/xira/cmd/xira --config demos/websocket-agent/xira.yaml serve
 ```
+
+目录里的 `xira.yaml` 和 `entrypoints.yaml` 是隔离的演示配置：它复用仓库的 `workspace` 和
+`xira-assistant`，但只启用 `websocket-default`，不会启动现有配置里的飞书或 iLink runner。
+演示运行状态写入本目录下被忽略的 `.state/`。
+
+页面发送的 `message` 帧不包含 `agent_id`，实际使用哪个 Agent 完全由 entrypoint 的
+`default_agent` 决定。
 
 默认监听地址是 `127.0.0.1:8089`，演示页默认连接：
 
@@ -36,7 +24,7 @@ go run ./apps/xira/cmd/xira --config xira.yaml serve
 ws://127.0.0.1:8089/api/v1/channels/websocket/messages
 ```
 
-## 3. 打开页面
+## 2. 打开页面
 
 直接在 Finder 中双击 `index.html`，或执行：
 
@@ -52,7 +40,7 @@ open demos/websocket-agent/index.html
 
 同一 `chat_id + sender_id` 同时只能有一条活跃 WebSocket 连接。请避免重复打开多个页面；如果异常断线后立即重连收到 `chat_already_has_connection`，等待旧连接释放后再手工连接。
 
-## 4. 运行测试
+## 3. 运行测试
 
 无需安装依赖：
 
@@ -66,7 +54,8 @@ node --test demos/websocket-agent/*.test.cjs
 
 ### `503 websocket channel runner is not configured`
 
-当前实例没有启用 `channel: websocket` 的 entrypoint，或修改配置后尚未重启 `xira serve`。
+当前实例没有启用 `channel: websocket` 的 entrypoint，或启动时没有使用本目录的
+`xira.yaml`。
 
 ### 页面显示连接异常
 

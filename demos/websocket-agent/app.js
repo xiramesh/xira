@@ -115,7 +115,11 @@
       case "connected":
         return { label: "链路在线", detail: "默认 Agent 路由已就绪", tone: "online" };
       case "error":
-        return { label: "链路异常", detail: "连接或传输发生错误", tone: "danger" };
+        return {
+          label: "链路异常",
+          detail: "无法握手；确认 Xira 已在填写地址启动",
+          tone: "danger",
+        };
       case "disconnected":
         return {
           label: "链路断开",

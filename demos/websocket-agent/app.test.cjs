@@ -94,6 +94,11 @@ test("connection states map to clear operator-facing labels", () => {
     detail: "默认 Agent 路由已就绪",
     tone: "online",
   });
+  assert.deepEqual(stateToPresentation("error", {}), {
+    label: "链路异常",
+    detail: "无法握手；确认 Xira 已在填写地址启动",
+    tone: "danger",
+  });
   assert.deepEqual(stateToPresentation("disconnected", { code: 1006 }), {
     label: "链路断开",
     detail: "连接已关闭 · 1006",
