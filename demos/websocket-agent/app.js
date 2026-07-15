@@ -16,6 +16,9 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function createDemoApp() {
   "use strict";
 
+  const SENDER_STORAGE_KEY = "xira.websocket-demo.sender-id.v1";
+  const CHAT_STORAGE_KEY = "xira.websocket-demo.chat-id.v1";
+
   function safeString(value, fallback) {
     const normalized = String(value == null ? "" : value).trim();
     return normalized || fallback || "";
@@ -26,6 +29,47 @@
       return JSON.stringify(value, null, 2);
     } catch (_error) {
       return String(value);
+    }
+  }
+
+  function createIdentityToken(cryptoLike, now, random) {
+    if (cryptoLike && typeof cryptoLike.randomUUID === "function") {
+      try {
+        const uuid = safeString(cryptoLike.randomUUID());
+        if (uuid) return uuid;
+      } catch (_error) {
+        // Privacy modes can expose crypto while rejecting individual operations.
+      }
+    }
+    const timestamp = (now || Date.now)().toString(36);
+    const entropy = (random || Math.random)().toString(36).slice(2, 10);
+    return `${timestamp}-${entropy}`;
+  }
+
+  // coverage: contract (100% required)
+  function getOrCreateIdentity(storage, key, prefix, createToken) {
+    try {
+      const existing = safeString(storage && storage.getItem(key));
+      if (existing) return existing;
+    } catch (_error) {
+      // Continue with an in-memory identity when browser storage is blocked.
+    }
+
+    const identity = `${prefix}-${createToken()}`;
+    try {
+      if (storage) storage.setItem(key, identity);
+    } catch (_error) {
+      // The generated identity still isolates this page lifetime.
+    }
+    return identity;
+  }
+
+  // coverage: contract (100% required)
+  function readBrowserStorage(browserWindow, name) {
+    try {
+      return browserWindow && browserWindow[name] ? browserWindow[name] : null;
+    } catch (_error) {
+      return null;
     }
   }
 
@@ -157,6 +201,30 @@
       lastFrame: document.getElementById("last-frame"),
       humanRegion: document.getElementById("human-action-region"),
     };
+    const browserWindow = typeof window !== "undefined" ? window : null;
+    const localStorage = readBrowserStorage(browserWindow, "localStorage");
+    const sessionStorage = readBrowserStorage(browserWindow, "sessionStorage");
+    let cryptoLike = null;
+    try {
+      cryptoLike = browserWindow && browserWindow.crypto;
+    } catch (_error) {
+      // The token generator has a time-and-random fallback.
+    }
+    const createToken = () => createIdentityToken(cryptoLike);
+    elements.senderId.value = getOrCreateIdentity(
+      localStorage,
+      SENDER_STORAGE_KEY,
+      "browser",
+      createToken,
+    );
+    elements.chatId.value = getOrCreateIdentity(
+      sessionStorage,
+      CHAT_STORAGE_KEY,
+      "chat",
+      createToken,
+    );
+    elements.senderId.readOnly = true;
+    elements.chatId.readOnly = true;
     let requestCount = 0;
     let client = null;
     const requestMessages = new Map();
@@ -422,5 +490,14 @@
     setControls("disconnected");
   }
 
-  return Object.freeze({ frameToPresentation, mountDemo, stateToPresentation });
+  return Object.freeze({
+    CHAT_STORAGE_KEY,
+    SENDER_STORAGE_KEY,
+    createIdentityToken,
+    frameToPresentation,
+    getOrCreateIdentity,
+    mountDemo,
+    readBrowserStorage,
+    stateToPresentation,
+  });
 });

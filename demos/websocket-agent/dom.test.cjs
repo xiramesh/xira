@@ -15,6 +15,7 @@ class FakeElement {
     this.textContent = "";
     this.value = "";
     this.disabled = false;
+    this.readOnly = false;
     this.hidden = false;
     this.focused = false;
     this.scrollTop = 0;
@@ -171,7 +172,21 @@ class FakeSocketClient {
   }
 }
 
-function createHarness() {
+class FakeStorage {
+  constructor(entries) {
+    this.values = new Map(entries || []);
+  }
+
+  getItem(key) {
+    return this.values.get(key) || null;
+  }
+
+  setItem(key, value) {
+    this.values.set(key, value);
+  }
+}
+
+function createHarness(options = {}) {
   FakeSocketClient.instances = [];
   FakeSocketClient.connectError = null;
   FakeSocketClient.sendError = null;
@@ -200,20 +215,29 @@ function createHarness() {
   };
   elements.endpoint.value = "ws://localhost:8089/socket";
   elements.entrypointId.value = "websocket-default";
-  elements.chatId.value = "demo-chat";
-  elements.senderId.value = "browser-user";
   const placeholder = new FakeElement("div");
   placeholder.className = "event-empty";
   elements.eventLog.append(placeholder);
 
   const windowListeners = new Map();
+  const localStorage = options.localStorage || new FakeStorage();
+  const sessionStorage = options.sessionStorage || new FakeStorage();
+  let identitySequence = 0;
   global.window = {
+    localStorage,
+    sessionStorage,
+    crypto: {
+      randomUUID() {
+        identitySequence += 1;
+        return `identity-${identitySequence}`;
+      },
+    },
     addEventListener(type, listener) {
       windowListeners.set(type, listener);
     },
   };
   mountDemo(document, { XiraSocketClient: FakeSocketClient });
-  return { document, elements, windowListeners };
+  return { document, elements, localStorage, sessionStorage, windowListeners };
 }
 
 test("mountDemo drives connection, message, frame, HITL, and cleanup interactions", (t) => {
@@ -222,13 +246,17 @@ test("mountDemo drives connection, message, frame, HITL, and cleanup interaction
 
   assert.equal(elements.disconnectButton.disabled, true);
   assert.equal(elements.messageInput.disabled, true);
+  assert.equal(elements.senderId.value, "browser-identity-1");
+  assert.equal(elements.chatId.value, "chat-identity-2");
+  assert.equal(elements.senderId.readOnly, true);
+  assert.equal(elements.chatId.readOnly, true);
   elements.connectionForm.requestSubmit();
   const client = FakeSocketClient.instances[0];
   assert.deepEqual(client.connectCalls[0], {
     endpoint: "ws://localhost:8089/socket",
     entrypointId: "websocket-default",
-    chatId: "demo-chat",
-    senderId: "browser-user",
+    chatId: "chat-identity-2",
+    senderId: "browser-identity-1",
   });
 
   client.callbacks.onState("connecting", {});
@@ -324,6 +352,16 @@ test("mountDemo drives connection, message, frame, HITL, and cleanup interaction
   elements.disconnectButton.click();
   windowListeners.get("beforeunload")();
   assert.equal(client.disconnectCalls, 2);
+});
+
+test("mountDemo keeps a browser sender while isolating each tab chat", (t) => {
+  t.after(() => delete global.window);
+  const localStorage = new FakeStorage();
+  const first = createHarness({ localStorage, sessionStorage: new FakeStorage() });
+  const second = createHarness({ localStorage, sessionStorage: new FakeStorage() });
+
+  assert.equal(first.elements.senderId.value, second.elements.senderId.value);
+  assert.notEqual(first.elements.chatId.value, second.elements.chatId.value);
 });
 
 test("mountDemo keeps connection and send failures visible", (t) => {
