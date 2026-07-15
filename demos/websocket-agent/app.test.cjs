@@ -1,7 +1,95 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { frameToPresentation, stateToPresentation } = require("./app.js");
+const {
+  CHAT_STORAGE_KEY,
+  SENDER_STORAGE_KEY,
+  createIdentityToken,
+  frameToPresentation,
+  getOrCreateIdentity,
+  readBrowserStorage,
+  stateToPresentation,
+} = require("./app.js");
+
+test("browser identity reuses stored values and persists newly generated values", () => {
+  const values = new Map([[SENDER_STORAGE_KEY, "browser-existing"]]);
+  const storage = {
+    getItem(key) {
+      return values.get(key) || null;
+    },
+    setItem(key, value) {
+      values.set(key, value);
+    },
+  };
+  let generated = 0;
+  const generate = () => {
+    generated += 1;
+    return `token-${generated}`;
+  };
+
+  assert.equal(
+    getOrCreateIdentity(storage, SENDER_STORAGE_KEY, "browser", generate),
+    "browser-existing",
+  );
+  assert.equal(generated, 0);
+  assert.equal(
+    getOrCreateIdentity(storage, CHAT_STORAGE_KEY, "chat", generate),
+    "chat-token-1",
+  );
+  assert.equal(values.get(CHAT_STORAGE_KEY), "chat-token-1");
+});
+
+test("browser identity safely falls back when storage is absent or blocked", () => {
+  const blockedStorage = {
+    getItem() {
+      throw new Error("storage blocked");
+    },
+    setItem() {
+      throw new Error("storage blocked");
+    },
+  };
+
+  assert.equal(
+    getOrCreateIdentity(blockedStorage, SENDER_STORAGE_KEY, "browser", () => "blocked"),
+    "browser-blocked",
+  );
+  assert.equal(
+    getOrCreateIdentity(null, CHAT_STORAGE_KEY, "chat", () => "missing"),
+    "chat-missing",
+  );
+});
+
+test("identity tokens prefer browser UUIDs and retain a no-crypto fallback", () => {
+  assert.equal(
+    createIdentityToken({ randomUUID: () => "uuid-1" }),
+    "uuid-1",
+  );
+  assert.equal(
+    createIdentityToken(null, () => 1234, () => 0.25),
+    "ya-9",
+  );
+  assert.equal(
+    createIdentityToken(
+      { randomUUID: () => { throw new Error("unavailable"); } },
+      () => 35,
+      () => 0.5,
+    ),
+    "z-i",
+  );
+});
+
+test("browser storage lookup does not fail when privacy settings block access", () => {
+  const browserWindow = { sessionStorage: { name: "session" } };
+  Object.defineProperty(browserWindow, "localStorage", {
+    get() {
+      throw new Error("denied");
+    },
+  });
+
+  assert.equal(readBrowserStorage(browserWindow, "localStorage"), null);
+  assert.equal(readBrowserStorage(browserWindow, "sessionStorage").name, "session");
+  assert.equal(readBrowserStorage(null, "sessionStorage"), null);
+});
 
 test("response frames become correlated assistant messages", () => {
   assert.deepEqual(

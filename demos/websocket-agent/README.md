@@ -38,7 +38,12 @@ open demos/websocket-agent/index.html
 - 右侧：`ready`、`ack`、`event`、`response`、`interrupt`、`error`、`pong` 协议轨迹。
 - 左侧：WebSocket URL、entrypoint、chat ID 和 sender ID。
 
-同一 `chat_id + sender_id` 同时只能有一条活跃 WebSocket 连接。请避免重复打开多个页面；如果异常断线后立即重连收到 `chat_already_has_connection`，等待旧连接释放后再手工连接。
+页面自动生成只读的浏览器身份和标签页会话：
+
+- `sender_id` 保存在 `localStorage`，同一浏览器配置会复用，不同浏览器或无痕配置相互独立。
+- `chat_id` 保存在 `sessionStorage`，同一标签页刷新后保持不变，新标签页会生成新会话。
+
+因此多个浏览器或标签页可以同时测试，不会再默认争用同一个 ChatKey。它只是演示隔离，不是登录态或可信用户认证；清理站点数据后会生成新身份。
 
 ## 3. 运行测试
 
@@ -48,7 +53,7 @@ open demos/websocket-agent/index.html
 node --test demos/websocket-agent/*.test.cjs
 ```
 
-测试覆盖协议帧、默认 Agent 路由、request 关联、心跳、坏 JSON、连接生命周期和 UI 帧分流。
+测试覆盖浏览器身份隔离、协议帧、默认 Agent 路由、request 关联、心跳、坏 JSON、连接生命周期和 UI 帧分流。
 
 ## 常见问题
 
@@ -63,7 +68,7 @@ node --test demos/websocket-agent/*.test.cjs
 
 ### `chat_already_has_connection`
 
-相同 ChatKey 已被另一个浏览器页占用。关闭另一个页面，或更换 chat ID / sender ID。
+相同 ChatKey 已被另一条连接占用。正常情况下每个新标签页都有独立 `chat_id`；如果异常断线后立即重连，等待旧连接释放后再试。
 
 ### 公网使用
 
