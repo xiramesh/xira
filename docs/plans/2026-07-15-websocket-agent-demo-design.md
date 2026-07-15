@@ -19,7 +19,7 @@
 ## 文件结构与测试
 
 - `index.html`：静态页面语义结构。
-- `styles.css`：无外部资源的完整视觉样式与响应式布局。
+- `styles.css`、`console.css`：无外部资源的基础视觉、交互组件与响应式布局。
 - `protocol.js`：UMD 风格的纯协议/client 模块，浏览器和 Node 测试共用。
 - `app.js`：DOM 绑定和交互控制。
 - `protocol.test.cjs`：Node 内置 `node:test` 单元测试。

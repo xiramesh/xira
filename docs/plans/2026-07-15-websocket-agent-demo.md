@@ -29,6 +29,7 @@
 **Files:**
 - Create: `demos/websocket-agent/index.html`
 - Create: `demos/websocket-agent/styles.css`
+- Create: `demos/websocket-agent/console.css`
 - Create: `demos/websocket-agent/app.js`
 
 **Steps:**
