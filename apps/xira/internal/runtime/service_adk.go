@@ -76,7 +76,7 @@ func (s *Service) generateADK(
 	}
 	conversationSessionID := strings.TrimSpace(req.Context.Raw["conversation_session_id"])
 	agentSessionID := strings.TrimSpace(req.Context.Raw["agent_session_id"])
-	historyMessages, historyChars, err := s.hydrateADKSession(ctx, req.Context.SenderID, req.SessionID, profile.ID, conversationSessionID)
+	historyMessages, historyChars, err := s.hydrateADKSession(ctx, req.Context.SenderID, req.SessionID, profile.ID, conversationSessionID, profile.Session.ContextMaxMessages)
 	if err != nil {
 		recordEvent("adk.session_hydrate_failed", "adk.session", "failed to restore session history", map[string]any{
 			"agent_id":                profile.ID,
@@ -236,7 +236,7 @@ func adkRunConfig(profile agents.Profile) adkagent.RunConfig {
 	return adkagent.RunConfig{StreamingMode: adkagent.StreamingModeNone}
 }
 
-func (s *Service) hydrateADKSession(ctx context.Context, userID, adkSessionID, agentID, conversationSessionID string) (int, int, error) {
+func (s *Service) hydrateADKSession(ctx context.Context, userID, adkSessionID, agentID, conversationSessionID string, maxMessages int) (int, int, error) {
 	userID = strings.TrimSpace(userID)
 	adkSessionID = strings.TrimSpace(adkSessionID)
 	agentID = strings.TrimSpace(agentID)
@@ -263,9 +263,9 @@ func (s *Service) hydrateADKSession(ctx context.Context, userID, adkSessionID, a
 	if conversationSessionID == "" || agentID == "" {
 		return 0, 0, nil
 	}
-	var restored int
-	var contentChars int
-	for _, msg := range s.sessions.AgentHistory(conversationSessionID, agentID) {
+	history := s.sessions.AgentHistory(conversationSessionID, agentID)
+	restorable := make([]fsession.Message, 0, len(history))
+	for _, msg := range history {
 		// Skip messages from failed runs: their tool events must not leak into
 		// the next run's model context. Audit still keeps them on disk.
 		if msg.Metadata != nil {
@@ -273,9 +273,19 @@ func (s *Service) hydrateADKSession(ctx context.Context, userID, adkSessionID, a
 				continue
 			}
 		}
+		if _, _, ok := adkEventFromSessionMessage(msg, agentID); ok {
+			restorable = append(restorable, msg)
+		}
+	}
+	if maxMessages > 0 && len(restorable) > maxMessages {
+		restorable = restorable[len(restorable)-maxMessages:]
+	}
+	var restored int
+	var contentChars int
+	for _, msg := range restorable {
 		event, chars, ok := adkEventFromSessionMessage(msg, agentID)
 		if !ok {
-			continue
+			continue // Defensive: restorable was built with the same conversion.
 		}
 		restored++
 		contentChars += chars

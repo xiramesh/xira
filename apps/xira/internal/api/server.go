@@ -2,11 +2,15 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,13 +18,15 @@ import (
 	"github.com/xiramesh/xira/internal/channelcontrol"
 	"github.com/xiramesh/xira/internal/humanrequest"
 	frt "github.com/xiramesh/xira/internal/runtime"
+	fsession "github.com/xiramesh/xira/internal/session"
 )
 
 type Server struct {
-	runtime         *frt.Service
-	channelControls ChannelControls
-	server          *http.Server
-	addr            string
+	runtime          *frt.Service
+	channelControls  ChannelControls
+	server           *http.Server
+	addr             string
+	internalAPIToken string
 }
 
 type ChannelControls interface {
@@ -33,12 +39,21 @@ type ChannelControls interface {
 const websocketChannel = "websocket"
 
 func NewServer(rt *frt.Service, addr string, controls ...ChannelControls) *Server {
+	return newServer(rt, addr, os.Getenv("XIRA_INTERNAL_API_TOKEN"), controls...)
+}
+
+func NewServerWithInternalToken(rt *frt.Service, addr, token string, controls ...ChannelControls) *Server {
+	return newServer(rt, addr, token, controls...)
+}
+
+func newServer(rt *frt.Service, addr, token string, controls ...ChannelControls) *Server {
 	if strings.TrimSpace(addr) == "" {
 		addr = "127.0.0.1:0"
 	}
 	s := &Server{
-		runtime: rt,
-		addr:    addr,
+		runtime:          rt,
+		addr:             addr,
+		internalAPIToken: strings.TrimSpace(token),
 	}
 	if len(controls) > 0 {
 		s.channelControls = controls[0]
@@ -57,8 +72,100 @@ func NewServer(rt *frt.Service, addr string, controls ...ChannelControls) *Serve
 	mux.HandleFunc("/api/v1/flows", s.flows)
 	mux.HandleFunc("/api/v1/flows/runs", s.flowRuns)
 	mux.HandleFunc("/api/v1/flows/runs/", s.flowRunByID)
+	mux.HandleFunc("/api/v1/internal/sessions/", s.internalSessionMessages)
 	s.server = &http.Server{Addr: addr, Handler: withCORS(mux)}
 	return s
+}
+
+func (s *Server) internalSessionMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizeInternalRequest(r) {
+		status := http.StatusUnauthorized
+		message := "unauthorized"
+		if strings.TrimSpace(s.internalAPIToken) == "" {
+			status = http.StatusServiceUnavailable
+			message = "internal API token is not configured"
+		}
+		http.Error(w, message, status)
+		return
+	}
+	if s.runtime == nil || s.runtime.SessionManager() == nil {
+		http.Error(w, "session store is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/internal/sessions/")
+	if !strings.HasSuffix(path, "/messages") {
+		http.NotFound(w, r)
+		return
+	}
+	sessionID := strings.TrimSpace(strings.TrimSuffix(path, "/messages"))
+	agentID := strings.TrimSpace(r.URL.Query().Get("agent_id"))
+	if sessionID == "" || agentID == "" {
+		http.Error(w, "session ID and agent_id are required", http.StatusBadRequest)
+		return
+	}
+
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		limit = min(parsed, 200)
+	}
+	history := s.runtime.SessionManager().AgentHistory(sessionID, agentID)
+	if history == nil {
+		history = make([]fsession.Message, 0)
+	}
+	end := len(history)
+	if raw := strings.TrimSpace(r.URL.Query().Get("before")); raw != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(raw)
+		if err != nil {
+			http.Error(w, "invalid before cursor", http.StatusBadRequest)
+			return
+		}
+		parsed, err := strconv.Atoi(string(decoded))
+		if err != nil || parsed < 0 || parsed > len(history) {
+			http.Error(w, "invalid before cursor", http.StatusBadRequest)
+			return
+		}
+		end = parsed
+	}
+	start := max(0, end-limit)
+	nextCursor := ""
+	if start > 0 {
+		nextCursor = base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(start)))
+	}
+	writeJSON(w, struct {
+		SessionID  string             `json:"sessionId"`
+		AgentID    string             `json:"agentId"`
+		Messages   []fsession.Message `json:"messages"`
+		NextCursor string             `json:"nextCursor,omitempty"`
+	}{
+		SessionID:  sessionID,
+		AgentID:    agentID,
+		Messages:   history[start:end],
+		NextCursor: nextCursor,
+	})
+}
+
+func (s *Server) authorizeInternalRequest(r *http.Request) bool {
+	expected := strings.TrimSpace(s.internalAPIToken)
+	if expected == "" {
+		return false
+	}
+	const prefix = "Bearer "
+	authorization := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authorization, prefix) {
+		return false
+	}
+	actual := strings.TrimSpace(strings.TrimPrefix(authorization, prefix))
+	return len(actual) == len(expected) && subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
 }
 
 func (s *Server) Addr() string {

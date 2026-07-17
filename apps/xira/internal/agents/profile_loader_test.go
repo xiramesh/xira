@@ -51,6 +51,7 @@ session:
     - chat
     - sender
     - channel
+  context_max_messages: 80
 verification:
   default_checks:
     - final_response_non_empty
@@ -87,6 +88,9 @@ Direct, careful, and source-backed.`)
 	}
 	if got := strings.Join(profile.Session.Dimensions, ","); got != "chat,sender,channel" {
 		t.Fatalf("Session.Dimensions = %q", got)
+	}
+	if profile.Session.ContextMaxMessages != 80 {
+		t.Fatalf("Session.ContextMaxMessages = %d, want 80", profile.Session.ContextMaxMessages)
 	}
 	if got := strings.Join(profile.MCPServers, ","); got != "filesystem" {
 		t.Fatalf("MCPServers = %q", got)

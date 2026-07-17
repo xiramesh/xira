@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,7 +19,150 @@ import (
 	"github.com/xiramesh/xira/internal/humanrequest"
 	"github.com/xiramesh/xira/internal/model/deepseek"
 	frt "github.com/xiramesh/xira/internal/runtime"
+	fsession "github.com/xiramesh/xira/internal/session"
 )
+
+func TestInternalSessionMessagesRequiresServiceToken(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
+	server := NewServerWithInternalToken(rt, "127.0.0.1:0", "mamamate-secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/internal/sessions/conversation:mamamate/messages?agent_id=maternity-nanny-assistant", nil)
+	resp := httptest.NewRecorder()
+	server.server.Handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d body=%s, want 401", resp.Code, resp.Body.String())
+	}
+}
+
+func TestInternalSessionMessagesReturnsEmptyArrayForNewSession(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
+	server := NewServerWithInternalToken(rt, "127.0.0.1:0", "mamamate-secret")
+
+	resp := internalHistoryRequest(t, server, "/api/v1/internal/sessions/xchat_v1_new/messages?agent_id=maternity-nanny-assistant", "mamamate-secret")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	messages, ok := body["messages"].([]any)
+	if !ok || len(messages) != 0 {
+		t.Fatalf("messages = %#v, want empty array", body["messages"])
+	}
+}
+
+func TestInternalSessionMessagesReturnsAgentHistoryWithCursorPagination(t *testing.T) {
+	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})
+	const (
+		sessionID = "conversation:mamamate:stable"
+		agentID   = "maternity-nanny-assistant"
+		token     = "mamamate-secret"
+	)
+	for i := 1; i <= 3; i++ {
+		if err := rt.SessionManager().AppendAgentTurn(fsession.AgentTurnInput{
+			SessionID:      sessionID,
+			AgentID:        agentID,
+			AgentSessionID: fsession.BuildAgentSessionID(sessionID, agentID),
+			UserMessage:    fmt.Sprintf("user-%d", i),
+			AssistantReply: fmt.Sprintf("assistant-%d", i),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := rt.SessionManager().AppendAgentTurn(fsession.AgentTurnInput{
+		SessionID:      sessionID,
+		AgentID:        "another-agent",
+		AgentSessionID: fsession.BuildAgentSessionID(sessionID, "another-agent"),
+		UserMessage:    "must-not-leak",
+		AssistantReply: "must-not-leak",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewServerWithInternalToken(rt, "127.0.0.1:0", token)
+	first := internalHistoryRequest(t, server, "/api/v1/internal/sessions/"+sessionID+"/messages?agent_id="+agentID+"&limit=2", token)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d body=%s", first.Code, first.Body.String())
+	}
+	var firstPage struct {
+		SessionID  string             `json:"sessionId"`
+		AgentID    string             `json:"agentId"`
+		Messages   []fsession.Message `json:"messages"`
+		NextCursor string             `json:"nextCursor"`
+	}
+	if err := json.NewDecoder(first.Body).Decode(&firstPage); err != nil {
+		t.Fatal(err)
+	}
+	if firstPage.SessionID != sessionID || firstPage.AgentID != agentID {
+		t.Fatalf("page identity = %+v", firstPage)
+	}
+	if len(firstPage.Messages) != 2 || firstPage.Messages[0].Content != "user-3" || firstPage.Messages[1].Content != "assistant-3" {
+		t.Fatalf("first page messages = %+v", firstPage.Messages)
+	}
+	if firstPage.NextCursor == "" {
+		t.Fatal("expected next cursor")
+	}
+
+	second := internalHistoryRequest(t, server, "/api/v1/internal/sessions/"+sessionID+"/messages?agent_id="+agentID+"&limit=2&before="+firstPage.NextCursor, token)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second status = %d body=%s", second.Code, second.Body.String())
+	}
+	var secondPage struct {
+		Messages   []fsession.Message `json:"messages"`
+		NextCursor string             `json:"nextCursor"`
+	}
+	if err := json.NewDecoder(second.Body).Decode(&secondPage); err != nil {
+		t.Fatal(err)
+	}
+	if len(secondPage.Messages) != 2 || secondPage.Messages[0].Content != "user-2" || secondPage.Messages[1].Content != "assistant-2" {
+		t.Fatalf("second page messages = %+v", secondPage.Messages)
+	}
+}
+
+func TestInternalSessionMessagesReturnsPersistedHistoryAfterRuntimeReload(t *testing.T) {
+	stateDir := t.TempDir()
+	const (
+		sessionID = "xchat_v1_persisted"
+		agentID   = "maternity-nanny-assistant"
+	)
+	rt := newAPITestService(t, frt.Config{StateDir: stateDir})
+	if err := rt.SessionManager().AppendAgentTurn(fsession.AgentTurnInput{
+		SessionID:      sessionID,
+		AgentID:        agentID,
+		AgentSessionID: fsession.BuildAgentSessionID(sessionID, agentID),
+		UserMessage:    "remember after restart",
+		AssistantReply: "restored reply",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded := newAPITestService(t, frt.Config{StateDir: stateDir})
+	server := NewServerWithInternalToken(reloaded, "127.0.0.1:0", "mamamate-secret")
+	resp := internalHistoryRequest(t, server, "/api/v1/internal/sessions/"+sessionID+"/messages?agent_id="+agentID, "mamamate-secret")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var page struct {
+		Messages []fsession.Message `json:"messages"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Messages) != 2 || page.Messages[0].Content != "remember after restart" || page.Messages[1].Content != "restored reply" {
+		t.Fatalf("reloaded messages = %+v", page.Messages)
+	}
+}
+
+func internalHistoryRequest(t *testing.T, server *Server, path, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp := httptest.NewRecorder()
+	server.server.Handler.ServeHTTP(resp, req)
+	return resp
+}
 
 func TestAgentRunAPI(t *testing.T) {
 	rt := newAPITestService(t, frt.Config{StateDir: t.TempDir()})

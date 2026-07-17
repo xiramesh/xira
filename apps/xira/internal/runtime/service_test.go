@@ -157,7 +157,7 @@ func TestHydrateADKSessionRestoresPersistedAgentHistory(t *testing.T) {
 
 	reloaded := newTestService(t, Config{StateDir: stateDir})
 	agentSessionID := fsession.BuildAgentSessionID(resp.SessionID, resp.AgentID)
-	if _, _, err := reloaded.hydrateADKSession(context.Background(), "user-1", agentSessionID, resp.AgentID, resp.SessionID); err != nil {
+	if _, _, err := reloaded.hydrateADKSession(context.Background(), "user-1", agentSessionID, resp.AgentID, resp.SessionID, 0); err != nil {
 		t.Fatal(err)
 	}
 	got, err := reloaded.adkSessions.Get(context.Background(), &adksession.GetRequest{
@@ -177,6 +177,47 @@ func TestHydrateADKSessionRestoresPersistedAgentHistory(t *testing.T) {
 	}
 	if second := events.At(1); second.Author != resp.AgentID || contentText(second.Content) != "fake model response: remember this" {
 		t.Fatalf("second restored event = %+v", second)
+	}
+}
+
+func TestHydrateADKSessionLimitsFilteredContextToMostRecentMessages(t *testing.T) {
+	rt := newTestService(t, Config{StateDir: t.TempDir()})
+	const (
+		conversationSessionID = "conversation:mamamate:stable"
+		agentID               = agents.DefaultAgentID
+		userID                = "mom-stable"
+	)
+	if err := rt.SessionManager().AppendAgentMessages(fsession.AgentTurnInput{
+		SessionID:      conversationSessionID,
+		AgentID:        agentID,
+		AgentSessionID: fsession.BuildAgentSessionID(conversationSessionID, agentID),
+	}, []fsession.Message{
+		{Role: "user", Content: "old-user"},
+		{Role: "assistant", Content: "old-assistant"},
+		{Role: "assistant", Content: "failed-latest", Metadata: map[string]any{"run_status": "failed"}},
+		{Role: "user", Content: "recent-user"},
+		{Role: "assistant", Content: "recent-assistant"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	adkSessionID := fsession.BuildAgentSessionID(conversationSessionID, agentID)
+	restored, _, err := rt.hydrateADKSession(context.Background(), userID, adkSessionID, agentID, conversationSessionID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored != 2 {
+		t.Fatalf("restored = %d, want 2", restored)
+	}
+	got, err := rt.adkSessions.Get(context.Background(), &adksession.GetRequest{
+		AppName: "xira", UserID: userID, SessionID: adkSessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := got.Session.Events()
+	if events.Len() != 2 || contentText(events.At(0).Content) != "recent-user" || contentText(events.At(1).Content) != "recent-assistant" {
+		t.Fatalf("restored events = %+v", events)
 	}
 }
 
@@ -1325,7 +1366,7 @@ func TestHydrateADKSessionRestoresPersistedToolHistory(t *testing.T) {
 
 	reloaded := newTestService(t, Config{StateDir: stateRoot})
 	agentSessionID := adkSessionID(fsession.BuildAgentSessionID(resp.SessionID, resp.AgentID), "rehydrate-test")
-	if restored, _, err := reloaded.hydrateADKSession(context.Background(), "user-1", agentSessionID, resp.AgentID, resp.SessionID); err != nil {
+	if restored, _, err := reloaded.hydrateADKSession(context.Background(), "user-1", agentSessionID, resp.AgentID, resp.SessionID, 0); err != nil {
 		t.Fatal(err)
 	} else if restored != 4 {
 		t.Fatalf("restored = %d, want 4", restored)

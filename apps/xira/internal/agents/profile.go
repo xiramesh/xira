@@ -50,8 +50,9 @@ type ContextPolicy struct {
 }
 
 type SessionPolicy struct {
-	Dimensions    []string            `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
-	IdentityLinks map[string][]string `json:"identity_links,omitempty" yaml:"identity_links,omitempty"`
+	Dimensions         []string            `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
+	IdentityLinks      map[string][]string `json:"identity_links,omitempty" yaml:"identity_links,omitempty"`
+	ContextMaxMessages int                 `json:"context_max_messages,omitempty" yaml:"context_max_messages,omitempty"`
 }
 
 type Permissions struct {
