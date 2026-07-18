@@ -40,3 +40,33 @@ task serve
 task agent:list
 task runs:list
 ```
+
+## Agent response format
+
+Agent profiles can require a JSON object response in the `PROFILE.md`
+frontmatter:
+
+```yaml
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-flash
+  format: json
+```
+
+`format: json` is case-insensitive. Xira maps it through ADK to DeepSeek's
+`response_format: {"type":"json_object"}` request parameter and rejects a
+final response that is not exactly one JSON object. The Agent profile remains
+responsible for describing the business-specific object shape.
+
+Validation is deliberately strict: only RFC 8259 whitespace may surround the
+object. A byte-order mark, non-JSON Unicode whitespace, Markdown fences, or
+surrounding prose makes the run fail; Xira does not silently rewrite invalid
+model output into valid JSON. Intentional silence declared by `finish_silent`,
+or authorized by a successful `notify_owner`, remains a completed run with no
+public final and therefore has no JSON value to validate.
+
+When `format` is omitted, Xira preserves the existing plain-text behavior.
+`format: text` is the explicit equivalent. Any other value makes the Agent
+profile invalid instead of silently falling back to text. Run snapshots
+preserve whether `format` was explicitly authored: an omitted value remains
+omitted in the snapshot while its effective runtime behavior is still `text`.

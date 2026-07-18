@@ -2,8 +2,10 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -193,6 +195,80 @@ func TestADKFinishSilentCompletesWithoutFinalOrOutbound(t *testing.T) {
 	}
 	if !foundAudit {
 		t.Fatalf("missing finish_silent audit: %+v", resp.AuditEvents)
+	}
+}
+
+func TestADKJSONFormatKeepsIntentionalSilenceSuccess(t *testing.T) {
+	instance := writeRuntimeFixture(t, agents.DefaultAgentID, []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "workspace", "agents", agents.DefaultAgentID, "PROFILE.md"), `---
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.1
+description: JSON intentional silence contract fixture.
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-flash
+  stream: false
+  format: json
+verification:
+  default_checks:
+    - final_response_non_empty
+---
+Use finish_silent when the user explicitly requests no public reply.
+`)
+	responses := []string{
+		deepSeekToolCallResponseWithArgs("silent-json", finishSilentToolName, map[string]any{}),
+		emptyDeepSeekFinalResponse(),
+	}
+	var requests []deepseek.ChatRequest
+	index := 0
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var request deepseek.ChatRequest
+		if err := json.NewDecoder(req.Body).Decode(&request); err != nil {
+			return nil, err
+		}
+		requests = append(requests, request)
+		if index >= len(responses) {
+			return nil, errors.New("unexpected model call")
+		}
+		body := responses[index]
+		index++
+		return deepSeekHTTPResponse(body), nil
+	})}
+	rt := newTestService(t, Config{
+		ConfigPath: filepath.Join(instance, "xira.yaml"),
+		DeepSeekClient: deepseek.New(
+			deepseek.WithBaseURLForTest("http://deepseek.test"),
+			deepseek.WithAPIKey("test-key"),
+			deepseek.WithHTTPClient(client),
+		),
+	})
+
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{
+		Message: "Complete silently with no public reply.",
+		Context: channel.NewInboundContext("test", "sender-json-silent", nil),
+	})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if resp.Status != "completed" || resp.FinalResponse != "" || resp.VerificationResult.Status != "passed" {
+		t.Fatalf("response = %+v, want intentional silence success", resp)
+	}
+	if len(resp.VerificationResult.Checks) != 1 || resp.VerificationResult.Checks[0] != finishSilentToolName {
+		t.Fatalf("verification = %+v, want finish_silent seal", resp.VerificationResult)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("model requests = %d, want tool call and empty-final follow-up", len(requests))
+	}
+	for i, request := range requests {
+		if request.ResponseFormat == nil || request.ResponseFormat.Type != "json_object" {
+			t.Fatalf("request %d response format = %+v, want json_object", i+1, request.ResponseFormat)
+		}
+	}
+	for _, event := range resp.Events {
+		if event.Kind == "assistant.final" || event.Kind == "adk.invalid_json_final" {
+			t.Fatalf("intentional silence emitted incompatible event: %+v", event)
+		}
 	}
 }
 

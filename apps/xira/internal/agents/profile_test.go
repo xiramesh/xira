@@ -58,6 +58,42 @@ func TestProfileValidateRequiresBoundaries(t *testing.T) {
 	}
 }
 
+func TestProfileValidateModelFormat(t *testing.T) {
+	for _, format := range []string{"", "text", "json", "JSON", " Json "} {
+		profile := BuiltinXiraAssistant()
+		profile.ModelPolicy.Format = format
+		if err := profile.Validate(); err != nil {
+			t.Errorf("format %q should validate: %v", format, err)
+		}
+	}
+
+	profile := BuiltinXiraAssistant()
+	profile.ModelPolicy.Format = "jsno"
+	if err := profile.Validate(); err == nil || !strings.Contains(err.Error(), `model_policy.format must be "text" or "json"`) {
+		t.Fatalf("Validate() error = %v, want rejected model_policy.format", err)
+	}
+}
+
+func TestModelPolicyNormalizedFormatDefaultsToText(t *testing.T) {
+	tests := []struct {
+		name   string
+		format string
+		want   string
+	}{
+		{name: "omitted", want: "text"},
+		{name: "explicit text", format: " TEXT ", want: "text"},
+		{name: "json", format: " Json ", want: "json"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := ModelPolicy{Format: tt.format}
+			if got := policy.NormalizedFormat(); got != tt.want {
+				t.Fatalf("NormalizedFormat() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDelegationPolicyDefaultsDisabled(t *testing.T) {
 	profile := BuiltinResearchAssistant()
 	profile.Delegation = DelegationPolicy{}

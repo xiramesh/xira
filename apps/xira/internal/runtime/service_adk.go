@@ -217,16 +217,51 @@ func (s *Service) generateADK(
 		})
 		return final, recordedTools, fmt.Errorf("ADK runner produced empty final response")
 	}
+	if profile.ModelPolicy.NormalizedFormat() == agents.ModelFormatJSON {
+		if err := validateJSONFinalResponse(final); err != nil {
+			recordEvent("adk.invalid_json_final", "adk.runner", "final ADK response violated the configured JSON format", map[string]any{
+				"agent_id": profile.ID,
+				"error":    err.Error(),
+			})
+			recordAudit("adk.runner", profile.ID, false, err.Error(), nil)
+			return "", recordedTools, err
+		}
+	}
 	recordAudit("adk.runner", profile.ID, true, "ADK runner completed", nil)
 	return final, recordedTools, nil
 }
 
+// generateContentConfig maps provider-neutral profile policy into ADK config.
+// DeepSeek-specific response_format translation belongs in its ADK adapter.
+// coverage: contract (100% required)
 func generateContentConfig(profile agents.Profile) *genai.GenerateContentConfig {
-	if profile.ModelPolicy.Temp == nil {
+	jsonOutput := profile.ModelPolicy.NormalizedFormat() == agents.ModelFormatJSON
+	if profile.ModelPolicy.Temp == nil && !jsonOutput {
 		return nil
 	}
-	temp := *profile.ModelPolicy.Temp
-	return &genai.GenerateContentConfig{Temperature: &temp}
+	config := &genai.GenerateContentConfig{}
+	if profile.ModelPolicy.Temp != nil {
+		temp := *profile.ModelPolicy.Temp
+		config.Temperature = &temp
+	}
+	if jsonOutput {
+		config.ResponseMIMEType = "application/json"
+	}
+	return config
+}
+
+// validateJSONFinalResponse enforces the public half of format=json: the final
+// content must be exactly one JSON object, never prose, an array, or a scalar.
+// coverage: contract (100% required)
+func validateJSONFinalResponse(final string) error {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(final), &object); err != nil {
+		return fmt.Errorf("final response is not a valid JSON object: %w", err)
+	}
+	if object == nil {
+		return fmt.Errorf("final response is not a valid JSON object")
+	}
+	return nil
 }
 
 func adkRunConfig(profile agents.Profile) adkagent.RunConfig {

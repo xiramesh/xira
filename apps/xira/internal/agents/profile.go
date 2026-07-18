@@ -11,6 +11,8 @@ import (
 const (
 	DefaultAgentID           = "xira-assistant"
 	ResearchAssistantAgentID = "research-assistant"
+	ModelFormatText          = "text"
+	ModelFormatJSON          = "json"
 )
 
 type Profile struct {
@@ -36,6 +38,7 @@ type ModelPolicy struct {
 	Model    string              `json:"model" yaml:"model"`
 	Stream   bool                `json:"stream,omitempty" yaml:"stream,omitempty"`
 	Temp     *float32            `json:"temperature,omitempty" yaml:"temperature,omitempty"`
+	Format   string              `json:"format,omitempty" yaml:"format,omitempty"`
 	Thinking ModelThinkingPolicy `json:"thinking,omitempty" yaml:"thinking,omitempty"`
 }
 
@@ -164,6 +167,17 @@ func (p Profile) InstructionText() string {
 	return strings.Join(p.Instructions, "\n")
 }
 
+// NormalizedFormat resolves the model response format. Omission is the
+// backwards-compatible text behavior; configured values are case-insensitive.
+// coverage: contract (100% required)
+func (p ModelPolicy) NormalizedFormat() string {
+	format := strings.ToLower(strings.TrimSpace(p.Format))
+	if format == "" {
+		return ModelFormatText
+	}
+	return format
+}
+
 func (p Profile) NormalizedDelegationPolicy() DelegationPolicy {
 	return NormalizeDelegationPolicy(p.Delegation)
 }
@@ -238,6 +252,11 @@ func (p Profile) Validate() error {
 	}
 	if len(p.Instructions) == 0 {
 		errs = append(errs, "instructions is required")
+	}
+	switch p.ModelPolicy.NormalizedFormat() {
+	case ModelFormatText, ModelFormatJSON:
+	default:
+		errs = append(errs, `model_policy.format must be "text" or "json"`)
 	}
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "; "))
