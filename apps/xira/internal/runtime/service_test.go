@@ -2467,6 +2467,7 @@ model_policy:
   model: deepseek-v4-pro
   stream: true
   temperature: 0
+  format: json
   thinking:
     type: enabled
 verification:
@@ -2485,7 +2486,7 @@ Use Xira runtime context and keep responses operational.
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"model":"deepseek-v4-pro","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"policy ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"model":"deepseek-v4-pro","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"reply\":\"policy ok\"}"}}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`)),
 		}, nil
 	})}
 	rt := newTestService(t, Config{
@@ -2505,8 +2506,96 @@ Use Xira runtime context and keep responses operational.
 	if gotReq.Thinking == nil || gotReq.Thinking.Type != "enabled" {
 		t.Fatalf("thinking = %+v", gotReq.Thinking)
 	}
-	if resp.ModelPolicy.Model != deepseek.ModelPro || resp.ModelPolicy.Temperature == nil || *resp.ModelPolicy.Temperature != 0 || resp.ModelPolicy.ThinkingType != "enabled" {
+	if gotReq.ResponseFormat == nil || gotReq.ResponseFormat.Type != "json_object" {
+		t.Fatalf("response format = %+v, want json_object", gotReq.ResponseFormat)
+	}
+	if len(gotReq.Messages) == 0 || !strings.Contains(fmt.Sprint(gotReq.Messages[0].Content), "# Response Format") || !strings.Contains(fmt.Sprint(gotReq.Messages[0].Content), "Example JSON output: {}") {
+		t.Fatalf("system instruction missing runtime JSON guidance: %+v", gotReq.Messages)
+	}
+	if resp.FinalResponse != `{"reply":"policy ok"}` {
+		t.Fatalf("final response = %q", resp.FinalResponse)
+	}
+	if resp.ModelPolicy.Model != deepseek.ModelPro || resp.ModelPolicy.Temperature == nil || *resp.ModelPolicy.Temperature != 0 || resp.ModelPolicy.ThinkingType != "enabled" || resp.ModelPolicy.Format != "json" {
 		t.Fatalf("model policy snapshot = %+v", resp.ModelPolicy)
+	}
+}
+
+func TestJSONModelPolicyRejectsInvalidFinalResponse(t *testing.T) {
+	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
+	writeFile(t, filepath.Join(instance, "workspace", "agents", "xira-assistant", "PROFILE.md"), `---
+id: xira-assistant
+name: Xira Assistant
+version: 0.1.1
+model_policy:
+  provider: deepseek
+  model: deepseek-v4-flash
+  format: json
+verification:
+  default_checks:
+    - final_response_non_empty
+---
+Return a JSON object.
+`)
+	var gotReq deepseek.ChatRequest
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"not json"}}]}`)),
+		}, nil
+	})}
+	rt := newTestService(t, Config{
+		ConfigPath:     filepath.Join(instance, "xira.yaml"),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	resp, err := rt.RunAgent(context.Background(), TurnRequest{Message: "policy", Context: channel.NewInboundContext("test", "", nil)})
+	if err == nil || !strings.Contains(err.Error(), "valid JSON object") {
+		t.Fatalf("RunAgent() error = %v, want invalid JSON object", err)
+	}
+	if gotReq.ResponseFormat == nil || gotReq.ResponseFormat.Type != "json_object" {
+		t.Fatalf("response format = %+v, want json_object", gotReq.ResponseFormat)
+	}
+	if resp.Status != "failed" || resp.FinalResponse != "" {
+		t.Fatalf("response status/final = %q/%q, want failed with no public final", resp.Status, resp.FinalResponse)
+	}
+	for _, event := range resp.Events {
+		if event.Kind == "assistant.final" {
+			t.Fatalf("invalid JSON must not publish assistant.final: %+v", event)
+		}
+	}
+}
+
+func TestGenerateNativeDeepSeekHonorsJSONModelFormat(t *testing.T) {
+	var gotReq deepseek.ChatRequest
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"ok\":true}"}}]}`)),
+		}, nil
+	})}
+	rt := newTestService(t, Config{
+		StateDir:       t.TempDir(),
+		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
+	})
+	profile := agents.BuiltinXiraAssistant()
+	profile.ModelPolicy.Format = "json"
+	profile.Permissions.Tools = nil
+	final, _, err := rt.generateNativeDeepSeek(context.Background(), profile, "Return JSON.", TurnRequest{Message: "hi"}, func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {})
+	if err != nil {
+		t.Fatalf("generateNativeDeepSeek() error = %v", err)
+	}
+	if gotReq.ResponseFormat == nil || gotReq.ResponseFormat.Type != "json_object" {
+		t.Fatalf("response format = %+v, want json_object", gotReq.ResponseFormat)
+	}
+	if final != `{"ok":true}` {
+		t.Fatalf("final = %q", final)
 	}
 }
 

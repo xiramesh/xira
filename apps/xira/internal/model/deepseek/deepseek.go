@@ -107,13 +107,18 @@ type ToolCallFunction struct {
 	Arguments string `json:"arguments"`
 }
 
+type ResponseFormat struct {
+	Type string `json:"type"`
+}
+
 type ChatRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Stream      bool      `json:"stream,omitempty"`
-	Tools       []Tool    `json:"tools,omitempty"`
-	Temperature *float32  `json:"temperature,omitempty"`
-	Thinking    *Thinking `json:"thinking,omitempty"`
+	Model          string          `json:"model"`
+	Messages       []Message       `json:"messages"`
+	Stream         bool            `json:"stream,omitempty"`
+	Tools          []Tool          `json:"tools,omitempty"`
+	Temperature    *float32        `json:"temperature,omitempty"`
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	Thinking       *Thinking       `json:"thinking,omitempty"`
 }
 
 type Thinking struct {
@@ -383,6 +388,9 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 		if req.Config != nil && req.Config.Temperature != nil {
 			t := float32(*req.Config.Temperature)
 			chatReq.Temperature = &t
+		}
+		if req.Config != nil && strings.EqualFold(strings.TrimSpace(req.Config.ResponseMIMEType), "application/json") {
+			chatReq.ResponseFormat = &ResponseFormat{Type: "json_object"}
 		}
 		if stream {
 			stopped := false

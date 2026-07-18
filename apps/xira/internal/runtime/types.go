@@ -210,6 +210,7 @@ type ModelPolicySnapshot struct {
 	Model           string   `json:"model,omitempty" yaml:"model,omitempty"`
 	Stream          bool     `json:"stream,omitempty" yaml:"stream,omitempty"`
 	Temperature     *float32 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
+	Format          string   `json:"format,omitempty" yaml:"format,omitempty"`
 	ThinkingType    string   `json:"thinking_type,omitempty" yaml:"thinking_type,omitempty"`
 	Tools           []string `json:"tools,omitempty" yaml:"tools,omitempty"`
 	Skills          []string `json:"skills,omitempty" yaml:"skills,omitempty"`

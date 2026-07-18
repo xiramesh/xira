@@ -1034,11 +1034,12 @@ func (s *Service) generateNativeDeepSeek(
 	tools := s.toolDefinitions(ctx, profile)
 	recordEvent("model.request", "deepseek", "sending chat completion", map[string]any{"model": modelID})
 	first, err := s.deepseek.Chat(ctx, deepseek.ChatRequest{
-		Model:       modelID,
-		Messages:    messages,
-		Tools:       tools,
-		Temperature: cloneFloat32(profile.ModelPolicy.Temp),
-		Thinking:    &deepseek.Thinking{Type: thinkingType(profile.ModelPolicy)},
+		Model:          modelID,
+		Messages:       messages,
+		Tools:          tools,
+		Temperature:    cloneFloat32(profile.ModelPolicy.Temp),
+		ResponseFormat: deepSeekResponseFormat(profile.ModelPolicy),
+		Thinking:       &deepseek.Thinking{Type: thinkingType(profile.ModelPolicy)},
 	})
 	if err != nil {
 		recordAudit("model.chat", modelID, false, err.Error(), nil)
@@ -1050,7 +1051,13 @@ func (s *Service) generateNativeDeepSeek(
 	}
 	msg := first.Choices[0].Message
 	if len(msg.ToolCalls) == 0 {
-		return messageContent(msg), nil, nil
+		final := messageContent(msg)
+		if profile.ModelPolicy.NormalizedFormat() == agents.ModelFormatJSON {
+			if err := validateJSONFinalResponse(final); err != nil {
+				return "", nil, err
+			}
+		}
+		return final, nil, nil
 	}
 	var toolRecords []ToolCallRecord
 	messages = append(messages, msg)
@@ -1092,10 +1099,11 @@ func (s *Service) generateNativeDeepSeek(
 		})
 	}
 	second, err := s.deepseek.Chat(ctx, deepseek.ChatRequest{
-		Model:       modelID,
-		Messages:    messages,
-		Temperature: cloneFloat32(profile.ModelPolicy.Temp),
-		Thinking:    &deepseek.Thinking{Type: thinkingType(profile.ModelPolicy)},
+		Model:          modelID,
+		Messages:       messages,
+		Temperature:    cloneFloat32(profile.ModelPolicy.Temp),
+		ResponseFormat: deepSeekResponseFormat(profile.ModelPolicy),
+		Thinking:       &deepseek.Thinking{Type: thinkingType(profile.ModelPolicy)},
 	})
 	if err != nil {
 		return "", toolRecords, err
@@ -1103,7 +1111,23 @@ func (s *Service) generateNativeDeepSeek(
 	if len(second.Choices) == 0 {
 		return "", toolRecords, errors.New("deepseek returned no final choices")
 	}
-	return messageContent(second.Choices[0].Message), toolRecords, nil
+	final := messageContent(second.Choices[0].Message)
+	if profile.ModelPolicy.NormalizedFormat() == agents.ModelFormatJSON {
+		if err := validateJSONFinalResponse(final); err != nil {
+			return "", toolRecords, err
+		}
+	}
+	return final, toolRecords, nil
+}
+
+// deepSeekResponseFormat is used only by the retained native DeepSeek path;
+// the primary ADK path translates ResponseMIMEType inside the model adapter.
+// coverage: contract (100% required)
+func deepSeekResponseFormat(policy agents.ModelPolicy) *deepseek.ResponseFormat {
+	if policy.NormalizedFormat() != agents.ModelFormatJSON {
+		return nil
+	}
+	return &deepseek.ResponseFormat{Type: "json_object"}
 }
 
 func (s *Service) executeToolCall(
@@ -1875,6 +1899,9 @@ func (s *Service) composeInstructionTextWithTools(profile agents.Profile, skillB
 		sections = append(sections, "# Addressing Context\n\n"+addressing)
 	}
 	sections = append(sections, "# Runtime Capabilities\n\n"+capability)
+	if profile.ModelPolicy.NormalizedFormat() == agents.ModelFormatJSON {
+		sections = append(sections, "# Response Format\n\nReturn exactly one valid JSON object as the final response. Output JSON only, without Markdown fences or surrounding prose. Follow any more specific JSON shape defined by the agent profile. Example JSON output: {}")
+	}
 	body := strings.Join(sections, "\n\n")
 	if base == "" {
 		return body
