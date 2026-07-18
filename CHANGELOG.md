@@ -26,3 +26,5 @@ and Xira uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Made `task clean` recover an incomplete or corrupt Task-managed Go module
   cache, including Go's read-only module directories, without compiling Xira
   before cleanup ([#184](https://github.com/xiramesh/xira/pull/184)).
+- Ensured the default `task build` injects version, commit, and build-date
+  metadata while retaining debug symbols; production builds remain stripped.
