@@ -59,14 +59,14 @@ func TestRootCommandInjectsSessionManagerBeforeConstructingService(t *testing.T)
 
 func TestVersionCommandPrintsBuildMetadata(t *testing.T) {
 	out := executeCommand(t, "version")
-	if out != "xira 0.7.0 commit=unknown date=unknown\n" {
+	if out != "xira 0.8.0 commit=unknown date=unknown\n" {
 		t.Fatalf("version output = %q", out)
 	}
 }
 
 func TestVersionFlagPrintsBuildMetadata(t *testing.T) {
 	out := executeCommand(t, "--version")
-	if out != "xira 0.7.0 commit=unknown date=unknown\n" {
+	if out != "xira 0.8.0 commit=unknown date=unknown\n" {
 		t.Fatalf("--version output = %q", out)
 	}
 }
