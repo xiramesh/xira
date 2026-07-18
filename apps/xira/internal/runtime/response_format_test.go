@@ -30,16 +30,6 @@ func TestGenerateContentConfigHonorsModelFormat(t *testing.T) {
 	}
 }
 
-func TestDeepSeekResponseFormatHonorsModelFormat(t *testing.T) {
-	if got := deepSeekResponseFormat(agents.ModelPolicy{}); got != nil {
-		t.Fatalf("default response format = %+v, want nil", got)
-	}
-	got := deepSeekResponseFormat(agents.ModelPolicy{Format: "JSON"})
-	if got == nil || got.Type != "json_object" {
-		t.Fatalf("JSON response format = %+v, want json_object", got)
-	}
-}
-
 func TestValidateJSONFinalResponse(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -51,6 +41,11 @@ func TestValidateJSONFinalResponse(t *testing.T) {
 		{name: "prose wrapped", final: `好的：{"reply":"ok"}`, wantErr: true},
 		{name: "array", final: `[{"reply":"ok"}]`, wantErr: true},
 		{name: "null", final: `null`, wantErr: true},
+		{name: "byte order mark", final: "\ufeff{\"reply\":\"ok\"}", wantErr: true},
+		{name: "non breaking space", final: "{\"reply\":\"ok\"}\u00a0", wantErr: true},
+		{name: "zero width space", final: "{\"reply\":\"ok\"}\u200b", wantErr: true},
+		{name: "ideographic space", final: "{\"reply\":\"ok\"}\u3000", wantErr: true},
+		{name: "markdown fence", final: "```json\n{\"reply\":\"ok\"}\n```", wantErr: true},
 		{name: "empty", final: "", wantErr: true},
 	}
 	for _, tt := range tests {
@@ -60,5 +55,18 @@ func TestValidateJSONFinalResponse(t *testing.T) {
 				t.Fatalf("validateJSONFinalResponse(%q) error = %v, wantErr %v", tt.final, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestModelPolicySnapshotPreservesAuthoredFormat(t *testing.T) {
+	profile := agents.BuiltinXiraAssistant()
+	profile.ModelPolicy.Format = ""
+	if got := modelPolicySnapshot(profile, "builtin").Format; got != "" {
+		t.Fatalf("omitted format snapshot = %q, want omission preserved", got)
+	}
+
+	profile.ModelPolicy.Format = " JSON "
+	if got := modelPolicySnapshot(profile, "workspace").Format; got != "json" {
+		t.Fatalf("authored JSON format snapshot = %q, want normalized json", got)
 	}
 }

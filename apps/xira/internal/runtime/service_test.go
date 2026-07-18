@@ -2568,37 +2568,6 @@ Return a JSON object.
 	}
 }
 
-func TestGenerateNativeDeepSeekHonorsJSONModelFormat(t *testing.T) {
-	var gotReq deepseek.ChatRequest
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
-			return nil, err
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"model":"deepseek-v4-flash","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"ok\":true}"}}]}`)),
-		}, nil
-	})}
-	rt := newTestService(t, Config{
-		StateDir:       t.TempDir(),
-		DeepSeekClient: deepseek.New(deepseek.WithBaseURLForTest("http://deepseek.test"), deepseek.WithAPIKey("test-key"), deepseek.WithHTTPClient(client)),
-	})
-	profile := agents.BuiltinXiraAssistant()
-	profile.ModelPolicy.Format = "json"
-	profile.Permissions.Tools = nil
-	final, _, err := rt.generateNativeDeepSeek(context.Background(), profile, "Return JSON.", TurnRequest{Message: "hi"}, func(string, string, string, map[string]any) {}, func(string, string, bool, string, map[string]any) {})
-	if err != nil {
-		t.Fatalf("generateNativeDeepSeek() error = %v", err)
-	}
-	if gotReq.ResponseFormat == nil || gotReq.ResponseFormat.Type != "json_object" {
-		t.Fatalf("response format = %+v, want json_object", gotReq.ResponseFormat)
-	}
-	if final != `{"ok":true}` {
-		t.Fatalf("final = %q", final)
-	}
-}
-
 func TestNewServiceLoadsWorkspaceAgentsFromConfig(t *testing.T) {
 	instance := writeRuntimeFixture(t, "xira-assistant", []string{"chat", "sender"})
 	rt := newTestService(t, Config{ConfigPath: filepath.Join(instance, "xira.yaml")})

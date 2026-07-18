@@ -58,6 +58,15 @@ model_policy:
 final response that is not exactly one JSON object. The Agent profile remains
 responsible for describing the business-specific object shape.
 
+Validation is deliberately strict: only RFC 8259 whitespace may surround the
+object. A byte-order mark, non-JSON Unicode whitespace, Markdown fences, or
+surrounding prose makes the run fail; Xira does not silently rewrite invalid
+model output into valid JSON. Intentional silence declared by `finish_silent`,
+or authorized by a successful `notify_owner`, remains a completed run with no
+public final and therefore has no JSON value to validate.
+
 When `format` is omitted, Xira preserves the existing plain-text behavior.
 `format: text` is the explicit equivalent. Any other value makes the Agent
-profile invalid instead of silently falling back to text.
+profile invalid instead of silently falling back to text. Run snapshots
+preserve whether `format` was explicitly authored: an omitted value remains
+omitted in the snapshot while its effective runtime behavior is still `text`.
