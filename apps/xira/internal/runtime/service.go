@@ -1875,6 +1875,9 @@ func (s *Service) composeInstructionTextWithTools(profile agents.Profile, skillB
 		sections = append(sections, "# Addressing Context\n\n"+addressing)
 	}
 	sections = append(sections, "# Runtime Capabilities\n\n"+capability)
+	if profile.ModelPolicy.NormalizedFormat() == agents.ModelFormatJSON {
+		sections = append(sections, "# Response Format\n\nReturn exactly one valid JSON object as the final response. Output JSON only, without Markdown fences or surrounding prose. Follow any more specific JSON shape defined by the agent profile. Example JSON output: {}")
+	}
 	body := strings.Join(sections, "\n\n")
 	if base == "" {
 		return body

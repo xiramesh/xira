@@ -466,11 +466,14 @@ func summarizeUsage(resp TurnResponse) UsageSummary {
 
 func modelPolicySnapshot(profile agents.Profile, profileSource string) ModelPolicySnapshot {
 	return ModelPolicySnapshot{
-		AgentID:         profile.ID,
-		Provider:        profile.ModelPolicy.Provider,
-		Model:           profile.ModelPolicy.Model,
-		Stream:          profile.ModelPolicy.Stream,
-		Temperature:     cloneFloat32(profile.ModelPolicy.Temp),
+		AgentID:     profile.ID,
+		Provider:    profile.ModelPolicy.Provider,
+		Model:       profile.ModelPolicy.Model,
+		Stream:      profile.ModelPolicy.Stream,
+		Temperature: cloneFloat32(profile.ModelPolicy.Temp),
+		// Preserve authored omission so existing text runs do not gain a new
+		// serialized field. Runtime behavior resolves the empty value to text.
+		Format:          strings.ToLower(strings.TrimSpace(profile.ModelPolicy.Format)),
 		ThinkingType:    thinkingType(profile.ModelPolicy),
 		Tools:           append([]string{}, profile.Permissions.Tools...),
 		Skills:          append([]string{}, profile.Skills...),

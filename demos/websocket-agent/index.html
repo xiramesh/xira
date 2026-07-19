@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="直接在浏览器中测试 Xira WebSocket channel 与默认 Agent。"
+    />
+    <title>Xira Signal Desk — WebSocket Agent Demo</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./console.css" />
+    <script defer src="./protocol.js"></script>
+    <script defer src="./app.js"></script>
+  </head>
+  <body data-connection-state="disconnected">
+    <div class="ambient-grid" aria-hidden="true"></div>
+    <main class="signal-desk">
+      <header class="masthead reveal reveal-1">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">X</span>
+          <div>
+            <p class="eyebrow">XIRA / CHANNEL LAB</p>
+            <h1>Signal Desk</h1>
+          </div>
+        </div>
+        <div class="connection-beacon" aria-live="polite">
+          <span class="beacon-dot" aria-hidden="true"></span>
+          <div>
+            <strong id="connection-label">链路离线</strong>
+            <span id="connection-detail">等待手工连接</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="desk-grid">
+        <aside class="panel control-panel reveal reveal-2" aria-labelledby="control-title">
+          <div class="panel-heading">
+            <span class="panel-index">01</span>
+            <div>
+              <p class="eyebrow">CONNECTION</p>
+              <h2 id="control-title">接入参数</h2>
+            </div>
+          </div>
+
+          <form id="connection-form" class="control-form">
+            <label class="field field-wide">
+              <span>WebSocket URL</span>
+              <input
+                id="endpoint"
+                name="endpoint"
+                type="url"
+                value="ws://127.0.0.1:8089/api/v1/channels/websocket/messages"
+                spellcheck="false"
+                required
+              />
+            </label>
+            <label class="field">
+              <span>Entrypoint</span>
+              <input
+                id="entrypoint-id"
+                name="entrypointId"
+                value="websocket-default"
+                spellcheck="false"
+                required
+              />
+            </label>
+            <label class="field">
+              <span>Chat ID</span>
+              <input id="chat-id" name="chatId" spellcheck="false" readonly required />
+            </label>
+            <label class="field">
+              <span>Sender ID</span>
+              <input id="sender-id" name="senderId" spellcheck="false" readonly required />
+            </label>
+            <div class="button-row">
+              <button id="connect-button" class="button button-primary" type="submit">
+                <span>连接信道</span>
+                <span aria-hidden="true">↗</span>
+              </button>
+              <button id="disconnect-button" class="button button-quiet" type="button" disabled>
+                断开
+              </button>
+            </div>
+          </form>
+
+          <section class="route-card" aria-label="Agent route">
+            <div class="route-card-topline">
+              <span>ROUTE POLICY</span>
+              <span class="live-chip">DEFAULT</span>
+            </div>
+            <strong>Entrypoint 默认 Agent</strong>
+            <p>消息帧不会发送 <code>agent_id</code>，本页专门验证服务端默认路由。</p>
+          </section>
+
+          <dl class="micro-stats">
+            <div>
+              <dt>Heartbeat</dt>
+              <dd>20s</dd>
+            </div>
+            <div>
+              <dt>Transport</dt>
+              <dd>JSON text</dd>
+            </div>
+            <div>
+              <dt>Reconnect</dt>
+              <dd>manual</dd>
+            </div>
+          </dl>
+        </aside>
+
+        <section class="panel conversation-panel reveal reveal-3" aria-labelledby="conversation-title">
+          <div class="panel-heading conversation-heading">
+            <span class="panel-index">02</span>
+            <div>
+              <p class="eyebrow">DEFAULT AGENT</p>
+              <h2 id="conversation-title">会话记录</h2>
+            </div>
+            <span id="request-counter" class="counter">0 REQUESTS</span>
+          </div>
+
+          <div id="transcript" class="transcript" aria-live="polite" aria-label="Agent conversation">
+            <article class="message message-system">
+              <div class="message-meta">
+                <span>DESK NOTE</span>
+                <time>READY</time>
+              </div>
+              <p>先在左侧建立连接。链路在线后，消息将交给 entrypoint 配置的默认 Agent。</p>
+            </article>
+          </div>
+
+          <div id="human-action-region" class="human-action-region" hidden></div>
+
+          <form id="message-form" class="composer">
+            <label for="message-input">发送给默认 Agent</label>
+            <div class="composer-row">
+              <textarea
+                id="message-input"
+                name="message"
+                rows="2"
+                placeholder="连接后，在这里输入测试消息…"
+                disabled
+                required
+              ></textarea>
+              <button id="send-button" class="send-button" type="submit" disabled>
+                <span>发送</span>
+                <span class="send-arrow" aria-hidden="true">→</span>
+              </button>
+            </div>
+            <p class="composer-hint"><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</p>
+          </form>
+        </section>
+
+        <aside class="panel event-panel reveal reveal-4" aria-labelledby="event-title">
+          <div class="panel-heading event-heading">
+            <span class="panel-index">03</span>
+            <div>
+              <p class="eyebrow">WIRE TRACE</p>
+              <h2 id="event-title">协议轨迹</h2>
+            </div>
+            <button id="clear-events" class="text-button" type="button">清空</button>
+          </div>
+          <div id="event-log" class="event-log" aria-live="polite">
+            <div class="event-empty">
+              <span aria-hidden="true">⌁</span>
+              <p>等待 WebSocket 帧</p>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <footer class="desk-footer reveal reveal-4">
+        <p>LOCAL DEMO / NO BUILD STEP / DEFAULT AGENT ROUTE</p>
+        <p id="last-frame">LAST FRAME — NONE</p>
+      </footer>
+    </main>
+  </body>
+</html>

@@ -10,14 +10,15 @@ vars:
   MSG: '{{.MSG | default "hello xira"}}'
   VERSION:
     sh: |
-      out=$(GOCACHE="{{.GO_CACHE}}" GOPATH="{{.GO_PATH}}" go run ./apps/xira/cmd/xira version)
-      set -- $out
-      printf '%s\n' "$2"
+      version=$(awk -F '"' '/^[[:space:]]*Version[[:space:]]*=/ { print $2; exit }' apps/xira/internal/version/version.go)
+      test -n "$version"
+      printf '%s\n' "$version"
   COMMIT:
     sh: git rev-parse --short HEAD
   BUILD_DATE:
     sh: date -u +%Y-%m-%dT%H:%M:%SZ
-  LDFLAGS: '-s -w -X github.com/xiramesh/xira/internal/version.Version={{.VERSION}} -X github.com/xiramesh/xira/internal/version.Commit={{.COMMIT}} -X github.com/xiramesh/xira/internal/version.Date={{.BUILD_DATE}}'
+  METADATA_LDFLAGS: '-X github.com/xiramesh/xira/internal/version.Version={{.VERSION}} -X github.com/xiramesh/xira/internal/version.Commit={{.COMMIT}} -X github.com/xiramesh/xira/internal/version.Date={{.BUILD_DATE}}'
+  LDFLAGS: '-s -w {{.METADATA_LDFLAGS}}'
 
 env:
   GOCACHE: "{{.GO_CACHE}}"
@@ -42,6 +43,8 @@ tasks:
   test:
     desc: Run all Go tests
     cmds:
+      - ./scripts/test-taskfile-clean.sh
+      - ./scripts/test-taskfile-build-metadata.sh
       - go test ./apps/xira/...
 
   check:
@@ -54,7 +57,7 @@ tasks:
     desc: Build Xira binary with debug symbols
     cmds:
       - mkdir -p {{.BIN_DIR}}
-      - go build -o {{.BIN}} ./apps/xira/cmd/xira
+      - go build -ldflags="{{.METADATA_LDFLAGS}}" -o {{.BIN}} ./apps/xira/cmd/xira
 
   build:prod:
     desc: Build stripped Xira production binary
@@ -133,4 +136,5 @@ tasks:
   clean:
     desc: Remove local Xira run/cache output
     cmds:
-      - rm -rf .xira workspace/.xira .cache /tmp/xira-go-build /tmp/xira-smoke-runs /tmp/xira-task-smoke-runs
+      - GOPATH="/tmp/xira-go" go clean -modcache
+      - rm -rf .xira workspace/.xira .cache /tmp/xira-go-build /tmp/xira-go /tmp/xira-smoke-runs /tmp/xira-task-smoke-runs

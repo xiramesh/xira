@@ -33,6 +33,7 @@ model_policy:
   model: deepseek-v4-flash
   stream: true
   temperature: 0.2
+  format: json
 tools:
   - command.run
   - shell.run
@@ -90,6 +91,9 @@ Direct, careful, and source-backed.`)
 	}
 	if got := strings.Join(profile.MCPServers, ","); got != "filesystem" {
 		t.Fatalf("MCPServers = %q", got)
+	}
+	if got := profile.ModelPolicy.NormalizedFormat(); got != "json" {
+		t.Fatalf("ModelPolicy format = %q, want json", got)
 	}
 }
 

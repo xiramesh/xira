@@ -334,6 +334,37 @@ func TestADKModelGenerateContent(t *testing.T) {
 	if gotReq.Thinking == nil || gotReq.Thinking.Type != "disabled" {
 		t.Fatalf("thinking = %+v, want disabled", gotReq.Thinking)
 	}
+	if gotReq.ResponseFormat != nil {
+		t.Fatalf("response format = %+v, want omitted for ordinary text output", gotReq.ResponseFormat)
+	}
+}
+
+func TestADKModelMapsJSONResponseMIMEType(t *testing.T) {
+	var gotReq ChatRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"model":"deepseek-v4-flash","choices":[{"message":{"role":"assistant","content":"{\"ok\":true}"}}]}`))
+	}))
+	defer server.Close()
+	client := New(WithBaseURLForTest(server.URL), WithAPIKey("test-key"))
+	model, err := NewADKModel(ModelFlash, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &adkmodel.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+		Config:   &genai.GenerateContentConfig{ResponseMIMEType: "application/json"},
+	}
+	for _, err := range model.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+	}
+	if gotReq.ResponseFormat == nil || gotReq.ResponseFormat.Type != "json_object" {
+		t.Fatalf("response format = %+v, want json_object", gotReq.ResponseFormat)
+	}
 }
 
 func TestADKModelStreamStopsAfterConsumerBreak(t *testing.T) {
