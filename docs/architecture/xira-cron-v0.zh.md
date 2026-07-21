@@ -193,7 +193,8 @@ cron:
 2. entrypoint 存在、启用且 CronPolicy enabled；
 3. 当前消息是 direct chat；
 4. 当前 sender 有非空 typed identity 并通过授权；
-5. channel 支持向 typed recipient 主动私聊；
+5. channel 支持向 typed recipient 主动私聊（即 `Capabilities().Supports(CapabilityTypedRecipientOutbound)`）。
+   当前 feishu/ilink 支持；**websocket 显式不支持，websocket-only 入口下 Cron 不可用**（§15.7、§11.1）；
 6. data isolation 已启用；公共入口已显式开放 Cron。
 
 eligibility 必须在 instruction/tool schema/Guidance 生成前进入 context。`Available tools`、
@@ -427,6 +428,38 @@ func (s *Service) RunScheduledAgent(context.Context, ScheduledTurnRequest) (Sche
 `RunAgent` 和 `RunScheduledAgent` 适配入参后调用同一个私有 Agent Loop Core，共享 instruction、
 model、tool、failure guard、`verifyRunOutcome`、Runtime events、RunStore 和 usage。
 
+#### 返回值与 final 判定（#189 结论）
+
+`RunScheduledAgent` 直接复用 `RunAgent` 的结构化返回值 `runtime.TurnResponse`，**不订阅
+`assistant.final` 事件，也不拿 `run.finished` 推断 final**（§15.8）。Cron 判定逻辑：
+
+```go
+resp, err := s.RunScheduledAgent(ctx, req)
+switch {
+case err != nil:
+    // execution failed
+case resp.Interrupt != nil:
+    // waiting_human → execution failed as interactive_not_supported（§6.2）
+case resp.Status == "completed" && resp.VerificationResult.Status == "passed":
+    // 成功；resp.FinalResponse 是 final
+    if resp.FinalResponse != "" {
+        // delivery: pending → sent（§11.1）
+    } else {
+        // finish_silent 成功；delivery: not_needed
+    }
+default:
+    // verifyRunOutcome 判失败（空 final / 工具失败 / 截断）
+}
+```
+
+**Scheduled Turn 不发布 `assistant.final` 事件**：`assistant.final` 是 per-chat-key sink 下游消费者
+判断"final 就绪"的契约信号（AGENTS.md §1.2），而 Scheduled Turn 不创建 sink、不投递 live progress
+（§8.2），没有消费者。Cron 的"final 就绪"语义由 `TurnResponse` 返回值直接表达，不需要事件。这与
+AGENTS.md §1.2 一致——`assistant.final` 的消费者是 ChatContext 渲染收尾，Scheduled Turn 不属于
+这个场景。
+
+`run.finished` 仍按 AGENTS.md §1.3 无条件发（completed/failed/waiting_human 都发），但 Cron 不读它。
+
 ### 8.2 Session/Memory 契约
 
 | 上下文 | Scheduled Turn |
@@ -544,7 +577,21 @@ recipient 固定为：
 channel.OutboundRecipient{ID: principal.SenderID, IDType: principal.SenderIDType}
 ```
 
-不用旧 ChatID、不发 owner。channel 不支持 typed proactive direct 时，Cron tool 不可见。
+不用旧 ChatID、不发 owner。投递通过现有 `channel.OutboundEmitter.Emit(ctx, OutboundEnvelope)` 完成，
+`OutboundEnvelope.Recipient` 设为上面的 `OutboundRecipient`，`OutboundEnvelope.Type` 为
+`OutboundProactiveMessage`。
+
+**channel 支持矩阵**（§15.7 核实结果）：
+
+| channel | typed proactive direct | sender_id_type |
+|---|---|---|
+| feishu | ✅ 支持 | `open_id` / `user_id` / `union_id` |
+| ilink | ✅ 支持 | `ilink_user_id` / `user_id` |
+| websocket | ❌ 显式不支持 | — |
+
+channel 不支持时（即 `!emitter.Capabilities().Supports(CapabilityTypedRecipientOutbound)`，典型如
+websocket），按 §4.2 条件 5 `cron` tool 不可见——即 websocket-only 入口下 Cron 不可用。这是设计
+取舍（websocket 连接 keyed by inbound ChatKey，无法定位 server-verified 用户身份），不是缺口。
 
 ### 11.2 Fire 前复核、自动暂停与交互式恢复
 
@@ -651,15 +698,59 @@ latency、execution time、delivery status 和 degraded records。
 
 ## 15. 当前代码要补的契约
 
-1. 独立 Cron access resolver，不能复用含 `/bind` 特例的消息授权。
-2. 统一显式 `default_agent` 与隐式 default 的 AllowsAgent 语义。
-3. Scheduled Turn 使用一等 Principal，不能伪造 ChatID/SessionScope。
-4. instruction 输入拆成 Principal + optional Conversation，按 Principal 加载 user/memory。
-5. Cron capability gate 在 instruction/schema/Guidance 编译前生效，handler 再鉴权。
-6. Scheduled tool scope 从 Principal 获取 data-isolation key。
-7. channel adapter 暴露 typed proactive direct capability。
-8. Cron 使用已验证 TurnResult，不能拿 `run.finished` 推断 final。
-9. Scheduler 生命周期晚于 Outbound ready、早于 channel shutdown 停止。
+> 下面 9 条已在 #188 对照 main `ecf210e` 核实过。每条标注当前状态与代码符号。实现时以符号名为准，
+> 不信行号。
+
+1. **独立 Cron access resolver**（仍然成立）。`entrypoints.Definition.AllowsSender(senderID)` 已是
+   纯 allowlist 判定，不含 `/bind` 特例；含特例的只有 `ingest.AuthorizeSender`。Cron 直接调
+   `Definition.AllowsSender`(+ 可选 `runtime.OwnerResolver.IsOwner`)即可，**切勿**调 `ingest` 系列。
+2. **统一显式 `default_agent` 与隐式 default 的 AllowsAgent 语义**（仍然成立）。`Definition.AllowsAgent`
+   非空 allowlist 时严格匹配，**不**自动并入 `DefaultAgentID`；`Registry.Resolve` 在
+   `RequestedAgentID == ""` 时直接用 default 且**不走** `AllowsAgent`，显式请求同一 default 反而
+   要过 `AllowsAgent`。Cron 若引用 default 必须处理这个不对称。
+3. **Scheduled Turn 用一等 Principal，不能伪造 ChatID/SessionScope**（仍然成立，伪造路径已定位）。
+   仓库内无 `Principal` 类型。`channel.NormalizeInboundContext` 里有伪造路径：`ChatID == ""` 时
+   `ctx.ChatID = ctx.SenderID`、`ChatType == ""` 时 `ctx.ChatType = "direct"`、`SenderID == ""` 时
+   `ctx.SenderID = "local-user"`——`ChatType=direct` 下 `ChatID` 恒等于 `SenderID`，`BuildScope` 据此
+   渲染 chat dimension。**Cron 不得走这条路径**。另：一等 `AgentTurn` 类型（`runtime/agent_turn.go`）
+   已存在（`SessionScope *fsession.SessionScope`，注释 `nil means no IM trigger identity`），但只在
+   event/message_bus 层用，未接进 `Service.RunAgent`。Cron 要补 Principal 类型 + 让 Scheduled Turn
+   走 AgentTurn 路径。
+4. **instruction 拆 Principal + optional Conversation**（仍然成立）。当前
+   `instructionTextForRunContext(ctx, profile, inbound channel.InboundContext)` 吃整块 `InboundContext`。
+   但 `loadUserProfileBlock(senderID)` / Sender Memory(`MemoryPath(stateDir, senderID)`）/ Agent Memory
+   (`AgentMemoryPath(stateDir, profile.ID)`) 都**只按 senderID/agent**，不依赖 ChatID。Cron 把入参
+   显式拆成 Principal(必填) + Conversation(可选) 即可，加载逻辑不用改。
+5. **Cron capability gate 在 instruction/schema/Guidance 编译前生效**（已部分补上）。机制三层齐：
+   `contextWithRuntimeToolAllowlist(ctx, tools)` + `runtimeNativeToolsDisabledFromContext` 写 ctx；
+   `Service.RunAgent` **先**设 ctx allowlist **再**调 `instructionTextForRunContext`；`effectiveToolNames`
+   → `composeInstructionTextWithTools` → `compileToolGuidance` 只从 effective 集编译；handler
+   `executeToolCall` 重复鉴权（`runtimeToolAllowedFromContext` + `registry.Has`）。**Cron 只需在调
+   `RunAgent` 前设好 ctx allowlist**，现有链路自动生效。
+6. **Scheduled tool scope 从 Principal 获取 data-isolation key**（仍然成立，底层已就位）。
+   `resolvePrivateRoot(workspaceRoot, senderID)` 私有层 root `workspaceRoot/users/sender_{SafePathID(senderID)}`
+   **只用 senderID 不用 ChatID**。但 `RunAgent` 里 `chatKey := ChatKeyFromInbound(req.Context)` 走的是
+   inbound envelope；Scheduled Turn 没有 inbound，要补"从 Cron Job 配置(sender_id + data_isolation flag)
+   构造 ChatKey/ctx"的入口，不能复用 `ChatKeyFromInbound`。
+7. **channel adapter 暴露 typed proactive direct capability**（已完全补上；websocket 显式不支持）。
+   `channel.OutboundRecipient{ID, IDType}` + `CapabilityTypedRecipientOutbound` + `OutboundEmitter.Emit`
+   全齐。**feishu**(id_type `open_id|user_id|union_id`)和 **ilink**(id_type `ilink_user_id|user_id`)
+   都支持；**websocket** `Capabilities()` 不含 `TypedRecipientOutbound`，`Emit` 遇 `Recipient != nil`
+   直接报错 `"websocket Emit: typed recipient outbound is not supported"`。结论：Cron 在
+   websocket-only 入口不可用——这是设计取舍，不是缺口。
+8. **Cron 用已验证 TurnResult，不拿 `run.finished` 推断 final**（已完全补上）。`RunAgent` 返回结构化
+   `TurnResponse{Status, FinalResponse, VerificationResult, Interrupt, ...}`(`runtime/types.go`)；
+   `verifyRunOutcome(final, toolCalls, checks)`(`runtime/intentional_silence.go`)在 parent/child/resume
+   三处统一调用。Cron 直接读 `resp.Status == "completed" && resp.VerificationResult.Status == "passed"`
+   判成功、`resp.FinalResponse` 作 final、`resp.Interrupt != nil` 处理 waiting_human。`run.finished`
+   是无条件事件、`assistant.final` 是 whitelist 事件（`final != "" && Status == "completed"`），Cron
+   都不当 final 来源。
+9. **Scheduler 生命周期**（已漂移，待建）。仓库内无 `Scheduler` 类型。启动序列在 `cmd/xira/main.go`
+   的 `serveCommand`：`newRuntime` → `channelrunner.NewManager` → `rt.SetOutboundEmitter` + 多个
+   `Set*` 注入 → `channelRunners.SetIngest` → `channelRunners.Start` → `rt.ReconcileHumanRequests` →
+   `api.NewServer.Start`。关闭只有 `defer { channelRunners.Stop(stopCtx) }`。`SetOutboundEmitter` 是
+   同步 setter，**无 ready 信号**。Cron Scheduler 要新增类型 + 在 `channelRunners.Start` 成功后启动、
+   在 `channelRunners.Stop` 之前停止。
 
 这些是核心契约，不能在 CronManager 里复制近似逻辑绕过去。
 
