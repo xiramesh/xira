@@ -2,7 +2,7 @@
 
 > 状态：Proposed，尚未实现。
 >
-> 目标：为 Xira 增加可持久化、按 sender 隔离的周期任务能力。
+> 目标：为 Xira 增加可持久化、按 sender 隔离的周期任务和一次性任务能力。
 >
 > 核心约束：Cron 只提供新的触发方式；到点后复用现有 Agent Loop，不形成第二套 Runtime。
 
@@ -16,19 +16,35 @@ Principal，启动不继承聊天 session 的 Scheduled Turn；非空 final 固�
 `owner` 只是 entrypoint 授权的一种来源，不是该 entrypoint 下所有 CronJob 的所有者，
 也不自动获得管理其他 sender 任务的权限。
 
+Cron 是持续消耗资源、定时主动联系用户的重行为，由此引出三个决策：
+
+1. **同时支持周期任务和一次性任务**（§5.1、§7.1、§9）。
+2. **agent 由用户在创建时刻显式选择并冻死**：多 agent 入口下未提候选 agent 时 create 被拒
+   并反问，单 agent 入口豁免（§6.1）。
+3. **Agent 失踪不静默 fallback**：Job 自动 pause + 投递带恢复选项的通知，由用户显式
+   delete+create 选择新 agent（§11.2）。
+
 ## 1. 需求与边界
 
 ### 1.1 v0 必须支持
 
 1. 授权 sender 在私聊中用自然语言 create/list/pause/resume/delete CronJob。
-2. 创建时持久化 `agent_id`、名称、五字段 expression、IANA timezone 和 Prompt。
-3. sender 只能查看和管理自己的任务；同一 entrypoint 可安全服务多人。
-4. 每个 Fire 使用新 ADK session，不读取聊天主 session 或聊天记录。
-5. Scheduled Turn 加载创建者的 `user.md`、Sender Memory、目标 Agent 的 Agent Memory。
-6. Scheduled Turn 的工具数据绑定创建者的 per-sender isolation scope。
-7. Job、Run 和 Fire claim 重启可恢复；恢复未来调度但不补历史 Fire。
-8. 每次 Fire 前重新验证 entrypoint、Principal、Agent、route 和工具权限。
-9. CronRun 分开记录 execution 与 delivery，投递失败不能重跑 Agent。
+2. **同时支持周期任务（recurring，五字段 cron expression）和一次性任务（oneshot，单个
+   `fire_at` + timezone）。两者共享 Principal、Scheduled Turn、Delivery、Fire claim 等基础
+   设施。** 详见 §5.1、§7.1、§9。
+3. 创建时持久化 `type`、`agent_id`、名称、时间字段（recurring: expression+timezone；
+   oneshot: fire_at+timezone）和 Prompt。
+4. sender 只能查看和管理自己的任务；同一 entrypoint 可安全服务多人。
+5. 每个 Fire 使用新 ADK session，不读取聊天主 session 或聊天记录。
+6. Scheduled Turn 加载创建者的 `user.md`、Sender Memory、目标 Agent 的 Agent Memory。
+7. Scheduled Turn 的工具数据绑定创建者的 per-sender isolation scope。
+8. Job、Run 和 Fire claim 重启可恢复；恢复未来调度但不补历史 Fire。
+9. 每次 Fire 前重新验证 entrypoint、Principal、Agent、route 和工具权限。
+10. 多 agent 入口下，create 时 `agent_id` 必须来自用户在 prompt 里的显式选择，否则 create
+    被拒并由模型反问；单 agent 入口豁免（§6.1）。
+11. Agent 在 fire 时不可用（被删除、被 allowed_agents 排除、route 不兼容）时，Job 自动 pause
+    并投递带可操作恢复选项的通知；**不静默 fallback 到任何默认 agent**（§11.2）。
+12. CronRun 分开记录 execution 与 delivery，投递失败不能重跑 Agent。
 
 ### 1.2 非功能要求
 
@@ -42,7 +58,8 @@ Principal，启动不继承聊天 session 的 Scheduled Turn；非空 final 固�
 ### 1.3 v0 不做
 
 - 独立 HeartbeatManager；Heartbeat 未来编译成 system-owned CronJob。
-- 秒级 Cron、descriptor、一次性任务、`update`、`run_now`。
+- 秒级 Cron、descriptor、`update`、`run_now`。
+- oneshot 任务的 pause/resume（一次性任务改期用 delete+create；周期任务支持 pause/resume）。
 - 群聊创建、owner 跨用户管理、模型指定 recipient/delivery/allowed tools。
 - Scheduled Turn HITL resume、Cron 自调用、spawn/delegation。
 - 停机 catch-up、多进程共享 Store、CLI/HTTP 与 daemon 并发写 Store。
@@ -163,6 +180,11 @@ cron:
 空 `allowed_senders` 或 `*` 对普通聊天仍表示公开，但 Cron 是持续消耗资源的写操作，只有显式
 `allow_public=true` 才允许非 owner 创建。Cron v0 还要求 `data_isolation.enabled=true`。
 
+`cron.enabled: true` 时，**不强制** `allowed_agents` 非空。Agent 候选集按 §6.1 的统一规则
+计算：`default_agent UNION allowed_agents`；空 `allowed_agents` 表示当时所有已安装 Agent。
+候选集跨时间会变（装新 Agent、删旧 Agent），但每个 Job 在创建那一刻面对的是明确、可枚举的
+集合，选完即冻死；老 Job 不受候选集后续变化影响。多 Agent 候选时的选择规则见 §6.1。
+
 ### 4.2 `cron` tool 可见条件
 
 以下条件必须全部满足：
@@ -183,28 +205,50 @@ eligibility 必须在 instruction/tool schema/Guidance 生成前进入 context�
 
 ### 5.1 create
 
+`type` 区分周期与一次性任务。recurring 用 `expression`，oneshot 用 `fire_at`：
+
 ```json
+// recurring
 {
   "action": "create",
+  "type": "recurring",
   "agent_id": "sales-agent",
   "name": "工作日销售日报",
   "expression": "0 9 * * 1-5",
   "timezone": "Asia/Shanghai",
   "prompt": "检查昨天的销售数据，生成包含异常和建议的日报。"
 }
+
+// oneshot（用 fire_at 替代 expression）
+{
+  "action": "create",
+  "type": "oneshot",
+  "agent_id": "sales-agent",
+  "name": "下周一销售周会提醒",
+  "fire_at": "2026-07-28T09:00:00+08:00",
+  "timezone": "Asia/Shanghai",
+  "prompt": "提醒我10分钟后开销售周会，准备上周复盘材料。"
+}
 ```
 
 | 字段 | 约束 | 使用方 |
 |---|---|---|
-| `agent_id` | 必填，Profile 存在且 entrypoint 允许 | Runtime |
+| `type` | `recurring` \| `oneshot`，必填 | CronManager + Scheduler |
+| `agent_id` | 必填；Profile 存在且 entrypoint 允许；多 Agent 候选时必须来自用户显式选择（§6.1） | Runtime |
 | `name` | 1-80 rune | CronManager |
-| `expression` | 严格五字段，最长 128 byte | Scheduler |
+| `expression` | `type=recurring` 必填；严格五字段，最长 128 byte | Scheduler |
+| `fire_at` | `type=oneshot` 必填；RFC3339；必须晚于当前时间 | Scheduler |
 | `timezone` | 有效 IANA TZ，最长 64 byte | Scheduler + Runtime |
 | `prompt` | 1-4000 rune | Runtime 用户级输入 |
 
-用户不必说出 Agent；模型可填写当前 Agent ID，但 tool schema 中始终必填，避免持久化任务依赖
-未来会变化的默认值。模型不能提供 Principal、entrypoint、channel、recipient、ChatID、delivery、
-allowed tools、next time 或 Fire ID。
+`type` 与时间字段必须一致：`recurring` 配 `expression`、`oneshot` 配 `fire_at`；混填或漏填
+均 create 失败。
+
+`agent_id` 在 schema 层始终必填，避免持久化任务依赖未来会变化的默认值。**多 Agent 候选入口
+下，`agent_id` 必须来自用户在当前对话里的显式选择**：模型若从 prompt 提取不到任一候选 Agent
+的 id/名称/别名，create 被 handler 拒绝，错误引导模型反问用户（详见 §6.1）。单 Agent 候选入口
+下豁免该规则——唯一解不构成隐式默认。模型不能提供 Principal、entrypoint、channel、recipient、
+ChatID、delivery、allowed tools、next time 或 Fire ID。
 
 ### 5.2 管理操作
 
@@ -216,11 +260,12 @@ allowed tools、next time 或 Fire ID。
 ```
 
 - list 只列当前 Principal 的 enabled/paused Job，显示 Agent、schedule、next/last run；
-- pause 阻止未来 Fire，不取消 running Run；
-- resume 从当前时间算下一次，不补暂停期间 Fire；
+- pause 阻止未来 Fire，不取消 running Run（**仅 recurring**；oneshot 不支持 pause/resume，
+  要改期用 delete+create）；
+- resume 从当前时间算下一次，不补暂停期间 Fire（**仅 recurring**）；
 - delete 写 tombstone，保留历史和幂等键；
 - 名称不唯一，破坏性操作必须使用 Job ID；
-- 修改 Agent/Prompt/schedule 采用 delete + create，v0 不做复杂 update 状态机。
+- 修改 Agent/Prompt/schedule/type 采用 delete + create，v0 不做复杂 update 状态机。
 
 ### 5.3 创建幂等
 
@@ -232,7 +277,9 @@ CreateKey = sha256(runtime_run_id + "\x00" + tool_call_id)
 
 ## 6. Agent 与工具权限
 
-### 6.1 Agent 必选与允许集合
+### 6.1 Agent 选择：候选集、显式选择与反问
+
+#### 候选集计算
 
 `agent_id` 必须存在且被 entrypoint 允许。当前 Registry 对隐式 default 与显式请求同一 Agent
 的行为不完全对称，实现前统一为：
@@ -241,7 +288,38 @@ CreateKey = sha256(runtime_run_id + "\x00" + tool_call_id)
 effective allowed agents = default_agent UNION allowed_agents
 ```
 
-`allowed_agents` 为空仍表示允许所有已安装 Agent。
+`allowed_agents` 为空仍表示允许所有已安装 Agent。该候选集在 create 时刻是一个明确、可枚举
+的集合；跨时间会变（装/删 Agent），但每个 Job 只在创建那一刻面对它，选完冻死，老 Job 不受
+候选集后续变化影响。
+
+#### 显式选择规则（多 Agent 候选时必选）
+
+Cron 是重行为，Agent 是用户意图的一部分，不允许模型替用户隐式选择。create handler 行为：
+
+- 候选集为空（入口没装 Agent）→ `ErrNoAgentAvailable`，直接失败；
+- 候选集为 1 → 接受 `agent_id == 唯一候选`（单候选豁免，唯一解不构成隐式默认）；
+- 候选集 > 1 → 必须从用户当前对话原文里提取到一个候选 Agent（`extractMentionedAgent`）；
+  提取不到 → `ErrAgentChoiceRequired` 引导模型反问；提取到多个 → ambiguous 拒绝。
+
+`extractMentionedAgent` 匹配范围为候选 Agent 的 id、display name、以及 entrypoint 配置里
+声明的 aliases，仅依据用户消息原文（精确或大小写不敏感子串），**不依赖模型自由推断**，避免
+prompt injection 伪造"用户说过"。
+
+#### 反问契约（`ErrAgentChoiceRequired`）
+
+handler 返回的 error 必须可序列化为面向模型的提示，列出候选 Agent id + 1 句简短描述（取自
+Agent Profile），并要求模型反问而非重试。形如：`multiple agents available: xira-assistant
+(general assistant), weather-agent (city weather queries). Ask the user which one to use
+for this cron job.`。模型收到该 error 后向用户反问；用户回复后模型带着显式 `agent_id` 再次
+调 create。该反问发生在普通聊天 turn 内，不涉及 Scheduled Turn。
+
+#### 冻死语义
+
+`agent_id` 通过 §5.1 校验后写入 Job 并冻死：
+
+- 后续入口候选集变化（装/删 Agent、改 allowed_agents）不影响已存在 Job；
+- Job 运行时若 Agent 失踪，按 §11.2 处理（自动 pause + 交互式恢复），**不 fallback 到
+  default_agent 或任何其他候选**——Agent 选择是用户意图，不能被系统静默替换。
 
 ### 6.2 能力快照
 
@@ -272,12 +350,14 @@ type CronJob struct {
 	SchemaVersion string
 	ID            string
 	Principal     CronPrincipal
+	Type          string    // "recurring" | "oneshot"
 	AgentID       string
 	Name          string
-	Expression    string
+	Expression    string    // type=recurring 用
+	FireAt        *time.Time // type=oneshot 用，nullable
 	Timezone      string
 	Prompt        string
-	State         string // enabled | paused | deleted
+	State         string // enabled | paused | completed | deleted
 	AllowedToolsSnapshot []string
 	CreateKey, CreatedByRunID, CreatedByCallID string
 	CreatedAt, UpdatedAt time.Time
@@ -285,15 +365,22 @@ type CronJob struct {
 ```
 
 - ID 使用 UUID/ULID，不含 sender、Prompt 或 ChatID；
-- 除 state 外 v0 不原地修改；deleted 保留 tombstone；
-- `next_run_at` 不是持久化真相，由 expression/timezone/当前时间计算；
+- `Type` 决定时间字段：`recurring` 配 `Expression`、`oneshot` 配 `FireAt`；二者互斥；
+- recurring 的 `next_run_at` 不是持久化真相，由 expression/timezone/当前时间计算；
+- oneshot 的触发时间就是 `FireAt`，无 `next_run_at` 概念；
+- oneshot Fire 成功（execution=completed）后 Job `State` 直接转 `completed`；execution=failed
+  也转 `completed`（一次性任务不重试，§9.3）；故 `completed` 表示"此 Job 生命周期已终态"；
+- recurring 不进入 `completed`，只能由用户操作或 §11.2 失踪处理进入 paused/deleted；
+- 除 state 转换外 v0 不原地修改字段；deleted 保留 tombstone；
 - Job 不保存模型选择的 recipient，Principal 是唯一 recipient 来源。
 
 ### 7.2 字段职责
 
 | 字段 | CronManager/Scheduler | Runtime |
 |---|---|---|
-| expression | Parse/Next | 不传模型 |
+| type | 决定时间解析路径 | 解释 trigger 块（cron/oneshot） |
+| expression | recurring: Parse/Next | 不传模型 |
+| fire_at | oneshot: 单点触发 | 不传模型 |
 | timezone | 解释时间 | 可信时间上下文 |
 | prompt | 持久化 | 用户级任务 |
 | agent_id | 校验/保存 | 选 Profile |
@@ -380,17 +467,35 @@ CronManager 从 `RunScheduledAgent` 的已验证结果投递，不能把 `run.fi
 使用 `github.com/robfig/cron/v3 v3.0.1`，并 `_ "time/tzdata"`。Parser 只启用
 Minute/Hour/Dom/Month/Dow，拒绝秒字段和 descriptor。expression/timezone 分开持久化。
 
-robfig 只负责 Parse 和 `Schedule.Next`；Xira 自己负责 timer、持久化、claim、queue、Run、授权和投递。
+robfig 只负责 recurring Job 的 Parse 和 `Schedule.Next`；**oneshot Job 不走 cron parser**，
+由 Scheduler 直接按 `FireAt`（已含 timezone 的绝对时间点）触发，无 `Next` 计算。Xira 自己负责
+timer、持久化、claim、queue、Run、授权和投递；两种 Job 共享同一套 Fire claim、queue、Run、
+Delivery 基础设施。
 
 ### 9.2 时间规则
 
+通用规则：
+
 - timezone 必须通过 `time.LoadLocation`，不回退服务器默认时区；
-- 春季不存在的本地时间跳过；秋季重复时间按 pinned `Next` 语义，不自行消重；
 - Fire identity 使用 UTC 时刻；DST 行为用 pinned 版本测试锁定；
 - 启动、reload、resume 从当前时间算下一次，不 catch up；
 - timer 延迟不超过 `misfire_grace` 仍执行，超过则 `skipped_misfire`；
 - Scheduler 注入 `Clock{Now, NewTimer}`，测试不用真实 sleep；
 - Job mutation/config reload 通过 wake channel 触发重新计算。
+
+recurring 特有：
+
+- 春季不存在的本地时间跳过；秋季重复时间按 pinned `Next` 语义，不自行消重。
+
+oneshot 特有：
+
+- `fire_at` 必须晚于 create 时刻（§5.1），校验在 handler；
+- `fire_at` 是绝对时间点，已含 timezone；到点即 Fire，无 DST 歧义；
+- 创建时若 `fire_at` 已早于"当前时间 + 一个最小准备阈值"（默认 30 秒，防 race），按
+  `skipped_misfire` 处理（不会立即执行刚建的任务）；
+- oneshot 不支持 pause/resume（§5.2）；想改期只能 delete+create；
+- oneshot Job 的 `fire_at` 早于当前时间的 stalled Job（系统启动时发现），由启动恢复流程标记
+  `skipped_misfire` 并把 Job State 转 `completed`。
 
 ### 9.3 并发和恢复
 
@@ -402,7 +507,9 @@ robfig 只负责 Parse 和 `Schedule.Next`；Xira 自己负责 timer、持久化
 - v0 是单进程 writer，不声称跨进程 exactly-once。
 
 v0 选择 at-most-once attempt：claim 后崩溃不自动重跑，因为工具可能有副作用。未来 retry 必须
-建立 Job/工具幂等契约，不能全局默认重试。
+建立 Job/工具幂等契约，不能全局默认重试。oneshot Job 在 execution=failed 或 skipped_* 后
+State 直接转 `completed`（§7.1），不会在后续 tick 再尝试；recurring Job 失败后下一周期照常
+调度。
 
 ## 10. 持久化
 
@@ -439,7 +546,7 @@ channel.OutboundRecipient{ID: principal.SenderID, IDType: principal.SenderIDType
 
 不用旧 ChatID、不发 owner。channel 不支持 typed proactive direct 时，Cron tool 不可见。
 
-### 11.2 Fire 前复核与自动暂停
+### 11.2 Fire 前复核、自动暂停与交互式恢复
 
 依次检查 Job enabled、entrypoint/CronPolicy、Principal 授权、Agent、route/type、工具交集和配额。
 
@@ -447,11 +554,47 @@ channel.OutboundRecipient{ID: principal.SenderID, IDType: principal.SenderIDType
 |---|---|---|
 | principal revoked | 自动 pause | 不联系已撤权 sender |
 | entrypoint/CronPolicy disabled | 自动 pause | 不投递 |
-| Agent unavailable/disallowed | 自动 pause | sender 仍授权时通知 |
-| route/type incompatible | 自动 pause | 能安全投递才通知 |
+| Agent unavailable/disallowed | 自动 pause | sender 仍授权时**投递交互式恢复通知**（见下） |
+| route/type incompatible | 自动 pause | 能安全投递才通知，附交互式恢复选项 |
 | quota exhausted | 保持 enabled，本次 skip | 不逐次刷屏 |
 
 使用 entrypoint 当前凭证/account，凭证轮换不改变所有权；channel/ID type 不兼容则 pause。
+
+#### 交互式恢复通知
+
+Agent 失踪（被删除、被 allowed_agents 排除、route 不兼容）时，**系统不静默 fallback 到
+default_agent 或任何其他候选**——Agent 是用户意图的一部分（§6.1），不能被系统替换。Job
+自动 pause，并向 Job Principal 投递一条带可操作选项的通知：
+
+```text
+你的定时任务「北京天气」已暂停
+原因：weather-agent 不再可用
+
+可选操作（回复对应文字）：
+- "改用 xira-assistant"
+- "改用 news-agent"
+- "删除"
+- "暂停保留"（不做任何事，等你以后手动处理）
+```
+
+通知里的候选 Agent 列表 = 当前入口有效候选集（§6.1）排除已失踪 Agent，每项附 1 句简短描述。
+用户回复后系统按回复执行：
+
+- "改用 X" → delete 老 Job + create 新 Job（`agent_id=X`，其余字段不变；recurring 用原
+  schedule，oneshot 用原 `fire_at`，若已过则按当前时间 + 默认提前量重算）；
+- "删除" → delete 老 Job（tombstone）；
+- "暂停保留" → 保持 paused。
+
+回复解析 = 用户原文匹配候选 Agent id/name/alias（同 §6.1 `extractMentionedAgent`）+ 操作
+关键词。匹配失败再投递 1 次后停止（不无限重试），Job 保持 paused。
+
+#### 为什么不 fallback
+
+fallback 到 default_agent 会与 §6.1（Agent 是用户意图，不能被系统替换）、§6.2（权限快照只
+收窄不替换）、§5.1（避免隐式默认）直接冲突；还会引入二次漂移（default_agent 本身会变）、
+prompt 失配（prompt 是为原 Agent 写的）、审计困难（产出风格突变用户不知情）。显式交互恢复
+的代价是"用户必须响应通知任务才继续"，这对重行为是正确的代价——用户不响应 = 主动选择让
+任务停。
 
 ## 12. 包边界与生命周期
 
@@ -502,6 +645,9 @@ latency、execution time、delivery status 和 degraded records。
 | 重试语义 | at-most-once attempt | 极端崩溃可能漏一次，但避免重复副作用 |
 | 权限快照 | 创建快照 ∩ 当前权限 | 新工具不会自动进入旧 Job |
 | 公共入口 | 默认不开放 Cron | 需 operator 显式承担成本风险 |
+| **Job 类型** | recurring + oneshot 共存，共享 Principal/Scheduled Turn/Delivery | Job 模型多一个 Type 字段、Scheduler 两条触发路径；oneshot 不支持 pause/resume |
+| **Agent 选择** | 多候选入口下用户必须显式选，单候选豁免；不依赖模型推断/默认值 | 多 agent 入口首次 create 可能被反问一轮；prompt injection 无法伪造"用户明示"（仅原文匹配） |
+| **Agent 失踪** | 自动 pause + 交互式恢复通知；不 fallback 到任何默认 | 用户必须响应通知任务才继续（重行为的正确代价）；不响应 = 主动选择停 |
 
 ## 15. 当前代码要补的契约
 
@@ -521,25 +667,36 @@ latency、execution time、delivery status 和 degraded records。
 
 ### 16.1 契约测试（100% 分支）
 
-- Principal normalize/hash：空 typed ID、大小写、`/`、Unicode、路径安全；
-- authorization：allowlist、owner fallback、public guard、撤权；
-- ownership：list/pause/resume/delete 隔离，猜他人 ID 返回 not found；
-- Job state machine 与 CreateKey；Agent default/explicit/allowlist；
-- tool visibility：direct/group、typed/untyped、policy、manager、channel capability；
-- effective tools/schema/Guidance 同步；能力快照和 denylist；
-- execution/delivery 两套状态转换。
+- Principal normalize/hash（空 typed ID、大小写、`/`、Unicode、路径安全）；authorization
+  （allowlist/owner fallback/public guard/撤权）；ownership（list/pause/resume/delete 隔离、
+  猜他人 ID 返回 not found）；
+- Job state machine 与 CreateKey；tool visibility（direct/group、typed/untyped、policy、
+  manager、channel capability）；effective tools/schema/Guidance 同步；能力快照和 denylist；
+  execution/delivery 两套状态转换；
+- **Agent 选择契约（§6.1）**：单候选豁免 / 多候选未提 → `ErrAgentChoiceRequired` / 多候选提到
+  1 个 → 通过 / 提到多个 → ambiguous / 候选为空 → `ErrNoAgentAvailable`；`extractMentionedAgent`
+  仅匹配用户原文，prompt injection 伪造"用户说过"不生效；
+- **oneshot vs recurring 字段一致性（§5.1/§7.1）**：recurring 缺 expression / oneshot 缺 fire_at /
+  两者都填 / fire_at 早于当前时间 + 准备阈值 / oneshot pause/resume 被拒 / oneshot fire 后 State
+  转 completed / oneshot 失败后不重试；
+- **交互式恢复通知（§11.2）**：Agent 失踪自动 pause + 通知；回复"改用 X"触发 delete+create；
+  "删除"/"暂停保留"对应处理；匹配失败再投递 1 次后停止；oneshot fire_at 已过时恢复策略。
 
 ### 16.2 Scheduler/Runtime 测试
 
-- 五字段 parser、timezone、DST、fake Clock、wake、next preview；
-- startup/resume no catch-up、misfire、claim、overlap、配额、公平、shutdown；
-- 单坏文件 degraded、Store 根故障；
-- 真实 `RunScheduledAgent -> ADK request`，fresh session、无 chat history；
-- 用真实 InboundContext 产出 Principal，不手搓干净 ID；
-- 正确 sender user/memory/data scope，Agent Memory 按现契约加载；
-- sealed trigger、expression 不进模型、timezone/scheduled_at 进入；
-- final、finish_silent、tool failure、空 final、waiting_human；
-- 双 sender E2E：管理/上下文/数据/投递隔离，撤权与 owner 转移。
+- 五字段 parser / timezone / DST / fake Clock / wake / next preview；oneshot：fire_at 到点即
+  Fire、提前量 race 防护、启动时 stalled 标 `skipped_misfire` 转 completed、不重试；
+- startup/resume no catch-up / misfire / claim / overlap / 配额 / 公平 / shutdown；单坏文件
+  degraded、Store 根故障；
+- 真实 `RunScheduledAgent → ADK request`（fresh session、无 chat history、真实 InboundContext
+  产出 Principal 不手搓干净 ID、sender user/memory/data scope 正确、Agent Memory 按现契约加载、
+  sealed trigger 块含 expression/fire_at + timezone/scheduled_at 不进模型）；
+- final / finish_silent / tool failure / 空 final / waiting_human；
+- 双 sender E2E（管理/上下文/数据/投递隔离、撤权、owner 转移）；
+- **Agent 反问 E2E**：多 agent 入口 + prompt 未提 agent → 模型被引导反问 → 用户回复 → create
+  成功；prompt injection 伪造明示失败；
+- **Agent 失踪恢复 E2E**：删 agent → 下次 fire 前 pause + 通知 → 用户回复恢复 → 新 job 用
+  新 agent 跑通。
 
 ### 16.3 全量验证
 
@@ -557,12 +714,16 @@ task live-test
 
 ### 16.4 实施切片
 
-1. **Contract**：冻结 Principal/Job/Run/tool schema，先写契约失败测试。
-2. **Cron Core**：parser/store/fake Clock scheduler/claim/state/quota，用 fake Executor 验证。
+1. **Contract**：冻结 Principal/Job/Run/tool schema（含 `type`/`fire_at`），先写契约失败测试。
+2. **Cron Core**：parser/store/fake Clock scheduler/claim/state/quota（含 oneshot 单点触发），
+   用 fake Executor 验证。
 3. **Scheduled Turn**：抽共享 Loop Core，接 Principal/memory/tool scope/verifyRunOutcome。
-4. **Cron Tool**：CronPolicy/access resolver/tool schema/Guidance/idempotent CRUD。
-5. **Delivery/Lifecycle**：typed proactive、final/silent/failure、撤权、wiring、metrics。
-6. **E2E/Live**：双 sender、restart/DST/delivery failure、全仓 build/test/race/coverage/live。
+4. **Cron Tool**：CronPolicy/access resolver/tool schema/Guidance/idempotent CRUD（含 `type` 字段）。
+5. **Agent 选择**：§6.1 候选集计算 + `extractMentionedAgent` + 反问 error 契约；契约测试 100% 分支。
+6. **Delivery/Lifecycle**：typed proactive、final/silent/failure、撤权、wiring、metrics。
+7. **Agent 失踪交互恢复**：§11.2 pause + 通知 + delete+create 恢复；回复解析；不 fallback。
+8. **E2E/Live**：双 sender、oneshot/recurring、restart/DST/delivery failure/Agent 反问/Agent 失踪恢复、
+   全仓 build/test/race/coverage/live。
 
 每个切片单独可验收，不把 Scheduler、Runtime 重构、channel delivery 全揉进一个 PR。
 
@@ -578,6 +739,12 @@ task live-test
 8. 撤权、Agent 不可用或 route 不兼容自动 pause；坏记录显式 degraded。
 9. 没有第二套 Agent Loop、全局 EventBus 或模型可控 recipient。
 10. 契约覆盖率 100%、包级覆盖率达标，全仓 build/test/race/live 通过。
+11. **recurring 与 oneshot 共存**：两者共享 Principal/Scheduled Turn/Delivery；oneshot fire 后 Job
+    转 completed 且不重试；oneshot 不支持 pause/resume。
+12. **Agent 必须用户显式选**：多 agent 入口下 prompt 未提候选 agent 时 create 被拒并反问；
+    prompt injection 无法伪造用户明示；单 agent 入口豁免。
+13. **Agent 失踪不静默替换**：Agent 不可用时 Job 自动 pause + 投递带恢复选项的通知；用户回复
+    后显式 delete+create；系统不 fallback 到 default_agent 或任何其他候选。
 
 ## 18. 参考
 
