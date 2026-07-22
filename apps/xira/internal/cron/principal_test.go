@@ -21,43 +21,43 @@ func TestPrincipalNormalize(t *testing.T) {
 			name: "trim 全字段",
 			input: CronPrincipal{
 				EntrypointID: "  feishu-main  ",
-				Channel:       "  feishu  ",
+				Channel:      "  feishu  ",
 				SenderIDType: "  feishu_open_id  ",
 				SenderID:     "  ou_yinwm  ",
 			},
 			want: CronPrincipal{
 				EntrypointID: "feishu-main",
-				Channel:       "feishu",
+				Channel:      "feishu",
 				SenderIDType: "feishu_open_id",
 				SenderID:     "ou_yinwm",
 			},
 		},
 		{
-			name: "channel 和 type 转 lowercase，sender 不转",
+			name: "channel 和 type 转 lowercase，entrypoint 和 sender 保留大小写",
 			input: CronPrincipal{
 				EntrypointID: "Feishu-Main",
-				Channel:       "FEISHU",
+				Channel:      "FEISHU",
 				SenderIDType: "Feishu_Open_ID",
 				SenderID:     "Ou_Yinwm",
 			},
 			want: CronPrincipal{
-				EntrypointID: "feishu-main",
-				Channel:       "feishu",
+				EntrypointID: "Feishu-Main",
+				Channel:      "feishu",
 				SenderIDType: "feishu_open_id",
-				SenderID:     "Ou_Yinwm", // 保留大小写
+				SenderID:     "Ou_Yinwm",
 			},
 		},
 		{
 			name: "空字段 trim 到空字符串",
 			input: CronPrincipal{
 				EntrypointID: "   ",
-				Channel:       "feishu",
+				Channel:      "feishu",
 				SenderIDType: "feishu_open_id",
 				SenderID:     "ou_yinwm",
 			},
 			want: CronPrincipal{
 				EntrypointID: "",
-				Channel:       "feishu",
+				Channel:      "feishu",
 				SenderIDType: "feishu_open_id",
 				SenderID:     "ou_yinwm",
 			},
@@ -84,7 +84,7 @@ func TestPrincipalValidate(t *testing.T) {
 			name: "完整 Principal 通过",
 			input: CronPrincipal{
 				EntrypointID: "feishu-main",
-				Channel:       "feishu",
+				Channel:      "feishu",
 				SenderIDType: "feishu_open_id",
 				SenderID:     "ou_yinwm",
 			},
@@ -94,7 +94,7 @@ func TestPrincipalValidate(t *testing.T) {
 			name: "typed identity 为空（SenderIDType 空）拒绝",
 			input: CronPrincipal{
 				EntrypointID: "feishu-main",
-				Channel:       "feishu",
+				Channel:      "feishu",
 				SenderIDType: "",
 				SenderID:     "ou_yinwm",
 			},
@@ -104,7 +104,7 @@ func TestPrincipalValidate(t *testing.T) {
 			name: "typed identity 为空（SenderID 空）拒绝",
 			input: CronPrincipal{
 				EntrypointID: "feishu-main",
-				Channel:       "feishu",
+				Channel:      "feishu",
 				SenderIDType: "feishu_open_id",
 				SenderID:     "",
 			},
@@ -114,14 +114,14 @@ func TestPrincipalValidate(t *testing.T) {
 			name: "typed identity 为空（两者都空）拒绝",
 			input: CronPrincipal{
 				EntrypointID: "feishu-main",
-				Channel:       "feishu",
+				Channel:      "feishu",
 			},
 			wantErr: true,
 		},
 		{
 			name: "entrypoint 空 拒绝",
 			input: CronPrincipal{
-				Channel:       "feishu",
+				Channel:      "feishu",
 				SenderIDType: "feishu_open_id",
 				SenderID:     "ou_yinwm",
 			},
@@ -153,7 +153,7 @@ func TestPrincipalHash(t *testing.T) {
 	t.Run("versioned 前缀和规范化规则 golden value", func(t *testing.T) {
 		p := CronPrincipal{
 			EntrypointID: "feishu-main",
-			Channel:       "feishu",
+			Channel:      "feishu",
 			SenderIDType: "feishu_open_id",
 			SenderID:     "ou_yinwm",
 		}
@@ -164,16 +164,16 @@ func TestPrincipalHash(t *testing.T) {
 		}
 	})
 
-	t.Run("规范化后再 hash：大小写和空格不影响结果", func(t *testing.T) {
+	t.Run("规范化后再 hash：channel 和 type 大小写及各字段空格不影响结果", func(t *testing.T) {
 		a := CronPrincipal{
-			EntrypointID: "  Feishu-Main  ",
-			Channel:       "FEISHU",
+			EntrypointID: "  feishu-main  ",
+			Channel:      "FEISHU",
 			SenderIDType: "Feishu_Open_ID",
-			SenderID:     "ou_yinwm",
+			SenderID:     "  ou_yinwm  ",
 		}
 		b := CronPrincipal{
 			EntrypointID: "feishu-main",
-			Channel:       "feishu",
+			Channel:      "feishu",
 			SenderIDType: "feishu_open_id",
 			SenderID:     "ou_yinwm",
 		}
@@ -182,16 +182,30 @@ func TestPrincipalHash(t *testing.T) {
 		}
 	})
 
+	t.Run("entrypoint 大小写不同 → hash 不同", func(t *testing.T) {
+		lower := CronPrincipal{
+			EntrypointID: "feishu-main",
+			Channel:      "feishu",
+			SenderIDType: "feishu_open_id",
+			SenderID:     "ou_yinwm",
+		}
+		upper := lower
+		upper.EntrypointID = "Feishu-Main"
+		if PrincipalHash(lower) == PrincipalHash(upper) {
+			t.Errorf("EntrypointID 大小写不同应产生不同 hash（逻辑 ID 区分大小写）")
+		}
+	})
+
 	t.Run("sender 大小写不同 → hash 不同", func(t *testing.T) {
 		lower := CronPrincipal{
 			EntrypointID: "feishu-main",
-			Channel:       "feishu",
+			Channel:      "feishu",
 			SenderIDType: "feishu_open_id",
 			SenderID:     "ou_yinwm",
 		}
 		upper := CronPrincipal{
 			EntrypointID: "feishu-main",
-			Channel:       "feishu",
+			Channel:      "feishu",
 			SenderIDType: "feishu_open_id",
 			SenderID:     "OU_YINWM",
 		}
@@ -203,7 +217,7 @@ func TestPrincipalHash(t *testing.T) {
 	t.Run("任一字段不同 → hash 不同", func(t *testing.T) {
 		base := CronPrincipal{
 			EntrypointID: "feishu-main",
-			Channel:       "feishu",
+			Channel:      "feishu",
 			SenderIDType: "feishu_open_id",
 			SenderID:     "ou_yinwm",
 		}
@@ -224,7 +238,7 @@ func TestPrincipalHash(t *testing.T) {
 	t.Run("hash 输出是 64 字符 hex（SHA-256）", func(t *testing.T) {
 		p := CronPrincipal{
 			EntrypointID: "feishu-main",
-			Channel:       "feishu",
+			Channel:      "feishu",
 			SenderIDType: "feishu_open_id",
 			SenderID:     "ou_yinwm",
 		}

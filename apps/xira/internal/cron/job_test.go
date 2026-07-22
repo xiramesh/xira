@@ -12,7 +12,7 @@ func TestValidateJob(t *testing.T) {
 			ID:            "cron_01TEST",
 			Principal: CronPrincipal{
 				EntrypointID: "feishu-main",
-				Channel:       "feishu",
+				Channel:      "feishu",
 				SenderIDType: "feishu_open_id",
 				SenderID:     "ou_yinwm",
 			},

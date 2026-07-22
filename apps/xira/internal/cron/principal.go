@@ -8,8 +8,8 @@ import "errors"
 // 实现时把 panic("not implemented") 替换为真实逻辑，测试从 red 转 green。
 
 // NormalizePrincipal 按规范化规则处理 Principal（RFC §3.1）：
-//   - EntrypointID / Channel / SenderIDType：trim + lowercase
-//   - SenderID：仅 trim，不 lowercase（外部 ID 可能区分大小写）
+//   - EntrypointID / SenderID：仅 trim，不 lowercase（逻辑 ID / 外部 ID 可能区分大小写）
+//   - Channel / SenderIDType：trim + lowercase
 func NormalizePrincipal(p CronPrincipal) CronPrincipal {
 	panic("not implemented: 切片 2 落地（RFC §3.1）")
 }

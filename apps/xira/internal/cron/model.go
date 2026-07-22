@@ -26,8 +26,8 @@ const PrincipalHashVersion = "cron-principal-v1"
 // InboundContext（聊天 create 路径）或 Job 记录（Scheduled Turn 路径）派生。
 //
 // 规范化规则（RFC §3.1）：
-//   - EntrypointID / Channel / SenderIDType：trim + lowercase
-//   - SenderID：仅 trim，不 lowercase（外部 ID 可能区分大小写）
+//   - EntrypointID / SenderID：仅 trim，不 lowercase（逻辑 ID / 外部 ID 可能区分大小写）
+//   - Channel / SenderIDType：trim + lowercase
 //   - typed identity（SenderIDType + SenderID）为空时不能创建 Cron
 //
 // 文件路径用四元组的 versioned SHA-256（见 PrincipalHash），不用 raw sender。
@@ -56,10 +56,10 @@ const (
 type JobState string
 
 const (
-	JobStateEnabled  JobState = "enabled"
-	JobStatePaused   JobState = "paused"
+	JobStateEnabled   JobState = "enabled"
+	JobStatePaused    JobState = "paused"
 	JobStateCompleted JobState = "completed" // 仅 oneshot 进入
-	JobStateDeleted  JobState = "deleted"    // tombstone
+	JobStateDeleted   JobState = "deleted"   // tombstone
 )
 
 // CronJob 是一份定时任务记录（RFC §7.1）。
@@ -130,7 +130,7 @@ type DeliveryStatus string
 const (
 	DeliveryPending    DeliveryStatus = "pending"
 	DeliverySent       DeliveryStatus = "sent"
-	DeliveryNotNeeded  DeliveryStatus = "not_needed"  // finish_silent 成功
+	DeliveryNotNeeded  DeliveryStatus = "not_needed" // finish_silent 成功
 	DeliveryFailed     DeliveryStatus = "failed"
 	DeliveryNotAllowed DeliveryStatus = "not_allowed" // execution 失败
 )
