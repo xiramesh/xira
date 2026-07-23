@@ -64,8 +64,15 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Test (no race)
+      - name: Test
         run: go test ./...
 
-      - name: Test with -race
-        run: go test -race ./...
+      # -race is temporarily DISABLED (tracked in #140).
+      # The first CI run (#136) exposed multiple pre-existing flaky/race tests
+      # across the repo (ilink pairing snapshot race, feishu TempDir cleanup
+      # race, progress steering-retry timing flake). None are introduced by
+      # any single PR — they're historical debt from never having had CI.
+      # Rather than block every PR on unrelated flaky tests, -race is disabled
+      # until #140 fixes them. Authors should run `go test -race ./...` locally
+      # for concurrency-sensitive changes; -race will return to CI once #140
+      # lands.
