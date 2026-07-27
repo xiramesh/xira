@@ -78,7 +78,7 @@ func SupportedModel(model string) bool {
 type Message struct {
 	Role             string     `json:"role"`
 	Content          any        `json:"content,omitempty"`
-	ReasoningContent any        `json:"reasoning_content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string     `json:"tool_call_id,omitempty"`
 	Name             string     `json:"name,omitempty"`
@@ -395,6 +395,7 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 		if stream {
 			stopped := false
 			var full strings.Builder
+			var streamedReasoning string
 			var streamedToolCalls []ToolCall
 			var lastModel string
 			var lastFinishReason string
@@ -410,6 +411,11 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 					if strings.TrimSpace(chunk.Choices[0].FinishReason) != "" {
 						lastFinishReason = chunk.Choices[0].FinishReason
 					}
+					streamedReasoning = mergeReasoningContent(
+						streamedReasoning,
+						chunk.Choices[0].Delta.ReasoningContent,
+						chunk.Choices[0].Message.ReasoningContent,
+					)
 					streamedToolCalls = mergeToolCallDeltas(streamedToolCalls, chunk.Choices[0].Delta.ToolCalls)
 					streamedToolCalls = mergeFullToolCalls(streamedToolCalls, chunk.Choices[0].Message.ToolCalls)
 				}
@@ -433,7 +439,11 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 						FinishReason string  `json:"finish_reason"`
 						Delta        Message `json:"delta,omitempty"`
 					}{{
-						Message:      Message{Role: "assistant", ToolCalls: streamedToolCalls},
+						Message: Message{
+							Role:             "assistant",
+							ReasoningContent: streamedReasoning,
+							ToolCalls:        streamedToolCalls,
+						},
 						FinishReason: "tool_calls",
 					}},
 				}, wireToOriginal), nil) {
@@ -462,6 +472,8 @@ func (m *ADKModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest
 	}
 }
 
+// contentsToMessages preserves provider-owned reasoning context while mapping ADK history.
+// coverage: contract (100% required)
 func contentsToMessages(contents []*genai.Content, systemInstruction string, originalToWire map[string]string) []Message {
 	out := make([]Message, 0, len(contents)+1)
 	if systemInstruction != "" {
@@ -476,6 +488,7 @@ func contentsToMessages(contents []*genai.Content, systemInstruction string, ori
 			role = "assistant"
 		}
 		var parts []string
+		var reasoningContent string
 		var toolCalls []ToolCall
 		for _, part := range content.Parts {
 			if part == nil {
@@ -483,6 +496,9 @@ func contentsToMessages(contents []*genai.Content, systemInstruction string, ori
 			}
 			if part.Text != "" {
 				parts = append(parts, part.Text)
+			}
+			if role == "assistant" && reasoningContent == "" && len(part.ThoughtSignature) > 0 {
+				reasoningContent = string(part.ThoughtSignature)
 			}
 			if part.FunctionCall != nil {
 				args, _ := json.Marshal(part.FunctionCall.Args)
@@ -517,7 +533,12 @@ func contentsToMessages(contents []*genai.Content, systemInstruction string, ori
 			}
 		}
 		if len(parts) > 0 || len(toolCalls) > 0 {
-			out = append(out, Message{Role: role, Content: strings.Join(parts, "\n"), ToolCalls: toolCalls})
+			out = append(out, Message{
+				Role:             role,
+				Content:          strings.Join(parts, "\n"),
+				ReasoningContent: reasoningContent,
+				ToolCalls:        toolCalls,
+			})
 		}
 	}
 	return out
@@ -609,6 +630,8 @@ func parametersJSONBytes(fn *genai.FunctionDeclaration) []byte {
 	}
 }
 
+// responseToADK stores provider-owned reasoning as opaque ADK context, never display text.
+// coverage: contract (100% required)
 func responseToADK(resp ChatResponse, wireToOriginal map[string]string) *adkmodel.LLMResponse {
 	if len(resp.Choices) == 0 {
 		return textResponse("", false)
@@ -616,6 +639,8 @@ func responseToADK(resp ChatResponse, wireToOriginal map[string]string) *adkmode
 	choice := resp.Choices[0]
 	msg := choice.Message
 	var parts []*genai.Part
+	reasoningContent := msg.ReasoningContent
+	reasoningAttached := false
 	if text := ContentText(msg.Content); text != "" {
 		parts = append(parts, genai.NewPartFromText(text))
 	}
@@ -628,6 +653,10 @@ func responseToADK(resp ChatResponse, wireToOriginal map[string]string) *adkmode
 		}
 		part := genai.NewPartFromFunctionCall(name, args)
 		part.FunctionCall.ID = call.ID
+		if reasoningContent != "" && !reasoningAttached {
+			part.ThoughtSignature = []byte(reasoningContent)
+			reasoningAttached = true
+		}
 		parts = append(parts, part)
 	}
 	return &adkmodel.LLMResponse{
@@ -636,6 +665,15 @@ func responseToADK(resp ChatResponse, wireToOriginal map[string]string) *adkmode
 		ModelVersion: resp.Model,
 		FinishReason: genai.FinishReason(choice.FinishReason),
 	}
+}
+
+// mergeReasoningContent assembles deltas unless the provider supplies a full value.
+// coverage: contract (100% required)
+func mergeReasoningContent(current, delta, full string) string {
+	if full != "" {
+		return full
+	}
+	return current + delta
 }
 
 func textResponse(text string, partial bool) *adkmodel.LLMResponse {
