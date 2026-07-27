@@ -1,10 +1,12 @@
 # Xira Triggered Turn 与 per-chat-key durable mailbox RFC v0
 
-- **状态**：Proposed
+- **状态**：Accepted
 - **日期**：2026-07-27
+- **接受日期**：2026-07-28
 - **Gate Issue**：[#204](https://github.com/xiramesh/xira/issues/204)
 - **Epic / Milestone**：[#202](https://github.com/xiramesh/xira/issues/202) / Managed Execution v0
 - **目标分支**：`milestone/managed-execution-v0`
+- **评审记录**：[#207 review](https://github.com/xiramesh/xira/pull/207#issuecomment-5093803049)
 
 ---
 
@@ -47,9 +49,10 @@ Managed Execution v0 要支持：命令超过同步等待窗口后继续运行�
 
 以下结论基于 `milestone/managed-execution-v0` 起点提交 `315cb6a1` 的源码，引用符号名而非易漂移行号。
 
-### 2.1 Runtime 只有“用户字符串”入口
+### 2.1 Runtime 的模型输入只有无 kind 的用户字符串
 
-- `runtime.TurnRequest` 只有 `Message string`，没有 trigger/source union。
+- `runtime.TurnRequest.Context` 已用一等 `channel.InboundContext` 承载来源身份；但模型输入仍只有
+  `Message string`，没有 trigger/source union，无法表达 trusted system trigger。
 - `Service.RunAgent` 把 `req.Message` 直接放进 `channel.InboundEnvelope.Content`。
 - DeepSeek 路径把它构造成 `role=user`；ADK 路径同样以 user content 启动。
 - `sessionMessagesForRun` 把它持久化为 `role=user + kind=message`。
@@ -326,10 +329,11 @@ claim trigger 前必须重新验证：
 任一不满足都 suppress，并保存 reason；禁止猜测、fallback 到 owner、按 channel 模糊选择 runner，或发送给
 新绑定身份。
 
-当前仓库没有 conversation reset/delete API，也没有 session generation。v0 不虚构一个不存在的操作；
-契约规定：未来 reset/delete 必须生成新的 conversation generation/tombstone，旧 generation 的 queued
-trigger 一律 suppress。实现 #204 时需要保留 generation 字段/validator 扩展点，但不因本 Gate 顺带新增
-完整 reset 产品功能。
+当前仓库没有 conversation reset/delete API，也没有 session generation。v0 不虚构一个不存在的操作，
+因此 v0 schema 不强制增加 generation。契约规定：未来首次引入 reset/delete 时，必须同时升级
+`ConversationRef` schema 与 validator，生成新的 conversation generation/tombstone；旧 generation 的 queued
+trigger 一律 suppress。禁止只实现 reset/delete，却继续让旧 trigger 通过验证。本 Gate 不顺带新增完整
+reset 产品功能。
 
 ### 4.9 #204 与 #205 的耐久边界
 
@@ -459,8 +463,12 @@ Execution continuation 使用原 conversation session/route，不能互换。
 | crash after enqueue | restart 后 trigger 仍被处理 |
 | crash after claim | lease 恢复；无永久 claimed |
 | user steers Triggered Turn | trigger 未 ack；User Turn 先完成；trigger 可重试 |
+| steered Triggered Turn hydrate | steered 记录保留供审计，但不进入下一轮模型上下文 |
 | user copies trigger text | 仍是 MessageKindMessage，不获得 trusted trigger kind |
+| four sealed trigger kinds | completed/failed/timed_out/lost 分别可接受；其他 kind 一律拒绝 |
 | trigger history round-trip | MessageKindTrigger 不恢复成普通 user/assistant message |
+| completion hook ordering | active 状态释放与 mailbox drain 不漏唤醒、不并发双跑、不依赖轮询 |
+| handling outcomes | handled/suppressed/retryable failure 三态可区分、可审计 |
 | current policy tightened | 原 completion 不能扩大工具或 sender 权限 |
 | entrypoint removed/ambiguous | suppress，不 fallback 到同 channel 其他 runner |
 | group conversation | exact entrypoint/chat/sender；不投群内其他 sender |
@@ -521,15 +529,15 @@ continuation 的 Target 是原 conversation route，不是 Cron Principal，也�
 
 ## 11. 本 Gate 的 Accepted 条件
 
-- [ ] 评审接受 User steering 与 Triggered mailbox 永久分离。
-- [ ] 评审接受全局 mailbox key 包含 EntrypointID + ChatKey。
-- [ ] 评审接受 `RunTriggeredAgent` 作为 #194 Agent Loop Core 的 typed adapter。
-- [ ] 评审接受 Trigger 在 session/history 中不是普通 user message。
-- [ ] 评审接受 user/trigger 的顺序、抢占和 starvation 策略。
-- [ ] 评审接受 exact route 恢复、当前权限重验证和 fail-closed suppression。
-- [ ] #205 已登记并引用本 RFC 的 mailbox invariants，后续由 #205 冻结精确 delivery state/CAS。
-- [ ] #206 已登记并引用 TriggeredTurn 所需的 terminal/result/artifact references，后续由 #206 冻结精确字段。
-- [ ] 本 RFC 由 Proposed 更新为 Accepted，并把最终结论回灌 #202。
+- [x] 评审接受 User steering 与 Triggered mailbox 永久分离。
+- [x] 评审接受全局 mailbox key 包含 EntrypointID + ChatKey。
+- [x] 评审接受 `RunTriggeredAgent` 作为 #194 Agent Loop Core 的 typed adapter。
+- [x] 评审接受 Trigger 在 session/history 中不是普通 user message。
+- [x] 评审接受 user/trigger 的顺序、抢占和 starvation 策略。
+- [x] 评审接受 exact route 恢复、当前权限重验证和 fail-closed suppression。
+- [x] #205 已登记并引用本 RFC 的 mailbox invariants，后续由 #205 冻结精确 delivery state/CAS。
+- [x] #206 已登记并引用 TriggeredTurn 所需的 terminal/result/artifact references，后续由 #206 冻结精确字段。
+- [x] 本 RFC 由 Proposed 更新为 Accepted，并把最终结论回灌 #202。
 
-在以上条件完成前，不创建 mailbox/TurnCoordinator/RunTriggeredAgent 的 implementation issue，不冻结物理
-Store schema。
+#204 Gate 条件已经完成。是否创建 mailbox/TurnCoordinator/RunTriggeredAgent 的 implementation issue，仍须
+等待 #205、#206 同样形成 Accepted 结论并关闭；在此之前不冻结物理 Store schema。
