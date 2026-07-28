@@ -250,6 +250,11 @@ v0 不在同一个 Execution 内自动创建新 generation。即使 launcher 能
 terminal `failed`（reason=`launch_failure`）；有意重试必须由新 tool call 创建新 Execution。无法证明
 时进入 reconciliation，不靠猜测再起进程。generation 在 v0 仍参与 fencing/evidence，值不用于重试。
 
+`launch_failure` 与其他 terminal 一样必须创建 matching outbox，不能因“target 没启动”按 reason 特判
+suppressed。若它在 automatic yield 前返回给仍 active 的 origin Run，该 tool result 仍只是观察；origin Run
+要负责本次 completion，必须按 #205 显式取得 terminal ownership。claiming Run verified ack 后不再启动
+Triggered Turn；未 claim 或 Run 后续失败时，outbox 继续保证失败最终被处理。
+
 ### 7.4 worker start handshake
 
 worker 顺序必须是：
@@ -320,8 +325,9 @@ artifact failure 是 reason/evidence。completion outbox 的 sealed kind 仍只�
 
 权威 terminal facts 至少包含 execution ID、status、occurred time、bounded result/artifact references、
 原 `parent_run_id + tool_call_id` correlation、termination reason/evidence type+digest。通常 evidence 指向
-worker candidate；确定性 launch failure 没有 candidate 时，digest 必须覆盖 durable launch intent 与
-launcher 的“target 从未启动”证明。全量 stdout/stderr 不得进入 terminal/outbox/RuntimeEvent/IM。
+worker candidate；确定性 pre-worker failure 没有 candidate 时，digest 必须覆盖 create guard、durable
+materialization/launch intent，以及 daemon/launcher 对失败点的证明。全量 stdout/stderr 不得进入
+terminal/outbox/RuntimeEvent/IM。
 
 ### 8.4 startup reconciliation matrix
 
@@ -343,6 +349,10 @@ launcher 的“target 从未启动”证明。全量 stdout/stderr 不得进入 
 
 `lost` 的含义是“系统不能再可信证明它如何结束”，不是普通 non-zero exit，也不是一个方便的兜底
 失败码。它必须携带 reason category 与可审计 evidence summary。
+
+v0 不把 launcher/system service 的普通 exit notification 提升为 result authority。worker 在发布 valid
+candidate 前死亡时，除非 launcher 能证明 target 从未启动，否则即使 OS 显示进程“干净退出”也只能
+`lost`；以后若要支持可信 OS-native result adapter，必须另行扩展 evidence contract。
 
 ### 8.5 恢复不得回拨 terminal
 
@@ -431,7 +441,7 @@ container 隔离。production 必须把 state-dir 放在 command write roots 之
 
 ## 12. Qualification companion
 
-运维 NFR、quota admission receipt、retention/GC、failure matrix、contract tests 与 production capability
+运维 NFR、unified create guard、retention/GC、failure matrix、contract tests 与 production capability
 qualification 由同 Gate companion
 `xira-execution-worker-ownership-recovery-qualification-v0.zh.md` 冻结。两份文档必须一起 review/Accepted；
 companion 不得改变本文 ownership/terminal 决策，只把它们转成可测门槛。
@@ -445,7 +455,9 @@ companion 不得改变本文 ownership/terminal 决策，只把它们转成可�
 | worker 直接写 SQLite terminal | 拒绝 | 破坏唯一写入者与 #205 terminal+outbox 原子边界 |
 | 仅用 PID/PID 文件恢复 | 拒绝 | PID 复用与 stale file 会误 adopt/误杀无关进程 |
 | 同一 Execution 自动重试 launch | 拒绝 | 即使 target 未被观测到，也不该在旧 tool call 下悄悄引入后发副作用 |
-| 把 quota rejection 伪造成 failed Execution | 拒绝 | 从未 admission 的请求不应生成 terminal/outbox；使用 pre-create receipt |
+| 把 quota rejection 伪造成 failed Execution | 拒绝 | 从未 admission 的请求不应生成 terminal/outbox；使用 create guard rejected branch |
+| receipt/Execution 分表各自查 key | 拒绝 | 无跨表唯一 winner，replay 与 admission 会竞态；统一由 create guard 路由 |
+| 用两个独立 TTL 管 guard/history | 拒绝 | 两者最终都删除会失忆；删除 guard 前必须先 fence origin replay authority |
 | 把 systemd 写死进核心 | 拒绝 | 将产品契约与部署实现耦合，开发/测试/演进成本过高 |
 | portable worker + qualified launcher | 采用 | ownership 稳定，同时允许 Linux 严格、macOS 显式降级 |
 | 宣称 macOS 与 Linux recovery 等价 | 拒绝 | 没有对应 OS 证据就是虚假能力，silent data loss 风险更高 |
