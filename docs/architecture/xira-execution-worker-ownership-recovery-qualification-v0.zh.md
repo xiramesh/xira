@@ -56,20 +56,27 @@ tool call 已 durable 的 managed-tool dispatch boundary 提供建立 projection
 - decision 是 sealed union：`admitted(execution_id)` 或 `rejected(reason)`；
 - admitted branch 的 Execution 仍保存并唯一约束同一个 create key，且 execution_id/digest 必须匹配 guard；
 - rejected branch 无 ExecutionID，不是 Execution terminal，不生成 ContinuationID/completion outbox；
-- replay 必须先验证 origin authority，再只查 guard：同 key+digest 返回原 Execution/rejection；不同 digest
-  返回 `idempotency_conflict`，并带 decision/object kind 便于审计；
+- caller 不能在事务外预判“首次 create”还是“provider replay”；每次 managed create request 都进入 §2.3
+  的同一个 transaction resolution，在一个序列化快照内验证 origin authority 并读取 guard；guard 命中且
+  key+digest 相同就返回原 Execution/rejection，不同 digest 返回 `idempotency_conflict` 并带
+  decision/object kind 便于审计；
 - 一个 create key 只有一个 guard winner，因此不存在“receipt 表还是 Execution 表先查”的竞态；
 - 有意重试必须使用新 tool call/create key。
 
-这扩展的是 #206 pre-create admission routing，不改变 #205 successful `create_key → ExecutionID` replay。
+在 origin replayable 生命周期内，provider replay 必须按 #205 命中原 guard decision/Execution；authoritative
+Runtime lifecycle 将 origin fence 为 non-replayable 后，任何更晚的 provider packet 都返回
+`origin_run_not_replayable`，即使 guard 尚未物理删除也不能返回、覆盖或重建 Execution。这冻结的是 #205
+successful replay 的有效生命周期与 #206 pre-create admission routing，不改变生命周期内的
+`create_key → ExecutionID` 语义。
 
 ### 2.3 admission 与 capacity 是单一事务
 
-v0 不引入隐藏的资源等待调度器。首次 decision 在 managed-execution SQLite 的一个 writer transaction 内
-完成：取得与 GC 相同的写序列化点后，验证 origin authority projection/version、争用 guard、检查 quota；
-admitted 时同时 reserve capacity + 创建 queued Execution + 写 admitted guard，quota 已满时只写 rejected
-guard（reason=`execution_capacity_exhausted`）。capacity ledger 必须位于同一 SQLite/事务域，不能以内存
-计数或外部 store 作为权威。
+v0 不引入隐藏的资源等待调度器。每次 managed create request（首次或 replay）都在 managed-execution
+SQLite 的一个 writer transaction 内 resolution：取得与 GC 相同的写序列化点后，在同一快照验证 origin
+authority projection/version 并读取/争用 guard。guard 已存在就返回既有 decision；只有 guard 不存在时才是
+首次 decision，继续检查 quota，admitted 时同时 reserve capacity + 创建 queued Execution + 写 admitted
+guard，quota 已满时只写 rejected guard（reason=`execution_capacity_exhausted`）。capacity ledger 必须位于
+同一 SQLite/事务域，不能以内存计数或外部 store 作为权威。
 
 - transaction 未 commit：guard、reservation、Execution 全部回滚，无 worker/target；
 - commit 后：non-terminal Execution 持有 capacity，直到 terminal+matching-outbox transaction 同时释放；
@@ -88,12 +95,20 @@ create guard removed  => origin was durably marked non-replayable first
 ```
 
 guard 可压缩为只保留 key、digest、decision、object ref/reason 的非敏感 tombstone，但只要 origin replayable
-就不能删除。admission 与 GC 必须使用同一 managed SQLite writer serialization point：authority 校验只能在
-取得该序列化点后的 create transaction 内完成；GC transaction 必须等待更早的 create commit/rollback，再以
-version CAS 将 origin 单向 fence 为 non-replayable，之后才可删除 guard。若 GC 先 commit，后来的 create 必须
-在 fresh authority check 失败；禁止把 authority check 放到事务外，也禁止把 projection/guard GC 拆到不能
-共同序列化的 store。两者最终都物理删除后，任何引用该缺失 origin 的迟到请求仍 fail closed。这样无需另设
-in-memory drain，也不会让旧 token 在 guard 删除后作为“首次 create”commit。
+就不能删除。所有 managed create resolution（首次或 replay）与 GC 必须使用同一 managed SQLite writer
+serialization point；authority 校验与 guard 读/争用只能在取得该点后的同一 transaction/snapshot 内完成。
+
+共享 writer serialization point 提供互斥与全序；projection version CAS 只执行 replayable →
+non-replayable 的单向生命周期转换并拒绝携带旧 version 的迟到写者，不能替代该互斥。fence transaction
+必须等待更早的 create resolution commit/rollback；若 fence 先 commit，后来的 resolution 必须在 fresh
+authority check 失败。禁止把 authority check 放到事务外，也禁止把 projection/guard GC 拆到不能共同序列化
+的 store。
+
+只有 authoritative Runtime lifecycle 已 durable 证明 origin Run 不再 active、且不存在仍有效的 fenced
+attempt 能发起该 tool call 时，才能把 projection fence 为 non-replayable；retention TTL 或普通后台 GC 不能
+自行推断这个转换。后台 GC 只能物理清理已被 lifecycle fence 的 projection/guard。两者最终都物理删除后，
+任何引用该缺失 origin 的迟到请求仍 fail closed；无需另设 in-memory drain，也不会让旧 token 在 guard 删除后
+作为“首次 create”commit。
 
 只有 terminal Execution 可被压缩。admitted guard 存活时，匹配 Execution 的最小 identity/status tombstone
 也必须可解析，且 tombstone 不得早于 guard 删除；artifact/body 可以按 TTL 过期，但 replay 至少返回原
@@ -144,6 +159,8 @@ profile 必须声明 terminal metadata TTL、artifact TTL、create-guard compact
 GC interval 和 aggregate quota。GC 契约：
 
 - active/non-terminal Execution 的 spec、marker、artifact、candidate 不得被 GC；
+- origin replay-authority retention 只决定 lifecycle fence 后的物理保留期，不能把 active projection 转为
+  non-replayable；fence eligibility 只由 §2.4 的 authoritative Runtime lifecycle proof 决定；
 - terminal metadata 与 artifact 可有不同 TTL，读取必须显式返回 `artifact_expired`，不能静默 dangling；
 - GC 先持久化 expiry/tombstone，再删 artifact，最后记录完成审计；crash 后可幂等续做；
 - quota pressure 只回收已过期且未被合法 hold 的 artifact；不足时拒绝新 admission，不偷删未过期或
@@ -180,7 +197,9 @@ qualification，不能让实现任选。
 | quota reject 后同 create key replay | guard 返回同 sticky rejection；容量释放也不 spawn；新 tool call 才可重试 |
 | admitted/rejected 同 key 并发 | 一个 guard winner；admitted branch 至多一个匹配 Execution |
 | origin replayable 时 GC 尝试删 guard | 拒绝/跳过 GC；guard 保留 |
-| GC fence 与已开始的 admission 并发 | 共享 writer serialization point；按 commit 顺序二选一，不允许 stale authority commit |
+| GC fence 与已开始的首次/replay resolution 并发 | 共享 writer serialization point；按 commit 顺序二选一，不允许跨快照或 stale authority commit |
+| origin Run/attempt 仍 authoritative active 时请求 fence | 拒绝 fence；TTL/GC 不得越权结束 replay 生命周期 |
+| provider replay 在 lifecycle fence 前/后到达 | fence 前命中原 decision；fence 后 `origin_run_not_replayable`；均不 spawn |
 | origin 先 durable non-replayable、guard 后删除 | 迟到请求在 authority check fail closed |
 | origin 与 guard 最终均物理删除后迟到请求 | origin 缺失即 fail closed；不得首次 create/spawn |
 | admitted guard 存活、Execution 完整记录已 compact | 返回原 execution_id 的 expired snapshot；不 spawn |
@@ -227,8 +246,10 @@ qualification，不能让实现任选。
 必须测试：
 
 - 每个 persist-before-spawn durable boundary 的 crash injection；
-- 同 key 跨 decision 高并发、sticky quota rejection replay、GC fence 与 in-flight admission 的两种 commit
-  顺序、guard/origin 全部 GC 顺序与 daemon 双实例竞争；
+- 同 key 跨 decision 高并发、sticky quota rejection replay、GC fence 与 in-flight first/replay resolution 的
+  两种 commit 顺序、guard/origin 全部 GC 顺序与 daemon 双实例竞争；
+- active Run/attempt 阻止 lifecycle fence、Run close 后允许 fence，以及 provider replay 在 fence 前后分别
+  命中原 decision/fail closed；
 - origin projection bootstrap/fence、旧 Run migration fail-closed，以及旧 digest validator replay；
 - admitted terminal Execution compaction 后 replay 仍返回原 identity/expired snapshot，cancel 不改 terminal；
 - admission rollback、post-commit materialization failure 与 terminal capacity release；
