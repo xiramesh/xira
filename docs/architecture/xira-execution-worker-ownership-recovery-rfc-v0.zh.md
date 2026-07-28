@@ -252,8 +252,14 @@ terminal `failed`（reason=`launch_failure`）；有意重试必须由新 tool c
 
 `launch_failure` 与其他 terminal 一样必须创建 matching outbox，不能因“target 没启动”按 reason 特判
 suppressed。若它在 automatic yield 前返回给仍 active 的 origin Run，该 tool result 仍只是观察；origin Run
-要负责本次 completion，必须按 #205 显式取得 terminal ownership。claiming Run verified ack 后不再启动
-Triggered Turn；未 claim 或 Run 后续失败时，outbox 继续保证失败最终被处理。
+要负责本次 completion，必须按 #205 §7.2 执行 `claim_terminal` take-over，暂停 automatic continuation。
+模型看不到 claim token，也不能直接 ack；只有 Runtime 在 claimant Run 产生 #205 §7.3 认可的 verified
+outcome 后才执行 Runtime-owned ack，把 completion 标为 handled 并不再启动 Triggered Turn。claimant Run
+失败、超时或失去 ownership 时必须 release/requeue，outbox/mailbox 继续处理。
+
+若 `launch_failure` 在 automatic yield 后才成为 terminal，origin Run 已不再 active，不能以 origin 身份补
+claim；outbox 按 #205 正常 dispatch。此后只有满足 #205 约束的 active successor Run 能与 mailbox
+coordinator 竞争同一 `ContinuationID` ownership；无人 take-over 时启动 Triggered Turn。
 
 ### 7.4 worker start handshake
 
