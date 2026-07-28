@@ -7,8 +7,7 @@
 
 ## 1. 摘要
 
-本 RFC 冻结 Managed Execution completion 从 Execution terminal 到 Triggered Turn，再到 channel final
-的可靠性契约。
+本 RFC 冻结 Managed Execution completion 从 Execution terminal 到 Triggered Turn，再到 channel final 的可靠性契约。
 
 v0 对外只承诺：
 
@@ -21,13 +20,11 @@ durable terminal outbox
 ```
 
 它不承诺跨 SQLite、Agent 工具副作用和外部 channel 的 exactly-once。所谓“幂等 Run 创建”只保证同一
-`ContinuationID` 对应一个逻辑 continuation `run_id`；进程在不可判定边界崩溃后，Agent attempt、普通
-工具调用或 channel message 仍可能被重试。没有下游 idempotency support 时，用户可见消息最多只能
-at-least-once。
+`ContinuationID` 对应一个逻辑 continuation `run_id`；不可判定边界 crash 后 attempt/tool/channel message
+仍可能重试。没有下游 idempotency support 时，用户可见消息最多只能 at-least-once。
 
-本 RFC 同时修正 #202 proposal 中最危险的歧义：`get/log/wait` 读到 terminal result 只是**观察**，绝不
-等于 completion 已被消费。若当前 Run 要接管 completion，必须显式 durable claim；只有 Runtime 确认该
-Run 已可靠处理后才能 ack。失败、超时或 steering 必须 release/defer/requeue，达到独立上限才 circuit-break。
+本 RFC 同时修正 #202 proposal 中最危险的歧义：`get/log/wait` 读到 terminal result 只是**观察**，绝不等于 completion 已被消费。当前 Run 要接管必须显式 durable claim；Runtime 确认可靠处理后才 ack。失败、超时或
+steering 必须 release/defer/requeue，达到独立上限才 circuit-break。
 
 ## 2. 已核实的当前代码事实
 
@@ -88,6 +85,7 @@ Run 已可靠处理后才能 ack。失败、超时或 steering 必须 release/de
 | final_sent | channel adapter 返回 accepted/success 且本地状态已提交；不是用户已读 |
 | suppressed | policy/identity/route 等确定性原因决定不运行或不发送 |
 | dead_letter | 自动重试耗尽或遇到不可自动修复错误，等待 admin；不是 suppressed/success |
+| infrastructure_blocked | Runtime 级存储健康覆盖态；record 保持原 durable state、暂停调度，不是 record state |
 
 禁止使用无修饰的 `delivered`。代码、日志、指标和文档必须写清 `outbox_dispatched`、`handled` 或
 `final_sent`。
@@ -123,6 +121,8 @@ BEGIN IMMEDIATE
   CAS completion_outbox arming -> pending
 COMMIT
 ```
+
+上面三条写操作必须在**同一个**数据库事务中；trigger 必须匹配同一 ExecutionID、ContinuationID 和 `state=arming` 的 outbox，不能只检查“任意 outbox 存在”。
 
 - CAS 没赢：读取已有 terminal；同一事实是幂等 replay，不同事实是 conflict/corruption。
 - outbox insert 没成功：整个 terminal transition 回滚。
@@ -176,11 +176,15 @@ create_key = SHA-256(
 数据库保存 `create_key`、canonical request spec、`request_spec_digest`、首次 create 的 immutable effective
 policy snapshot/digest 和 ExecutionID，并对 create key 建唯一约束。
 
+`request_spec_digest` 必须带持久版本：v0 为 `SHA-256("xira.execution.request-spec.v0\0" + canonical_spec_bytes)`；同版本 replay 才按该 validator 比较，migration 保留旧 validator，禁止用新 canonicalizer 重算旧 digest。
+
 request spec 包含 caller 请求的 executor kind、program/argv 或 shell command、cwd、environment refs、requested
 max runtime 等语义输入。首次 create 再解析 canonical cwd、effective max runtime、termination/sandbox policy
 并冻结 policy snapshot；后续 replay 不用“今天的 policy”重算旧 digest。managed execution 不得把隐式
 process env 当未记录输入；secret value 不落明文，但保存可比较的 version/content digest。yield/preview/cursor
 等观察字段不进入 request digest。
+
+这里冻结的是外部 Execution 的 create-time policy；Triggered Turn 是否仍可运行/发送，继续按 #204 做 `current policy ∩ original snapshot` 的只收紧校验。两者发生在不同 phase，不得互相替代。
 
 行为冻结为：
 
@@ -266,7 +270,8 @@ queued
 handling_claimed/run_created/attempt_running --retryable failure--> queued
 attempt_running --steered #1/#2--> user_activity_deferred
 attempt_running --steered #3--> dead_letter(steering_starvation)
-user_activity_deferred --quiet window--> queued
+user_activity_deferred --new user activity--> user_activity_deferred(reset quiet watermark)
+user_activity_deferred --quiet eligible--> queued
 queued/handling_claimed/user_activity_deferred --policy/identity/route invalid--> suppressed
 queued/handling_claimed/run_created/attempt_running --retry exhausted--> dead_letter
 ```
@@ -274,10 +279,13 @@ queued/handling_claimed/run_created/attempt_running --retry exhausted--> dead_le
 约束：
 
 - 同一 `(EntrypointID, Channel, ChatID, SenderID)` 最多一个有效 handling claim/active continuation。
-- user message 可以 steering active Triggered Run；user turn 始终先跑。steering 不计普通 handling failure，但
-  单独记录 `steered_count/last_steered_at`：前两次只有 conversation 连续 quiet 30 秒才重试；连续第三个已启动
-  attempt 又被 steer 后进入 `steering_starvation` dead letter，停止自动费用/副作用。admin retry 或同 key 的
-  authorized successor Run 显式 take-over 可重新处理，历史计数保留。
+- Runtime 为每个 mailbox key durable 保存 `last_user_activity_at`，每次接受 user message 时用数据库 UTC 更新；
+  deferred record 只有在该 key 无 active/pending user turn，且 scanner 读到
+  `db_now_utc >= last_user_activity_at + 30s` 时才 eligible。后续 user message 只重置 quiet watermark，不增加
+  steering 次数；periodic scanner 让资格随数据库当前时间推进，不依赖新的业务写入。
+- mailbox handling record 的 `auto_steer_streak` 只在一个**已启动** Triggered attempt 以 ErrSteered 结束时增加：第 1/2 次 deferred，
+  第 3 次进入 `steering_starvation`。成功、suppressed、admin retry 或 authorized successor 显式 take-over 会
+  清零 active streak；`total_steered` 与 transition audit 永久保留。steering 不计普通 handling failure。
 - `run_created` 不是 ack 点。只有 Triggered Run outcome 已可靠保存后才能进入 `handled`。
 - verified completed + non-empty final：`handled`，并在同一事务中保存 immutable final body/ref + digest、
   创建/推进 delivery pending。
@@ -389,6 +397,9 @@ v0 区分短 claim 和 Agent attempt ownership，不能拿同一个 60 秒 lease
 - Agent context 必须受 attempt_deadline 约束；每个 tool call/checkpoint/outcome commit 前重新验证 fencing token。
   失去 ownership 的旧 attempt 立即取消，不能再调下一个工具或 ack；已在外部系统进行中的调用不可撤销，
   仍属于公开的 at-least-once 副作用边界。
+- attempt fence 是数据库单调递增 version/token。scanner 在 deadline + grace 后可由**同一 live daemon** CAS
+  fence overdue attempt、触发本地 attempt registry cancel 并重新排队；旧 attempt 此后所有 tool boundary/outcome
+  校验都失败。已经发出的外部调用与 fence CAS 不能原子化，仍属于上述公开边界。
 - 单 daemon 必须由 #206 的 state-dir singleton ownership 证明。新 daemon 取得 singleton 后，可在 startup
   reconciliation 立即回收旧 daemon instance 的 claim/attempt，不必等旧 deadline。
 
@@ -410,10 +421,12 @@ fencing token 保证至多一个 owner 能继续 commit/调用下一工具。测
 delay = full-jitter(min(5m, 1s * 2^(attempt-1)))
 ```
 
-- `SQLITE_BUSY/LOCKED` 按 transient 重试；第 12 次告警，持续 24 小时或 1000 次后停止 hot retry、把 Runtime
-  标为 `infrastructure_blocked`，admin 恢复存储后继续原 pending record。`FULL/IOERR/READONLY/CORRUPT` 立即
-  fail-stop/健康检查失败；数据库不可写时不能假装成功写了 dead letter。只影响单 record 的 digest/schema/
-  state corruption 才进入该 completion 的 deterministic dead letter。
+- `SQLITE_BUSY/LOCKED` 按 transient 重试；第 12 次告警，持续 24 小时或 1000 次后停止 hot retry、进入 Runtime
+  级 `infrastructure_blocked`：所有 record 保持进入前的 durable state，暂停新调度，health/admin 暴露
+  reason、started_at、last_success_at 与各 phase oldest age；存储 health probe 恢复后继续原 record。
+  `FULL/IOERR/READONLY/CORRUPT` 立即 fail-stop/健康检查失败并给出稳定诊断；数据库不可写时绝不能伪造
+  per-record dead letter。进程级 watchdog/restart 属于 #206/deployment；只有可读写数据库内的单 record
+  digest/schema/state corruption 才进入该 completion 的 deterministic dead letter。
 - handling 的真实 Agent/verification 失败最多 5 次；继续自动跑会重复费用和普通工具副作用，第 5 次后
   dead letter。
 - final delivery 至少重试 24 小时且至少 12 次；两项都满足仍失败才 dead letter。其间始终只重发已持久化
@@ -452,20 +465,23 @@ admin 至少能按 ExecutionID、ContinuationID、origin run_id、continuation r
 
 - 三个状态机的当前 state/version/lease/next_attempt；
 - canonical digests 和安全 spec 摘要；
-- 每 phase attempts、steered_count、last_error、dead-letter reason；
+- 每 phase attempts、auto_steer_streak/total_steered、last_error、dead-letter reason；
 - terminal/result/artifact refs；
 - delivery envelope ID、target 摘要和 final_sent 时间；
+- Runtime infrastructure health overlay 与 reason/started_at/last_success_at；
 - 完整 transition audit，不含 secret/env value/无界 stdout。
 
 至少暴露：
 
 - pending/claimed/dead-letter count（按 phase）；
-- oldest pending age；
+- oldest pending age、oldest dispatch_claimed age；
 - lease expiry/recovery count；
 - idempotency hit/conflict；
 - handling retry/suppressed reason；
 - final delivery retry/final_sent；
 - completion 从 terminal 到 handled、从 handled 到 final_sent 的 latency。
+
+`handling=handled && delivery=dead_letter` 可在 admin/UI 派生显示为 `handled_but_undeliverable`，但不得新增第四个 authoritative 组合状态；两个正交状态机仍各自推进和重试。
 
 未到 `dispatched` 的 outbox、未到 handled/suppressed 的 mailbox、未到 final_sent/not_required/suppressed 的
 delivery 永不自动 GC。终态 metadata 默认至少保留 30 天；artifact retention 由 #206 冻结，但清 artifact 后
@@ -493,7 +509,7 @@ record 必须保留 tombstone/digest，不能让 replay 变成“从没发生”
 这里没有“恰好一次”魔法。可靠性来自 durable truth、unique identity、CAS、lease recovery 和把不可判定边界
 明确暴露出来。
 
-## 11. Race / fault-injection contract test matrix
+## 11. Automated race / fault-injection contract test matrix
 
 以下状态转换属于 contract code，所有 case/branch 100% 覆盖；包级覆盖率仍需满足 AGENTS.md §5。
 
@@ -509,13 +525,14 @@ record 必须保留 tombstone/digest，不能让 replay 变成“从没发生”
 | outbox dequeue/insert/commit crash injection | restart 后不丢、不双 mailbox |
 | claim lease expires while stale owner returns | stale token 的 renew/release/ack 全部 CAS 失败 |
 | same mailbox key user/trigger race | user 优先；最多一个 active；trigger 仍 durable |
-| user steers Triggered Run 1/2/3 次 | quiet gate；第三个 started attempt 后 steering dead letter，不无限烧钱 |
+| user steers Triggered Run 1/2/3 次且持续发消息 | activity 只重置 quiet；第三个 started attempt 被 steer 才 dead letter |
 | `wait` observes terminal then Run fails | automatic continuation 仍可处理 |
 | current origin/successor Run claim then fails/times out/crashes | lease release/expiry 后 requeue |
 | current origin/successor Run claim then verified complete | completion handled；不创建 Triggered Run |
 | 100 replayed Run-create requests | 一个 continuation run_id；attempt 可审计 |
 | crash at Run binding/Agent/outcome boundaries | 不创建第二个 logical run_id；未持久化 outcome 不误 handled |
 | long Agent attempt exceeds short claim lease | scanner 不启动第二 attempt；stale token 不能继续 tool/ack |
+| same-daemon attempt hangs past deadline+grace | scanner fence/cancel/requeue；旧 attempt 后续 tool/outcome 全拒绝 |
 | waiting_human outcome | completion handled 一次；HumanRequest 不重复创建 |
 | handling fails 5 times | dead letter 可检查；Execution terminal 不变 |
 | final send fails for 24h and at least 12 attempts | delivery dead letter；不重跑 Agent/Execution |
@@ -528,42 +545,25 @@ record 必须保留 tombstone/digest，不能让 replay 变成“从没发生”
 | startup scan crashes / overlaps periodic | 下次幂等恢复；periodic 不会在 startup 完成前启动 |
 | DB clock forward/backward jump | grace + fencing 防双 commit；恢复延迟/竞争可观测 |
 | worker bypasses terminal API | database constraint 拒绝无 matching outbox 的 terminal commit |
-| unsupported locking FS / NFS | startup fail closed；不降级内存 |
-| APFS + Linux ext4/overlayfs WAL qualification | migration、restart、power-loss fault suite 通过并记录平台结果 |
 | retention after artifact cleanup | identity/digest/tombstone 仍可防 replay |
 
 恢复链测试必须使用真实 `BuildScope -> persisted SessionScope -> inboundContextFromScope -> Manager.Emit` 数据，
 不能手搓无 prefix 的干净 sender/chat ID。
 
+平台/文件系统/断电不是包级覆盖率分母，按 companion qualification 文档
+`xira-completion-reliability-platform-qualification-v0.zh.md` 做 release/manual/nightly 取证；二者不能拿“单测全绿”互相冒充。
+
 ## 12. 被拒绝的方案
 
-### A. JSON 文件 + process-local mutex
-
-拒绝。无法原子提交 terminal/outbox/mailbox/Run binding，也无法用 lease token 阻止 stale owner。
-
-### B. terminal 后 best-effort enqueue goroutine
-
-拒绝。terminal commit 后 crash 会永久丢 completion，是本 Gate 要消灭的 silent-loss window。
-
-### C. `wait` 返回就标 consumed
-
-拒绝。读取之后 Run 仍可能失败/steer；把观察当 ack 是倒果为因。
-
-### D. Run 创建成功就删 mailbox
-
-拒绝。Run 可能尚未执行、尚未持久化 outcome，甚至只创建了目录。`run_created` 不是 handled。
-
-### E. delivery 失败就重跑 Triggered Agent
-
-拒绝。会重复 LLM/tool 副作用。delivery 只重发已持久化 final。
-
-### F. Redis/Kafka
-
-拒绝。单 daemon/local-first v0 不需要分布式基础设施；同一 SQLite 事务域更容易证明正确。
-
-### G. 宣称 exactly-once
-
-拒绝。channel accepted 与本地 commit 不能原子；外部命令、LLM 和普通工具也不都支持 idempotency。
+| 方案 | 拒绝原因 |
+|---|---|
+| JSON + process mutex | 不能原子提交四类记录，也不能 fence stale owner |
+| terminal 后 best-effort enqueue | terminal commit 后 crash 会永久 silent loss |
+| `wait` 返回即 consumed | 观察后 Run 仍可能失败/steer，读取不是 ack |
+| Run 创建即删 mailbox | `run_created` 尚无 durable outcome，不是 handled |
+| delivery 失败重跑 Agent | 会重复 LLM/tool 副作用；只能重发 frozen final |
+| Redis/Kafka | local-first 单 daemon v0 不需要分布式基础设施 |
+| exactly-once 宣称 | 外部 channel/tool 与本地 commit 没有原子边界 |
 
 ## 13. 与 #204/#206/#194/#197 的边界
 
@@ -572,7 +572,8 @@ record 必须保留 tombstone/digest，不能让 replay 变成“从没发生”
 - #206：定义 Execution worker ownership、persist-before-spawn、terminal facts、artifact/result refs 和 restart
   harvest、state-dir singleton daemon ownership；所有 terminal transition 必须满足本 RFC 的 atomic
   terminal+outbox operation，且数据库约束拒绝旁路。#205 可先 Accepted 成为 #206 的规范输入；#206 必须在
-  自身 Accepted checklist 回引本契约。两者都 Accepted 前不实施，因此不存在互相等待的循环前置。
+  自身 Accepted checklist 回引本契约；daemon-wide hang 的外部 supervisor/watchdog 也由 #206/deployment 负责。
+  #205 先定义交界契约，#206 再接受并实现；两者都 Accepted 前不实施，不存在循环前置。
 - #194：提供 typed Triggered Turn 共用的 Agent Loop Core。本 RFC 在 core 外做 Run binding、attempt、claim、
   handling ack 和 delivery。
 - #197：复用 `OutboundEnvelope`/exact-entrypoint `Manager.Emit` mechanics，不假设已有 envelope-ID 幂等闭环。
@@ -592,7 +593,7 @@ Gate 0 全部 Accepted 前，不创建 implementation issue，不合入 Store/Su
 - [ ] 评审接受 steering quiet gate/三次 circuit breaker，不因用户活跃无限重跑 Agent。
 - [ ] 评审接受数据库层拒绝 terminal-without-outbox，以及 #206 的 singleton/terminal 对接义务。
 - [ ] 评审接受 final delivery 独立重试，`final_sent` 不等于用户已读/全局 exactly-once。
-- [ ] race/fault-injection matrix 覆盖 #205 issue 的六项验收。
+- [ ] automated matrix 覆盖 #205 六项验收；platform qualification 留有可审计 evidence。
 - [ ] Accepted 后将最终结论回灌 #202、更新 #205 checklist 并关闭 #205。
 
 当前文档是 Proposed。以上条件经评审完成前，不得把它当成 implementation contract。
