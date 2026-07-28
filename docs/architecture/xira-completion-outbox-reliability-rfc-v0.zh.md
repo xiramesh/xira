@@ -1,6 +1,6 @@
 # Xira Completion Outbox、幂等与可靠消费 RFC v0
 
-- 状态：Proposed
+- 状态：Accepted（2026-07-28）
 - Gate：Managed Execution v0 / Gate 0B
 - 关联：#202、#204、#205、#206、#194、#197
 - 前置 Accepted RFC：`xira-triggered-turn-mailbox-rfc-v0.zh.md`
@@ -184,7 +184,7 @@ max runtime 等语义输入。首次 create 再解析 canonical cwd、effective 
 process env 当未记录输入；secret value 不落明文，但保存可比较的 version/content digest。yield/preview/cursor
 等观察字段不进入 request digest。
 
-这里冻结的是外部 Execution 的 create-time policy；Triggered Turn 是否仍可运行/发送，继续按 #204 做 `current policy ∩ original snapshot` 的只收紧校验。两者发生在不同 phase，不得互相替代。
+这里冻结的是外部 Execution 的 create-time policy；Triggered Turn 是否仍可运行/发送，继续按 #204 做 `current policy ∩ 原 Run 持久化 execution policy` 的只收紧校验。后者与本节的 managed Execution create-time policy snapshot 是两个不同对象，不得互相替代。
 
 行为冻结为：
 
@@ -583,17 +583,17 @@ Gate 0 全部 Accepted 前，不创建 implementation issue，不合入 Store/Su
 
 ## 14. 本 Gate Accepted 条件
 
-- [ ] 评审接受同一 local SQLite 事务域与 terminal + outbox 原子提交。
-- [ ] 评审接受 outbox、mailbox handling、final delivery 三状态机及无歧义术语。
-- [ ] 评审接受 `get/log/wait` 只观察；显式 claim + Runtime-owned ack。
-- [ ] 评审接受 run_id + authoritative tool_call_id create key、request digest/policy snapshot 分离和 missing-ID fail closed。
-- [ ] 评审接受 ContinuationID 唯一与 idempotent logical Run binding，不宣称 Agent exactly-once。
-- [ ] 评审接受 short claim 与 fenced Agent attempt 分离、15s heartbeat、30s scan/grace、DB-time expiry CAS。
-- [ ] 评审接受分 phase retry、full-jitter backoff、phase-specific poison threshold 与 sealed suppression。
-- [ ] 评审接受 steering quiet gate/三次 circuit breaker，不因用户活跃无限重跑 Agent。
-- [ ] 评审接受数据库层拒绝 terminal-without-outbox，以及 #206 的 singleton/terminal 对接义务。
-- [ ] 评审接受 final delivery 独立重试，`final_sent` 不等于用户已读/全局 exactly-once。
-- [ ] automated matrix 覆盖 #205 六项验收；platform qualification 留有可审计 evidence。
-- [ ] Accepted 后将最终结论回灌 #202、更新 #205 checklist 并关闭 #205。
+- [x] 评审接受同一 local SQLite 事务域与 terminal + outbox 原子提交。
+- [x] 评审接受 outbox、mailbox handling、final delivery 三状态机及无歧义术语。
+- [x] 评审接受 `get/log/wait` 只观察；显式 claim + Runtime-owned ack。
+- [x] 评审接受 run_id + authoritative tool_call_id create key、request digest/policy snapshot 分离和 missing-ID fail closed。
+- [x] 评审接受 ContinuationID 唯一与 idempotent logical Run binding，不宣称 Agent exactly-once。
+- [x] 评审接受 short claim 与 fenced Agent attempt 分离、15s heartbeat、30s scan/grace、DB-time expiry CAS。
+- [x] 评审接受分 phase retry、full-jitter backoff、phase-specific poison threshold 与 sealed suppression。
+- [x] 评审接受 steering quiet gate/三次 circuit breaker，不因用户活跃无限重跑 Agent。
+- [x] 评审接受数据库层拒绝 terminal-without-outbox，以及 #206 的 singleton/terminal 对接义务。
+- [x] 评审接受 final delivery 独立重试，`final_sent` 不等于用户已读/全局 exactly-once。
+- [x] automated matrix 覆盖 #205 六项验收；platform qualification 留有可审计 evidence。
+- [x] Accepted 后将最终结论回灌 #202、更新 #205 checklist 并关闭 #205。
 
-当前文档是 Proposed。以上条件经评审完成前，不得把它当成 implementation contract。
+本 RFC 已于 2026-07-28 Accepted，作为 Managed Execution v0 Gate 0B 的 implementation contract。

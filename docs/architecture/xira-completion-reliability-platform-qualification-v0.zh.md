@@ -1,6 +1,6 @@
 # Xira Completion Reliability 平台资格验证 v0
 
-- 状态：Proposed
+- 状态：Accepted（2026-07-28）
 - 关联：#205、#206、PR #208
 - 核心契约：`xira-completion-outbox-reliability-rfc-v0.zh.md`
 
