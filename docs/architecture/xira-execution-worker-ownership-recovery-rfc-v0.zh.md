@@ -127,8 +127,8 @@ daemon **不直接持有目标进程**，也不依赖某个 Agent request contex
 daemon 退出不应自动解释为用户取消或 timeout。
 
 singleton 必须是 OS-backed exclusive lock，而不是 PID 文件。daemon 在打开数据库、执行迁移、
-启动 scanner 或接受请求前取得锁。锁 FD 必须 close-on-exec，且不得被 worker/target 继承；否则旧
-worker 存活会反过来阻止新 daemon 取得 singleton，形成无法恢复的自锁。
+启动 scanner 或接受请求前取得锁。锁 FD 必须 close-on-exec，且不得被任何 surviving launcher/helper、
+worker 或 target 继承；否则旧进程会阻止新 daemon 取得 singleton，形成无法恢复的自锁。
 
 ### 5.2 exec-worker ownership
 
@@ -195,6 +195,9 @@ systemd transient unit 可以成为 Linux 实现方案，但不是 RFC 契约本
 
 Linux production profile 未通过资格测试时，Managed Execution 必须拒绝启动。macOS profile 必须在
 capability response 和日志中明确 `restart_survival=false`，不得让调用方误以为与 production 等价。
+macOS daemon crash 后，无法重新核验的 worker/target 可能成为 orphan；Execution 必须 `lost` 并产生
+`orphan_possible` admin diagnostic，不能拿旧 PID 自动清理。该退化只允许 development profile；正常
+运行期的 verified cancel 不受影响，Linux production 必须证明 containment 不留下持久 orphan。
 
 ### 6.3 Shutdown profiles
 
@@ -243,8 +246,9 @@ daemon 通过 CAS 将一个 generation 标为 launch-intended，再调用 launch
 - result candidate；
 - generation/spec digest。
 
-只有能够证明该 generation 从未启动 target，才可把它确定为 launch failure 或根据策略创建新
-generation。无法证明时进入 reconciliation，不靠猜测再起一个进程。
+v0 不在同一个 Execution 内自动创建新 generation。即使 launcher 能证明 target 从未启动，也提交
+terminal `failed`（reason=`launch_failure`）；有意重试必须由新 tool call 创建新 Execution。无法证明
+时进入 reconciliation，不靠猜测再起进程。generation 在 v0 仍参与 fencing/evidence，值不用于重试。
 
 ### 7.4 worker start handshake
 
@@ -291,11 +295,14 @@ worker 将结果写入同目录临时文件，完成 file fsync 后 atomic no-re
 - target start/end wall time 与 monotonic duration；
 - exit code 或 signal；
 - termination source 及 cancel intent reference；
-- stdout/stderr byte count、cursor、digest、truncation/corruption 标记；
+- target-observed stdout/stderr byte count（可带 streaming digest）；
+- durable artifact byte count、最后完整 cursor、digest 与 truncation/corruption 标记；
 - worker 自身版本与结果格式版本。
 
-candidate 是 worker 对观测事实的结构化封装，不是 SQLite terminal authority。daemon/harvester 校验
-identity、digest、格式和 artifact 边界后，调用 #205 的原子 terminal+outbox API。
+observed facts 描述 worker 从 pipe drain 到的字节；durable facts 只覆盖已 checkpoint 的完整 frame。
+quota/truncation 时前者可大于后者。harvester 用 durable cursor/digest 核验 artifact；artifact 缺尾或
+损坏只降级 artifact，不推翻已通过 identity/result-envelope 校验的真实 exit。candidate 仍不是 SQLite
+terminal authority；daemon/harvester 最终调用 #205 的原子 terminal+outbox API。
 
 ### 8.3 terminal facts 与分类
 
@@ -312,8 +319,9 @@ identity、digest、格式和 artifact 边界后，调用 #205 的原子 termina
 artifact failure 是 reason/evidence。completion outbox 的 sealed kind 仍只对应上表四种状态。
 
 权威 terminal facts 至少包含 execution ID、status、occurred time、bounded result/artifact references、
-原 `parent_run_id + tool_call_id` correlation、termination reason/evidence digest。全量 stdout/stderr 不得
-进入 terminal row、outbox、RuntimeEvent 或 IM payload。
+原 `parent_run_id + tool_call_id` correlation、termination reason/evidence type+digest。通常 evidence 指向
+worker candidate；确定性 launch failure 没有 candidate 时，digest 必须覆盖 durable launch intent 与
+launcher 的“target 从未启动”证明。全量 stdout/stderr 不得进入 terminal/outbox/RuntimeEvent/IM。
 
 ### 8.4 startup reconciliation matrix
 
@@ -322,8 +330,10 @@ artifact failure 是 reason/evidence。completion outbox 的 sealed kind 仍只�
 | 可验证事实 | 处理 |
 |---|---|
 | valid immutable result candidate | harvest，原子提交 terminal+outbox |
-| identity-matching worker alive | 恢复为受管理 running，继续 harvest/cancel |
-| launcher 能证明 target 从未启动 | 确定性 launch failure；是否新 generation 由冻结策略决定 |
+| identity-matching worker alive，deadline 未过 | 恢复为受管理 running，继续 harvest/cancel |
+| identity-matching worker alive，deadline 已过 | 立即通过 verified launcher/containment 执行 timeout termination；不只等 worker 自己醒来 |
+| launcher 能证明 target 从未启动 | terminal `failed/launch_failure`；v0 不创建新 generation |
+| marker 存在、无 target evidence/candidate，launcher 也无法证明未启动 | `lost`；不得假设 running/launch failure 或 respawn |
 | worker/target 不存在且无 valid result | `lost` + matching outbox |
 | PID 存在但 identity 不匹配 | 绝不 adopt/kill；原 Execution 为 `lost` |
 | host boot ID 改变，有 valid result | 允许校验并 harvest 已 durable 的结果 |
@@ -345,6 +355,8 @@ terminal。重复 harvest 必须幂等；匹配 outbox 由同一 terminal transa
 
 cancel API 先把 intent、actor、requested_at 与 reason category 持久化，再向核验通过的 worker 发请求。
 “signal 发成功”不是取消完成；最终状态取决于 worker 实际观测结果。
+同步返回只表达 intent `accepted`；若尚无 verified worker，则表达 `pending_recovery`。这两个都是 control
+outcome，不是 Execution terminal status；调用方通过 get/wait 观察最终 `failed`（reason=`cancelled`）或其他结果。
 
 worker 收到 cancel 或 max-runtime 到期后：
 
@@ -355,7 +367,7 @@ worker 收到 cancel 或 max-runtime 到期后：
 5. 发布包含实际 evidence 的 result candidate。
 
 如果找不到身份匹配的 worker，daemon 不得向裸 PID 发 signal。它保留 cancel intent，并由 recovery
-判断 `lost` 或 harvest 已存在结果。
+判断 `lost` 或 harvest 已存在结果，cancel API 绝不提前宣称 target 已取消。
 
 ### 9.2 自然退出、取消和 timeout 竞争
 
@@ -364,8 +376,8 @@ worker 收到 cancel 或 max-runtime 到期后：
 - target 已自然退出且 worker 先观测到 exit，迟到 cancel 不把它改写为 cancelled；
 - worker 先执行 max-runtime termination，并有相应 evidence，结果是 `timed_out`；
 - cancel termination 有匹配 intent/evidence，结果是 `failed`，reason 为 `cancelled`；
-- 无法证明谁终止了 target 时，不伪造 cancelled/timed_out，按证据降级为 lost 或明确的
-  unknown-termination category。
+- 无法证明谁终止了 target 时，terminal 只能是 `lost`；`unknown_termination` 是其 sealed
+  termination reason/evidence category，不是第五种 status。
 
 最终提交仍受 SQLite terminal CAS 保护。
 
@@ -407,7 +419,8 @@ artifact 写失败、quota exhausted、result candidate 无法 durable、SQLite 
 - persisted spec、marker、result、日志、preview 不得包含明文 secret；
 - worker 只获得执行所需的最小环境和文件权限，不继承 daemon 全量环境；
 - command spec 必须 sealed，worker 不接受任意后续参数注入；
-- artifact path 根据 execution ID 派生并防目录穿越、symlink swap 与跨 Execution 读取；
+- artifact path 根据 execution ID 派生并防目录穿越、跨 Execution 读取；`O_NOFOLLOW`/等价能力用于
+  防意外或陈旧 symlink，并作为对抗性 symlink swap 的 defense-in-depth，不宣称构成完整隔离；
 - cancel 必须经 daemon 权限判定，worker endpoint 还要核验 launch nonce/peer identity；
 - result/candidate 解析按不可信输入处理：长度有界、版本校验、未知字段策略明确；
 - worker executable、launcher profile 和 artifact root 的权限是 production qualification 的一部分。
@@ -416,145 +429,14 @@ v0 不宣称能抵御与 Xira 同 OS 用户、可主动读取/篡改 state-dir �
 container 隔离。production 必须把 state-dir 放在 command write roots 之外，且不向 target 暴露内部路径，
 以阻止误写并缩小攻击面；评审 terminal “可信”时必须同时写明这一 threat-model 前提。
 
-## 12. 运维 NFR、配额、retention 与可观测性
+## 12. Qualification companion
 
-### 12.1 配额与 admission
+运维 NFR、quota admission receipt、retention/GC、failure matrix、contract tests 与 production capability
+qualification 由同 Gate companion
+`xira-execution-worker-ownership-recovery-qualification-v0.zh.md` 冻结。两份文档必须一起 review/Accepted；
+companion 不得改变本文 ownership/terminal 决策，只把它们转成可测门槛。
 
-所有上限由 runtime/profile policy 提供，模型参数只能向下收紧，不能放宽。profile 必须声明有限值：
-
-- daemon global active executions；
-- workspace、principal 与 conversation active executions；
-- 单 Execution output bytes、max runtime 与 termination grace；
-- state-dir aggregate artifact bytes 与 terminal record count；
-- control API 的 wait window、log page 与 list page 上限。
-
-v0 不引入隐藏的资源等待调度器。admission quota 已满时，create 在 spawn 前返回明确的
-`execution_capacity_exhausted`，不创建一个可能永久 queued 的 target。quota 检查、容量 reservation
-与 Execution create 必须在同一事务域竞争；拒绝结果也要按 create key durable 去重。同一 tool call
-重放只能得到同一拒绝，不能在容量释放后突然 spawn；有意重试必须使用新 tool call。已经通过 admission
-并持久化的 Execution 不因后来 quota 收紧被静默杀掉，管理员只能走审计过的 cancel。
-
-production profile 未配置上述有限值时 fail closed。development profile 可带保守默认值，但启动日志
-与 capability response 必须打印生效值。qualification 用实际 profile 做边界测试；RFC 不硬编码一组
-未经生产负载验证的通用魔法数字。
-
-### 12.2 latency、RPO 与 RTO
-
-在健康的本地 SQLite/qualified filesystem、未触发 quota 且不含 target 自身耗时的前提下：
-
-- automatic yield 响应应在配置的 yield deadline 后 250ms 内返回；
-- cancel intent commit 到 worker 收到 graceful terminate 的 p95 不超过 1s；force kill 最迟在
-  `termination_grace + 1s` 内发出；
-- valid result candidate durable 后，运行中 harvester 的 terminal+outbox commit p95 不超过 2s；
-- daemon restart 后必须在对外 ready 前完成全量 non-terminal reconciliation；在该 profile 允许的
-  最大 non-terminal 数量下，recovery RTO 不超过 30s；
-- worker 至少在“每 1s 或每新增 1MiB 完整 frame，先到者”执行 artifact durability checkpoint。
-  host/worker crash 的 output RPO 不超过当前 checkpoint window；已 durable candidate 的 terminal
-  fact RPO 为 0，由 harvester 重放；
-- SQLite 暂时 busy 可有界重试，但不得跨 max-runtime、cancel deadline 或 readiness 无限等待。
-
-这些是 v0 qualification threshold，不是对磁盘损坏或断电硬件撒谎。平台无法达到时不标 qualified，
-或在后续 RFC 明确修改产品 SLO，不能悄悄把测试阈值放宽。
-
-### 12.3 retention 与 GC
-
-profile 必须声明 terminal metadata TTL、artifact TTL、GC interval 和 aggregate quota。GC 契约：
-
-- active/non-terminal Execution 的 spec、marker、artifact、candidate 不得被 GC；
-- terminal metadata 与 artifact 可有不同 TTL，但读取必须显式返回 `artifact_expired`，不能留下静默
-  dangling reference；
-- GC 先持久化 expiry/tombstone，再删 artifact，最后记录完成审计；crash 后可幂等续做；
-- quota pressure 只回收已过期且未被合法 hold 的 artifact；不足时拒绝新 admission，不偷删未过期
-  或 active evidence；
-- result digest、terminal facts、completion correlation 与 GC audit 的最小保留期由审计 policy 决定；
-- secret/owner unbind 不等于直接删事实；访问立即失效，物理清理按明确 policy 执行。
-
-### 12.4 observability 与 admin inspection
-
-至少暴露：active/admission-rejected 数、状态年龄、launch/recovery/harvest latency、timeout/cancel/lost、
-artifact bytes/truncation/corruption、candidate validation failure、GC backlog、oldest non-terminal、
-singleton/launcher capability 状态。
-
-admin inspection 对单个 Execution 至少能看到：权威状态/version、deadline、policy digest、worker identity
-核验摘要、launcher observation、最后 durable cursor、cancel intent、candidate validity、recovery/lost
-reason 和 matching outbox ID。敏感 argv/env/output 只显示 redacted 摘要。admin cancel 必须走同一个
-persist-intent → verified-worker 协议并留下 actor/audit，不提供裸 PID kill 捷径。
-
-## 13. Failure matrix
-
-实现 RFC 与测试必须逐项覆盖：
-
-| 故障点 | 必须结果 |
-|---|---|
-| Execution DB create/spec publish 失败 | 无 worker、无 target |
-| 100 个相同 create key 并发 | 一个 Execution、至多一个 target |
-| CAS 后、launcher 调用前 daemon crash | reconcile，不盲目 respawn |
-| launcher 已启动、返回前 daemon crash | 恢复同一 worker 或诚实 lost；不重复 target |
-| marker 发布前 worker crash | 能证明未启动则 launch failure，否则不猜测 |
-| target 启动后 worker crash | containment 有界清理；无 valid result 则 lost |
-| result rename 后、SQLite terminal 前 daemon crash | 新 daemon harvest 同一 candidate |
-| terminal commit 后、outbox delivery 前 crash | #205 outbox 重放 |
-| daemon 与 worker 同时 crash | 按 durable evidence 分类，不使用内存事实 |
-| PID 复用/伪造 marker | 不 adopt、不 signal 无关进程 |
-| host reboot | valid result 可 harvest；其余 running 不可假恢复 |
-| cancel/natural exit/timeout 同时发生 | 由观测 evidence 决定，terminal CAS 单向 |
-| output 远超 quota | target 不因 pipe 堵塞；内存有界；标 truncated |
-| partial frame/candidate/corrupt digest | 不把部分内容当可信结果 |
-| disk full / SQLite busy / SQLite full | 有界重试或 fail closed，completion 不静默丢失 |
-| unsupported filesystem/launcher capability | 启动时拒绝 Managed Execution |
-| daemon singleton lock 被第二实例争抢 | 第二实例在 DB/scanner 前失败 |
-
-## 14. Verification 与 qualification gate
-
-### 14.1 契约测试
-
-以下属于 contract code，落地时按仓库 §5.2 标记并要求分支/case 100%：
-
-- create-key/CAS 与 launch generation 状态机；
-- identity matching 与 PID-reuse rejection；
-- startup reconciliation matrix；
-- terminal mapping 与 terminal+outbox 调用边界；
-- cancel/timeout/natural-exit resolution；
-- capability/profile fail-closed；
-- artifact cursor/frame validation。
-
-### 14.2 必须测试场景
-
-- persist-before-spawn：在每个 durable boundary 注入 crash；
-- 同 key 高并发与 daemon 双实例竞争；
-- singleton FD、worker lock、control FD 不被 exec target 继承；
-- Linux production worker 跨 daemon kill/restart 继续运行并由新 daemon harvest；
-- macOS restart-survival=false 时不会冒充恢复；
-- PID reuse、boot ID 变化、marker/candidate tamper；
-- 100 MiB 以上 stdout/stderr，证明 daemon/worker 内存不随输出线性增长；
-- cursor 增量读取、partial tail、quota、disk full；
-- TERM grace 后 KILL，且覆盖整棵目标进程树；
-- cancel/timeout/natural exit 的所有竞争顺序；
-- quota admission、profile 未配置 fail-closed、model 参数无法放宽上限；
-- recovery RTO、harvest/cancel/yield latency 与 output checkpoint RPO 阈值；
-- retention tombstone/delete 每个 crash boundary，active evidence 永不被 GC；
-- worker 尝试绕过 terminal API 的架构测试/包边界约束；
-- result harvest 与 #205 completion outbox 重放的端到端测试；
-- daemon 被外部 watchdog 杀死/拉起，而 worker kill domain 不受影响。
-
-全量验证至少包括 `go build ./...`、`go test ./...`、相关 race/fault-injection 测试与平台资格套件。
-不能用“进程还在”替代 identity 检查，也不能用手搓干净 marker 绕过真实序列化/恢复路径。
-
-### 14.3 Production qualification artifact
-
-发布 Managed Execution 的环境必须生成可审计 qualification 结果，至少记录：
-
-- OS/kernel/filesystem/launcher 版本；
-- singleton、atomic rename、file+directory fsync 能力；
-- daemon/worker kill-domain 隔离；
-- worker restart survival 与 identity proof；
-- process-tree terminate/kill；
-- fault-injection、large-output、reboot/PID-reuse 测试结果。
-- 实际 profile quotas、retention 与 latency/RPO/RTO 测量值。
-
-资格结果不通过或环境漂移后未重跑，production profile 必须 fail closed。
-
-## 15. 备选方案与取舍
+## 13. 备选方案与取舍
 
 | 方案 | 结论 | 原因 |
 |---|---|---|
@@ -562,12 +444,14 @@ persist-intent → verified-worker 协议并留下 actor/audit，不提供裸 PI
 | `nohup`/double-fork target | 拒绝 | 只解决“还活着”，没有身份、结果、取消和 containment |
 | worker 直接写 SQLite terminal | 拒绝 | 破坏唯一写入者与 #205 terminal+outbox 原子边界 |
 | 仅用 PID/PID 文件恢复 | 拒绝 | PID 复用与 stale file 会误 adopt/误杀无关进程 |
+| 同一 Execution 自动重试 launch | 拒绝 | 即使 target 未被观测到，也不该在旧 tool call 下悄悄引入后发副作用 |
+| 把 quota rejection 伪造成 failed Execution | 拒绝 | 从未 admission 的请求不应生成 terminal/outbox；使用 pre-create receipt |
 | 把 systemd 写死进核心 | 拒绝 | 将产品契约与部署实现耦合，开发/测试/演进成本过高 |
 | portable worker + qualified launcher | 采用 | ownership 稳定，同时允许 Linux 严格、macOS 显式降级 |
 | 宣称 macOS 与 Linux recovery 等价 | 拒绝 | 没有对应 OS 证据就是虚假能力，silent data loss 风险更高 |
 | artifact/result 只写 JSON 后覆盖 | 拒绝 | crash partial write 与并发读无法可靠分辨 |
 
-## 16. 后续实现切分约束
+## 14. 后续实现切分约束
 
 本 Gate Accepted 后，才允许从 #202 创建实现 issue。实现切分应按契约边界而不是按“文件数量”：
 
@@ -580,7 +464,7 @@ persist-intent → verified-worker 协议并留下 actor/audit，不提供裸 PI
 这些只是推荐切分，不在本 RFC 中提前锁定 issue 数量或 PR 顺序。每个实现 PR 都以
 `milestone/managed-execution-v0` 为 base，不直接进入 release `main`。
 
-## 17. Acceptance checklist
+## 15. Acceptance checklist
 
 - [ ] daemon / worker / target ownership 无重叠或无人负责区；
 - [ ] persist-before-spawn 和 ambiguous launch 恢复规则可执行；
@@ -590,6 +474,7 @@ persist-intent → verified-worker 协议并留下 actor/audit，不提供裸 PI
 - [ ] cancel/timeout/natural exit 竞争不靠 wall-clock 猜测；
 - [ ] output artifact、quota、partial write、disk failure 有界；
 - [ ] active quota、retention/GC、latency、RPO/RTO 与 admin inspection 可测试；
+- [ ] qualification companion 与本文同时完成 review，未产生第二套语义；
 - [ ] security、secret、path 与 worker 权限边界明确；
 - [ ] failure/test/qualification matrix 足以阻止 silent data loss；
 - [ ] PTY/stdin/service/distributed execution 未偷渡进 v0；
