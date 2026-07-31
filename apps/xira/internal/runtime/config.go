@@ -170,6 +170,11 @@ func readEntrypointsFile(path string, required bool) ([]entrypoints.Definition, 
 	if err := yaml.Unmarshal(content, &cfg); err != nil {
 		return nil, fmt.Errorf("parse entrypoints %s: %w", path, err)
 	}
+	for _, definition := range cfg.Entrypoints {
+		if err := definition.ValidateRawEventDiagnostics(); err != nil {
+			return nil, fmt.Errorf("validate entrypoints %s: entrypoint %q: %w", path, definition.ID, err)
+		}
+	}
 	return cfg.Entrypoints, nil
 }
 

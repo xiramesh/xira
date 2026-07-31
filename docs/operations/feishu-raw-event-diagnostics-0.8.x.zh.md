@@ -5,6 +5,7 @@
 ## 采集契约
 
 - 只在 Feishu entrypoint 显式配置 `raw_event_diagnostics.enabled: true` 时启用；默认不创建目录或文件。
+- `raw_event_diagnostics` 当前只支持 Feishu；在其他 channel 上启用会导致配置加载失败，不会静默忽略。
 - 对该 entrypoint 收到的所有 `im.message.receive_v1` 采集完整 `EventReq.Body`，发生在 mention、sender allowlist、dedupe 和 typed event 校验之前，不支持按 `chat_id` 过滤。
 - 一个部署有多个 Feishu entrypoint 时，需要在每个待诊断的 entrypoint 上显式开启；每个 entrypoint 的容量和文件互相隔离。
 - JSONL 位于 `<state_dir>/channels/feishu/<entrypoint-id>/raw-event-diagnostics/`。目录权限强制为 `0700`，文件权限强制为 `0600`。

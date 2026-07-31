@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/routing"
@@ -55,6 +56,29 @@ type RawEventDiagnosticsPolicy struct {
 	Enabled        bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 	MaxBytes       int64 `json:"max_bytes,omitempty" yaml:"max_bytes,omitempty"`
 	RetentionHours int   `json:"retention_hours,omitempty" yaml:"retention_hours,omitempty"`
+}
+
+// ValidateRawEventDiagnostics validates the channel capability and all bounds
+// as one contract so config loading and runner construction cannot drift.
+// coverage: contract (100% required)
+func (d Definition) ValidateRawEventDiagnostics() error {
+	policy := d.RawEventDiagnostics
+	if policy == nil || !policy.Enabled {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(d.Channel), "feishu") {
+		return fmt.Errorf("raw_event_diagnostics is only supported for feishu entrypoints, got channel %q", strings.TrimSpace(d.Channel))
+	}
+	if policy.MaxBytes <= 0 {
+		return fmt.Errorf("raw event diagnostics max_bytes must be greater than zero")
+	}
+	if policy.RetentionHours <= 0 {
+		return fmt.Errorf("raw event diagnostics retention_hours must be greater than zero")
+	}
+	if policy.RetentionHours > int(time.Duration(1<<63-1)/time.Hour) {
+		return fmt.Errorf("raw event diagnostics retention_hours is too large")
+	}
+	return nil
 }
 
 type ResolveInput struct {

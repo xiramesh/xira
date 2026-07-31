@@ -129,11 +129,11 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 	if err != nil {
 		return nil, err
 	}
+	if err := definition.ValidateRawEventDiagnostics(); err != nil {
+		return nil, fmt.Errorf("feishu entrypoint %q: %w", definition.ID, err)
+	}
 	var rawEvents *rawEventRecorder
 	if definition.RawEventDiagnostics != nil && definition.RawEventDiagnostics.Enabled {
-		if definition.RawEventDiagnostics.RetentionHours > int(time.Duration(1<<63-1)/time.Hour) {
-			return nil, fmt.Errorf("feishu entrypoint %q: raw event diagnostics retention_hours is too large", definition.ID)
-		}
 		rawEvents, err = newRawEventRecorder(
 			stateDir,
 			definition.ID,
