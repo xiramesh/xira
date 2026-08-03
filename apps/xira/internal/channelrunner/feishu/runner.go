@@ -75,6 +75,10 @@ type Runner struct {
 	// ingest is the shared message processing layer (#151). It owns the
 	// SessionManager dependency, so runners only normalize platform facts.
 	ingest *ingest.Ingest
+
+	// rawEvents is an explicitly enabled, bounded sensitive-payload recorder
+	// used only for Feishu im.message.receive_v1 diagnosis (#210).
+	rawEvents *rawEventRecorder
 }
 
 func (r *Runner) SetAsyncExactHITLResolver(resolver frt.AsyncExactHITLResolver) {
@@ -125,6 +129,27 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 	if err != nil {
 		return nil, err
 	}
+	if err := definition.ValidateRawEventDiagnostics(); err != nil {
+		return nil, fmt.Errorf("feishu entrypoint %q: %w", definition.ID, err)
+	}
+	var rawEvents *rawEventRecorder
+	if definition.RawEventDiagnostics != nil && definition.RawEventDiagnostics.Enabled {
+		rawEvents, err = newRawEventRecorder(
+			stateDir,
+			definition.ID,
+			definition.RawEventDiagnostics.MaxBytes,
+			time.Duration(definition.RawEventDiagnostics.RetentionHours)*time.Hour,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("feishu entrypoint %q: %w", definition.ID, err)
+		}
+		slog.Warn("feishu raw event diagnostics enabled; full message payloads will be stored",
+			"entrypoint_id", definition.ID,
+			"directory", rawEvents.dir,
+			"max_bytes", definition.RawEventDiagnostics.MaxBytes,
+			"retention_hours", definition.RawEventDiagnostics.RetentionHours,
+		)
+	}
 	slog.Info("feishu runner configured",
 		"entrypoint_id", definition.ID,
 		"app_id", appID,
@@ -145,6 +170,7 @@ func NewRunner(definition entrypoints.Definition, rt *frt.Service, stateRoot str
 		messages:   dedupe.New(filepath.Join(stateDir, "dedupe.json"), messageDedupeTTL),
 		router:     progress.NewRouter(),
 		ingest:     ingest.New(nil, nil), // 默认无 session manager 的 ingest（observe no-op）；main.go 会覆盖
+		rawEvents:  rawEvents,
 	}, nil
 }
 
@@ -179,6 +205,9 @@ func (r *Runner) Start(ctx context.Context) error {
 		})
 
 	runCtx, cancel := context.WithCancel(ctx)
+	if r.rawEvents != nil {
+		go r.rawEvents.RunRetention(runCtx)
+	}
 	domain := lark.FeishuBaseUrl
 	if r.definition.IsLark {
 		domain = lark.LarkBaseUrl
@@ -258,6 +287,7 @@ func (r *Runner) handleMessageRead(_ context.Context, event *larkim.P2MessageRea
 }
 
 func (r *Runner) handleMessageReceive(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+	r.captureRawMessageReceive(event)
 	if event == nil || event.Event == nil || event.Event.Message == nil {
 		return nil
 	}

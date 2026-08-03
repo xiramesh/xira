@@ -259,6 +259,60 @@ entrypoints: entrypoints.yaml
 	}
 }
 
+func TestRuntimeConfigLoadsRawEventDiagnosticsPolicy(t *testing.T) {
+	instance := t.TempDir()
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+entrypoints: entrypoints.yaml
+`)
+	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
+  - id: feishu-main
+    channel: feishu
+    default_agent: xira-assistant
+    raw_event_diagnostics:
+      enabled: true
+      max_bytes: 104857600
+      retention_hours: 24
+`)
+
+	resolved, err := resolveRuntimeConfig(Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.Entrypoints) != 1 || resolved.Entrypoints[0].RawEventDiagnostics == nil {
+		t.Fatalf("entrypoints = %+v", resolved.Entrypoints)
+	}
+	policy := resolved.Entrypoints[0].RawEventDiagnostics
+	if !policy.Enabled || policy.MaxBytes != 104857600 || policy.RetentionHours != 24 {
+		t.Fatalf("raw event diagnostics policy = %+v", policy)
+	}
+}
+
+func TestRuntimeConfigRejectsRawEventDiagnosticsOnNonFeishuEntrypoint(t *testing.T) {
+	instance := t.TempDir()
+	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace
+default_agent: xira-assistant
+entrypoints: entrypoints.yaml
+`)
+	writeFile(t, filepath.Join(instance, "workspace", "entrypoints.yaml"), `entrypoints:
+  - id: ilink-main
+    channel: ilink
+    default_agent: xira-assistant
+    raw_event_diagnostics:
+      enabled: true
+      max_bytes: 1048576
+      retention_hours: 1
+`)
+
+	_, err := resolveRuntimeConfig(Config{ConfigPath: filepath.Join(instance, "xira.yaml")})
+	if err == nil {
+		t.Fatal("expected non-Feishu raw_event_diagnostics to fail configuration loading")
+	}
+	if !strings.Contains(err.Error(), "ilink-main") || !strings.Contains(err.Error(), "only supported for feishu") {
+		t.Fatalf("error = %v, want entrypoint-scoped fail-loud diagnostic", err)
+	}
+}
+
 func TestRuntimeConfigRejectsOldConfigRelativeEntrypoints(t *testing.T) {
 	instance := t.TempDir()
 	writeFile(t, filepath.Join(instance, "xira.yaml"), `workspace: workspace

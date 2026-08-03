@@ -1,11 +1,41 @@
 package entrypoints
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiramesh/xira/internal/channel"
 	"github.com/xiramesh/xira/internal/routing"
 )
+
+func TestDefinitionValidateRawEventDiagnostics(t *testing.T) {
+	maxRetentionHours := int(time.Duration(1<<63-1) / time.Hour)
+	cases := []struct {
+		name    string
+		def     Definition
+		wantErr string
+	}{
+		{name: "absent policy", def: Definition{Channel: "ilink"}},
+		{name: "disabled policy is inert", def: Definition{Channel: "websocket", RawEventDiagnostics: &RawEventDiagnosticsPolicy{Enabled: false}}},
+		{name: "enabled on unsupported channel", def: Definition{Channel: "ilink", RawEventDiagnostics: &RawEventDiagnosticsPolicy{Enabled: true, MaxBytes: 1, RetentionHours: 1}}, wantErr: "only supported for feishu"},
+		{name: "missing capacity", def: Definition{Channel: "feishu", RawEventDiagnostics: &RawEventDiagnosticsPolicy{Enabled: true, RetentionHours: 1}}, wantErr: "max_bytes"},
+		{name: "missing retention", def: Definition{Channel: " FEISHU ", RawEventDiagnostics: &RawEventDiagnosticsPolicy{Enabled: true, MaxBytes: 1}}, wantErr: "retention_hours"},
+		{name: "retention overflows duration", def: Definition{Channel: "feishu", RawEventDiagnostics: &RawEventDiagnosticsPolicy{Enabled: true, MaxBytes: 1, RetentionHours: maxRetentionHours + 1}}, wantErr: "retention_hours is too large"},
+		{name: "valid", def: Definition{Channel: "Feishu", RawEventDiagnostics: &RawEventDiagnosticsPolicy{Enabled: true, MaxBytes: 1, RetentionHours: 1}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.def.ValidateRawEventDiagnostics()
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("ValidateRawEventDiagnostics() error = %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("ValidateRawEventDiagnostics() error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
 
 func TestRegistryUsesRequestedAgentWhenAllowed(t *testing.T) {
 	registry := NewRegistry("xira-assistant", []Definition{
