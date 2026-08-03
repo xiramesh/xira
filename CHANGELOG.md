@@ -6,6 +6,24 @@ with version 0.8.0; earlier release history remains available in Git.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and Xira uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-08-03
+
+### Added
+
+- Added opt-in, bounded capture of Feishu `im.message.receive_v1` WebSocket
+  payloads for short-lived diagnostics. Captures preserve SDK-unknown fields,
+  use isolated `0700`/`0600` storage, enforce capacity and retention across
+  restarts, fail loudly on unsupported channels, and include a controlled
+  production verification and cleanup runbook
+  ([#211](https://github.com/xiramesh/xira/pull/211)).
+
+### Fixed
+
+- Preserved DeepSeek `reasoning_content` across streaming and non-streaming
+  tool turns so Thinking models can complete follow-up requests without a
+  missing-reasoning-content API failure, while keeping reasoning out of
+  user-visible output ([#203](https://github.com/xiramesh/xira/pull/203)).
+
 ## [0.8.0] - 2026-07-18
 
 ### Added
