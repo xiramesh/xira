@@ -46,7 +46,7 @@ entrypoints:
 
 3. 先把上面的诊断配置加入真实 Feishu entrypoint，再短暂停止旧进程、替换为已验证的 0.8.x 二进制，并沿用原环境和参数启动。启动前的 `xira version` 输出和启动日志必须共同证明：
 
-   - `xira 0.8.0 commit=<目标 SHA>`；
+   - `xira 0.8.1 commit=<目标 SHA>`；
    - Feishu runner 已启动且长连接正常；
    - `feishu raw event diagnostics enabled` WARN，字段中的 entrypoint、目录、容量和保留期正确。
 
