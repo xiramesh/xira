@@ -6,6 +6,20 @@ with version 0.8.0; earlier release history remains available in Git.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and Xira uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-08-05
+
+### Fixed
+
+- Replaced the ambiguous hydrated-history `[name|id]` prefix with explicit,
+  channel-independent sender and mentioned-user identity records. Senders with
+  no authoritative display name are marked `sender_name_known="false"`, every
+  persisted mention is rendered independently, and untrusted identity values
+  are safely encoded without rewriting the original message body
+  ([#214](https://github.com/xiramesh/xira/pull/214)). This prevents known
+  mention names from being presented as sender names, but does not yet provide
+  the Feishu `SenderName` resolver tracked by
+  [#133](https://github.com/xiramesh/xira/issues/133).
+
 ## [0.8.1] - 2026-08-03
 
 ### Added
