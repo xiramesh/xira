@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	adkagent "google.golang.org/adk/agent"
@@ -388,6 +389,7 @@ func adkEventFromSessionMessage(msg fsession.Message, agentID string) (*adksessi
 // textSessionEvent renders a session message as a plain text ADK event (the
 // default hydration path for non-tool messages, and for resolved HITL messages
 // after #106's pending-skip). Role/author are derived from msg.Role.
+// coverage: contract (100% required)
 func textSessionEvent(msg fsession.Message, agentID string, event *adksession.Event, contentChars int) (*adksession.Event, int, bool) {
 	var role genai.Role = genai.RoleModel
 	event.Author = agentID
@@ -395,19 +397,87 @@ func textSessionEvent(msg fsession.Message, agentID string, event *adksession.Ev
 		role = genai.RoleUser
 		event.Author = "user"
 	}
-	// #151：群聊 observed 消息带说话人标识（[name|id]\n 前缀），让 LLM 区分谁在说话。
 	content := msg.Content
-	if msg.SenderID != "" && role == genai.RoleUser {
-		name := msg.SenderName
-		if name == "" {
-			name = msg.SenderID
-		}
-		content = "[" + name + "|" + msg.SenderID + "] " + content
+	if role == genai.RoleUser {
+		content = renderSessionUserIdentity(msg)
 	}
 	event.LLMResponse = adkmodel.LLMResponse{
 		Content: genai.NewContentFromText(content, role),
 	}
 	return event, contentChars, true
+}
+
+// renderSessionUserIdentity projects persisted sender and mention facts into
+// explicit, channel-independent records. The original message body is never
+// rewritten; identity records are only prepended when a usable ID exists.
+// coverage: contract (100% required)
+func renderSessionUserIdentity(msg fsession.Message) string {
+	var records []string
+	senderID := strings.TrimSpace(msg.SenderID)
+	if senderID != "" {
+		record := "[sender sender_id=" + quoteSessionIdentityValue(senderID)
+		if senderName := strings.TrimSpace(msg.SenderName); senderName != "" {
+			record += " sender_name=" + quoteSessionIdentityValue(senderName)
+		} else {
+			record += ` sender_name_known="false"`
+		}
+		records = append(records, record+"]")
+	}
+	for _, target := range msg.MentionTargets {
+		userID := strings.TrimSpace(target.ID)
+		if userID == "" {
+			continue
+		}
+		record := "[mentioned_user user_id=" + quoteSessionIdentityValue(userID)
+		if userIDType := strings.TrimSpace(target.IDType); userIDType != "" {
+			record += " user_id_type=" + quoteSessionIdentityValue(userIDType)
+		}
+		if userName := strings.TrimSpace(target.Name); userName != "" {
+			record += " user_name=" + quoteSessionIdentityValue(userName)
+		}
+		records = append(records, record+"]")
+	}
+	if len(records) == 0 {
+		return msg.Content
+	}
+	return strings.Join(append(records, msg.Content), "\n")
+}
+
+// quoteSessionIdentityValue returns a JSON string literal while additionally
+// escaping DEL and C1 controls. encoding/json permits those runes verbatim,
+// but identity values are an untrusted prompt boundary and must stay on one
+// physical record line.
+// coverage: contract (100% required)
+func quoteSessionIdentityValue(value string) string {
+	var quoted strings.Builder
+	quoted.Grow(len(value) + 2)
+	quoted.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '"':
+			quoted.WriteString(`\"`)
+		case '\\':
+			quoted.WriteString(`\\`)
+		case '\b':
+			quoted.WriteString(`\b`)
+		case '\f':
+			quoted.WriteString(`\f`)
+		case '\n':
+			quoted.WriteString(`\n`)
+		case '\r':
+			quoted.WriteString(`\r`)
+		case '\t':
+			quoted.WriteString(`\t`)
+		default:
+			if r < 0x20 || unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+				fmt.Fprintf(&quoted, `\u%04x`, r)
+			} else {
+				quoted.WriteRune(r)
+			}
+		}
+	}
+	quoted.WriteByte('"')
+	return quoted.String()
 }
 
 func (s *Service) adkTools(
